@@ -278,10 +278,10 @@ def process_motionsense(
 
 
 def main():
-    # Paths
-    project_root = Path(__file__).parent.parent
-    raw_dir = project_root / "data" / "raw" / "motionsense" / "A_DeviceMotion_data"
-    output_dir = project_root / "data" / "motionsense"
+    # Paths (new repo layout: this converter lives in data/datasets/motionsense/)
+    ds_dir = Path(__file__).resolve().parent
+    raw_dir = ds_dir / "downloads" / "A_DeviceMotion_data"
+    output_dir = ds_dir
 
     print("=" * 60)
     print("Processing MotionSense Dataset")
@@ -294,8 +294,9 @@ def main():
         print("Please download from: https://github.com/mmalekzadeh/motion-sense")
         return
 
-    # Process data
-    num_sessions, labels = process_motionsense(raw_dir, output_dir)
+    # Process data. use_windowing=False: emit RAW per-recording sessions; build_grids does the fixed
+    # windowing for the grids (avoids double-windowing).
+    num_sessions, labels = process_motionsense(raw_dir, output_dir, use_windowing=False)
 
     # Create and save manifest
     print("\nCreating manifest.json...")

@@ -20,12 +20,17 @@ env/
 *.pth
 *.tar.gz
 
-# data/: CODE and dataset metadata ARE tracked; downloads & generated grids are NOT.
+# data/: CODE and authored metadata ARE tracked; downloads & converter-generated files are NOT.
+# Authored (tracked): convert.py, metadata.json, eval_labels.json.
+# Generated (ignored): sessions/, grids/, manifest.json, labels.json (session->activity map).
 data/datasets/*/downloads/
 data/datasets/*/download/
 data/datasets/*/raw/
 data/datasets/*/sessions/
 data/datasets/*/processed/
+data/datasets/*/grids/
+data/datasets/*/manifest.json
+data/datasets/*/labels.json
 data/**/bundles/
 training_output/
 test_output/

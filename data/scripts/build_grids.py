@@ -99,15 +99,21 @@ def iter_sessions(dataset: str, spec: StreamSpec) -> Iterable[Session]:
     # Native rate is a dataset property (metadata.json). The session manifest stores rate per-channel;
     # a single deployment stream shares one rate, so the dataset rate is authoritative.
     native_rate = float(json.loads((ds_dir / "metadata.json").read_text())["sampling_rate_hz"])
-    for pq in sorted((ds_dir / "sessions").glob("*.parquet")):
-        sid = pq.stem
+    # Converters write per-session activity to labels.json (session_id -> [activity]); the parquet has
+    # only sensor channels, so inject `activity` here for the assembler to majority-vote.
+    labels_map = json.loads((ds_dir / "labels.json").read_text()) if (ds_dir / "labels.json").exists() else {}
+    # One session per subdir: sessions/<session_id>/data.parquet.
+    for pq in sorted((ds_dir / "sessions").glob("*/data.parquet")):
+        sid = pq.parent.name
         if spec.stream_id not in {s.stream_id for s in session_stream_specs(dataset, sid, role=spec.role)}:
             continue
         frame = pd.read_parquet(pq)
-        # Subject id for subject-disjoint splits: prefer a `subject` column; else the session id
-        # (converters name sessions per-subject, so this is a safe fallback — refine if a dataset
-        # packs multiple subjects into one session file).
-        subject = frame["subject"].iloc[0] if "subject" in frame.columns else sid
+        if "activity" not in frame.columns and sid in labels_map:
+            act = labels_map[sid]
+            frame = frame.assign(activity=act[0] if isinstance(act, list) else act)
+        # Subject for subject-disjoint splits: a `subject` column if present, else the session-id
+        # prefix (converters encode the subject in the id, e.g. "sub01_..." / "subject3_...").
+        subject = frame["subject"].iloc[0] if "subject" in frame.columns else sid.split("_")[0]
         yield frame, native_rate, subject
 
 
