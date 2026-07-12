@@ -33,10 +33,17 @@ python -m data.scripts.labels.build_global_label_mapping  # canonical ConSE voca
 - **Running end-to-end needs the source downloads (stage 1)** — no sessions are materialized in the
   repo, so the disk I/O in `build_grids.iter_sessions` / the converters has not been executed here.
 
-## Converter alignment — gated on the downloads
+## Converter wiring — gated on the downloads
 
-`deployment_policy` names the exact source columns each stream needs. Before stage 1 output will
-curate cleanly, a few converters must emit those names (verify against real converter output):
+**Internal paths (all converters).** The converters were ported from a shallower legacy layout, so
+their `project_root = Path(__file__).parent.parent` now resolves to `data/datasets` instead of the
+repo root, and their `raw_dir`/`output_dir` are off by one. Each must be repointed to read from
+`data/datasets/<ds>/downloads/` (or a shared raw dir) and write sessions to
+`data/datasets/<ds>/sessions/` + `manifest.json`. (Run converters via `python -m
+data.datasets.<ds>.convert` from the repo root so `data.scripts.*` imports resolve.)
+
+**Column names.** `deployment_policy` names the exact source columns each stream needs. A few
+converters must emit those names (verify against real converter output):
 
 | Dataset | deployment_policy needs | converter action |
 |---|---|---|
