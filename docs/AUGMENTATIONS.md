@@ -1,51 +1,80 @@
-# Augmentation viability — which augmentations are safe for which models
+# Augmentation policy — what each model gets, and why
 
-Augmentations run **on-the-fly** in the training dataloader (per-sample, stochastic), on top of the
-pre-materialised grids. The question here: which of them are safe to apply to **every** model, and
-which only make sense for a **heterogeneity-aware** model (HALO).
+Augmentations run **on-the-fly** in the training dataloader (per-sample, stochastic) on top of the
+pre-materialised grids. This doc answers two questions: (1) which augmentations each model can
+*consume*, and (2) how they are *used* across our two experiments.
 
-The dividing line is simple: **does the augmentation preserve the fixed input contract of a
-fixed-layout model** (fixed 6-channel `[acc,gyro]`, fixed 60 Hz, no metadata channel)? If yes, it's a
-plain signal-space augmentation any model can consume. If it changes the *rate*, *channel set*,
-*gravity content*, or *text metadata*, a placement-/rate-blind model either cannot ingest it (you'd
-have to resample/repad it back, undoing the augmentation) or is pushed out of its training
-distribution — so it belongs to the heterogeneity-aware set only.
+The policy is dictated by the contribution thesis (`MOTIVATION.md`): **the differentiator is test-time
+language conditioning, NOT augmentation exposure.** So a robustness augmentation a fixed baseline can
+consume must be applied to the baselines *too* — otherwise a reviewer correctly says "you just gave
+HALO more diverse training data," and the conditioning result means nothing. Only augmentations a fixed
+model **structurally cannot ingest**, or that **train HALO's language interface**, are HALO-exclusive.
 
-## A · Safe for ALL models (signal-space, format-preserving)
+## Three buckets
 
-These are the classic HAR augmentations. They keep the 6-ch / 60 Hz layout intact, so a fixed
-baseline consumes an augmented sample exactly like a real one, and they broadly help generalization.
+### Bucket 1 — Symmetric robustness (apply to baselines too)
 
-| Aug | What it does | Why it's safe |
+Layout-preserving: they keep the fixed 6-ch `[acc,gyro]` / 60 Hz contract, so a fixed baseline consumes
+an augmented sample exactly like a real one. **Reserving these for HALO would confound conditioning
+with augmentation exposure** — so in the conditioning experiment they are applied to HALO **and** the
+retrained baselines equally.
+
+| Aug | What it does | Why it's layout-preserving |
 |---|---|---|
-| `jitter` | additive Gaussian noise | preserves shape, layout, rate |
-| `scale` | multiply by a random amplitude factor | amplitude robustness; layout/rate intact |
-| `magnitude_warp` | smooth per-timestep magnitude variation | shape robustness; layout/rate intact |
-| `time_warp` | smooth local time distortion (same window length) | speed robustness; layout/rate intact |
-| `time_shift` | shift the signal within the window | phase robustness; layout/rate intact |
+| `jitter` | additive Gaussian noise | shape/layout/rate intact |
+| `scale` | random amplitude factor | amplitude robustness; layout intact |
+| `magnitude_warp` | smooth per-timestep magnitude | shape robustness; layout intact |
+| `time_warp` | smooth local time distortion (same length) | speed robustness; layout intact |
+| `time_shift` | shift within the window | phase robustness; layout intact |
+| `gravity` (P1) | remove/add the gravity DC (iOS userAccel ↔ Android total) | still 6-ch/60 Hz — a fixed model **can** train on it |
+| `rotation_3d` (P2) | uniform SO(3) rotation of each co-located triad (gravity rotates with accel) | still 6-ch/60 Hz — a fixed model **can** train on it |
 
-## B · Heterogeneity-aware only (HALO)
+> **Note (changed 2026-07-12):** `gravity` and `rotation_3d` were previously filed as HALO-only. That
+> was the old "augmentation as HALO's capability" framing. Under the `MOTIVATION.md` thesis they are the
+> *core* of the conditioning experiment and therefore **must be symmetric** — the fixed baselines get
+> them in training; only HALO can be *told* the transform at test time.
 
-Each of these changes an axis a fixed-layout model is welded to, so applying it to such a model is
-either impossible or actively harmful. They are exactly the heterogeneity HALO is built to handle.
+### Bucket 2 — HALO-only by necessity (layout-breaking)
 
-| Aug | Axis changed | Why it's HALO-only |
+A fixed-layout model **structurally cannot ingest** these — not a boost, a hard incompatibility.
+
+| Aug | Axis changed | Why a fixed model can't take it |
 |---|---|---|
-| `gravity` (P1) | gravity content | removes/adds the gravity DC (simulates iOS userAcc). A gravity-present-trained fixed model goes out-of-distribution. |
-| `rotation_3d` (P2) | orientation / placement | full uniform SO(3) rotation of each co-located triad (gravity rotates with accel). Teaches orientation invariance a fixed phone-in-pocket model isn't meant to have. |
-| `rate` (P3) | sampling rate | anti-aliased resample to a random Hz — a 60 Hz-fixed model can't ingest it without resampling back (which cancels the aug). |
-| `channel_dropout` (P4) | channel count | drops sensor channels → variable width; a fixed 6-ch model can't take it. |
-| `channel_text_phrase` | channel-text metadata | paraphrases the per-channel placement/sensor text — only HALO reads channel text. |
-| `channel_text_dropout` | channel-text metadata | drops channel metadata for robustness — HALO-only signal. |
-| `label_text` | label text | paraphrases the label string — only language-aligned models (HALO) use it. |
+| `rate` (P3) | sampling rate | a 60 Hz-fixed model must resample back, which cancels the augmentation |
+| `channel_dropout` (P4) | channel count | drops channels → variable width; a fixed 6-ch model can't take it |
 
-## Fairness note (how this interacts with the baseline contract)
+### Bucket 3 — HALO-only by design (interface-training)
 
-The **retrained** baselines (CrossHAR, LiMU-BERT) are trained with **their own published augmentation
-recipe** — that's the faithful choice (`BASELINE_FAIRNESS_POLICY.md` §3a.4). We do **not** graft our
-augmentations onto them, and the asymmetry rule (§3b.4) forbids giving one side more augmentation than
-its recipe. So set **B is HALO-only in practice**, not because we're boosting HALO, but because those
-augmentations produce data a fixed model structurally cannot consume. Set **A** is the pool of
-augmentations that *would* be safe if we ever ran a symmetric-augmentation ablation (they don't break
-any model's input contract). Frozen baselines (harnet, UniMTS, NormWear) are never trained by us, so
-augmentation does not apply to them at all.
+These train HALO's **language interface**; a baseline has no text interface to train, so they are
+legitimately exclusive.
+
+| Aug | What it trains |
+|---|---|
+| `channel_text_phrase` | paraphrases the per-channel placement/sensor text |
+| `channel_text_dropout` | drops channel metadata for robustness |
+| `label_text` | paraphrases the label string (language-aligned label tower) |
+
+## Two experiments, two policies
+
+1. **Headline comparison table.** Each model uses **its own published training recipe** (faithfulness —
+   "each at its fullest," `BASELINE_FAIRNESS_POLICY.md`). We do not graft our augmentations onto anyone.
+2. **The conditioning demonstration** (the thesis, `MOTIVATION.md` §3). Train HALO **and the retrained
+   baselines** (CrossHAR, LiMU-BERT) with the **same Bucket-1 transform augmentation** (equal exposure).
+   At test time, apply the transform to the test data and give **only HALO** the acquisition descriptor.
+   The gap is then purely *test-time conditioning access* — architectural, not a data advantage.
+
+**Caveat.** Equal-exposure only works for the baselines we retrain (CrossHAR, LiMU-BERT); the **frozen**
+baselines (harnet, UniMTS, NormWear) are as-released, so the clean conditioning control is HALO vs the
+retrained baselines. Against frozen baselines the comparison is "off-the-shelf product vs HALO."
+
+## Fairness guardrails (from `MOTIVATION.md` §4)
+
+1. **Realistic transforms only** — orientation, gravity, placement, rate. Never an arbitrary corruption
+   (channel scramble, additive garbage) engineered to break baselines; that is sabotage and reads as such.
+2. **Equal augmentation exposure** in the conditioning experiment — baselines see the same transformed
+   data; the only difference is being *told* the transform at test time.
+3. **Descriptor ≠ answer** — the acquisition descriptor never leaks the label or target distribution.
+
+This is consistent with `BASELINE_FAIRNESS_POLICY.md`'s asymmetry rule (never give one side more
+augmentation than the other): the symmetric bucket is applied to both sides; the HALO-only buckets are
+excluded because a fixed model *cannot consume them*, not because we are boosting HALO.
