@@ -185,6 +185,21 @@ def stream_specs(dataset: str, role: Optional[str] = "primary") -> Tuple[StreamS
     return specs if role is None else tuple(spec for spec in specs if spec.role == role)
 
 
+def deployment_streams(placement_strict: bool = False, role: str = "primary") -> Tuple[StreamSpec, ...]:
+    """Every device stream in the corpus, for the harmonised/deployment build.
+
+    - ``placement_strict=True``  → **phone streams only** ("harmonised-strict"). Watch-placement
+      datasets (pamap2, mhealth, capture24) and wisdm's watch stream are dropped, because mixing
+      phone and watch placement is a problem for placement-blind models.
+    - ``placement_strict=False`` → **phone + watch** ("harmonised"): a session recorded on both a
+      phone and a watch contributes two separate single-device samples.
+
+    ``watch_proxy`` / ``non_deployment`` streams are excluded — they are diagnostic/stress, not primary.
+    """
+    keep = {"phone"} if placement_strict else {"phone", "watch"}
+    return tuple(s for s in STREAM_SPECS if s.role == role and s.device_profile in keep)
+
+
 def get_stream_spec(dataset: str, stream_id: str) -> StreamSpec:
     for spec in _BY_DATASET.get(dataset, ()):
         if spec.stream_id == stream_id:

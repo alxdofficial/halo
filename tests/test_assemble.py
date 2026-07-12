@@ -75,3 +75,26 @@ def test_windowing_shapes_and_majority_labels():
     g = assemble(frame, "hhar", spec, alignment="harmonised", window=20, rate_hz=50)  # stride=window
     assert g.data.shape == (2, 20, 6)
     assert g.labels == ["walk", "run"]
+
+
+def test_resample_to_60hz_changes_rate_and_length_preserves_g():
+    frame, spec = make_frame("hhar", "phone_waist", n=300, fills={"acc": GRAVITY_MS2, "gyro": 0.3})
+    g = assemble(frame, "hhar", spec, alignment="harmonised", window=60, rate_hz=50, resample_to=60)
+    assert g.rate_hz == 60.0
+    assert g.data.shape[0] == 6 and g.data.shape[1] == 60      # 300 @50Hz -> 360 @60Hz -> 6×60
+    assert np.allclose(g.data[2:4, 20:40, :3], 1.0, atol=0.05)  # accel ~1 g in the interior
+    assert np.allclose(g.data[2:4, 20:40, 3:], 0.3, atol=0.05)  # gyro preserved through resample
+
+
+def test_resample_signal_length_and_dc_preserved():
+    from data.scripts.assembly.assemble import resample_signal
+    y = resample_signal(np.ones((300, 3), np.float32), 50, 60)
+    assert abs(len(y) - 360) <= 1
+    assert np.allclose(y[100:-100], 1.0, atol=1e-2)            # constant preserved in interior
+
+
+def test_resample_noop_when_rates_equal():
+    frame, spec = make_frame("hhar", "phone_waist", n=40, fills={"acc": GRAVITY_MS2})
+    a = assemble(frame, "hhar", spec, alignment="harmonised", window=20, rate_hz=50)
+    b = assemble(frame, "hhar", spec, alignment="harmonised", window=20, rate_hz=50, resample_to=50)
+    assert np.array_equal(a.data, b.data) and a.rate_hz == b.rate_hz == 50.0

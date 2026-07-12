@@ -135,3 +135,28 @@ def test_channel_text_names_device_placement_axis_and_gravity_state():
         "phone accelerometer X-axis at waist; gravity removed"
     )
     assert channel_description(metadata, "gyro_z") == "phone gyroscope Z-axis at waist"
+
+
+def test_deployment_streams_non_strict_includes_phone_and_watch():
+    from data.scripts.curate.deployment_policy import deployment_streams
+    streams = deployment_streams(placement_strict=False)
+    assert {s.device_profile for s in streams} == {"phone", "watch"}
+    datasets = {s.dataset for s in streams}
+    assert {"pamap2", "mhealth", "capture24"}.issubset(datasets)   # watch datasets present
+    assert sum(s.dataset == "wisdm" for s in streams) == 2          # wisdm phone + watch
+
+
+def test_deployment_streams_strict_is_phone_only():
+    from data.scripts.curate.deployment_policy import deployment_streams
+    streams = deployment_streams(placement_strict=True)
+    assert all(s.device_profile == "phone" for s in streams)
+    datasets = {s.dataset for s in streams}
+    assert not ({"pamap2", "mhealth", "capture24"} & datasets)      # watch datasets dropped
+    assert [s.stream_id for s in streams if s.dataset == "wisdm"] == ["phone_pocket"]
+
+
+def test_strict_streams_are_a_strict_subset():
+    from data.scripts.curate.deployment_policy import deployment_streams
+    strict = {(s.dataset, s.stream_id) for s in deployment_streams(placement_strict=True)}
+    full = {(s.dataset, s.stream_id) for s in deployment_streams(placement_strict=False)}
+    assert strict < full
