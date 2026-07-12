@@ -4,11 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from halo.baselines.baseline_view import (
+from data.scripts.baseline_view import (
     HARMONISED_CHANNELS,
     to_view,
 )
-from halo.data.deployment_policy import (
+from data.scripts.deployment_policy import (
     curate_frame,
     get_stream_spec,
 )
@@ -80,7 +80,7 @@ def test_rejects_bad_shape_unknown_channels_and_alignment():
 
 def _full_source_frame(dataset, spec, n=8):
     cols = {"timestamp_sec": np.arange(n, dtype=float) / 50.0}
-    from halo.data.deployment_policy import all_source_channels
+    from data.scripts.deployment_policy import all_source_channels
     for source in all_source_channels(dataset, role=spec.role):
         cols[source] = np.ones(n, dtype=float)
     return pd.DataFrame(cols)

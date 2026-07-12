@@ -10,12 +10,7 @@ __pycache__/
 venv/
 env/
 
-# Data & heavy artifacts — never commit (regenerated from source datasets).
-# Anchored to repo root so the `halo/data/` package is NOT ignored.
-/data/
-benchmark_data/raw/
-benchmark_data/processed/
-benchmark_data/bundles/
+# Heavy artifacts anywhere — never commit (regenerated from source)
 *.npy
 *.npz
 *.parquet
@@ -23,8 +18,20 @@ benchmark_data/bundles/
 *.mdl
 *.ckpt
 *.pth
+*.tar.gz
+
+# data/: CODE and dataset metadata ARE tracked; downloads & generated grids are NOT.
+data/datasets/*/downloads/
+data/datasets/*/download/
+data/datasets/*/raw/
+data/datasets/*/sessions/
+data/datasets/*/processed/
+data/**/bundles/
 training_output/
 test_output/
+
+# baselines/: adapters + citations ARE tracked; cloned upstream repos are NOT.
+baselines/*/repo/
 auxiliary_repos/
 
 # Secrets — never commit

@@ -25,7 +25,7 @@ from typing import Sequence, Tuple
 
 import numpy as np
 
-from halo.data.deployment_policy import STANDARD_CHANNEL_ORDER
+from data.scripts.deployment_policy import STANDARD_CHANNEL_ORDER
 
 # The harmonised schema is exactly the deployment policy's canonical order (width 6).
 HARMONISED_CHANNELS: Tuple[str, ...] = tuple(STANDARD_CHANNEL_ORDER)

@@ -30,17 +30,24 @@ prior tree lives beside it as `legacy_code/` (not part of this repo) and is mine
 
 ## Layout
 
+Organized by concern (top-level folders, not a single Python package):
+
 ```
-halo/
-  data/
-    deployment_policy.py   # phone/watch device-stream curation (channel/placement selection)
-    accel_units.py         # unit + gravity canonicalization (single source of truth)
-  baselines/
-    baseline_view.py       # harmonised / non-harmonised model-input views
-docs/
-  BASELINE_FAIRNESS_POLICY.md   # tiered comparison + faithfulness contract (design of record)
-tests/                     # regression tests for the above (green)
+baselines/            # one subfolder per baseline: citation + paper, cloned repo (gitignored), adapter.py
+data/
+  datasets/           # one subfolder per dataset: downloads (gitignored), converter, metadata, channel descriptions
+  scripts/            # shared cross-dataset logic (imported as data.scripts.*)
+    accel_units.py        # unit + gravity canonicalization (single source of truth)
+    deployment_policy.py  # phone/watch device-stream selection (channels/placement)
+    baseline_view.py      # harmonised vs non-harmonised assembly
+model/                # the HALO model (tokenizer + encoder + language-alignment head)
+training/             # training harness; harmonised + normal modes
+eval/                 # (proposed) zero-shot / few-shot scoring + tiered ablations
+docs/                 # BASELINE_FAIRNESS_POLICY.md — design of record
+tests/                # regression tests (green)
 ```
+
+Each folder has a short README describing exactly what belongs in it.
 
 ## Status
 

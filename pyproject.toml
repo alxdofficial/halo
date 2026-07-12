@@ -17,7 +17,7 @@ dependencies = [
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]
-include = ["halo*"]
+include = ["data*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
