@@ -70,5 +70,6 @@
     20,
     24
   ],
-  "role": "train"
+  "role": "train",
+  "pre_windowed": true
 }

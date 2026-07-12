@@ -25,9 +25,10 @@ ACTIVITIES = {
     6: "laying"
 }
 
-# Paths
-RAW_DIR = Path("data/raw/uci_har/UCI HAR Dataset")
-OUTPUT_DIR = Path("data/uci_har")
+# Paths (new repo layout: this converter lives in data/datasets/uci_har/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads" / "UCI HAR Dataset"
+OUTPUT_DIR = DS_DIR
 
 
 def load_inertial_signals(base_path: Path, set_name: str):
@@ -92,6 +93,10 @@ def convert_set(set_name: str):
 
         # Add timestamp column (50 Hz = 0.02 sec per sample)
         df.insert(0, 'timestamp_sec', np.arange(128) * 0.02)
+
+        # Subject id for subject-disjoint splits (session id starts with the set name, not the
+        # subject, so build_grids.iter_sessions reads the subject from this column).
+        df['subject'] = f"subject{subject_id:02d}"
 
         # Save to parquet
         session_dir = OUTPUT_DIR / "sessions" / session_id

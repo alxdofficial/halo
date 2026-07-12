@@ -15,9 +15,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# Add datascripts to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows, get_window_range
+# Run as `python -m data.datasets.wisdm.convert` from repo root; repo root on path for shared imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 # Activity mapping (A-S, excluding N)
@@ -42,9 +41,10 @@ ACTIVITIES = {
     'S': 'folding_clothes'
 }
 
-# Paths
-RAW_DIR = Path("data/raw/wisdm/wisdm-dataset/raw")
-OUTPUT_DIR = Path("data/wisdm")
+# Paths (new repo layout: this converter lives in data/datasets/wisdm/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads" / "wisdm-dataset" / "raw"
+OUTPUT_DIR = DS_DIR
 
 
 def load_sensor_data(device: str, sensor: str):
@@ -166,6 +166,10 @@ def save_sessions(sessions):
         device = session['device']
         sensor = session['sensor']
 
+        # Subject id (from the raw first column) for subject-disjoint splits; the session id starts
+        # with the device, so build_grids.iter_sessions reads the subject from this column.
+        subject_id = str(data['subject'].iloc[0]) if 'subject' in data.columns else base_session_id.split('_')[2]
+
         # Rename x, y, z to be device/sensor-specific and ensure float
         data = data.rename(columns={
             'x': f'{device}_{sensor}_x',
@@ -173,31 +177,20 @@ def save_sessions(sessions):
             'z': f'{device}_{sensor}_z'
         })
 
-        # Select final columns and ensure all are float
+        # Select final columns; keep the whole continuous single-activity recording as ONE session
+        # (build_grids does the fixed 6 s windowing — avoids double-windowing).
         cols = ['timestamp_sec', f'{device}_{sensor}_x', f'{device}_{sensor}_y', f'{device}_{sensor}_z']
-        data = data[cols].astype(float)
+        out = data[cols].astype(float)
+        out['subject'] = subject_id
 
-        # Apply variable-length windowing
-        windows = create_variable_windows(
-            df=data,
-            session_prefix=base_session_id,
-            activity=activity,
-            sample_rate=sample_rate,
-        )
+        session_dir = OUTPUT_DIR / "sessions" / base_session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        out.to_parquet(session_dir / "data.parquet", index=False)
 
-        # Save each window
-        for window_id, window_df, window_activity in windows:
-            session_dir = OUTPUT_DIR / "sessions" / window_id
-            session_dir.mkdir(parents=True, exist_ok=True)
+        labels_dict[base_session_id] = [activity]
+        total_windows += 1
 
-            parquet_path = session_dir / "data.parquet"
-            window_df.to_parquet(parquet_path, index=False)
-
-            # Store label
-            labels_dict[window_id] = [window_activity]
-            total_windows += 1
-
-    print(f"  Created {total_windows} windows from {len(sessions)} original sessions")
+    print(f"  Created {total_windows} sessions from {len(sessions)} original segments")
     return labels_dict
 
 

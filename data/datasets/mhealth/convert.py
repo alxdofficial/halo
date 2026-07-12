@@ -1,23 +1,29 @@
 """
 Convert MHEALTH dataset to standardized format.
 
-Input: data/raw/mhealth/MHEALTHDATASET/
-Output: data/mhealth/
+Input:  data/datasets/mhealth/downloads/MHEALTHDATASET/
+Output: data/datasets/mhealth/
   - manifest.json
   - labels.json
-  - sessions/session_XXX/data.parquet
+  - sessions/<session_id>/data.parquet
+
+Emits RAW, un-windowed sessions: each continuous single-activity block from a
+subject's log is saved as ONE session (mHealth log files are continuous per
+subject, with an activity-id column marking each activity block). The shared
+`data/scripts/build_grids.py` does the fixed 6-second windowing downstream, so
+this converter must NOT pre-window (that would double-window).
 """
 
 import os
 import sys
 import json
+import shutil
 import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# Add datascripts to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows, get_window_range
+# Repo root on path for `data.scripts` imports (kept for parity with sibling converters).
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 # Activity mapping
@@ -50,9 +56,10 @@ COLUMN_NAMES = [
     'activity_id'
 ]
 
-# Paths
-RAW_DIR = Path("data/raw/mhealth/MHEALTHDATASET")
-OUTPUT_DIR = Path("data/mhealth")
+# Paths (new repo layout: this converter lives in data/datasets/mhealth/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads" / "MHEALTHDATASET"
+OUTPUT_DIR = DS_DIR
 
 
 def segment_continuous_activity(df: pd.DataFrame, min_duration_sec: float = 3.0):
@@ -88,7 +95,11 @@ def segment_continuous_activity(df: pd.DataFrame, min_duration_sec: float = 3.0)
 
 
 def convert_subject(subject_file: Path):
-    """Convert one subject file to sessions with variable-length windowing."""
+    """Convert one subject log into RAW sessions (one per continuous activity block).
+
+    No windowing here: each continuous single-activity segment is saved as ONE
+    session. build_grids applies the shared 6-second windowing downstream.
+    """
     print(f"  Processing: {subject_file.name}")
 
     # Load data (tab/space-separated, 24 columns)
@@ -98,7 +109,7 @@ def convert_subject(subject_file: Path):
         print(f"    ERROR loading {subject_file.name}: {e}")
         return [], {}
 
-    # Segment into sessions
+    # Segment into continuous single-activity blocks (drops null + <3 s blocks).
     sessions = segment_continuous_activity(df)
 
     print(f"    Found {len(sessions)} activity segments")
@@ -106,46 +117,30 @@ def convert_subject(subject_file: Path):
     subject_id = subject_file.stem.replace('mHealth_subject', '')
     session_data = []
     labels_dict = {}
-    sample_rate = 50.0  # MHEALTH is 50Hz
-
-    total_windows = 0
 
     for idx, session in enumerate(sessions):
-        # Create base session ID
-        base_session_id = f"subject{subject_id}_seg{idx:03d}"
+        session_id = f"subject{subject_id}_seg{idx:03d}"
         activity_name = ACTIVITIES.get(session['activity_id'], 'unknown')
 
-        # Prepare DataFrame
-        data = session['data'].copy()
+        # Prepare DataFrame (one whole raw segment = one session)
+        data = session['data'].copy().reset_index(drop=True)
 
-        # Add timestamp column (50 Hz = 0.02 sec per sample)
+        # Timestamp column (50 Hz = 0.02 sec per sample), reset to start at 0.
         data.insert(0, 'timestamp_sec', np.arange(len(data)) * 0.02)
 
-        # Drop activity_id (it's in labels.json)
+        # Drop activity_id (activity lives in labels.json); tag with the subject
+        # id string for subject-disjoint splits in build_grids.
         data = data.drop(columns=['activity_id'])
+        data['subject'] = subject_id
 
-        # Apply variable-length windowing
-        windows = create_variable_windows(
-            df=data,
-            session_prefix=base_session_id,
-            activity=activity_name,
-            sample_rate=sample_rate,
-        )
+        session_dir = OUTPUT_DIR / "sessions" / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        data.to_parquet(session_dir / "data.parquet", index=False)
 
-        # Save each window
-        for window_id, window_df, window_activity in windows:
-            session_dir = OUTPUT_DIR / "sessions" / window_id
-            session_dir.mkdir(parents=True, exist_ok=True)
+        labels_dict[session_id] = [activity_name]
+        session_data.append(session_id)
 
-            parquet_path = session_dir / "data.parquet"
-            window_df.to_parquet(parquet_path, index=False)
-
-            # Store label
-            labels_dict[window_id] = [window_activity]
-            session_data.append(window_id)
-            total_windows += 1
-
-    print(f"    Created {total_windows} windows from {len(sessions)} segments")
+    print(f"    Wrote {len(session_data)} raw sessions from {len(sessions)} segments")
     return session_data, labels_dict
 
 
@@ -292,8 +287,12 @@ def main():
         print("Run: python datascripts/download_all_datasets.py mhealth")
         return
 
-    # Create output directory
+    # Create output directory; clear any stale (e.g. previously windowed) sessions.
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    sessions_dir = OUTPUT_DIR / "sessions"
+    if sessions_dir.exists():
+        shutil.rmtree(sessions_dir)
+    sessions_dir.mkdir(parents=True, exist_ok=True)
 
     # Process all subject files
     subject_files = sorted(RAW_DIR.glob("mHealth_subject*.log"))
@@ -329,7 +328,7 @@ def main():
     # Generate debug visualizations
     try:
         import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))  # Add datascripts/ to path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root
         from data.scripts.debug.visualization_utils import generate_debug_visualizations
 
         generate_debug_visualizations(OUTPUT_DIR)

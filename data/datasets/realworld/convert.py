@@ -1,358 +1,348 @@
 """
-Convert RealWorld HAR dataset to standardized format.
+Convert RealWorld HAR (2016) dataset to the new HALO raw-session layout.
 
-Input: data/raw/realworld/
-Output: data/realworld/
-  - manifest.json (channel metadata)
-  - labels.json (activity labels per session)
-  - sessions/session_XXX/data.parquet (sensor data)
+Deployment stream: `phone_waist` (see data/scripts/curate/deployment_policy.py) — we convert
+ONLY the WAIST body position, emitting generic accelerometer columns acc_x/acc_y/acc_z and,
+when a complete finite triad exists, gyroscope columns gyro_x/gyro_y/gyro_z.
 
-RealWorld format:
-  - Organized by: subject/data/{sensor}_{activity}_csv.zip
-  - Subject folders: proband1, proband2, ..., proband15
-  - Activities: climbingdown, climbingup, jumping, lying, running, sitting, standing, walking
-  - Positions (in ZIP): chest, forearm, head, shin, thigh, upperarm, waist
-  - Sensor prefixes: acc (accelerometer), gyr (gyroscope), mag (magnetometer)
-  - 15 subjects, 8 activities, 7 positions
+RealWorld raw layout (data/datasets/realworld/downloads/probandN/data/):
+  - Per (sensor, activity) outer zip: {acc|gyr}_{activity}_csv.zip
+      * single recording  -> outer zip directly holds per-position CSVs
+                             (acc_{activity}_waist.csv / Gyroscope_{activity}_waist.csv)
+      * multi-part record  -> outer zip holds inner zips ({sensor}_{activity}_<n>_csv.zip),
+                             each inner zip holds the per-position CSVs for that part.
+  - CSV columns: id, attr_time (Unix ms), attr_x, attr_y, attr_z
+  - Accelerometer is in m/s² (gravity present); the shared pipeline rescales m/s² -> g.
 
-We extract only the WAIST position for consistency with other datasets.
+Output (new layout, this directory):
+  - sessions/<session_id>/data.parquet : timestamp_sec + acc_x/y/z (+ gyro_x/y/z) + subject
+  - labels.json                        : {session_id: [activity_name]}
+  - manifest.json / metadata.json      : informational + native rate for build_grids
+
+We emit RAW whole-recording sessions (one per continuous waist recording / recording part).
+build_grids performs the fixed 6-second windowing — do NOT pre-window here.
 """
 
 import io
 import json
-import os
 import re
+import shutil
 import sys
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
 
-# Add parent to path for shared utilities
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows
+# Repo root on path for shared imports (not strictly needed here, kept for parity).
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+DS_DIR = Path(__file__).resolve().parent
+DOWNLOADS_DIR = DS_DIR / "downloads"
+OUTPUT_DIR = DS_DIR
+SESSIONS_DIR = OUTPUT_DIR / "sessions"
 
-# Activity mapping - standardized names
-ACTIVITIES = {
-    "climbingdown": "stairs_down",
-    "climbingup": "stairs_up",
-    "jumping": "jumping",
-    "lying": "lying",
-    "running": "running",
-    "sitting": "sitting",
-    "standing": "standing",
-    "walking": "walking",
-}
-
-# Sensor types mapping
-SENSOR_TYPES = {
-    "acc": "acc",
-    "gyr": "gyro",
-    "mag": "mag",
-}
-
-# Body position to use (for consistency with other waist-mounted datasets)
+# Body position for the phone_waist deployment stream.
 TARGET_POSITION = "waist"
-
-# Paths - data may be in subdirectory or directly in raw folder
-RAW_BASE_DIR = Path("data/raw/realworld")
-RAW_SUBDIR = RAW_BASE_DIR / "realworld2016_dataset"
-OUTPUT_DIR = Path("data/realworld")
-
-# Target sampling rate
+# RealWorld records at ~50 Hz; we resample each recording onto a uniform 50 Hz grid so the
+# acc/gyro streams share one timeline and build_grids' fixed native rate is exact.
 TARGET_SAMPLE_RATE = 50.0
 
+# RealWorld activities (raw folder/file codes == the label strings we store).
+ACTIVITIES = [
+    "climbingdown",
+    "climbingup",
+    "jumping",
+    "lying",
+    "running",
+    "sitting",
+    "standing",
+    "walking",
+]
 
-def load_sensor_from_zip(zip_path: Path, sensor_prefix: str, activity: str) -> Optional[pd.DataFrame]:
-    """
-    Load sensor data from a ZIP file for the waist position.
+# Outer-zip sensor prefix -> output channel prefix. Magnetometer is intentionally dropped:
+# the phone_waist stream only needs accelerometer (+ optional gyroscope).
+SENSORS = {"acc": "acc", "gyr": "gyro"}
 
-    Args:
-        zip_path: Path to the ZIP file (e.g., acc_walking_csv.zip)
-        sensor_prefix: Sensor type prefix (acc, gyr, mag)
-        activity: Activity name
 
-    Returns:
-        DataFrame with timestamp_sec and sensor columns, or None if failed.
-    """
-    try:
-        target_filename = f"{sensor_prefix}_{activity}_{TARGET_POSITION}.csv"
+def _waist_member(namelist: List[str]) -> Optional[str]:
+    """Return the per-position CSV member for the waist position (acc_*_waist.csv or
+    Gyroscope_*_waist.csv), or None. Matching by the `_waist.csv` suffix is robust to the
+    differing acc (`acc_`) vs gyro (`Gyroscope_`) filename prefixes."""
+    for name in namelist:
+        if name.lower().endswith("_waist.csv"):
+            return name
+    return None
 
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            # Check if target file exists
-            if target_filename not in zf.namelist():
-                return None
 
-            # Read CSV from ZIP
-            with zf.open(target_filename) as f:
-                df = pd.read_csv(f)
+def _parse_waist_csv(fileobj, sensor_out: str) -> Optional[pd.DataFrame]:
+    """Parse one RealWorld per-position CSV into timestamp_sec + {sensor_out}_x/y/z."""
+    df = pd.read_csv(fileobj)
+    df.columns = [c.lower().strip() for c in df.columns]
 
-        if len(df) < 10:
-            return None
-
-        # Normalize column names
-        df.columns = [c.lower().strip() for c in df.columns]
-
-        # Get timestamp
-        time_col = "attr_time" if "attr_time" in df.columns else "time"
-        if time_col not in df.columns:
-            return None
-
-        # Convert timestamp to seconds (RealWorld uses Unix milliseconds)
-        time_values = df[time_col].values.astype(float)
-        time_sec = (time_values - time_values[0]) / 1000.0  # Convert ms to sec
-
-        # Map sensor prefix to output name
-        output_sensor = SENSOR_TYPES.get(sensor_prefix, sensor_prefix)
-
-        # Create result DataFrame
-        result = pd.DataFrame()
-        result["timestamp_sec"] = time_sec
-
-        # Get x, y, z values
-        for axis in ["x", "y", "z"]:
-            src_col = f"attr_{axis}"
-            if src_col in df.columns:
-                result[f"{output_sensor}_{axis}"] = df[src_col].values.astype(float)
-
-        return result
-
-    except Exception as e:
-        print(f"      ERROR loading {zip_path}: {e}")
+    time_col = "attr_time" if "attr_time" in df.columns else ("time" if "time" in df.columns else None)
+    if time_col is None:
+        return None
+    if not all(f"attr_{axis}" in df.columns for axis in "xyz"):
+        return None
+    if len(df) < 10:
         return None
 
+    t_ms = df[time_col].values.astype(float)
+    out = pd.DataFrame()
+    out["timestamp_sec"] = (t_ms - t_ms[0]) / 1000.0  # Unix ms -> seconds, relative to start
+    for axis in "xyz":
+        out[f"{sensor_out}_{axis}"] = df[f"attr_{axis}"].values.astype(float)
+    return out
 
-def merge_sensor_data(sensor_dfs: Dict[str, pd.DataFrame]) -> Optional[pd.DataFrame]:
+
+def load_sensor_parts(outer_zip_path: Path, sensor_out: str) -> List[Optional[pd.DataFrame]]:
+    """Return the ordered list of per-recording-part waist DataFrames for one sensor.
+
+    Single-recording zips yield a 1-element list; multi-part (nested-zip) activities yield one
+    entry per part, ordered by part index. Entries may be None if a part lacks a waist CSV.
     """
-    Merge accelerometer, gyroscope, and magnetometer data on timestamps.
+    if not outer_zip_path.exists():
+        return []
 
-    Uses linear interpolation to align sensors to common timeline.
+    parts: List[Optional[pd.DataFrame]] = []
+    with zipfile.ZipFile(outer_zip_path) as z:
+        names = z.namelist()
+        inner_zips = [n for n in names if n.lower().endswith(".zip")]
+
+        if inner_zips:
+            # Multi-part: order inner zips by their trailing part number. Part 1 for gyro has no
+            # number (gyr_<act>_csv.zip); treat missing number as part 0 so it sorts first. acc/gyro
+            # are then paired by list position (acc parts 1,2,3 ; gyro parts 0/1,2,3).
+            def part_key(n: str) -> int:
+                m = re.search(r"_(\d+)_csv\.zip$", n.lower())
+                return int(m.group(1)) if m else 0
+
+            for inner_name in sorted(inner_zips, key=part_key):
+                inner_bytes = z.read(inner_name)
+                with zipfile.ZipFile(io.BytesIO(inner_bytes)) as zi:
+                    member = _waist_member(zi.namelist())
+                    if member is None:
+                        parts.append(None)
+                        continue
+                    with zi.open(member) as f:
+                        parts.append(_parse_waist_csv(f, sensor_out))
+        else:
+            member = _waist_member(names)
+            if member is not None:
+                with z.open(member) as f:
+                    parts.append(_parse_waist_csv(f, sensor_out))
+
+    return parts
+
+
+def resample_part(acc_df: pd.DataFrame, gyro_df: Optional[pd.DataFrame],
+                  rate: float = TARGET_SAMPLE_RATE) -> Optional[pd.DataFrame]:
+    """Resample one recording part onto a uniform `rate` Hz timeline.
+
+    Accelerometer is required and defines the session duration; gyroscope (if present) is
+    interpolated onto the same timeline. Both are treated relative to their own start (the
+    acc/gyro clocks differ by a few ms; negligible at 50 Hz). Gyro is kept only if it forms a
+    complete finite triad over the whole session.
     """
-    if not sensor_dfs:
-        return None
-
-    # Find the sensor with most samples to use as reference timeline
-    ref_sensor = max(sensor_dfs.keys(), key=lambda k: len(sensor_dfs[k]))
-    ref_df = sensor_dfs[ref_sensor]
-
-    result = pd.DataFrame()
-    result["timestamp_sec"] = ref_df["timestamp_sec"].values
-
-    # Add reference sensor columns
-    for col in ref_df.columns:
-        if col != "timestamp_sec":
-            result[col] = ref_df[col].values
-
-    # Interpolate other sensors to reference timeline
-    for sensor_type, df in sensor_dfs.items():
-        if sensor_type == ref_sensor:
-            continue
-
-        for col in df.columns:
-            if col == "timestamp_sec":
-                continue
-
-            # Interpolate to reference timeline
-            result[col] = np.interp(
-                result["timestamp_sec"].values,
-                df["timestamp_sec"].values,
-                df[col].values,
-            )
-
-    return result
-
-
-def resample_to_target_rate(df: pd.DataFrame, target_rate: float = 50.0) -> Optional[pd.DataFrame]:
-    """Resample data to target sampling rate using linear interpolation."""
-    if df is None or len(df) == 0:
-        return None
-
-    duration = df["timestamp_sec"].iloc[-1] - df["timestamp_sec"].iloc[0]
+    src_t = acc_df["timestamp_sec"].values - acc_df["timestamp_sec"].values[0]
+    duration = float(src_t[-1])
     if duration <= 0:
         return None
 
-    num_samples = int(duration * target_rate) + 1
-    new_timestamps = np.linspace(0, duration, num_samples)
+    n = int(duration * rate) + 1
+    if n < 10:
+        return None
+    t = np.linspace(0.0, duration, n)
 
-    result = pd.DataFrame()
-    result["timestamp_sec"] = new_timestamps
+    out = pd.DataFrame()
+    out["timestamp_sec"] = t
+    for axis in "xyz":
+        out[f"acc_{axis}"] = np.interp(t, src_t, acc_df[f"acc_{axis}"].values)
 
-    for col in df.columns:
-        if col != "timestamp_sec":
-            result[col] = np.interp(new_timestamps, df["timestamp_sec"].values, df[col].values)
+    if gyro_df is not None and len(gyro_df) >= 10:
+        g_t = gyro_df["timestamp_sec"].values - gyro_df["timestamp_sec"].values[0]
+        gyro_cols = {}
+        for axis in "xyz":
+            gyro_cols[f"gyro_{axis}"] = np.interp(t, g_t, gyro_df[f"gyro_{axis}"].values)
+        # Retain gyro only when the converted triad is complete and finite.
+        if all(np.all(np.isfinite(v)) for v in gyro_cols.values()):
+            for col, vals in gyro_cols.items():
+                out[col] = vals
 
-    return result
+    if not np.all(np.isfinite(out[["acc_x", "acc_y", "acc_z"]].values)):
+        return None
+    return out
 
 
-def convert_realworld():
-    """Convert RealWorld dataset to standardized format."""
+def convert_realworld() -> bool:
     print("=" * 80)
-    print("RealWorld HAR → Standardized Format Converter")
+    print("RealWorld HAR -> HALO raw sessions (waist / phone_waist)")
     print("=" * 80)
 
-    # Check input - data may be in subdirectory or directly in base folder
-    if RAW_SUBDIR.exists():
-        raw_dir = RAW_SUBDIR
-    elif RAW_BASE_DIR.exists():
-        raw_dir = RAW_BASE_DIR
-    else:
-        print(f"ERROR: Raw data not found at {RAW_BASE_DIR}")
-        print("Run: python datascripts/realworld/download.py")
+    if not DOWNLOADS_DIR.exists():
+        print(f"ERROR: Raw data not found at {DOWNLOADS_DIR}")
         return False
 
-    # Create output directory
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    sessions_dir = OUTPUT_DIR / "sessions"
-    sessions_dir.mkdir(exist_ok=True)
+    if SESSIONS_DIR.exists():
+        shutil.rmtree(SESSIONS_DIR)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Find all subject folders
-    subject_folders = sorted([d for d in raw_dir.iterdir() if d.is_dir() and d.name.startswith("proband")])
+    subject_folders = sorted(
+        [d for d in DOWNLOADS_DIR.iterdir() if d.is_dir() and d.name.startswith("proband")],
+        key=lambda d: int(re.search(r"\d+", d.name).group()),
+    )
     print(f"\nFound {len(subject_folders)} subjects")
-
-    if len(subject_folders) == 0:
+    if not subject_folders:
         print("ERROR: No proband folders found")
         return False
 
     all_labels = {}
+    subjects_seen = set()
+    subjects_with_acc = set()
+    subjects_with_gyro = set()
+    activity_counts = {}
     session_count = 0
-    skipped_count = 0
+    gyro_session_count = 0
+    acc_only_session_count = 0
+    skipped_no_acc = 0
 
     for subject_folder in subject_folders:
-        subject_id = int(re.search(r"\d+", subject_folder.name).group())
-        print(f"\n  Processing subject {subject_id} ({subject_folder.name})")
-
-        # Find data folder
+        subject = subject_folder.name  # e.g. "proband1"
         data_dir = subject_folder / "data"
         if not data_dir.exists():
-            print(f"    WARNING: No data folder found for {subject_folder.name}")
+            print(f"  {subject}: WARNING no data folder, skipping")
             continue
 
         subject_sessions = 0
 
-        for activity_code, activity_name in ACTIVITIES.items():
-            # Load each sensor type
-            sensor_dfs = {}
+        for activity in ACTIVITIES:
+            acc_parts = load_sensor_parts(data_dir / f"acc_{activity}_csv.zip", "acc")
+            gyro_parts = load_sensor_parts(data_dir / f"gyr_{activity}_csv.zip", "gyro")
 
-            for sensor_prefix, sensor_name in SENSOR_TYPES.items():
-                zip_filename = f"{sensor_prefix}_{activity_code}_csv.zip"
-                zip_path = data_dir / zip_filename
+            if not acc_parts:
+                # No waist accelerometer for this (subject, activity) — cannot emit.
+                continue
 
-                if not zip_path.exists():
+            for idx, acc_df in enumerate(acc_parts):
+                if acc_df is None:
+                    skipped_no_acc += 1
+                    continue
+                gyro_df = gyro_parts[idx] if idx < len(gyro_parts) else None
+
+                frame = resample_part(acc_df, gyro_df)
+                if frame is None:
+                    skipped_no_acc += 1
                     continue
 
-                df = load_sensor_from_zip(zip_path, sensor_prefix, activity_code)
-                if df is not None and len(df) > 10:
-                    sensor_dfs[sensor_name] = df
+                frame["subject"] = subject
 
-            if not sensor_dfs:
-                skipped_count += 1
-                continue
+                multi = len(acc_parts) > 1
+                session_id = (f"{subject}_{activity}_part{idx + 1}" if multi
+                              else f"{subject}_{activity}")
 
-            # Merge sensor data
-            merged_df = merge_sensor_data(sensor_dfs)
-            if merged_df is None or len(merged_df) < 10:
-                skipped_count += 1
-                continue
+                session_dir = SESSIONS_DIR / session_id
+                session_dir.mkdir(exist_ok=True)
+                frame.to_parquet(session_dir / "data.parquet", index=False)
 
-            # Resample to target rate
-            resampled_df = resample_to_target_rate(merged_df, TARGET_SAMPLE_RATE)
-            if resampled_df is None or len(resampled_df) < 10:
-                skipped_count += 1
-                continue
-
-            # Create session ID prefix
-            session_prefix = f"s{subject_id:02d}_{activity_code}"
-
-            # Split long sessions into variable-length windows
-            windows = create_variable_windows(
-                df=resampled_df,
-                session_prefix=session_prefix,
-                activity=activity_name,
-                sample_rate=TARGET_SAMPLE_RATE,
-                seed=42 + subject_id * 100,  # Reproducible but varied per subject
-            )
-
-            # Save each window as a separate session
-            for window_id, window_df, window_activity in windows:
-                window_path = sessions_dir / window_id
-                window_path.mkdir(exist_ok=True)
-
-                parquet_path = window_path / "data.parquet"
-                window_df.to_parquet(parquet_path, index=False)
-
-                # Store label
-                all_labels[window_id] = [window_activity]
+                all_labels[session_id] = [activity]
+                activity_counts[activity] = activity_counts.get(activity, 0) + 1
+                subjects_seen.add(subject)
+                subjects_with_acc.add(subject)
+                has_gyro = "gyro_x" in frame.columns
+                if has_gyro:
+                    gyro_session_count += 1
+                    subjects_with_gyro.add(subject)
+                else:
+                    acc_only_session_count += 1
                 session_count += 1
                 subject_sessions += 1
 
-        print(f"    Sessions: {subject_sessions}")
+        print(f"  {subject}: {subject_sessions} sessions")
 
-    # Save labels.json
-    labels_path = OUTPUT_DIR / "labels.json"
-    with open(labels_path, "w") as f:
+    if session_count == 0:
+        print("ERROR: no waist accelerometer sessions produced — STOP.")
+        return False
+
+    # labels.json
+    with open(OUTPUT_DIR / "labels.json", "w") as f:
         json.dump(all_labels, f, indent=2)
-    print(f"\n✓ Created labels.json ({len(all_labels)} sessions)")
 
-    # Create manifest.json
-    create_manifest()
+    write_manifest(gyro_available=gyro_session_count > 0)
+    update_metadata(num_sessions=session_count,
+                    activities=sorted(activity_counts.keys()),
+                    gyro_available=gyro_session_count > 0)
 
-    # Summary
     print(f"\n{'=' * 80}")
     print("Conversion complete!")
     print(f"{'=' * 80}")
-    print(f"Output: {OUTPUT_DIR}")
-    print(f"  - {session_count} sessions converted")
-    print(f"  - {skipped_count} recordings skipped")
-    print(f"  - Position: {TARGET_POSITION}")
-    print(f"  - {TARGET_SAMPLE_RATE} Hz sampling rate")
-
-    # Generate debug visualizations
-    try:
-        sys.path.insert(0, str(Path(__file__).parent.parent))
-        from data.scripts.debug.visualization_utils import generate_debug_visualizations
-
-        generate_debug_visualizations(OUTPUT_DIR)
-    except ImportError as e:
-        print(f"\n⚠ Could not generate visualizations: {e}")
-        print("Install matplotlib: pip install matplotlib")
-
+    print(f"Output dir           : {OUTPUT_DIR}")
+    print(f"Sessions written     : {session_count}")
+    print(f"  with gyro (6-ch)   : {gyro_session_count}")
+    print(f"  acc-only (3-ch)    : {acc_only_session_count}")
+    print(f"Parts skipped (no acc): {skipped_no_acc}")
+    print(f"Distinct subjects    : {len(subjects_seen)}")
+    print(f"  subjects w/ gyro   : {len(subjects_with_gyro)}")
+    print(f"Native rate          : {TARGET_SAMPLE_RATE} Hz")
+    print("Sessions per activity:")
+    for act in sorted(activity_counts):
+        print(f"  {act:14s}: {activity_counts[act]}")
     return True
 
 
-def create_manifest():
-    """Create manifest.json with channel metadata."""
+def write_manifest(gyro_available: bool) -> None:
+    channels = [
+        {"name": "acc_x", "description": "Accelerometer X-axis (waist), m/s^2", "sampling_rate_hz": TARGET_SAMPLE_RATE},
+        {"name": "acc_y", "description": "Accelerometer Y-axis (waist), m/s^2", "sampling_rate_hz": TARGET_SAMPLE_RATE},
+        {"name": "acc_z", "description": "Accelerometer Z-axis (waist), m/s^2", "sampling_rate_hz": TARGET_SAMPLE_RATE},
+    ]
+    if gyro_available:
+        channels += [
+            {"name": "gyro_x", "description": "Gyroscope X-axis (waist), rad/s", "sampling_rate_hz": TARGET_SAMPLE_RATE},
+            {"name": "gyro_y", "description": "Gyroscope Y-axis (waist), rad/s", "sampling_rate_hz": TARGET_SAMPLE_RATE},
+            {"name": "gyro_z", "description": "Gyroscope Z-axis (waist), rad/s", "sampling_rate_hz": TARGET_SAMPLE_RATE},
+        ]
     manifest = {
         "dataset_name": "RealWorld HAR",
-        "description": "RealWorld Human Activity Recognition dataset from University of Mannheim. 15 subjects performing 8 activities with sensors at waist position. Triaxial accelerometer, gyroscope, and magnetometer resampled to 50Hz.",
+        "description": ("RealWorld HAR (University of Mannheim). 15 subjects, 8 activities. "
+                        "Waist position, triaxial accelerometer (m/s^2, gravity present) plus "
+                        "gyroscope where a complete finite triad exists, on a uniform 50 Hz grid."),
         "source": "https://www.uni-mannheim.de/dws/research/projects/activity-recognition/dataset/dataset-realworld/",
         "num_subjects": 15,
         "body_position": TARGET_POSITION,
-        "channels": [
-            {"name": "acc_x", "description": "Accelerometer X-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-            {"name": "acc_y", "description": "Accelerometer Y-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-            {"name": "acc_z", "description": "Accelerometer Z-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-            {"name": "gyro_x", "description": "Gyroscope X-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-            {"name": "gyro_y", "description": "Gyroscope Y-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-            {"name": "gyro_z", "description": "Gyroscope Z-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-            {"name": "mag_x", "description": "Magnetometer X-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-            {"name": "mag_y", "description": "Magnetometer Y-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-            {"name": "mag_z", "description": "Magnetometer Z-axis (waist)", "sampling_rate_hz": TARGET_SAMPLE_RATE},
-        ],
+        "channels": channels,
     }
-
-    manifest_path = OUTPUT_DIR / "manifest.json"
-    with open(manifest_path, "w") as f:
+    with open(OUTPUT_DIR / "manifest.json", "w") as f:
         json.dump(manifest, f, indent=2)
-    print(f"✓ Created manifest.json")
 
 
-def main():
-    """Main entry point."""
-    success = convert_realworld()
-    return 0 if success else 1
+def update_metadata(num_sessions: int, activities: List[str], gyro_available: bool) -> None:
+    """Refresh informational fields of metadata.json while preserving the split/role fields that
+    downstream tooling relies on. build_grids reads `sampling_rate_hz`; never set `pre_windowed`."""
+    meta_path = OUTPUT_DIR / "metadata.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+
+    meta["display_name"] = meta.get("display_name", "RealWorld HAR")
+    meta["num_sessions"] = num_sessions
+    meta["sampling_rate_hz"] = int(TARGET_SAMPLE_RATE)
+    channels = ["acc_x", "acc_y", "acc_z"]
+    if gyro_available:
+        channels += ["gyro_x", "gyro_y", "gyro_z"]
+    meta["channels"] = channels
+    meta["core_channels"] = {c: c for c in channels}
+    meta["extra_channels"] = []
+    meta.pop("note", None)
+    meta["placement"] = meta.get("placement", TARGET_POSITION)
+    meta["num_subjects"] = 15
+    meta["activities"] = activities
+    meta.pop("pre_windowed", None)
+
+    meta_path.write_text(json.dumps(meta, indent=2))
+
+
+def main() -> int:
+    return 0 if convert_realworld() else 1
 
 
 if __name__ == "__main__":

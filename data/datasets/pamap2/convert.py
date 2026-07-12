@@ -17,9 +17,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# Add datascripts to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows, get_window_range
+# Run as `python -m data.datasets.pamap2.convert` from repo root; repo root on path for shared imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 # Activity mapping
@@ -62,9 +61,10 @@ COLUMN_NAMES = ['timestamp', 'activity_id', 'heart_rate'] + [
     for sensor in _IMU_SENSORS
 ]
 
-# Paths
-RAW_DIR = Path("data/raw/pamap2/PAMAP2_Dataset/Protocol")
-OUTPUT_DIR = Path("data/pamap2")
+# Paths (new repo layout: this converter lives in data/datasets/pamap2/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads" / "PAMAP2_Dataset" / "Protocol"
+OUTPUT_DIR = DS_DIR
 
 
 def segment_continuous_activity(df: pd.DataFrame, min_duration_sec: float = 5.0):
@@ -139,32 +139,24 @@ def convert_subject(subject_file: Path):
         # Drop activity_id (it's in labels.json)
         data = data.drop(columns=['activity_id'])
 
+        # Subject id for subject-disjoint splits (read by build_grids.iter_sessions).
+        data['subject'] = f"subject{subject_id}"
+
         # Reorder: timestamp first, then all channels
         cols = ['timestamp_sec'] + [c for c in data.columns if c != 'timestamp_sec' and c != 'timestamp']
         data = data[cols]
 
-        # Apply variable-length windowing
-        windows = create_variable_windows(
-            df=data,
-            session_prefix=base_session_id,
-            activity=activity_name,
-            sample_rate=sample_rate,
-        )
+        # Save the whole continuous single-activity segment as ONE session; build_grids does the
+        # fixed 6 s windowing (avoids double-windowing).
+        session_dir = OUTPUT_DIR / "sessions" / base_session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        data.to_parquet(session_dir / "data.parquet", index=False)
 
-        # Save each window
-        for window_id, window_df, window_activity in windows:
-            session_dir = OUTPUT_DIR / "sessions" / window_id
-            session_dir.mkdir(parents=True, exist_ok=True)
+        labels_dict[base_session_id] = [activity_name]
+        session_data.append(base_session_id)
+        total_windows += 1
 
-            parquet_path = session_dir / "data.parquet"
-            window_df.to_parquet(parquet_path, index=False)
-
-            # Store label
-            labels_dict[window_id] = [window_activity]
-            session_data.append(window_id)
-            total_windows += 1
-
-    print(f"    Created {total_windows} windows from {len(sessions)} segments")
+    print(f"    Created {total_windows} sessions from {len(sessions)} segments")
     return session_data, labels_dict
 
 

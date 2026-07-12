@@ -31,6 +31,7 @@ data/datasets/*/processed/
 data/datasets/*/grids/
 data/datasets/*/manifest.json
 data/datasets/*/labels.json
+data/datasets/*/debug_*.png
 data/**/bundles/
 training_output/
 test_output/

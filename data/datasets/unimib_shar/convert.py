@@ -40,9 +40,10 @@ ACTIVITIES = {
     17: 'falling_left'
 }
 
-# Paths
-RAW_DIR = Path("data/raw/unimib_shar")
-OUTPUT_DIR = Path("data/unimib_shar")
+# Paths (new repo layout: this converter lives in data/datasets/unimib_shar/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads"
+OUTPUT_DIR = DS_DIR
 
 # Sampling rate
 SAMPLING_RATE_HZ = 50.0

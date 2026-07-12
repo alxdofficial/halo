@@ -25,10 +25,11 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from math import gcd
+from scipy.signal import resample_poly
 
-# Add parent to path for shared utilities
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows
+# Run as `python -m data.datasets.kuhar.convert` from repo root; repo root on path for shared imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 def _estimate_rate(timestamps: np.ndarray, nominal: float) -> float:
@@ -70,9 +71,10 @@ ACTIVITIES = {
     "Table-tennis": "table_tennis",
 }
 
-# Paths
-RAW_DIR = Path("data/raw/kuhar")
-OUTPUT_DIR = Path("data/kuhar")
+# Paths (new repo layout: this converter lives in data/datasets/kuhar/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads"
+OUTPUT_DIR = DS_DIR
 
 # Dataset parameters
 SAMPLE_RATE = 100.0  # Hz
@@ -224,32 +226,29 @@ def convert_kuhar():
             print(f"  ⚠ subject {subject}: est. rate {file_rate:.1f} Hz (nominal {SAMPLE_RATE}) — windowing at true rate")
             rate_warned.add(subject)
 
-        # Create session ID prefix
-        session_prefix = f"s{subject:04d}_{activity}_{i:04d}"
+        # Normalize this file to the nominal 100 Hz so build_grids (which resamples once at the
+        # dataset rate from metadata.json) sees a single true rate. KU-HAR is 100 Hz except a few
+        # files (e.g. subject 1016 ≈ 111 Hz); anti-alias resample those to 100 Hz here.
+        chans = ["acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
+        if abs(file_rate - SAMPLE_RATE) / SAMPLE_RATE > 0.02:
+            s, d = int(round(file_rate)), int(round(SAMPLE_RATE))
+            g = gcd(s, d)
+            arr = resample_poly(df[chans].to_numpy(np.float64), up=d // g, down=s // g, axis=0)
+            df = pd.DataFrame(arr, columns=chans)
+            df["timestamp_sec"] = np.arange(len(df)) / SAMPLE_RATE
 
-        # Apply windowing (deterministic seed; true per-file rate)
-        windows = create_variable_windows(
-            df=df,
-            session_prefix=session_prefix,
-            activity=activity,
-            sample_rate=file_rate,
-            seed=42 + subject + i,
-        )
-        subject_window_counts[subject] = subject_window_counts.get(subject, 0) + len(windows)
+        # Save the whole continuous single-activity recording as ONE session (build_grids does the
+        # fixed 6 s windowing). Subject id for subject-disjoint splits (read by iter_sessions).
+        df["subject"] = f"s{subject:04d}"
+        session_id = f"s{subject:04d}_{activity}_{i:04d}"
+        session_dir = sessions_dir / session_id
+        session_dir.mkdir(exist_ok=True)
+        df.to_parquet(session_dir / "data.parquet", index=False)
 
-        # Save each window
-        for window_id, window_df, window_activity in windows:
-            window_path = sessions_dir / window_id
-            window_path.mkdir(exist_ok=True)
-
-            parquet_path = window_path / "data.parquet"
-            window_df.to_parquet(parquet_path, index=False)
-
-            all_labels[window_id] = [window_activity]
-            session_count += 1
-
-            # Track activity counts
-            activity_counts[window_activity] = activity_counts.get(window_activity, 0) + 1
+        all_labels[session_id] = [activity]
+        subject_window_counts[subject] = subject_window_counts.get(subject, 0) + 1
+        session_count += 1
+        activity_counts[activity] = activity_counts.get(activity, 0) + 1
 
         if (i + 1) % 500 == 0:
             print(f"  Processed {i + 1}/{len(data_files)} files, {session_count} sessions...")
