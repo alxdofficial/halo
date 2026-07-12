@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Data & heavy artifacts — never commit (regenerated from source datasets).
+# Anchored to repo root so the `halo/data/` package is NOT ignored.
+/data/
+benchmark_data/raw/
+benchmark_data/processed/
+benchmark_data/bundles/
+*.npy
+*.npz
+*.parquet
+*.pt
+*.mdl
+*.ckpt
+*.pth
+training_output/
+test_output/
+auxiliary_repos/
+
+# Secrets — never commit
+.env
+*.env
+cloud/.env
+*.key
+*.pem
+credentials*.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
