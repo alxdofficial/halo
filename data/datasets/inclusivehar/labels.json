@@ -1,0 +1,42 @@
+{
+  "dataset": "inclusivehar",
+  "protocol_version": "v2",
+  "source": "Label strings verbatim from benchmark_data/processed/tsfm_eval/inclusivehar/metadata.json activity_to_idx (produced by datascripts/inclusivehar/convert.py from the dataset's documented label names). Frozen for eval v2 \u2014 no rephrasing at evaluation time.",
+  "labels": [
+    "jogging",
+    "ramp_ascent",
+    "ramp_descent",
+    "sitting",
+    "standing",
+    "walking"
+  ],
+  "idx_to_label": {
+    "0": "jogging",
+    "1": "ramp_ascent",
+    "2": "ramp_descent",
+    "3": "sitting",
+    "4": "standing",
+    "5": "walking"
+  },
+  "n_classes": 6,
+  "sampling_rate_hz": 50,
+  "n_subjects": 20,
+  "common_classes_exact": [
+    "jogging",
+    "sitting",
+    "standing",
+    "walking"
+  ],
+  "proposed_semantic_pairs": {
+    "ramp_ascent": {
+      "train_label": "climbing_stairs",
+      "cosine": 0.6072,
+      "status": "PENDING_REVIEW"
+    }
+  },
+  "conse": {
+    "text_encoder": "all-MiniLM-L6-v2",
+    "pooling": "mean",
+    "top_T": 10
+  }
+}

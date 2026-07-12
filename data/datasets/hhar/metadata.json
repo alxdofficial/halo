@@ -1,0 +1,47 @@
+{
+  "display_name": "HHAR",
+  "num_sessions": 146557,
+  "num_sessions_subsampled": 15000,
+  "sampling_rate_hz": 50,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z",
+    "gyro_x": "gyro_x",
+    "gyro_y": "gyro_y",
+    "gyro_z": "gyro_z"
+  },
+  "extra_channels": [],
+  "placement": "waist",
+  "num_subjects": 9,
+  "activities": [
+    "cycling",
+    "sitting",
+    "standing",
+    "walking",
+    "walking_downstairs",
+    "walking_upstairs"
+  ],
+  "train_subjects": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+  ],
+  "test_subjects": [
+    "h",
+    "i"
+  ],
+  "role": "train"
+}

@@ -1,0 +1,71 @@
+{
+  "display_name": "InclusiveHAR",
+  "num_sessions": 2049,
+  "sampling_rate_hz": 50,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z",
+    "gravity_x",
+    "gravity_y",
+    "gravity_z",
+    "attitude_roll",
+    "attitude_pitch",
+    "attitude_yaw"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z",
+    "gyro_x": "gyro_x",
+    "gyro_y": "gyro_y",
+    "gyro_z": "gyro_z"
+  },
+  "extra_channels": [
+    "gravity_x",
+    "gravity_y",
+    "gravity_z",
+    "attitude_roll",
+    "attitude_pitch",
+    "attitude_yaw"
+  ],
+  "note": "iOS CoreMotion (same schema as MotionSense). acc is gravity-removed userAcceleration in g. UserID 1-10 able-bodied, 11-20 with physical disabilities (see manifest ability_by_subject) - enables ability-stratified reporting.",
+  "placement": "waist",
+  "num_subjects": 20,
+  "activities": [
+    "jogging",
+    "ramp_ascent",
+    "ramp_descent",
+    "sitting",
+    "standing",
+    "walking"
+  ],
+  "train_subjects": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17
+  ],
+  "test_subjects": [
+    8,
+    9,
+    10,
+    18,
+    19,
+    20
+  ],
+  "role": "eval"
+}

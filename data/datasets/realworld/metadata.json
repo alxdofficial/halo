@@ -1,0 +1,49 @@
+{
+  "display_name": "RealWorld HAR",
+  "num_sessions": 16830,
+  "sampling_rate_hz": 50,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z"
+  },
+  "extra_channels": [],
+  "note": "Accelerometer only in processed sessions. Gyro channels zero-padded for LIMU-BERT.",
+  "placement": "waist",
+  "num_subjects": 15,
+  "activities": [
+    "jumping",
+    "lying",
+    "running",
+    "sitting",
+    "stairs_down",
+    "stairs_up",
+    "standing",
+    "walking"
+  ],
+  "train_subjects": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "test_subjects": [
+    12,
+    13,
+    14,
+    15
+  ],
+  "role": "eval"
+}

@@ -1,0 +1,65 @@
+{
+  "display_name": "HARTH",
+  "num_sessions": 39199,
+  "sampling_rate_hz": 50,
+  "channels": [
+    "back_acc_x",
+    "back_acc_y",
+    "back_acc_z",
+    "thigh_acc_x",
+    "thigh_acc_y",
+    "thigh_acc_z"
+  ],
+  "core_channels": {
+    "acc_x": "back_acc_x",
+    "acc_y": "back_acc_y",
+    "acc_z": "back_acc_z"
+  },
+  "extra_channels": [
+    "thigh_acc_x",
+    "thigh_acc_y",
+    "thigh_acc_z"
+  ],
+  "note": "Accelerometer only - no gyroscope. Gyro channels zero-padded for LIMU-BERT.",
+  "placement": "back+thigh",
+  "num_subjects": 22,
+  "activities": [
+    "cycling_sit",
+    "cycling_stand",
+    "lying",
+    "running",
+    "shuffling",
+    "sitting",
+    "stairs_down",
+    "stairs_up",
+    "standing",
+    "walking"
+  ],
+  "train_subjects": [
+    6,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20
+  ],
+  "test_subjects": [
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28
+  ],
+  "role": "eval"
+}

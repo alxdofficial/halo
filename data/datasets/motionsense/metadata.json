@@ -1,0 +1,74 @@
+{
+  "display_name": "MotionSense",
+  "num_sessions": 7989,
+  "sampling_rate_hz": 50,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z",
+    "gravity_x",
+    "gravity_y",
+    "gravity_z",
+    "attitude_roll",
+    "attitude_pitch",
+    "attitude_yaw"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z",
+    "gyro_x": "gyro_x",
+    "gyro_y": "gyro_y",
+    "gyro_z": "gyro_z"
+  },
+  "extra_channels": [
+    "gravity_x",
+    "gravity_y",
+    "gravity_z",
+    "attitude_roll",
+    "attitude_pitch",
+    "attitude_yaw"
+  ],
+  "placement": "pocket",
+  "num_subjects": 24,
+  "activities": [
+    "jogging",
+    "sitting",
+    "standing",
+    "walking",
+    "walking_downstairs",
+    "walking_upstairs"
+  ],
+  "train_subjects": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17
+  ],
+  "test_subjects": [
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24
+  ],
+  "role": "eval"
+}

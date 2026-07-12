@@ -1,0 +1,41 @@
+{
+  "dataset": "shoaib",
+  "protocol_version": "v2",
+  "source": "Label strings verbatim from benchmark_data/processed/tsfm_eval/shoaib/metadata.json activity_to_idx (produced by datascripts/shoaib/convert.py from the dataset's documented label names). Frozen for eval v2 \u2014 no rephrasing at evaluation time.",
+  "labels": [
+    "cycling",
+    "jogging",
+    "sitting",
+    "standing",
+    "walking",
+    "walking_downstairs",
+    "walking_upstairs"
+  ],
+  "idx_to_label": {
+    "0": "cycling",
+    "1": "jogging",
+    "2": "sitting",
+    "3": "standing",
+    "4": "walking",
+    "5": "walking_downstairs",
+    "6": "walking_upstairs"
+  },
+  "n_classes": 7,
+  "sampling_rate_hz": 50,
+  "n_subjects": 10,
+  "common_classes_exact": [
+    "cycling",
+    "jogging",
+    "sitting",
+    "standing",
+    "walking",
+    "walking_downstairs",
+    "walking_upstairs"
+  ],
+  "proposed_semantic_pairs": {},
+  "conse": {
+    "text_encoder": "all-MiniLM-L6-v2",
+    "pooling": "mean",
+    "top_T": 10
+  }
+}

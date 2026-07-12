@@ -1,0 +1,34 @@
+{
+  "display_name": "CAPTURE-24",
+  "num_sessions": 48518,
+  "sampling_rate_hz": 100,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z"
+  },
+  "extra_channels": [],
+  "note": "TRAIN-ONLY. Wrist accelerometer only (no gyro); raw acc in g INCLUDES gravity (heterogeneity vs iOS userAcceleration). Free-living, WillettsSpecific2018 labels. train/test_subjects empty because this dataset is not used as an eval split; subjects are P001..P151 strings.",
+  "placement": "wrist",
+  "num_subjects": 151,
+  "activities": [
+    "bicycling",
+    "household_chores",
+    "manual_work",
+    "mixed_activity",
+    "sitting",
+    "sleeping",
+    "sports",
+    "standing",
+    "vehicle",
+    "walking"
+  ],
+  "train_subjects": [],
+  "test_subjects": [],
+  "role": "train"
+}

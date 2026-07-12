@@ -1,0 +1,73 @@
+{
+  "display_name": "UniMiB SHAR",
+  "num_sessions": 11771,
+  "sampling_rate_hz": 50,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z"
+  },
+  "extra_channels": [],
+  "placement": "pocket",
+  "num_subjects": 30,
+  "note": "Accelerometer only - no gyroscope. Gyro channels zero-padded for LIMU-BERT.",
+  "activities": [
+    "falling_backward",
+    "falling_backward_sitting",
+    "falling_forward",
+    "falling_hitting_obstacle",
+    "falling_left",
+    "falling_right",
+    "falling_with_protection",
+    "going_down_stairs",
+    "going_up_stairs",
+    "jumping",
+    "lying_down_from_standing",
+    "running",
+    "sitting_down",
+    "standing_up_from_laying",
+    "standing_up_from_sitting",
+    "syncope",
+    "walking"
+  ],
+  "train_subjects": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21
+  ],
+  "test_subjects": [
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30
+  ],
+  "role": "train"
+}

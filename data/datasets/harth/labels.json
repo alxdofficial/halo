@@ -1,0 +1,58 @@
+{
+  "dataset": "harth",
+  "protocol_version": "v2",
+  "source": "Label strings verbatim from benchmark_data/processed/tsfm_eval/harth/metadata.json activity_to_idx (produced by datascripts/harth/convert.py from the dataset's documented label names). Frozen for eval v2 \u2014 no rephrasing at evaluation time.",
+  "labels": [
+    "cycling_sit",
+    "cycling_stand",
+    "lying",
+    "running",
+    "shuffling",
+    "sitting",
+    "stairs_down",
+    "stairs_up",
+    "standing",
+    "walking"
+  ],
+  "idx_to_label": {
+    "0": "cycling_sit",
+    "1": "cycling_stand",
+    "2": "lying",
+    "3": "running",
+    "4": "shuffling",
+    "5": "sitting",
+    "6": "stairs_down",
+    "7": "stairs_up",
+    "8": "standing",
+    "9": "walking"
+  },
+  "n_classes": 10,
+  "sampling_rate_hz": 50,
+  "n_subjects": 22,
+  "common_classes_exact": [
+    "lying",
+    "running",
+    "sitting",
+    "stairs_down",
+    "stairs_up",
+    "standing",
+    "walking"
+  ],
+  "proposed_semantic_pairs": {
+    "cycling_sit": {
+      "train_label": "cycling",
+      "cosine": 0.7619,
+      "status": "PENDING_REVIEW"
+    },
+    "cycling_stand": {
+      "train_label": "cycling",
+      "cosine": 0.6384,
+      "status": "PENDING_REVIEW"
+    }
+  },
+  "conse": {
+    "text_encoder": "all-MiniLM-L6-v2",
+    "pooling": "mean",
+    "top_T": 10
+  }
+}

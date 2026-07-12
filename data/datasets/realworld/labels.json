@@ -1,0 +1,44 @@
+{
+  "dataset": "realworld",
+  "protocol_version": "v2",
+  "source": "Label strings verbatim from benchmark_data/processed/tsfm_eval/realworld/metadata.json activity_to_idx (produced by datascripts/realworld/convert.py from the dataset's documented label names). Frozen for eval v2 \u2014 no rephrasing at evaluation time.",
+  "labels": [
+    "jumping",
+    "lying",
+    "running",
+    "sitting",
+    "stairs_down",
+    "stairs_up",
+    "standing",
+    "walking"
+  ],
+  "idx_to_label": {
+    "0": "jumping",
+    "1": "lying",
+    "2": "running",
+    "3": "sitting",
+    "4": "stairs_down",
+    "5": "stairs_up",
+    "6": "standing",
+    "7": "walking"
+  },
+  "n_classes": 8,
+  "sampling_rate_hz": 50,
+  "n_subjects": 15,
+  "common_classes_exact": [
+    "jumping",
+    "lying",
+    "running",
+    "sitting",
+    "stairs_down",
+    "stairs_up",
+    "standing",
+    "walking"
+  ],
+  "proposed_semantic_pairs": {},
+  "conse": {
+    "text_encoder": "all-MiniLM-L6-v2",
+    "pooling": "mean",
+    "top_T": 10
+  }
+}
