@@ -1,0 +1,14 @@
+{
+  "name": "limubert",
+  "category": "baselines",
+  "paper_title": "LIMU-BERT: Unleashing the Potential of Unlabeled Data for IMU Sensing Applications",
+  "authors": "Huatao Xu, Pengfei Zhou, Rui Tan, Mo Li, Guobin Shen",
+  "year": "2021",
+  "venue": "Proceedings of the 19th ACM Conference on Embedded Networked Sensor Systems (SenSys) 2021",
+  "doi": "10.1145/3485730.3485937",
+  "paper_url": "https://dl.acm.org/doi/10.1145/3485730.3485937",
+  "data_or_code_url": "https://github.com/dapowan/LIMU-BERT-Public",
+  "weights_url": null,
+  "license": "Code repo: see upstream LICENSE.md.",
+  "notes": "Self-supervised 'ConSE tier' baseline with NO released weights: a ~62K-param masked-reconstruction Transformer (BERT-style) pretrained from scratch. We SELF-PRETRAIN its backbone on our 9-dataset training corpus (baselines/limubert/train.py, reusing the upstream SSL pipeline via sys.path) and fit a subject-disjoint softmax head over our 59-way global vocabulary for the zero-shot ConSE bridge. Input contract (verified BASELINES.md): 6-ch acc+gyro, 20 Hz, 120 samples (6 s), accel ÷ 9.8 -> g (gravity RETAINED), gyro raw, internal LayerNorm. base_v1 architecture: 4-layer (weight-shared), 72-d Transformer encoder."
+}
