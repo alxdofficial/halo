@@ -34,14 +34,13 @@ tier; HALO is `native` at every tier, and that stack *is* the contribution.
 |---|---|---|---|---|
 | **CrossHAR** | we pretrain (SSL) | fixed → **60 Hz** | fixed 6-ch, zero-pad+mask; placement-blind | closed → **ConSE** |
 | **LiMU-BERT** | we pretrain (SSL) | fixed → **60 Hz** | fixed 6-ch, zero-pad+mask; placement-blind | closed → **ConSE** |
-| **DeepConvLSTM** | we train from scratch | fixed → **60 Hz** | fixed 6-ch; placement-blind | closed softmax → **few-shot floor** |
 | **ssl / harnet5** | **frozen released** | fixed **30 Hz** | fixed **3-ch acc-only**; wrist-implied | closed → **ConSE** |
 | **UniMTS** | **frozen released** | resample to its rate | **native placement** (SMPL joint), acc-only 3-ch | **native text** (CLIP, cosine) |
 | **NormWear** | **frozen released** | fixed **65 Hz** | **native** variable real channels + mask; no placement | **native text** (TinyLlama, L1) |
 | **HALO (ours)** | we train | **native (invariant)** | **native**: ch-independent + **language conditioning** (placement/sensor/gravity) | **native language alignment** |
 
-The single most important split is **T0 weights**: three models we *train on our corpus*
-(CrossHAR, LiMU-BERT, DeepConvLSTM) — for those we fully control T1/T2 — and three **frozen
+The single most important split is **T0 weights**: two models we *pretrain on our corpus*
+(CrossHAR, LiMU-BERT, self-supervised) — for those we fully control T1/T2 — and three **frozen
 released checkpoints** (harnet, UniMTS, NormWear) whose rate/channel/gravity contract is baked into
 the weights and **cannot** be changed without discarding the released model. "We train all
 baselines on the same data" is true only for the first group *and* for every ConSE head; the frozen
@@ -58,7 +57,7 @@ documented transform. Decided 2026-07-11.
   `accel_units.to_g`; the only gravity-removed set is kuhar, physically unrecoverable), **acc+gyro**,
   **phone/watch placements only** (pocket / waist / thigh for phone; wrist / arm for watch — see the
   corpus-curation policy). No magnetometer / ECG / orientation / temperature / heart-rate.
-- **T1 — rate.** Models we train (CrossHAR, LiMU-BERT, DeepConvLSTM) unify at **60 Hz**. Frozen
+- **T1 — rate.** Models we pretrain (CrossHAR, LiMU-BERT) unify at **60 Hz**. Frozen
   models are resampled **from the source to their required native rate** (harnet 30 Hz, NormWear
   65 Hz, UniMTS its 200-sample format) by **one** anti-aliased resampler — per-model *target*, one
   code path. HALO consumes native rate (no resample). *Faithfulness note:* CrossHAR/LiMU-BERT are
@@ -76,8 +75,7 @@ documented transform. Decided 2026-07-11.
 - **T3 — labels.** Text-aligned models (UniMTS, NormWear, HALO) use their **native text tower**.
   Closed-vocab models (CrossHAR, LiMU-BERT, harnet) use the **ConSE bridge** (Norouzi 2014):
   softmax over the shared global TRAIN vocabulary → convex combination of frozen-SBERT label
-  embeddings, temperature-calibrated on held-out source subjects. DeepConvLSTM has no open-set path
-  and serves as the **supervised few-shot floor** only.
+  embeddings, temperature-calibrated on held-out source subjects.
 
 ---
 
@@ -161,11 +159,10 @@ HALO-specific capability. Effort is symmetric across all models.
    per-channel + mask (channel-independent), SMPL-joint placement (UniMTS). *(T2)*
 3. **Window fitting**: center-crop / wrap-pad to the model's fixed window length. *(T0/T1)*
 4. **(Re)training the backbone on our corpus** for models *designed to be trained on your data* —
-   CrossHAR/LiMU-BERT (self-supervised) and DeepConvLSTM (from scratch) — keeping the architecture
-   and training recipe as published and changing **only** the corpus (and rate/window via the
-   model's own config knobs). *(T0)*
-5. **Fitting the ConSE head / few-shot classifier / temperature** on our **TRAIN** sets, with
-   subject-disjoint splits and no target-label access. *(T3)*
+   CrossHAR/LiMU-BERT (self-supervised) — keeping the architecture and training recipe as published
+   and changing **only** the corpus (and rate/window via the model's own config knobs). *(T0)*
+5. **Fitting the ConSE head / temperature** on our **TRAIN** sets, with subject-disjoint splits and
+   no target-label access. *(T3)*
 6. **Using a model's native text tower** for open-set (UniMTS CLIP, NormWear TinyLlama). *(T3)*
 7. **Repairing a released repo's broken code** *to restore its published behavior* (e.g. NormWear's
    GPU CWT path that `.numpy()`s a CUDA tensor). A bug-fix that makes the model run as its authors
@@ -211,10 +208,6 @@ Exactly what we do to each model, and why it passes Section 3.
   placement-blind. T3 closed→ConSE. *Modification:* removed the eval-time GT sub-window filter
   (target-label leakage) — a *fairness restoration* (3b.3), not a capability change.
 
-- **DeepConvLSTM** *(we train from scratch)* — T0 4×Conv + 2×LSTM; per-target supervised **few-shot
-  floor**. T1 60 Hz. T2 fixed 6-ch, min-max. T3 closed softmax (no open-set). *Faithful:* documented
-  from-scratch reimplementation; disclosed batch/LR reconstructed from the paper.
-
 - **ssl / harnet5** *(frozen released — OxWearables, Capture-24 pretrain)* — T0 1D-ResNet, **frozen**.
   T1 fixed **30 Hz** (source resampled to 30, center-cropped to 5 s / 150). T2 fixed **3-ch
   acc-only**, wrist-implied, no gyro. T3 closed→ConSE head fit on our train sets. *Faithful:* no
@@ -253,7 +246,5 @@ Exactly what we do to each model, and why it passes Section 3.
   adds conditioning and rises above them. The gap **HALO-full − HALO-parity** = the value of
   conditioning, and **baselines cannot close it** (no conditioning mechanism).
 - **T3** — language alignment (HALO, UniMTS, NormWear) vs ConSE bridge (CrossHAR, LiMU-BERT, harnet).
-- **FS floor** — DeepConvLSTM (supervised, per-dataset) frames the gap zero-shot must close.
-
 Each tier is one axis, one policy, one comparison — which is exactly what keeps the code and the
 paper clean.

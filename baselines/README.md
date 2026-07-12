@@ -11,7 +11,7 @@ Planned baselines:
 
 | Baseline | Weights | Open-set |
 |---|---|---|
-| crosshar, limubert, deepconvlstm | we train / from scratch | ConSE / few-shot |
+| crosshar, limubert | we pretrain (SSL) | ConSE |
 | ssl_wearables, unimts, normwear | frozen released | ConSE / native text |
 
 Nothing here yet — populated as each baseline is ported.
