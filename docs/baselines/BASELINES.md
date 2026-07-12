@@ -14,6 +14,12 @@ Companion docs: `BASELINE_FAIRNESS_POLICY.md` (the treatment contract), `MOTIVAT
 | **harnet / ssl-wearables** | Yuan et al., npj Digit. Med. 2024 | **Yes** (`harnet5/10/30`) | **frozen (released)** |
 | **UniMTS** | Zhang et al., NeurIPS 2024 | **Yes** (274 MB ckpt) | **frozen (released)** |
 | **NormWear** | Tang et al., arXiv 2412.09758 | **Yes** (194M + frozen 1.1B LLM) | **frozen (released)** |
+| **ImageBind** | Girdhar et al., CVPR 2023 | **Yes** (`imagebind_huge`, 4.5 GB) | **frozen (released)** |
+
+All six are wired as auto-registered `baselines/<name>/adapter.py` adapters; the four frozen run
+zero-shot as-is, the two self-trained self-pretrain on our corpus first (see §2). ImageBind uses only
+its **IMU + text** towers (no images at inference) — a cosine-tier baseline like UniMTS, and the
+"generic multimodal binding" reference floor.
 
 ## 2. Why each is frozen or self-trained (verified rationale)
 
@@ -90,13 +96,12 @@ small-SSL floors (CrossHAR, LiMU-BERT). A verified landscape survey found it **n
 with **one gap a reviewer will flag**.
 
 **ADD:**
-- **ImageBind** (Meta, CVPR 2023) — **recommended, high priority, cheap.** The canonical multimodal
-  foundation model with a released IMU tower (accel+gyro) + text zero-shot, and — decisively — **both
-  UniMTS and NormWear benchmark against it.** Released `imagebind_huge` checkpoint; frozen; needs only an
-  input adapter (cosine tier, like UniMTS). Its IMU was trained on Ego4D head-mounted single-location, so
-  it scores low on phone/watch HAR (~12.5% acc in UniMTS Table 1) — that is the *point*: the "generic
-  multimodal binding fails on phone/watch HAR" reference floor. Closes the obvious reviewer gap with no
-  retraining.
+- **ImageBind** (Meta, CVPR 2023) — **DONE ✓ (integrated as the 4th frozen adapter).** The canonical
+  multimodal foundation model with a released IMU tower (accel+gyro) + text zero-shot, and — decisively —
+  **both UniMTS and NormWear benchmark against it.** Frozen `imagebind_huge`; cosine tier (IMU + text
+  towers, no images). Its IMU was trained on Ego4D head-mounted single-location, so it scores low on
+  phone/watch HAR (our protocol: macro-F1 15.2% on motionsense; ~12.5% acc in UniMTS Table 1) — that is
+  the *point*: the "generic multimodal binding fails on phone/watch HAR" reference floor.
 - **PRIMUS** (Nokia Bell Labs, ICASSP 2025) — **optional.** Released IMU-SSL encoder (Zenodo weights,
   Ego4D, accel+gyro 50 Hz). Downstream use is **few-shot/linear-probe, not zero-shot** → belongs in the
   SSL tier alongside CrossHAR/LiMU-BERT, only if we want a fresh 2024–25 IMU-SSL point. Else cite.
