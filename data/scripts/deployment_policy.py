@@ -119,8 +119,9 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
     StreamSpec("hapt", "phone_waist", "phone", "waist",
                _GENERIC_ACC, _GENERIC_GYRO, "present"),
     StreamSpec("mhealth", "watch_wrist", "watch", "right wrist",
-               _xyz("arm_acc_"), {}, "present",
-               note="Low-reliability sample-and-hold wrist gyro is pruned with chest, ankle, ECG, and magnetometer channels."),
+               _xyz("arm_acc_"), _gyro("arm_gyro_"), "present",
+               note="Right-lower-arm IMU: co-located acc + gyro (6-ch). mHealth's gyro is somewhat "
+                    "sample-and-hold but real, so it is kept; chest, ankle, ECG, and magnetometer are pruned."),
     StreamSpec("capture24", "watch_wrist", "watch", "dominant wrist",
                _GENERIC_ACC, {}, "present"),
 

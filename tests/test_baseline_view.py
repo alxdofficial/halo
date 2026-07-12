@@ -94,9 +94,9 @@ def test_end_to_end_from_deployment_policy_six_and_three_channel():
     out6, chans6, mask6 = to_view(data6, meta6.channels, "harmonised")
     assert chans6 == HARMONISED_CHANNELS and out6.shape[1] == 6 and mask6.all()
 
-    # 3-ch dataset (mhealth, acc-only wrist) -> harmonised pads gyro, non_harmonised stays 3.
-    spec3 = get_stream_spec("mhealth", "watch_wrist")
-    curated3, meta3 = curate_frame(_full_source_frame("mhealth", spec3), spec3)
+    # 3-ch dataset (capture24, acc-only wrist) -> harmonised pads gyro, non_harmonised stays 3.
+    spec3 = get_stream_spec("capture24", "watch_wrist")
+    curated3, meta3 = curate_frame(_full_source_frame("capture24", spec3), spec3)
     data3 = curated3[list(meta3.channels)].to_numpy(np.float32)
     assert meta3.channels == ACC
     h3, _, hmask3 = to_view(data3, meta3.channels, "harmonised")

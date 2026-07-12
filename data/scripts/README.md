@@ -8,8 +8,9 @@ Shared, cross-dataset data logic (imported as `data.scripts.*`).
 | `accel_units.py` | unit + gravity canonicalization → accel in `g`, gravity present (single source of truth) | ✅ |
 | `deployment_policy.py` | phone/watch device-stream selection — which channels/placement per dataset | ✅ |
 | `channels.py` | channel-name helpers (`group_channels_by_sensor`, `is_imu_channel`) | ✅ |
-| `baseline_view.py` | **harmonised** (fixed 6-ch, zero-pad+mask) vs **non-harmonised** (native) assembly | ✅ |
-| `windowing.py` | activity-aware variable-length windowing | ✅ |
+| `baseline_view.py` | **harmonised** (fixed 6-ch, zero-pad+mask) vs **non-harmonised** (native) channel views | ✅ |
+| `assemble.py` | full pipeline: curate → unit→g → window → harmonised/non-harmonised **grid** | ✅ |
+| `windowing.py` | activity-aware variable-length windowing (training) | ✅ |
 
 **Labels & augmentation**
 | Script | Role | Status |

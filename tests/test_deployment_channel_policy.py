@@ -27,7 +27,7 @@ EXPECTED_PRIMARY_CHANNELS = {
     "kuhar": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "unimib_shar": ("acc_x", "acc_y", "acc_z"),
     "hapt": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
-    "mhealth": ("acc_x", "acc_y", "acc_z"),
+    "mhealth": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "capture24": ("acc_x", "acc_y", "acc_z"),
     "motionsense": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "realworld": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
@@ -72,10 +72,12 @@ def test_pamap2_keeps_only_wrist_acc16_and_gyro():
     }
 
 
-def test_mhealth_keeps_right_wrist_acceleration_only():
+def test_mhealth_keeps_right_wrist_imu_acc_and_gyro():
     sources = set(all_source_channels("mhealth"))
-    assert sources == {"arm_acc_x", "arm_acc_y", "arm_acc_z"}
-    assert not any("gyro" in source or "chest" in source or "ankle" in source for source in sources)
+    assert sources == {
+        "arm_acc_x", "arm_acc_y", "arm_acc_z", "arm_gyro_x", "arm_gyro_y", "arm_gyro_z",
+    }
+    assert not any("chest" in s or "ankle" in s or "ecg" in s or "mag" in s for s in sources)
 
 
 def test_ios_total_acceleration_is_reconstructed_before_pruning():
