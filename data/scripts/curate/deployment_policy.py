@@ -292,28 +292,6 @@ def curate_frame(frame: pd.DataFrame, spec: StreamSpec) -> Tuple[pd.DataFrame, C
     return out.reset_index(drop=True), metadata
 
 
-def curate_session(
-    dataset: str,
-    session_id: str,
-    frame: pd.DataFrame,
-    stream_id: Optional[str] = None,
-    role: str = "primary",
-) -> Tuple[pd.DataFrame, CuratedMetadata]:
-    if stream_id is not None:
-        spec = get_stream_spec(dataset, stream_id)
-        if spec.role != role:
-            raise ValueError(f"{dataset}/{stream_id} has role={spec.role}, requested role={role}")
-    else:
-        matches = session_stream_specs(dataset, session_id, role)
-        if len(matches) != 1:
-            raise ValueError(
-                f"{dataset}/{session_id}: expected exactly one {role} deployment stream, "
-                f"found {[s.stream_id for s in matches]}"
-            )
-        spec = matches[0]
-    return curate_frame(frame, spec)
-
-
 def source_channel_is_allowed(dataset: str, channel_name: str, role: str = "primary") -> bool:
     """Whether a raw channel participates in any selected deployment stream."""
     return any(

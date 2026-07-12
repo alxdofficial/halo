@@ -1,8 +1,8 @@
 """
 Convert HARTH dataset to standardized format.
 
-Input: data/raw/harth/
-Output: data/harth/
+Input: data/datasets/harth/downloads/
+Output: data/datasets/harth/
   - manifest.json
   - labels.json
   - sessions/session_XXX/data.parquet
@@ -40,9 +40,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# Add parent to path for shared utilities
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows
+# Run as `python -m data.datasets.harth.convert` from the repo root; repo root on path for shared imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 # Activity mapping (label codes to standardized names)
@@ -86,9 +85,10 @@ ACTIVITIES_BY_STR = {
     "cycling_stand": "cycling_stand",
 }
 
-# Paths
-RAW_DIR = Path("data/raw/harth")
-OUTPUT_DIR = Path("data/harth")
+# Paths (new repo layout: this converter lives in data/datasets/harth/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads"
+OUTPUT_DIR = DS_DIR
 
 # Sampling rate
 SAMPLE_RATE = 50.0
@@ -261,9 +261,7 @@ def convert_dataset():
     # Check input
     if not RAW_DIR.exists():
         print(f"ERROR: Raw data not found at {RAW_DIR}")
-        print("Download from: https://archive.ics.uci.edu/dataset/779/harth")
-        print("Extract to: data/raw/harth/")
-        print("Expected: data/raw/harth/S006.csv, S008.csv, ...")
+        print("Run: python -m data.scripts.download_datasets harth")
         return False
 
     # Create output directory. Clear any prior conversion first so re-runs don't
@@ -312,7 +310,7 @@ def convert_dataset():
                 segment_starts.append(i)
         segment_starts.append(len(activities))
 
-        subject_windows = 0
+        subject_sessions = 0
         for seg_idx in range(len(segment_starts) - 1):
             start = segment_starts[seg_idx]
             end = segment_starts[seg_idx + 1]
@@ -336,29 +334,21 @@ def convert_dataset():
                 skipped_count += 1
                 continue
 
-            # Create session prefix
-            session_prefix = f"harth_{subject_id}_{activity_name}_{seg_idx:04d}"
+            # Subject id for subject-disjoint splits (read by build_grids.iter_sessions).
+            segment_df["subject"] = subject_id
 
-            # Split into variable-length windows
-            windows = create_variable_windows(
-                df=segment_df,
-                session_prefix=session_prefix,
-                activity=activity_name,
-                sample_rate=SAMPLE_RATE,
-                seed=42 + int(subject_id.lstrip("Ss")) * 100 + seg_idx,
-            )
+            # Save the whole continuous single-activity segment as ONE session; build_grids does the
+            # fixed 6 s windowing (avoids double-windowing).
+            session_id = f"harth_{subject_id}_{activity_name}_{seg_idx:04d}"
+            session_dir = sessions_dir / session_id
+            session_dir.mkdir(exist_ok=True)
+            segment_df.to_parquet(session_dir / "data.parquet", index=False)
 
-            # Save each window
-            for window_id, window_df, window_activity in windows:
-                window_path = sessions_dir / window_id
-                window_path.mkdir(exist_ok=True)
-                window_df.to_parquet(window_path / "data.parquet", index=False)
+            all_labels[session_id] = [activity_name]
+            session_count += 1
+            subject_sessions += 1
 
-                all_labels[window_id] = [window_activity]
-                session_count += 1
-                subject_windows += 1
-
-        print(f"    Created {subject_windows} windows")
+        print(f"    Created {subject_sessions} sessions")
 
     if not all_labels:
         print("\nNo sessions created. Check the raw data format.")

@@ -7,11 +7,8 @@ loader) so both the assembly/augmentation code and the loader depend on one impl
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from data.scripts.curate.deployment_policy import STANDARD_CHANNEL_ORDER, source_channel_is_allowed
-
-_STANDARD = set(STANDARD_CHANNEL_ORDER)
 _AXIS = re.compile(r"_([xyz]|[1-4])$")
 
 
@@ -29,16 +26,3 @@ def group_channels_by_sensor(channel_names: List[str]) -> Dict[str, List[str]]:
     for group_name in groups:
         groups[group_name] = sorted(groups[group_name])
     return groups
-
-
-def is_imu_channel(channel_name: str, dataset_name: Optional[str] = None) -> bool:
-    """Whether a raw channel is admitted by the phone/watch deployment policy.
-
-    Dataset-free calls (small synthetic tests) recognize only the standardized acc/gyro schema;
-    production calls pass `dataset_name` and defer to the deployment policy's source allowlist.
-    """
-    if channel_name == "timestamp_sec":
-        return False
-    if dataset_name:
-        return source_channel_is_allowed(dataset_name, channel_name)
-    return channel_name in _STANDARD

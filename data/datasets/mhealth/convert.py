@@ -284,7 +284,7 @@ def main():
     # Check input
     if not RAW_DIR.exists():
         print(f"ERROR: Raw data not found at {RAW_DIR}")
-        print("Run: python datascripts/download_all_datasets.py mhealth")
+        print("Run: python -m data.scripts.download_datasets mhealth")
         return
 
     # Create output directory; clear any stale (e.g. previously windowed) sessions.

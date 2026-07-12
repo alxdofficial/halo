@@ -27,9 +27,8 @@ from pathlib import Path
 import shutil
 from typing import Dict, List, Tuple
 
-# Add datascripts to path for shared imports
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root for data.scripts imports
-from data.scripts.assembly.windowing import create_variable_windows, get_window_range
+# Run as `python -m data.datasets.motionsense.convert` from repo root; repo root on path for shared imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 # Activity code to label mapping (using underscores to match other datasets)
@@ -135,7 +134,6 @@ def process_motionsense(
     raw_dir: Path,
     output_dir: Path,
     min_session_length: int = 200,  # Minimum samples per session
-    use_windowing: bool = True  # Apply variable-length windowing
 ) -> Tuple[int, Dict[str, List[str]]]:
     """
     Process MotionSense raw data into standardized format.
@@ -144,7 +142,6 @@ def process_motionsense(
         raw_dir: Path to raw MotionSense data (A_DeviceMotion_data folder)
         output_dir: Path to output directory (data/motionsense)
         min_session_length: Minimum number of samples per session
-        use_windowing: If True, split long sessions into variable-length windows
 
     Returns:
         Tuple of (num_sessions, labels_dict)
@@ -160,7 +157,6 @@ def process_motionsense(
 
     labels = {}
     session_count = 0
-    window_count = 0
     skipped_short = 0
     skipped_error = 0
 
@@ -168,7 +164,6 @@ def process_motionsense(
     activity_folders = [f for f in raw_dir.iterdir() if f.is_dir() and not f.name.startswith('.')]
 
     print(f"Found {len(activity_folders)} activity folders")
-    print(f"Windowing enabled: {use_windowing}")
 
     for activity_folder in sorted(activity_folders):
         folder_name = activity_folder.name
@@ -228,38 +223,15 @@ def process_motionsense(
                 # Create base session ID: sub{subject:02d}_{activity}_{trial:02d}
                 base_session_id = f"sub{subject_num:02d}_{activity_code}_{trial_num:02d}"
 
-                if use_windowing:
-                    # Apply variable-length windowing
-                    windows = create_variable_windows(
-                        df=df,
-                        session_prefix=base_session_id,
-                        activity=activity_label,
-                        sample_rate=SAMPLING_RATE,
-                    )
+                # Save the full per-recording session; build_grids does the fixed 6 s windowing
+                # for the grids (avoids double-windowing).
+                session_dir = sessions_dir / base_session_id
+                session_dir.mkdir(exist_ok=True)
 
-                    # Save each window as a separate session
-                    for window_id, window_df, window_activity in windows:
-                        session_dir = sessions_dir / window_id
-                        session_dir.mkdir(exist_ok=True)
+                output_path = session_dir / "data.parquet"
+                df.to_parquet(output_path, index=False)
 
-                        # Reset timestamp to start from 0
-                        window_df = window_df.copy()
-                        window_df['timestamp_sec'] = window_df['timestamp_sec'] - window_df['timestamp_sec'].iloc[0]
-
-                        output_path = session_dir / "data.parquet"
-                        window_df.to_parquet(output_path, index=False)
-
-                        labels[window_id] = [window_activity]
-                        window_count += 1
-                else:
-                    # Save full session without windowing
-                    session_dir = sessions_dir / base_session_id
-                    session_dir.mkdir(exist_ok=True)
-
-                    output_path = session_dir / "data.parquet"
-                    df.to_parquet(output_path, index=False)
-
-                    labels[base_session_id] = [activity_label]
+                labels[base_session_id] = [activity_label]
 
                 session_count += 1
 
@@ -269,12 +241,10 @@ def process_motionsense(
                 continue
 
     print(f"\nProcessed {session_count} raw recordings")
-    if use_windowing:
-        print(f"Created {window_count} windowed sessions")
     print(f"Skipped {skipped_short} recordings (too short)")
     print(f"Skipped {skipped_error} recordings (errors)")
 
-    return window_count if use_windowing else session_count, labels
+    return session_count, labels
 
 
 def main():
@@ -294,9 +264,9 @@ def main():
         print("Please download from: https://github.com/mmalekzadeh/motion-sense")
         return
 
-    # Process data. use_windowing=False: emit RAW per-recording sessions; build_grids does the fixed
-    # windowing for the grids (avoids double-windowing).
-    num_sessions, labels = process_motionsense(raw_dir, output_dir, use_windowing=False)
+    # Emit RAW per-recording sessions; build_grids does the fixed windowing for the grids
+    # (avoids double-windowing).
+    num_sessions, labels = process_motionsense(raw_dir, output_dir)
 
     # Create and save manifest
     print("\nCreating manifest.json...")

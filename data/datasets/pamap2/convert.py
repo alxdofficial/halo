@@ -1,15 +1,14 @@
 """
 Convert PAMAP2 dataset to standardized format.
 
-Input: data/raw/pamap2/PAMAP2_Dataset/
-Output: data/pamap2/
+Input: data/datasets/pamap2/downloads/PAMAP2_Dataset/
+Output: data/datasets/pamap2/
   - manifest.json
   - labels.json
   - sessions/session_XXX/data.parquet
 """
 
 import os
-import random
 import shutil
 import sys
 import json
@@ -241,13 +240,8 @@ def main():
     # Check input
     if not RAW_DIR.exists():
         print(f"ERROR: Raw data not found at {RAW_DIR}")
-        print("Run: python datascripts/download_all_datasets.py pamap2")
+        print("Run: python -m data.scripts.download_datasets pamap2")
         return
-
-    # Seed once (not per-call) so windowing is reproducible while preserving
-    # window-length variety across segments (create_variable_windows only
-    # re-seeds when passed an explicit seed, so it draws from this global state).
-    random.seed(42)
 
     # Create output directory. Clear any prior conversion so re-runs don't leave
     # stale orphan session dirs (the loader indexes labels.json, so orphans are
@@ -288,8 +282,6 @@ def main():
 
     # Generate debug visualizations
     try:
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))  # Add datascripts/ to path
         from data.scripts.debug.visualization_utils import generate_debug_visualizations
 
         generate_debug_visualizations(OUTPUT_DIR)

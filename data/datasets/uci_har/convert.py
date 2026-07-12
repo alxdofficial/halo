@@ -1,8 +1,8 @@
 """
 Convert UCI HAR dataset to standardized format.
 
-Input: data/raw/uci_har/UCI HAR Dataset/
-Output: data/uci_har/
+Input: data/datasets/uci_har/downloads/UCI HAR Dataset/
+Output: data/datasets/uci_har/
   - manifest.json (minimal, human-readable)
   - labels.json (activity labels per session)
   - sessions/session_XXX/data.parquet (all channels as DataFrame)
@@ -185,7 +185,7 @@ def main():
     # Check input
     if not RAW_DIR.exists():
         print(f"ERROR: Raw data not found at {RAW_DIR}")
-        print("Run: python datascripts/download_all_datasets.py uci_har")
+        print("Run: python -m data.scripts.download_datasets uci_har")
         return
 
     # Create output directory
@@ -221,8 +221,6 @@ def main():
 
     # Generate debug visualizations
     try:
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))  # Add datascripts/ to path
         from data.scripts.debug.visualization_utils import generate_debug_visualizations
 
         generate_debug_visualizations(OUTPUT_DIR)

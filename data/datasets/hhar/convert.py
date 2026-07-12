@@ -244,12 +244,12 @@ def main():
 
     if not acc_path.exists():
         print(f"ERROR: Accelerometer data not found at {acc_path}")
-        print("Run: python datascripts/shared/download_all_datasets.py hhar")
+        print("Run: python -m data.scripts.download_datasets hhar")
         return
 
     if not gyro_path.exists():
         print(f"ERROR: Gyroscope data not found at {gyro_path}")
-        print("Run: python datascripts/shared/download_all_datasets.py hhar")
+        print("Run: python -m data.scripts.download_datasets hhar")
         return
 
     # Create output directory

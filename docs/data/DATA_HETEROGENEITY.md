@@ -10,7 +10,7 @@ Three modules enforce these decisions in code; this doc is their prose rationale
 
 - **`data/scripts/deployment_policy.py`** — device/placement/channel selection + gravity reconstruction
 - **`data/scripts/accel_units.py`** — accelerometer unit → g (runs *after* deployment_policy)
-- **`data/scripts/windowing.py` + `baseline_view.py`** — windowing + harmonised/non-harmonised views
+- **`data/scripts/assembly/baseline_view.py`** — harmonised/non-harmonised views (fixed windowing runs in `build_grids.py`)
 
 Pipeline order (fixed): `raw session → deployment_policy → accel_units → windowing → baseline_view`.
 `deployment_policy` owns **gravity**; `accel_units` owns **unit**. Nothing here fabricates data.

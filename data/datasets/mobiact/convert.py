@@ -5,8 +5,8 @@ Supports two formats:
 1. MobiAct (Annotated Data): CSV files with combined sensor data
 2. MobiFall (Kaggle): Separate TXT files for acc/gyro/ori per trial
 
-Input: data/raw/mobiact/
-Output: data/mobiact/
+Input: data/datasets/mobiact/downloads/
+Output: data/datasets/mobiact/
   - manifest.json (channel metadata)
   - labels.json (activity labels per session)
   - sessions/session_XXX/data.parquet (sensor data)
@@ -326,7 +326,7 @@ def convert_dataset():
     # Check input
     if not RAW_DIR.exists():
         print(f"ERROR: Raw data not found at {RAW_DIR}")
-        print("Run: python datascripts/mobiact/download.py")
+        print("Run: python -m data.scripts.download_datasets mobiact")
         return False
 
     # Detect format

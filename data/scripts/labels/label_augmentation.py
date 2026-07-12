@@ -6,7 +6,6 @@ This provides rich, natural language variations for contrastive learning.
 """
 
 import random
-from typing import List, Dict
 
 # ============================================================================
 # UCI-HAR: Basic 6 activities (lab-controlled)
@@ -496,62 +495,6 @@ def augment_label(
     return label
 
 
-def batch_augment_labels(
-    labels: List[str],
-    dataset_names: List[str],
-    augmentation_rate: float = 0.8,
-    use_synonyms: bool = True,
-    use_templates: bool = True,
-) -> List[str]:
-    """
-    Augment a batch of labels with dataset-specific augmentation.
-
-    Args:
-        labels: List of activity labels
-        dataset_names: List of dataset names (parallel to labels)
-        augmentation_rate: Probability of augmenting each label
-        use_synonyms: Whether to apply synonyms
-        use_templates: Whether to apply templates
-
-    Returns:
-        List of augmented labels
-    """
-    return [
-        augment_label(label, dataset_name, augmentation_rate, use_synonyms, use_templates)
-        for label, dataset_name in zip(labels, dataset_names)
-    ]
-
-
-def get_augmentation_stats(dataset_name: str) -> Dict[str, int]:
-    """
-    Get statistics about augmentation diversity for a dataset.
-
-    Returns dict with:
-        - num_activities: Number of unique base activities
-        - num_synonyms: Total number of synonyms
-        - num_templates: Number of templates
-        - max_variations: Maximum possible variations per activity
-    """
-    if dataset_name not in DATASET_CONFIGS:
-        return {"num_activities": 0, "num_synonyms": 0, "num_templates": 0, "max_variations": 0}
-
-    config = DATASET_CONFIGS[dataset_name]
-    synonyms = config["synonyms"]
-    templates = config["templates"]
-
-    num_activities = len(synonyms)
-    num_synonyms = sum(len(syns) for syns in synonyms.values())
-    num_templates = len(templates)
-    max_variations = max(len(syns) for syns in synonyms.values()) * num_templates
-
-    return {
-        "num_activities": num_activities,
-        "num_synonyms": num_synonyms,
-        "num_templates": num_templates,
-        "max_variations": max_variations,
-    }
-
-
 if __name__ == "__main__":
     # Test augmentation
     print("=" * 70)
@@ -573,16 +516,3 @@ if __name__ == "__main__":
         for i in range(5):
             augmented = augment_label(label, dataset, augmentation_rate=1.0)
             print(f"  {i+1}. {augmented}")
-
-    print("\n" + "=" * 70)
-    print("Augmentation Statistics per Dataset:")
-    print("=" * 70)
-
-    all_datasets = ["uci_har", "mhealth", "pamap2", "wisdm", "unimib_shar", "hhar", "motionsense"]
-    for dataset_name in all_datasets:
-        stats = get_augmentation_stats(dataset_name)
-        print(f"\n{dataset_name.upper()}:")
-        print(f"  Activities:      {stats['num_activities']}")
-        print(f"  Total Synonyms:  {stats['num_synonyms']}")
-        print(f"  Templates:       {stats['num_templates']}")
-        print(f"  Max Variations:  {stats['max_variations']} per activity")

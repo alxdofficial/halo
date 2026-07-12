@@ -87,8 +87,8 @@ def fixed_windows(arr: np.ndarray, window: int, stride: int, labels: Optional[np
     """Fixed-length windows (non-overlapping when stride == window).
 
     Returns `(windows (N, window, C), win_labels)`. `win_labels` is a per-window majority vote when
-    `labels` is given, else an empty list. (Activity-aware variable windowing for HALO training lives
-    in `windowing.py`; the grids use simple fixed windows so the two versions align 1:1.)
+    `labels` is given, else an empty list. (Converters emit whole-recording sessions; the grids use
+    these simple fixed windows only — there is no activity-aware variable windowing.)
     """
     n = arr.shape[0]
     starts = list(range(0, n - window + 1, stride)) if n >= window else []

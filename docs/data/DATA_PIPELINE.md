@@ -55,7 +55,7 @@ subject-map, so its splits collapse to a single pseudo-subject (documented, acce
 Run as `python -m data.datasets.<ds>.convert` from the repo root. Each converter: (a) reads raw from
 `data/datasets/<ds>/downloads/`, writes to `data/datasets/<ds>/` (`DS_DIR = Path(__file__).resolve().parent`);
 (b) emits **raw whole-recording sessions** `sessions/<id>/data.parquet` (build_grids does the 6 s
-windowing — converters must NOT pre-window with `create_variable_windows`); (c) includes a `subject`
+windowing — converters must NOT pre-window); (c) includes a `subject`
 column for subject-disjoint splits and writes per-session activity to `labels.json`; (d) emits the exact
 source column names `deployment_policy` selects for that dataset's stream. All 14 non-gated converters
 now satisfy this and are verified against real output.

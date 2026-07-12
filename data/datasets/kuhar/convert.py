@@ -1,8 +1,8 @@
 """
 Convert KU-HAR dataset to standardized format.
 
-Input: data/raw/kuhar/
-Output: data/kuhar/
+Input: data/datasets/kuhar/downloads/
+Output: data/datasets/kuhar/
   - manifest.json (channel metadata)
   - labels.json (activity labels per session)
   - sessions/session_XXX/data.parquet (sensor data)
@@ -177,7 +177,7 @@ def convert_kuhar():
     # Check input
     if not RAW_DIR.exists():
         print(f"ERROR: Raw data not found at {RAW_DIR}")
-        print("Run: python datascripts/kuhar/download.py")
+        print("Run: python -m data.scripts.download_datasets kuhar")
         return False
 
     # Find data files

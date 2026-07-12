@@ -1,8 +1,8 @@
 """
 Convert HAPT dataset to standardized format.
 
-Input: data/raw/hapt/
-Output: data/hapt/
+Input: data/datasets/hapt/downloads/
+Output: data/datasets/hapt/
   - manifest.json (channel metadata)
   - labels.json (activity labels per session)
   - sessions/session_XXX/data.parquet (sensor data)
@@ -113,7 +113,7 @@ def convert_hapt():
     raw_data_dir = find_raw_data_dir()
     if raw_data_dir is None:
         print(f"ERROR: Raw data not found in {RAW_DIR}")
-        print("Run: python datascripts/hapt/download.py")
+        print("Run: python -m data.scripts.download_datasets hapt")
         return False
 
     print(f"Found raw data: {raw_data_dir}")

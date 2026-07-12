@@ -1,8 +1,8 @@
 """
 Convert WISDM dataset to standardized format.
 
-Input: data/raw/wisdm/wisdm-dataset/
-Output: data/wisdm/
+Input: data/datasets/wisdm/downloads/wisdm-dataset/
+Output: data/datasets/wisdm/
   - manifest.json
   - labels.json
   - sessions/session_XXX/data.parquet
@@ -279,7 +279,7 @@ def main():
     # Check input
     if not RAW_DIR.exists():
         print(f"ERROR: Raw data not found at {RAW_DIR}")
-        print("Run: python datascripts/download_all_datasets.py wisdm")
+        print("Run: python -m data.scripts.download_datasets wisdm")
         return
 
     # Create output directory
@@ -315,8 +315,6 @@ def main():
 
     # Generate debug visualizations
     try:
-        import sys
-        sys.path.insert(0, str(Path(__file__).parent.parent))  # Add datascripts/ to path
         from data.scripts.debug.visualization_utils import generate_debug_visualizations
 
         generate_debug_visualizations(OUTPUT_DIR)
