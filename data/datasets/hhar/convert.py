@@ -1,11 +1,11 @@
 """
 Convert HHAR (Heterogeneity Activity Recognition) dataset to standardized format.
 
-Input: data/raw/hhar/Activity recognition exp/
-Output: data/hhar/
+Input: data/datasets/hhar/downloads/Activity recognition exp/
+Output: data/datasets/hhar/
   - manifest.json (minimal, human-readable)
   - labels.json (activity labels per session)
-  - sessions/session_XXX/data.parquet (all channels as DataFrame)
+  - sessions/<session_id>/data.parquet (raw whole-recording session; build_grids does the windowing)
 
 HHAR Dataset Info:
 - 9 users (a-i)
@@ -33,14 +33,14 @@ ACTIVITIES = {
     "stairsdown": "walking_downstairs",
 }
 
-# Paths
-RAW_DIR = Path("data/raw/hhar/Activity recognition exp")
-OUTPUT_DIR = Path("data/hhar")
+# Paths (new repo layout: this converter lives in data/datasets/hhar/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads" / "Activity recognition exp"
+OUTPUT_DIR = DS_DIR
 
 # Processing parameters
-WINDOW_SIZE = 128  # ~2.56 seconds at 50Hz
-WINDOW_STRIDE = 64  # 50% overlap
-TARGET_SAMPLE_RATE = 50  # Hz (HHAR varies between devices, we'll resample)
+TARGET_SAMPLE_RATE = 50  # Hz (HHAR native rates vary 50-200 Hz; resampled to a uniform 50 Hz here)
+MIN_SESSION_SAMPLES = 300  # 6 s @ 50 Hz — the shared 6 s grid window; shorter segments yield no window
 
 
 def load_and_merge_sensor_data(acc_path: Path, gyro_path: Path) -> pd.DataFrame:
@@ -145,50 +145,45 @@ def resample_stream(group, rate=TARGET_SAMPLE_RATE):
     return segments
 
 
-def create_windows(df: pd.DataFrame) -> Tuple[List[str], Dict[str, List[str]]]:
-    """
-    Create fixed-size windows from continuous sensor data.
+def convert_sessions(df: pd.DataFrame, sessions_dir: Path) -> Dict[str, List[str]]:
+    """Save each continuous (user, device, activity) recording as ONE RAW session.
 
-    Returns:
-        sessions: List of session IDs
-        labels_dict: Dict mapping session ID to list of activity labels
-    """
-    sessions = []
-    labels_dict = {}
-    session_idx = 0
+    Preserves HHAR's device heterogeneity: every physical (user, device, activity) stream is
+    gap-split and resampled to a uniform 50 Hz on its real Creation_Time clock (see
+    resample_stream), then EACH contiguous resampled segment is written whole as one session.
+    No pre-windowing here — the shared build_grids.py cuts the fixed 6 s windows (pre-windowing
+    would double-window the grid). Accel stays in native m/s²; the shared pipeline rescales to g.
 
-    # Group by user, DEVICE, activity — resample each physical stream to a true
-    # 50 Hz on its real clock before windowing (native rates are 50-200 Hz).
+    Returns labels_dict mapping session_id -> [standardized_activity].
+    """
+    labels_dict: Dict[str, List[str]] = {}
+    session_count = 0
+    skipped_short = 0
+
+    # Group by user, DEVICE, activity — never merge across devices (rates AND biases differ).
     for (user, device, activity), group in df.groupby(['user', 'device', 'activity']):
         std_activity = ACTIVITIES.get(activity, activity)
-        # Window each CONTIGUOUS resampled segment separately (gap-split), so no window
-        # ever spans a fabricated across-gap interpolation ramp.
-        for seg in resample_stream(group):
-            if len(seg) < WINDOW_SIZE:
+        # Each CONTIGUOUS resampled segment (gap-split) becomes one whole session — no window ever
+        # spans a fabricated across-gap interpolation ramp.
+        for seg_idx, seg in enumerate(resample_stream(group)):
+            if len(seg) < MIN_SESSION_SAMPLES:
+                skipped_short += 1
                 continue
-            num_windows = max(0, (len(seg) - WINDOW_SIZE) // WINDOW_STRIDE + 1)
-            for win_idx in range(num_windows):
-                start_idx = win_idx * WINDOW_STRIDE
-                window_data = seg.iloc[start_idx:start_idx + WINDOW_SIZE]
+            seg = seg.copy()
+            # Subject id (user a-i) for subject-disjoint splits; read by build_grids.iter_sessions.
+            seg['subject'] = str(user)
 
-                session_id = f"hhar_{user}_{activity}_{session_idx:05d}"
-                window_df = pd.DataFrame({
-                    'timestamp_sec': np.arange(WINDOW_SIZE) * (1.0 / TARGET_SAMPLE_RATE),
-                    'acc_x': window_data['acc_x'].values,
-                    'acc_y': window_data['acc_y'].values,
-                    'acc_z': window_data['acc_z'].values,
-                    'gyro_x': window_data['gyro_x'].values,
-                    'gyro_y': window_data['gyro_y'].values,
-                    'gyro_z': window_data['gyro_z'].values,
-                })
-                session_dir = OUTPUT_DIR / "sessions" / session_id
-                session_dir.mkdir(parents=True, exist_ok=True)
-                window_df.to_parquet(session_dir / "data.parquet", index=False)
-                labels_dict[session_id] = [std_activity]
-                sessions.append(session_id)
-                session_idx += 1
+            session_id = f"hhar_{user}_{device}_{activity}_{seg_idx:03d}"
+            session_dir = sessions_dir / session_id
+            session_dir.mkdir(parents=True, exist_ok=True)
+            # Columns: timestamp_sec, acc_x/y/z, gyro_x/y/z (native m/s²), subject.
+            seg.to_parquet(session_dir / "data.parquet", index=False)
+            labels_dict[session_id] = [std_activity]
+            session_count += 1
 
-    return sessions, labels_dict
+    print(f"    Wrote {session_count} raw sessions "
+          f"({skipped_short} segments skipped: < {MIN_SESSION_SAMPLES} samples / 6 s)")
+    return labels_dict
 
 
 def create_manifest():
@@ -266,9 +261,9 @@ def main():
     print("\nStep 1: Loading and merging sensor data...")
     merged_df = load_and_merge_sensor_data(acc_path, gyro_path)
 
-    # Create windows
-    print("\nStep 2: Creating windows...")
-    sessions, labels_dict = create_windows(merged_df)
+    # Emit raw whole-recording sessions (build_grids does the fixed 6 s windowing)
+    print("\nStep 2: Writing raw sessions...")
+    labels_dict = convert_sessions(merged_df, OUTPUT_DIR / "sessions")
 
     # Save labels.json
     labels_path = OUTPUT_DIR / "labels.json"
@@ -286,10 +281,9 @@ def main():
     print("Conversion complete!")
     print(f"{'=' * 80}")
     print(f"Output: {OUTPUT_DIR}")
-    print(f"  - {len(labels_dict)} sessions")
+    print(f"  - {len(labels_dict)} raw sessions (whole recordings; not pre-windowed)")
     print(f"  - 6 channels (acc + gyro)")
     print(f"  - {TARGET_SAMPLE_RATE} Hz sampling rate")
-    print(f"  - {WINDOW_SIZE} samples per window (~{WINDOW_SIZE/TARGET_SAMPLE_RATE:.2f}s)")
 
     # Activity distribution
     activity_counts = {}

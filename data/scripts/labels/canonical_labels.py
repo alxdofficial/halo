@@ -34,8 +34,10 @@ SYNONYMS = {
     "ascending_stairs": "walking_upstairs",        # pamap2
     "going_up_stairs": "walking_upstairs",         # unimib_shar
     "climbing_stairs": "walking_upstairs",         # mhealth
+    "climbingup": "walking_upstairs",              # realworld
     "descending_stairs": "walking_downstairs",     # pamap2
     "going_down_stairs": "walking_downstairs",     # unimib_shar
+    "climbingdown": "walking_downstairs",          # realworld
 
     # --- posture transitions: hapt uses "X_to_Y"; kuhar/unimib use a descriptive name.
     #     Unify to the descriptive scheme (and normalize laying->lying). ---
