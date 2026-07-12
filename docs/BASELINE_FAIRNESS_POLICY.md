@@ -72,6 +72,16 @@ documented transform. Decided 2026-07-11.
   acc-only models (harnet, UniMTS) slice the 3 accel channels; HALO takes the variable real set.
   **Zero-pad + mask only — never random/fabricated fill.** Gravity is uniform in the source; any
   gravity removal is the model's *own* internal step (CrossHAR InstanceNorm, NormWear z-score).
+  - **Invariant (the reviewer-facing guarantee).** Every fixed-layout baseline we train receives the
+    **identical** 6-channel `[acc_x,y,z, gyro_x,y,z]` tensor at **60 Hz**; where a device lacks a
+    sensor the missing channels are zero-padded and masked. So **no fixed baseline ever sees more
+    channels, a higher rate, or more data than another** — they are byte-for-byte the same input
+    contract. The only models that read anything beyond this fixed tensor are the channel-/text-native
+    ones (HALO, and NormWear/UniMTS via their own released contracts); that extra capability *is* the
+    contribution and is isolated by the parity row (HALO run on this same 6-channel tensor). The layout
+    is **device-agnostic**: phone and watch map to the same 6 slots (placement lives in channel-text,
+    which only HALO reads), so the tensor never widens to 12 — a phone+watch dataset contributes two
+    single-device samples, not a fused 12-wide tensor.
 - **T3 — labels.** Text-aligned models (UniMTS, NormWear, HALO) use their **native text tower**.
   Closed-vocab models (CrossHAR, LiMU-BERT, harnet) use the **ConSE bridge** (Norouzi 2014):
   softmax over the shared global TRAIN vocabulary → convex combination of frozen-SBERT label

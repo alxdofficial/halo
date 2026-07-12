@@ -19,38 +19,43 @@ native 3/6-ch, native labels. `placement_strict` → phones only (drops the watc
 ## Run
 
 ```bash
-python -m data.scripts.setup_all_datasets                 # (1) download + convert → sessions  [needs source access]
-python -m data.scripts.build_grids                        # (2–5) harmonised (phone+watch) + non-harmonised
-python -m data.scripts.build_grids --placement-strict     #       harmonised-strict (phones only)
+python -m data.scripts.download_datasets                  # (1) download raw → data/datasets/<ds>/downloads/
+python -m data.datasets.<ds>.convert                      #     convert one dataset → sessions/ + labels.json + manifest.json
+python -m data.scripts.build_grids                        # (2–5) harmonised (phone+watch) + non-harmonised, all datasets
+python -m data.scripts.build_grids --dataset hhar wisdm   #       ...or just some datasets
 python -m data.scripts.labels.build_global_label_mapping  # canonical ConSE vocabulary → data/labels/global_labels.json
 ```
 
-## Status
+`placement_strict` (phones only, "harmonised-strict") is not a separate build — it is the phone
+subset of the harmonised grids, selected at training time via `deployment_streams(placement_strict=True)`.
 
-- **Stages 2–5 are complete and unit-tested** (on synthetic sessions): curation, unit→g, gravity
-  reconstruction, anti-aliased 60 Hz resample, harmonised/non-harmonised views, `placement_strict`,
-  canonical labels, and the `build_grids` accumulation core. `56` tests green.
-- **Running end-to-end needs the source downloads (stage 1)** — no sessions are materialized in the
-  repo, so the disk I/O in `build_grids.iter_sessions` / the converters has not been executed here.
+## Status — run end-to-end and verified (2026-07-12)
 
-## Converter wiring — gated on the downloads
+**11 datasets converted + verified end-to-end** on real downloads (harmonised 60 Hz 6-ch `[acc,gyro]` /
+non-harmonised native): motionsense, hapt, uci_har, pamap2, wisdm, mhealth, realworld, hhar, kuhar,
+unimib_shar (+ shoaib/inclusivehar/capture24 in progress). Verification invariants that passed:
+accelerometer median magnitude ≈ 1 g where gravity is present (uci_har 1.02, pamap2 1.00, hhar 0.99,
+realworld 1.00, …) and ≈ 0 where gravity is removed (kuhar 0.074); correct channel count + mask
+(acc-only sets show `mask=[T,T,T,F,F,F]`); 60 Hz harmonised; canonical labels; subjects present.
 
-**Internal paths (all converters).** The converters were ported from a shallower legacy layout, so
-their `project_root = Path(__file__).parent.parent` now resolves to `data/datasets` instead of the
-repo root, and their `raw_dir`/`output_dir` are off by one. Each must be repointed to read from
-`data/datasets/<ds>/downloads/` (or a shared raw dir) and write sessions to
-`data/datasets/<ds>/sessions/` + `manifest.json`. (Run converters via `python -m
-data.datasets.<ds>.convert` from the repo root so `data.scripts.*` imports resolve.)
+**Provenance + downloader:** `data/scripts/download_datasets.py` encodes the verified sources (direct
+UCI/uni-mannheim URLs + Kaggle slugs). Gated: **mobiact** (Kaggle returns 403 until you accept the
+dataset terms on kaggle.com); shoaib/capture24/inclusivehar download via the scriptable URLs in the
+downloader notes. `harth` is downloaded but `role='stress'` (thigh/lower-back), so it is not in the
+primary `build_grids` output.
 
-**Column names.** `deployment_policy` names the exact source columns each stream needs. A few
-converters must emit those names (verify against real converter output):
+**Pre-windowed datasets** (`metadata.json: pre_windowed: true`): uci_har (128-sample / 2.56 s segments)
+and unimib_shar (151-sample). These ship as fixed short segments too short for the 6 s corpus window,
+so `build_grids` treats each distributed segment as exactly one window. (kuhar uses its *continuous*
+`1.Raw_time_domian_data`, so it is windowed normally.) unimib's upstream Kaggle CSV lost the
+subject-map, so its splits collapse to a single pseudo-subject (documented, acceptable for a train set).
 
-| Dataset | deployment_policy needs | converter action |
-|---|---|---|
-| **pamap2** | `hand_acc16_*`, `hand_gyro_*` | export the wrist IMU's ±16 g accel **and gyro** (raw has them; current export kept only `hand_acc6`/mag/ori) |
-| **uci_har** | `total_acc_*`, `body_gyro_*` | export `total_acc` (gravity present) + `body_gyro` under those names |
-| **wisdm** | `phone_accel_*`, `phone_gyro_*`, `watch_accel_*`, `watch_gyro_*` | name the phone stream `phone_accel`/`phone_gyro` (currently bare `acc`/`gyro`); also merge the disjoint accel/gyro rows or keep gyro optional |
-| **unimib_shar** | `acc_x/y/z` | accelerometer-only; the source subject-map was lost — a re-download is needed to restore subject ids for splits |
+## Converter contract (the recipe every converter follows)
 
-The remaining 11 datasets are expected to match (their `deployment_policy` sources use names the
-converters already emit), but confirm once sessions exist.
+Run as `python -m data.datasets.<ds>.convert` from the repo root. Each converter: (a) reads raw from
+`data/datasets/<ds>/downloads/`, writes to `data/datasets/<ds>/` (`DS_DIR = Path(__file__).resolve().parent`);
+(b) emits **raw whole-recording sessions** `sessions/<id>/data.parquet` (build_grids does the 6 s
+windowing — converters must NOT pre-window with `create_variable_windows`); (c) includes a `subject`
+column for subject-disjoint splits and writes per-session activity to `labels.json`; (d) emits the exact
+source column names `deployment_policy` selects for that dataset's stream. All 14 non-gated converters
+now satisfy this and are verified against real output.
