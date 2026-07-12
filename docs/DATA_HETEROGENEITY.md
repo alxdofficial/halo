@@ -1,5 +1,10 @@
 # Data heterogeneity — per-dataset reference
 
+> This doc is the *mechanics* of how we normalize heterogeneity. It is **not** a contribution claim:
+> reducing every dataset to ≤ 6 channels and resampling is deliberate deployment-realistic
+> preprocessing, not the pitch. For *why* HALO exists (language-conditioned open-set + acquisition-config
+> generalization — the part that is not cheap preprocessing) see [`MOTIVATION.md`](MOTIVATION.md).
+
 Every non-obvious thing we do to a dataset is recorded here, so we never have to re-derive *why*.
 Three modules enforce these decisions in code; this doc is their prose rationale:
 

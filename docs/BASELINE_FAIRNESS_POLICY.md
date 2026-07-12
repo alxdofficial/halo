@@ -10,13 +10,23 @@ matrix) and [`BASELINE_IMPLEMENTATION_NOTES.md`](BASELINE_IMPLEMENTATION_NOTES.m
 published contracts + citations). Where those disagree with this file on a *decision*, this file
 wins.
 
+**Scope note.** This document is the fair-comparison **scaffold**, not the paper's contribution. The
+contribution is the language-conditioned open-set + acquisition-config generalization defined in
+[`MOTIVATION.md`](MOTIVATION.md); the tier stack below exists to make the comparison airtight, so that
+what remains after controlling for rate/channels/labels is the language interface. Channel-count and
+order handling in particular is **cheap preprocessing, not a claim** — it appears here only to
+guarantee every fixed baseline sees an equal input.
+
 ---
 
 ## 1. The heterogeneity stack
 
 Real-world phone/watch HAR is heterogeneous along a few independent axes. We model the comparison
 as a **stack of tiers**, bottom to top. Each tier is one axis; a model occupies a *level* at each
-tier; HALO is `native` at every tier, and that stack *is* the contribution.
+tier; HALO is `native` at every tier. The stack is the **fair-comparison scaffold** that isolates the
+contribution — it is not itself the contribution. Being `native` at the rate/channel tiers is cheap
+(resample, pad+mask); the load-bearing tier is the **language interface** (T2 placement/sensor
+conditioning + T3 label alignment), which is what `MOTIVATION.md` argues no baseline can match.
 
 | Tier | Axis | Question it answers |
 |---|---|---|
@@ -91,7 +101,10 @@ documented transform. Decided 2026-07-11.
 
 ## 2A. Channel heterogeneity in depth (the T2 design)
 
-T2 is the richest axis and HALO's headline, so its handling is pinned down here. Refined 2026-07-12.
+T2 is the richest axis to get *fair*, so its contract is pinned down here (refined 2026-07-12). Note
+the **channel-count/order** part is cheap preprocessing and not a claim (see `MOTIVATION.md`); what
+carries weight is the **language conditioning** on placement/sensor/gravity, evaluated in the
+conditioning experiment (`AUGMENTATIONS.md`).
 
 **Deployment unit = one device.** A phone-or-watch product runs on one device at a time, so the
 fundamental sample is one device's `[acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z]`. A dataset that
