@@ -65,6 +65,13 @@ _BACKBONE_CKPT = _HERE / "limubert_backbone.pt"
 _HEAD_CACHE = _HERE / "limubert_conse_head.pt"
 
 
+def _backbone_fp() -> str:
+    """Content hash of the pretrained backbone — stamped into the head cache so a re-pretrained
+    backbone invalidates a head that was fit on the old backbone's feature space."""
+    import hashlib
+    return hashlib.sha256(_BACKBONE_CKPT.read_bytes()).hexdigest() if _BACKBONE_CKPT.exists() else ""
+
+
 # =============================================================================
 # Backbone (reproduces upstream LIMUBertModel4Pretrain state_dict layout)
 # =============================================================================
@@ -237,6 +244,9 @@ class LiMUBERTAdapter(ConSEAdapter):
         blob = torch.load(str(_HEAD_CACHE), map_location=device, weights_only=True)
         if list(blob.get("labels", [])) != list(vocab):
             return None
+        # Re-fit if the backbone changed (e.g. after the deferred full pretrain overwrites it).
+        if blob.get("backbone_fp") != _backbone_fp():
+            return None
         return blob["head"]
 
     def _fit_head(self, backbone, head, vocab, device):
@@ -296,7 +306,7 @@ class LiMUBERTAdapter(ConSEAdapter):
         n_val_subj = len(set(S[vi]))
         print(f"[limubert] fitted head: val_acc={best_acc:.3f} over {n_val_subj} held-out subjects")
         torch.save({"head": {k: v.cpu() for k, v in head.state_dict().items()},
-                    "labels": list(vocab)}, str(_HEAD_CACHE))
+                    "labels": list(vocab), "backbone_fp": _backbone_fp()}, str(_HEAD_CACHE))
         backbone.to(device)
         head.to(device)
 

@@ -27,11 +27,11 @@ GRAVITY_MS2 = 9.80665
 
 # --- Accelerometer already in g → scale 1.0 --------------------------------------------------------
 # Native-g recordings: capture24 + harth (Axivity AX3, reported in g); uci_har (Android, exported as
-# `total_acc` in g — NOT the gravity-removed `body_acc`); hapt (Android, ~1.02 g); unimib_shar (g).
+# `total_acc` in g — NOT the gravity-removed `body_acc`); hapt (Android, ~1.02 g).
 # iOS sets (motionsense, inclusivehar): deployment_policy already summed userAcceleration + gravity,
 # both in g, so they ARRIVE here in g.
 ACC_UNIT_G = frozenset({
-    "uci_har", "hapt", "unimib_shar", "capture24", "harth", "motionsense", "inclusivehar",
+    "uci_har", "hapt", "capture24", "harth", "motionsense", "inclusivehar",
     "usc_had",  # MotionNode accelerometer reported in g (USC-HAD Readme); |acc|~1.07 g still.
 })
 
@@ -39,9 +39,12 @@ ACC_UNIT_G = frozenset({
 # Android / Shimmer recordings. kuhar is here too: it is m/s² but gravity-REMOVED (linear
 # acceleration); the unit rescale is identical — gravity STATE is deployment_policy's concern and is
 # never fabricated here.
+# unimib_shar: the RAW UniMiB .npy release is m/s² (|acc|~9.8, gravity present); the converter reads
+# that (not the z-scored Kaggle CSV). Reclassified from G on 2026-07-12 after the debug sweep found the
+# CSV was z-score-normalized.
 ACC_UNIT_MS2 = frozenset({
     "hhar", "pamap2", "wisdm", "kuhar", "mhealth", "realworld", "mobiact", "shoaib",
-    "tnda_har", "ut_complex",  # accelerometer in m/s^2 (gravity present, |acc|~9.8) -> rescale to g.
+    "tnda_har", "ut_complex", "unimib_shar",  # accelerometer in m/s^2 (gravity present) -> rescale to g.
 })
 
 

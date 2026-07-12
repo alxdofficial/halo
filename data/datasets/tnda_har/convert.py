@@ -72,7 +72,12 @@ def main():
                 "timestamp_sec": np.arange(n) / SAMPLING_RATE,
                 "acc_x": seg[:, 0], "acc_y": seg[:, 1], "acc_z": seg[:, 2],
                 "gyro_x": seg[:, 3], "gyro_y": seg[:, 4], "gyro_z": seg[:, 5],
-                "subject": split,  # bundle has no per-sample subject id; record UniMTS split partition
+                # The UniMTS bundle has NO per-sample subject id (23 real participants lost). Recording
+                # the train/test split tag as `subject` gave a fake 2-subject cohort, so the
+                # subject-bootstrap CI printed a garbage near-degenerate interval as if legit. Use a
+                # single sentinel instead → scoring's <2-subject guard flags the CI as degenerate
+                # (point estimate is unaffected; it just isn't given a false subject-stratified CI).
+                "subject": "unknown",
             })
             session_id = f"{split}_{i:05d}_{LABELS[cls]}"
             (sessions_dir / session_id).mkdir(parents=True, exist_ok=True)
