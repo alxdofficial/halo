@@ -1,0 +1,20 @@
+{
+  "name": "normwear",
+  "category": "baselines",
+  "paper_title": "Toward Foundation Model for Multivariate Wearable Sensing of Physiological Signals",
+  "authors": "Yunfei Luo, Yuliang Chen, Asif Salekin, Tauhidur Rahman",
+  "year": "2024",
+  "venue": "ACM Transactions on Computing for Healthcare (2025). Preprint: arXiv:2412.09758 (Dec 2024, rev. May 2025)",
+  "doi": "10.1145/3803808",
+  "arxiv": "2412.09758",
+  "paper_url": "https://arxiv.org/abs/2412.09758",
+  "pdf_url": "https://arxiv.org/pdf/2412.09758",
+  "acm_url": "https://dl.acm.org/doi/10.1145/3803808",
+  "openreview_url": "https://openreview.net/forum?id=XhdckVyXKg",
+  "data_or_code_url": "https://github.com/Mobile-Sensing-and-UbiComp-Laboratory/NormWear",
+  "weights_url": "GitHub release v1.0.0-alpha: normwear_pretrain_ckpt.pth (backbone), normwear_msitf_zeroshot_last_checkpoint-5.pth (MSiTF aggregator). Text head: muzammil-eds/tinyllama-2.5T-Clinical-v2 (HuggingFace, ~1.1B).",
+  "license": "verify in repo/ACM",
+  "role": "baseline (bespoke MSiTF / L1 text-matching tier) — the released open-vocab wearable foundation model whose CWT-scalogram tokenizer most directly contests HALO's physical-Hz filterbank; must-have head-to-head.",
+  "bibtex": "@article{luo2025normwear,\n  title={Toward Foundation Model for Multivariate Wearable Sensing of Physiological Signals},\n  author={Luo, Yunfei and Chen, Yuliang and Salekin, Asif and Rahman, Tauhidur},\n  journal={ACM Transactions on Computing for Healthcare},\n  year={2025},\n  doi={10.1145/3803808},\n  note={Preprint arXiv:2412.09758},\n  url={https://arxiv.org/abs/2412.09758}\n}",
+  "notes": "First multimodal wearable-sensing foundation model. Channel-INDEPENDENT ViT over ricker continuous-wavelet-transform (CWT) scalograms per channel; query-conditioned MSiTF aggregator fuses per-channel patch tokens into one 2048-d vector aligned to a frozen Clinical-TinyLlama (~1.1B) text head. Pretrained on ~2.5M multivariate segments / 14,943 h of PPG/ECG/EEG/GSR/IMU. Zero-shot HAR = MINIMUM MANHATTAN (L1) distance between the signal embedding and each candidate label's TinyLlama embedding (NOT cosine: sensor/text spaces are asymmetric, native metric is L1). Adapter contract: 6 real acc+gyro channels (no phantom/zero-pad), resample to 65 Hz (ricker scales are 65 Hz-tuned; get_embedding only resamples internally above 256 Hz), 6 s (390-sample) windows, per-channel linear de-trend (removes gravity DC) + amplitude-normalize by mean|x|, unit-agnostic. Ported from the legacy 'l1 tier' adapter; the 65 Hz resample (offline in legacy preprocess_normwear.py) is folded per-window into the adapter here. Reuses the on-disk NormWear repo code + released checkpoints; vendored repo/ copy is a follow-up."
+}

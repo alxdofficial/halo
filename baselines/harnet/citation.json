@@ -1,0 +1,32 @@
+{
+  "name": "harnet",
+  "aliases": ["ssl_wearables", "ssl-wearables"],
+  "title": "Self-supervised Learning for Human Activity Recognition Using 700,000 Person-days of Wearable Data",
+  "authors": [
+    "Hang Yuan", "Shing Chan", "Andrew P. Creagh", "Catherine Tong",
+    "Aidan Acquah", "David A. Clifton", "Aiden Doherty"
+  ],
+  "year": 2024,
+  "venue": "npj Digital Medicine",
+  "doi": "10.1038/s41746-024-01062-3",
+  "arxiv": "2206.02909",
+  "url": "https://github.com/OxWearables/ssl-wearables",
+  "weights": {
+    "source": "torch.hub",
+    "repo": "OxWearables/ssl-wearables",
+    "tag": "v1.0.0",
+    "entrypoint": "harnet5",
+    "pretrained": true,
+    "note": "Released frozen: a pretrained ResNet feature_extractor + an UNTRAINED EvaClassifier head. We fit the head on our 59-way global training vocabulary for the zero-shot ConSE bridge."
+  },
+  "input_contract": {
+    "channels": ["acc_x", "acc_y", "acc_z"],
+    "rate_hz": 30,
+    "window_samples": 150,
+    "window_sec": 5,
+    "units": "g",
+    "gravity": "retained",
+    "normalization": "none",
+    "note": "harnet5 native input is 3 x 150 (5 s @ 30 Hz). Accelerometer only; gravity RETAINED; no per-window standardization. harnet10 (300) does not fit our <=6 s eval grids without >=4 s of padding, so harnet5 is used (mirrors the working legacy adapter)."
+  }
+}

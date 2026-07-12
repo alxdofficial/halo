@@ -1,0 +1,16 @@
+{
+  "name": "unimts",
+  "category": "baselines",
+  "paper_title": "UniMTS: Unified Pre-training for Motion Time Series",
+  "authors": "Xiyuan Zhang, Diyan Teng, Ranak Roy Chowdhury, Shuheng Li, Dezhi Hong, Rajesh K. Gupta, Jingbo Shang",
+  "year": "2024",
+  "venue": "Advances in Neural Information Processing Systems (NeurIPS) 2024",
+  "doi": "10.48550/arXiv.2410.19818",
+  "paper_url": "https://arxiv.org/abs/2410.19818",
+  "pdf_url": "https://arxiv.org/pdf/2410.19818",
+  "data_or_code_url": "https://github.com/xiyuanzh/UniMTS",
+  "weights_url": "https://huggingface.co/xiyuanz/UniMTS",
+  "license": "Paper: CC BY 4.0 (arXiv). Code repo: no LICENSE file present (unknown).",
+  "bibtex": "@inproceedings{zhang2024unimts,\n  title={UniMTS: Unified Pre-training for Motion Time Series},\n  author={Zhang, Xiyuan and Teng, Diyan and Chowdhury, Ranak Roy and Li, Shuheng and Hong, Dezhi and Gupta, Rajesh K. and Shang, Jingbo},\n  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},\n  year={2024},\n  eprint={2410.19818},\n  archivePrefix={arXiv},\n  primaryClass={eess.SP},\n  url={https://arxiv.org/abs/2410.19818}\n}",
+  "notes": "Zero-shot 'cosine tier' baseline: an ST-GCN over a 22-node SMPL skeleton graph contrastively aligned to a fine-tuned CLIP ViT-B/32 text tower (shared 512-d space). Zero-shot HAR = cosine similarity between a window's IMU embedding and each label string's text embedding. Released weights (HF xiyuanz/UniMTS, checkpoint/UniMTS.pth) are ACCELEROMETER-ONLY (in_channels=3; gyro/stft branches OFF, verified from the checkpoint) and expect 20 Hz, m/s^2 WITH gravity, no per-window normalization. Input tensor is (N, C=3, T=200, V=22, M=1): one physical IMU is written into ONE SMPL joint's 3 accel channels, the other 21 joints zero-filled. Original SEED code URL github.com/xiyuanz/UniMTS is a typo (404); correct repo github.com/xiyuanzh/UniMTS. HF username 'xiyuanz' differs from GitHub 'xiyuanzh'."
+}
