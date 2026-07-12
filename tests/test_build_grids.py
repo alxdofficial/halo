@@ -7,7 +7,7 @@ alignments without needing converted parquet on disk.
 import numpy as np
 import pandas as pd
 
-from data.scripts.build_grids import stream_grid
+from data.scripts.build_grids import _greedy_class_cap, stream_grid
 from data.scripts.curate.accel_units import GRAVITY_MS2
 from data.scripts.curate.deployment_policy import all_source_channels, get_stream_spec
 
@@ -52,3 +52,19 @@ def test_stream_grid_acc_only_dataset_harmonised_pads_gyro():
     assert grid.channels == ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
     assert list(grid.mask) == [True, True, True, False, False, False]
     assert np.count_nonzero(grid.data[..., 3:]) == 0                # gyro zero-padded, never fabricated
+
+
+def test_greedy_class_cap_balances_and_keeps_rare_classes():
+    per_class = {
+        "sitting": [(f"sit_{i}", 3600.0) for i in range(10)],       # 10 h, each 1 h
+        "sports":  [("sp_0", 1800.0), ("sp_1", 1800.0)],            # 1 h total, under the cap
+    }
+    keep = _greedy_class_cap(per_class, max_hours=2.0)              # 2 h/class
+    assert len([s for s in keep if s.startswith("sit_")]) == 2      # capped to 2 h
+    assert {"sp_0", "sp_1"} <= keep                                 # rare class kept whole (under cap)
+
+
+def test_greedy_class_cap_always_keeps_at_least_one():
+    per_class = {"vehicle": [("v0", 1e9), ("v1", 1e9)]}             # first session already exceeds cap
+    keep = _greedy_class_cap(per_class, max_hours=1.0)
+    assert len(keep) == 1                                          # never drops a class to zero, but stops

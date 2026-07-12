@@ -21,6 +21,7 @@ core (`stream_grid`) is unit-tested on synthetic sessions; only the disk I/O bel
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -101,11 +102,14 @@ def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
 # Disk I/O — reads what the converters produce. Thin by design; the logic above is what's tested.
 # --------------------------------------------------------------------------------------------------
 
-def iter_sessions(dataset: str, spec: StreamSpec) -> Iterable[Session]:
+def iter_sessions(dataset: str, spec: StreamSpec,
+                  keep_ids: Optional[set] = None) -> Iterable[Session]:
     """Yield the converted sessions belonging to `spec`'s device stream.
 
     Expects `data/datasets/<ds>/sessions/*.parquet` + `manifest.json` (native `sampling_rate_hz`).
     For multi-stream datasets (wisdm phone/watch) sessions are routed by `session_stream_specs`.
+    ``keep_ids`` (if given) restricts to that set of session ids — used by the class-balanced cap for
+    huge free-living datasets (capture24) so we never load the full corpus into memory.
     """
     ds_dir = REPO / "data" / "datasets" / dataset
     # Native rate is a dataset property (metadata.json). The session manifest stores rate per-channel;
@@ -117,6 +121,8 @@ def iter_sessions(dataset: str, spec: StreamSpec) -> Iterable[Session]:
     # One session per subdir: sessions/<session_id>/data.parquet.
     for pq in sorted((ds_dir / "sessions").glob("*/data.parquet")):
         sid = pq.parent.name
+        if keep_ids is not None and sid not in keep_ids:
+            continue
         if spec.stream_id not in {s.stream_id for s in session_stream_specs(dataset, sid, role=spec.role)}:
             continue
         frame = pd.read_parquet(pq)
@@ -135,6 +141,55 @@ def _pre_windowed(dataset: str) -> bool:
     return bool(meta.exists() and json.loads(meta.read_text()).get("pre_windowed", False))
 
 
+def _max_hours_per_class(dataset: str) -> Optional[float]:
+    """Per-class hour cap for a huge free-living dataset (metadata `max_hours_per_class`), else None."""
+    meta = REPO / "data" / "datasets" / dataset / "metadata.json"
+    if not meta.exists():
+        return None
+    v = json.loads(meta.read_text()).get("max_hours_per_class")
+    return float(v) if v else None
+
+
+def _greedy_class_cap(per_class: dict, max_hours: float) -> set:
+    """Select session ids so each class contributes at most `max_hours` of data.
+
+    `per_class` maps canonical-label -> list of (session_id, duration_seconds). Within a class,
+    sessions are taken in a deterministic hash order (mixes subjects, reproducible) until the hour
+    budget is reached — always keeping at least one session so a rare class never vanishes.
+    Pure/deterministic so it is unit-testable without disk.
+    """
+    budget = max_hours * 3600.0
+    keep: set = set()
+    for items in per_class.values():
+        ordered = sorted(items, key=lambda it: hashlib.md5(str(it[0]).encode()).hexdigest())
+        acc = 0.0
+        for i, (sid, dur) in enumerate(ordered):
+            if i > 0 and acc >= budget:
+                break
+            keep.add(sid)
+            acc += dur
+    return keep
+
+
+def _capped_session_ids(dataset: str, spec: StreamSpec, max_hours: float) -> set:
+    """Class-balanced keep-set for `dataset`'s stream, reading only parquet row-counts (cheap)."""
+    import pyarrow.parquet as pq_meta  # metadata-only read; no data loaded
+    from collections import defaultdict
+    ds_dir = REPO / "data" / "datasets" / dataset
+    native_rate = float(json.loads((ds_dir / "metadata.json").read_text())["sampling_rate_hz"])
+    labels_map = json.loads((ds_dir / "labels.json").read_text()) if (ds_dir / "labels.json").exists() else {}
+    per_class = defaultdict(list)
+    for pqf in sorted((ds_dir / "sessions").glob("*/data.parquet")):
+        sid = pqf.parent.name
+        if spec.stream_id not in {s.stream_id for s in session_stream_specs(dataset, sid, role=spec.role)}:
+            continue
+        act = labels_map.get(sid)
+        label = canonicalize(act[0] if isinstance(act, list) else act) if act else "?"
+        nrows = pq_meta.ParquetFile(pqf).metadata.num_rows
+        per_class[label].append((sid, nrows / native_rate))
+    return _greedy_class_cap(per_class, max_hours)
+
+
 def build(out_root: Optional[Path] = None, datasets: Optional[Sequence[str]] = None) -> None:
     """Assemble + save harmonised and non-harmonised grids for EVERY device stream (phone + watch).
 
@@ -148,7 +203,11 @@ def build(out_root: Optional[Path] = None, datasets: Optional[Sequence[str]] = N
         if want and spec.dataset not in want:
             continue
         pw = _pre_windowed(spec.dataset)
-        sessions = list(iter_sessions(spec.dataset, spec))
+        cap = _max_hours_per_class(spec.dataset)
+        keep_ids = _capped_session_ids(spec.dataset, spec, cap) if cap else None
+        if keep_ids is not None:
+            print(f"  {spec.dataset}/{spec.stream_id}: class-balanced cap {cap}h/class → {len(keep_ids)} sessions")
+        sessions = list(iter_sessions(spec.dataset, spec, keep_ids=keep_ids))
         for harmonised, alignment in ((True, "harmonised"), (False, "non_harmonised")):
             grid, subjects = stream_grid(spec.dataset, spec, sessions,
                                          alignment=alignment, harmonised=harmonised, pre_windowed=pw)
