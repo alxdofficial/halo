@@ -28,7 +28,7 @@ import shutil
 from typing import Dict, List, Tuple
 
 # Add datascripts to path for shared imports
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root for data.scripts imports
 from data.scripts.assembly.windowing import create_variable_windows, get_window_range
 
 

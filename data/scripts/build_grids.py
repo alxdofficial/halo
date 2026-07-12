@@ -3,8 +3,10 @@
 Run AFTER the per-dataset converters have produced `data/datasets/<ds>/sessions/*.parquet`
 (+ `manifest.json` with the native rate, + `labels.json`):
 
-    python -m data.scripts.build_grids                     # harmonised (phone+watch) + non-harmonised
-    python -m data.scripts.build_grids --placement-strict  # harmonised-strict (phone only)
+    python -m data.scripts.build_grids                     # all streams: harmonised + non-harmonised
+
+`harmonised-strict` (phones only) is NOT a separate build — it is the phone subset of the harmonised
+grids, selected at training time via `deployment_streams(placement_strict=True)`.
 
 For every device stream (`deployment_policy.deployment_streams`), each session is assembled into a
 windowed `Grid`:
@@ -94,21 +96,29 @@ def iter_sessions(dataset: str, spec: StreamSpec) -> Iterable[Session]:
     For multi-stream datasets (wisdm phone/watch) sessions are routed by `session_stream_specs`.
     """
     ds_dir = REPO / "data" / "datasets" / dataset
-    manifest = json.loads((ds_dir / "manifest.json").read_text())
-    native_rate = float(manifest.get("sampling_rate_hz") or manifest.get("rate_hz"))
+    # Native rate is a dataset property (metadata.json). The session manifest stores rate per-channel;
+    # a single deployment stream shares one rate, so the dataset rate is authoritative.
+    native_rate = float(json.loads((ds_dir / "metadata.json").read_text())["sampling_rate_hz"])
     for pq in sorted((ds_dir / "sessions").glob("*.parquet")):
         sid = pq.stem
         if spec.stream_id not in {s.stream_id for s in session_stream_specs(dataset, sid, role=spec.role)}:
             continue
         frame = pd.read_parquet(pq)
+        # Subject id for subject-disjoint splits: prefer a `subject` column; else the session id
+        # (converters name sessions per-subject, so this is a safe fallback — refine if a dataset
+        # packs multiple subjects into one session file).
         subject = frame["subject"].iloc[0] if "subject" in frame.columns else sid
         yield frame, native_rate, subject
 
 
-def build(placement_strict: bool = False, out_root: Optional[Path] = None) -> None:
-    """Assemble + save harmonised and (non-strict only) non-harmonised grids for the whole corpus."""
+def build(out_root: Optional[Path] = None) -> None:
+    """Assemble + save harmonised and non-harmonised grids for EVERY device stream (phone + watch).
+
+    We build the full phone+watch set once; `harmonised-strict` is the phone-only subset selected at
+    training time (`deployment_streams(placement_strict=True)`), not a separate materialization.
+    """
     out_root = out_root or (REPO / "data" / "datasets")
-    for spec in deployment_streams(placement_strict=placement_strict):
+    for spec in deployment_streams(placement_strict=False):
         sessions = list(iter_sessions(spec.dataset, spec))
         for harmonised, alignment in ((True, "harmonised"), (False, "non_harmonised")):
             grid, subjects = stream_grid(spec.dataset, spec, sessions,
@@ -130,10 +140,8 @@ def _save(out_root: Path, spec: StreamSpec, grid: Grid, subjects: List) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--placement-strict", action="store_true",
-                    help="harmonised-strict: phones only (drops watch datasets)")
-    build(placement_strict=ap.parse_args().placement_strict)
+    argparse.ArgumentParser(description=__doc__).parse_args()  # --help only
+    build()
 
 
 if __name__ == "__main__":
