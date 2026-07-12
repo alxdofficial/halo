@@ -7,8 +7,8 @@
     "lying",
     "running",
     "sitting",
-    "stairs_down",
-    "stairs_up",
+    "climbingdown",
+    "climbingup",
     "standing",
     "walking"
   ],
@@ -17,8 +17,8 @@
     "1": "lying",
     "2": "running",
     "3": "sitting",
-    "4": "stairs_down",
-    "5": "stairs_up",
+    "4": "climbingdown",
+    "5": "climbingup",
     "6": "standing",
     "7": "walking"
   },
