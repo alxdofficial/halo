@@ -23,13 +23,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
 from data.scripts.assembly import baseline_view
-from data.scripts.assembly.assemble import Grid, assemble
+from data.scripts.assembly.assemble import Grid, assemble, resample_signal
 from data.scripts.curate.deployment_policy import (STANDARD_CHANNEL_ORDER, StreamSpec,
                                                    deployment_streams, session_stream_specs)
 from data.scripts.labels.canonical_labels import canonicalize
@@ -43,14 +43,18 @@ Session = Tuple[pd.DataFrame, float, object]
 
 
 def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
-                alignment: str, harmonised: bool,
+                alignment: str, harmonised: bool, pre_windowed: bool = False,
                 window_seconds: float = WINDOW_SECONDS) -> Tuple[Grid, List]:
     """Assemble every session of ONE device stream into a single stacked `Grid`.
 
     ``harmonised=True`` → resample to 60 Hz + map labels to the canonical vocabulary.
     ``harmonised=False`` → keep the native rate and native labels.
+    ``pre_windowed=True`` → the dataset is distributed as fixed-length segments (e.g. UCI HAR's
+    2.56 s windows), too short for the 6 s corpus window; treat each segment as exactly ONE window
+    (window = the segment's own resampled length) instead of cutting 6 s windows from it.
     Returns ``(grid, subjects)`` where ``subjects`` is one entry per window (for subject-disjoint splits).
     """
+    sessions = list(sessions)
     resample_to = HARMONISED_RATE_HZ if harmonised else None
     datas: List[np.ndarray] = []
     labels: List = []
@@ -59,9 +63,17 @@ def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
     mask = None
     rate_out = float(HARMONISED_RATE_HZ) if harmonised else None
 
+    forced_window: Optional[int] = None
+    if pre_windowed and sessions:
+        f0, r0, _ = sessions[0]
+        n0 = len(f0)
+        # The segment's length after (optional) resampling — one whole window, no truncation.
+        forced_window = (len(resample_signal(np.zeros((n0, 1), np.float32), r0, HARMONISED_RATE_HZ))
+                         if harmonised else n0)
+
     for frame, native_rate, subject in sessions:
         out_rate = HARMONISED_RATE_HZ if harmonised else native_rate
-        window = max(1, round(window_seconds * out_rate))
+        window = forced_window if forced_window is not None else max(1, round(window_seconds * out_rate))
         g = assemble(frame, dataset, spec, alignment=alignment, window=window,
                      rate_hz=native_rate, resample_to=resample_to)
         if len(g.data) == 0:
@@ -117,18 +129,29 @@ def iter_sessions(dataset: str, spec: StreamSpec) -> Iterable[Session]:
         yield frame, native_rate, subject
 
 
-def build(out_root: Optional[Path] = None) -> None:
+def _pre_windowed(dataset: str) -> bool:
+    """Whether a dataset is distributed as fixed short segments (metadata `pre_windowed: true`)."""
+    meta = REPO / "data" / "datasets" / dataset / "metadata.json"
+    return bool(meta.exists() and json.loads(meta.read_text()).get("pre_windowed", False))
+
+
+def build(out_root: Optional[Path] = None, datasets: Optional[Sequence[str]] = None) -> None:
     """Assemble + save harmonised and non-harmonised grids for EVERY device stream (phone + watch).
 
     We build the full phone+watch set once; `harmonised-strict` is the phone-only subset selected at
     training time (`deployment_streams(placement_strict=True)`), not a separate materialization.
+    Pass `datasets` to build only those (e.g. after a single converter re-run).
     """
     out_root = out_root or (REPO / "data" / "datasets")
+    want = set(datasets) if datasets else None
     for spec in deployment_streams(placement_strict=False):
+        if want and spec.dataset not in want:
+            continue
+        pw = _pre_windowed(spec.dataset)
         sessions = list(iter_sessions(spec.dataset, spec))
         for harmonised, alignment in ((True, "harmonised"), (False, "non_harmonised")):
             grid, subjects = stream_grid(spec.dataset, spec, sessions,
-                                         alignment=alignment, harmonised=harmonised)
+                                         alignment=alignment, harmonised=harmonised, pre_windowed=pw)
             _save(out_root, spec, grid, subjects)
 
 
@@ -146,8 +169,11 @@ def _save(out_root: Path, spec: StreamSpec, grid: Grid, subjects: List) -> None:
 
 
 def main() -> None:
-    argparse.ArgumentParser(description=__doc__).parse_args()  # --help only
-    build()
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--dataset", nargs="*", default=None,
+                   help="Build only these datasets (default: all primary phone+watch streams).")
+    args = p.parse_args()
+    build(datasets=args.dataset)
 
 
 if __name__ == "__main__":

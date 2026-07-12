@@ -23,9 +23,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-# Add parent to path for shared utilities
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows
+# Run as `python -m data.datasets.hapt.convert` from the repo root; repo root on path for shared imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 # Activity mapping - standardized names
@@ -44,9 +43,10 @@ ACTIVITIES = {
     12: "lie_to_stand",
 }
 
-# Paths
-RAW_DIR = Path("data/raw/hapt")
-OUTPUT_DIR = Path("data/hapt")
+# Paths (new repo layout: this converter lives in data/datasets/hapt/)
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads"
+OUTPUT_DIR = DS_DIR
 
 # Dataset parameters
 SAMPLE_RATE = 50.0  # Hz
@@ -172,8 +172,9 @@ def convert_hapt():
             skipped_count += 1
             continue
 
-        # Process each labeled segment
-        for activity_id, start_sample, end_sample in segments:
+        # Process each labeled segment. Each segment is one continuous single-activity chunk;
+        # we save it whole as ONE session (build_grids does the fixed 6 s windowing).
+        for seg_idx, (activity_id, start_sample, end_sample) in enumerate(segments):
             if activity_id not in ACTIVITIES:
                 continue
 
@@ -207,28 +208,16 @@ def convert_hapt():
                 result["gyro_y"] = np.nan
                 result["gyro_z"] = np.nan
 
-            # Create session ID prefix
-            session_prefix = f"exp{exp_id:02d}_user{user_id:02d}_{activity_name}"
+            # Subject id (user) for subject-disjoint splits; read by build_grids.iter_sessions.
+            result["subject"] = f"user{user_id:02d}"
 
-            # Apply windowing for long segments
-            windows = create_variable_windows(
-                df=result,
-                session_prefix=session_prefix,
-                activity=activity_name,
-                sample_rate=SAMPLE_RATE,
-                seed=42 + exp_id * 100 + user_id,
-            )
+            session_id = f"exp{exp_id:02d}_user{user_id:02d}_{activity_name}_{seg_idx:02d}"
+            session_dir = sessions_dir / session_id
+            session_dir.mkdir(exist_ok=True)
+            result.to_parquet(session_dir / "data.parquet", index=False)
 
-            # Save each window
-            for window_id, window_df, window_activity in windows:
-                window_path = sessions_dir / window_id
-                window_path.mkdir(exist_ok=True)
-
-                parquet_path = window_path / "data.parquet"
-                window_df.to_parquet(parquet_path, index=False)
-
-                all_labels[window_id] = [window_activity]
-                session_count += 1
+            all_labels[session_id] = [activity_name]
+            session_count += 1
 
     # Save labels.json
     labels_path = OUTPUT_DIR / "labels.json"
