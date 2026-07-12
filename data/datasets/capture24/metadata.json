@@ -1,6 +1,6 @@
 {
   "display_name": "CAPTURE-24",
-  "num_sessions": 48518,
+  "num_sessions": 13120,
   "sampling_rate_hz": 100,
   "channels": [
     "acc_x",

@@ -1,55 +1,74 @@
 """
-Convert CAPTURE-24 dataset to standardized format.
+Convert CAPTURE-24 to the new HALO raw-session layout.
 
-Input:  data/raw/capture24/**/P*.csv.gz  +  annotation-label-dictionary.csv
-Output: data/capture24/
-  - manifest.json
-  - labels.json
-  - sessions/session_XXX/data.parquet
+Input  (this dataset dir): downloads/capture24/
+  - P001.csv.gz ... P151.csv.gz   (columns: time, x, y, z, annotation)
+  - annotation-label-dictionary.csv
+  - metadata.csv                  (pid, age, sex)
+Output (this dataset dir):
+  - sessions/<session_id>/data.parquet : timestamp_sec + acc_x/y/z + subject
+  - labels.json                        : {session_id: [activity_name]}
+  - manifest.json / metadata.json      : informational + native rate for build_grids
 
 CAPTURE-24 Dataset Info:
-- 151 participants, ~24 h each of FREE-LIVING wear (2,562 annotated hours total).
-- Axivity AX3 worn on the dominant WRIST; triaxial accelerometer only (no gyro).
+- 151 participants, ~24 h each of FREE-LIVING wear (~2,500 annotated hours total).
+- Axivity AX3 worn on the dominant WRIST; triaxial accelerometer only (NO gyro).
 - 100 Hz. Raw acceleration in g, INCLUDES gravity (unlike iOS userAcceleration).
-- Labels: camera + sleep-diary free-text annotations, mapped through the
-  official annotation-label-dictionary.csv to the WillettsSpecific2018 scheme
-  (10 activity classes: bicycling, household-chores, manual-work, mixed-activity,
-  sitting, sleep, sports, standing, vehicle, walking).
-- This is a large, real-world, wrist-worn free-living corpus — a TRAIN dataset,
-  broadening the model beyond scripted lab protocols toward the distribution a
-  phone/watch actually sees in daily life.
+- Labels: camera + sleep-diary free-text annotations, mapped through the official
+  annotation-label-dictionary.csv WillettsSpecific2018 scheme to 10 activity classes:
+  bicycling, household-chores, manual-work, mixed-activity, sitting, sleep, sports,
+  standing, vehicle, walking.
+- Large, real-world, wrist-worn free-living corpus — a TRAIN dataset that broadens the
+  model beyond scripted lab protocols toward the distribution a phone/watch sees daily.
 
-Because the recordings are continuous multi-hour streams heavily dominated by
-sleep/sitting, we (a) segment by contiguous label, (b) cap each segment to
-MAX_SEG_SEC before windowing, and (c) cap windows per (participant, label) to
-MAX_WIN_PER_PID_LABEL so no class/subject swamps the corpus. Downstream
-subsampling (dataset_config.json) trims further.
+Segmentation (raw sessions, NO pre-windowing):
+Each subject is one continuous multi-hour 100 Hz recording whose annotation changes over
+time. We split it into RAW sessions by CONTIGUOUS RUNS of the same WillettsSpecific2018
+label. Unlabelled / undictionaried spans (NaN after mapping) break runs and are dropped.
+Each contiguous run is saved as one session parquet. build_grids does the fixed 6 s
+windowing downstream — we do NOT window here and do NOT call create_variable_windows.
+Runs shorter than one 6 s window can never yield a grid window, so they are skipped.
+
+Accelerometer is already in g (capture24 is registered native-g in accel_units); it is
+NOT rescaled here. The watch_wrist deployment stream is accelerometer-only; the harmonised
+grid zero-pads + masks the absent gyroscope half.
+
+SCALE: the full corpus is ~2,500 annotated hours -> on the order of a million 6 s windows.
+Converting to sessions is cheap (they live on disk), but do NOT run
+`build_grids --dataset capture24` on the full set: build_grids loads every session frame
+into RAM at once and would OOM. Subsample sessions/windows before materialising a grid.
 
 License: CC BY 4.0. doi:10.5287/bodleian:NGx0JOMP5
-Reference: Chan Chang et al., "CAPTURE-24: A large dataset of wrist-worn
-activity tracker data collected in the wild for human activity recognition".
+Reference: Chan Chang et al., "CAPTURE-24: A large dataset of wrist-worn activity tracker
+data collected in the wild for human activity recognition".
 https://github.com/OxWearables/capture24
 """
 
+import argparse
 import json
+import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows
+# Repo root on path for shared imports (kept for parity with the other converters).
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-RAW_DIR = Path("data/raw/capture24")
-OUTPUT_DIR = Path("data/capture24")
+DS_DIR = Path(__file__).resolve().parent
+DOWNLOADS_DIR = DS_DIR / "downloads" / "capture24"
+OUTPUT_DIR = DS_DIR
+SESSIONS_DIR = OUTPUT_DIR / "sessions"
+
 SAMPLE_RATE = 100.0
 
-# Label scheme used from the annotation dictionary.
+# Label scheme column in annotation-label-dictionary.csv used as the activity label.
 LABEL_SCHEME = "label:WillettsSpecific2018"
 
-# WillettsSpecific2018 value -> standardized HALO label string (underscore conv).
+# WillettsSpecific2018 value -> standardized HALO label string (underscore convention).
 LABEL_MAP = {
     "sleep": "sleeping",
     "sitting": "sitting",
@@ -65,108 +84,107 @@ LABEL_MAP = {
 
 OUTPUT_COLUMNS = ["acc_x", "acc_y", "acc_z"]
 
-# Balancing / bounding knobs.
-MAX_SEG_SEC = 120          # cap each contiguous label segment before windowing
-MAX_WIN_PER_PID_LABEL = 50  # cap windows per (participant, label)
-MIN_SEG_SEC = 3            # ignore contiguous segments shorter than this
+# Drop contiguous runs shorter than one 6 s grid window: build_grids' fixed_windows yields
+# zero windows for a session shorter than the window, so such runs are dead weight on disk.
+MIN_SEG_SEC = 6.0
+
+# Sentinel that stands in for unlabelled/undictionaried samples so a contiguous NaN span
+# collapses to a single (skipped) run instead of one boundary per sample.
+_UNLABELLED = "\x00unlabelled"
 
 
 def find_dictionary() -> Path:
-    hits = list(RAW_DIR.glob("**/annotation-label-dictionary.csv"))
+    hits = sorted(DOWNLOADS_DIR.glob("**/annotation-label-dictionary.csv"))
     if not hits:
         raise FileNotFoundError(
-            f"annotation-label-dictionary.csv not found under {RAW_DIR}"
-        )
+            f"annotation-label-dictionary.csv not found under {DOWNLOADS_DIR}")
     return hits[0]
 
 
-def convert_dataset() -> bool:
-    print("=" * 80)
-    print("CAPTURE-24 -> Standardized Format Converter")
-    print("=" * 80)
-    print("NOTE: large free-living wrist-accel TRAIN corpus")
-
-    if not RAW_DIR.exists():
-        print(f"ERROR: raw data not found at {RAW_DIR}")
-        print("Download capture24.zip (CC BY) from Oxford ORA:")
-        print("  https://ora.ox.ac.uk/objects/uuid:99d7c092-d865-4a19-b096-cc16440cd001")
-        print(f"Unzip so that P*.csv.gz live under {RAW_DIR}/")
-        return False
-
-    pid_files = sorted(RAW_DIR.glob("**/P*.csv.gz"))
-    if not pid_files:
-        print(f"ERROR: no P*.csv.gz found under {RAW_DIR}")
-        return False
-    print(f"Found {len(pid_files)} participant files")
-
+def build_ann2label() -> dict:
+    """annotation string -> standardized HALO label (or NaN if the WillettsSpecific2018
+    value is unknown). Preserves the original WillettsSpecific2018 -> LABEL_MAP logic."""
     dic = pd.read_csv(find_dictionary())
-    ann2label = dict(zip(dic["annotation"], dic[LABEL_SCHEME].map(LABEL_MAP)))
+    if LABEL_SCHEME not in dic.columns:
+        raise KeyError(f"{LABEL_SCHEME!r} not in dictionary columns {list(dic.columns)}")
+    return dict(zip(dic["annotation"], dic[LABEL_SCHEME].map(LABEL_MAP)))
 
-    sessions_dir = OUTPUT_DIR / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
+
+def convert_dataset(limit: Optional[int] = None) -> bool:
+    print("=" * 80)
+    print("CAPTURE-24 -> HALO raw sessions (dominant wrist / watch_wrist)")
+    print("=" * 80)
+    print("NOTE: large free-living wrist-accel TRAIN corpus (accelerometer only, in g).")
+
+    if not DOWNLOADS_DIR.exists():
+        print(f"ERROR: raw data not found at {DOWNLOADS_DIR}")
+        print("Download capture24.zip (CC BY) from Oxford ORA and unzip so that")
+        print(f"  P*.csv.gz live under {DOWNLOADS_DIR}/")
+        return False
+
+    pid_files = sorted(DOWNLOADS_DIR.glob("**/P*.csv.gz"))
+    if not pid_files:
+        print(f"ERROR: no P*.csv.gz found under {DOWNLOADS_DIR}")
+        return False
+    if limit is not None:
+        pid_files = pid_files[:limit]
+    print(f"Found {len(pid_files)} participant files"
+          + (f" (limited to first {limit})" if limit is not None else ""))
+
+    ann2label = build_ann2label()
+
+    if SESSIONS_DIR.exists():
+        shutil.rmtree(SESSIONS_DIR)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
     all_labels = {}
     session_count = 0
-    label_counts = defaultdict(int)
-    total_unmapped_frac = []
+    label_session_counts = defaultdict(int)
+    label_second_counts = defaultdict(float)
+    unmapped_fracs = []
+    min_seg_samples = int(round(MIN_SEG_SEC * SAMPLE_RATE))
 
     for pi, pid_file in enumerate(pid_files):
         pid = pid_file.name.split(".")[0]  # 'P001'
-        df = pd.read_csv(pid_file, dtype={"annotation": str}, low_memory=False)
-        df["lab"] = df["annotation"].map(ann2label)
-        total_unmapped_frac.append(float(df["lab"].isna().mean()))
+        df = pd.read_csv(pid_file, usecols=["x", "y", "z", "annotation"],
+                         dtype={"annotation": str}, low_memory=False)
 
-        # Contiguous label segments (NaN/unmapped act as break points and are skipped).
-        labs = df["lab"].values
-        change = np.where(labs[1:] != labs[:-1])[0] + 1
-        seg_bounds = np.concatenate([[0], change, [len(labs)]])
-        segs_by_label = defaultdict(list)
-        for k in range(len(seg_bounds) - 1):
-            s, e = int(seg_bounds[k]), int(seg_bounds[k + 1])
-            lab = labs[s]
-            if lab is None or (isinstance(lab, float) and np.isnan(lab)):
-                continue
-            if (e - s) < MIN_SEG_SEC * SAMPLE_RATE:
-                continue
-            segs_by_label[lab].append((s, e))
+        lab_series = df["annotation"].map(ann2label)   # NaN where unmapped / unlabelled
+        unmapped_fracs.append(float(lab_series.isna().mean()))
+
+        # Contiguous runs of the same label. Unlabelled spans collapse to one sentinel run.
+        labs = lab_series.fillna(_UNLABELLED).to_numpy(dtype=object)
+        change = np.nonzero(labs[1:] != labs[:-1])[0] + 1
+        bounds = np.concatenate(([0], change, [len(labs)])).astype(np.int64)
 
         xyz = df[["x", "y", "z"]].to_numpy(dtype=np.float32)
-        rng = np.random.RandomState(1000 + pi)
 
-        for lab, segs in segs_by_label.items():
-            order = rng.permutation(len(segs))
-            count = 0
-            for gi in order:
-                if count >= MAX_WIN_PER_PID_LABEL:
-                    break
-                s, e = segs[gi]
-                e = min(e, s + int(MAX_SEG_SEC * SAMPLE_RATE))  # cap segment length
-                seg = pd.DataFrame(xyz[s:e], columns=OUTPUT_COLUMNS)
-                seg.insert(0, "timestamp_sec", np.arange(len(seg)) / SAMPLE_RATE)
+        subject_sessions = 0
+        for k in range(len(bounds) - 1):
+            s, e = int(bounds[k]), int(bounds[k + 1])
+            lab = labs[s]
+            if lab == _UNLABELLED:
+                continue
+            if (e - s) < min_seg_samples:
+                continue
 
-                prefix = f"capture24_{pid}_{lab}_{int(gi):04d}"
-                windows = create_variable_windows(
-                    df=seg, session_prefix=prefix, activity=lab,
-                    sample_rate=SAMPLE_RATE, seed=1000 + pi * 1000 + int(gi),
-                )
-                for window_id, window_df, window_activity in windows:
-                    if count >= MAX_WIN_PER_PID_LABEL:
-                        break
-                    window_df = window_df.copy()
-                    window_df["timestamp_sec"] = (
-                        window_df["timestamp_sec"] - window_df["timestamp_sec"].iloc[0]
-                    )
-                    wp = sessions_dir / window_id
-                    wp.mkdir(exist_ok=True)
-                    window_df.to_parquet(wp / "data.parquet", index=False)
-                    all_labels[window_id] = [window_activity]
-                    label_counts[window_activity] += 1
-                    session_count += 1
-                    count += 1
+            frame = pd.DataFrame(xyz[s:e], columns=OUTPUT_COLUMNS)
+            frame.insert(0, "timestamp_sec", np.arange(e - s, dtype=np.float64) / SAMPLE_RATE)
+            frame["subject"] = pid
 
-        if (pi + 1) % 10 == 0 or pi == len(pid_files) - 1:
-            print(f"  [{pi + 1:3d}/{len(pid_files)}] {pid}: "
-                  f"{session_count} windows so far")
+            session_id = f"{pid}_{lab}_{k:06d}"
+            sdir = SESSIONS_DIR / session_id
+            sdir.mkdir(exist_ok=True)
+            frame.to_parquet(sdir / "data.parquet", index=False)
+
+            all_labels[session_id] = [lab]
+            label_session_counts[lab] += 1
+            label_second_counts[lab] += (e - s) / SAMPLE_RATE
+            session_count += 1
+            subject_sessions += 1
+
+        print(f"  [{pi + 1:3d}/{len(pid_files)}] {pid}: {subject_sessions} sessions "
+              f"(unmapped {unmapped_fracs[-1]:.1%}) -> {session_count} total")
 
     if not all_labels:
         print("\nNo sessions created — check raw data / dictionary.")
@@ -174,28 +192,39 @@ def convert_dataset() -> bool:
 
     with open(OUTPUT_DIR / "labels.json", "w") as f:
         json.dump(all_labels, f)
-    with open(OUTPUT_DIR / "manifest.json", "w") as f:
-        json.dump(create_manifest(len(pid_files)), f, indent=2)
+
+    total_seconds = float(sum(label_second_counts.values()))
+    write_manifest(len(pid_files))
+    update_metadata(num_sessions=session_count,
+                    activities=sorted(label_session_counts.keys()))
+
+    est_windows = int(total_seconds // 6)
+    est_grid_gb = est_windows * 360 * 6 * 4 / 1e9  # 6 s @ 60 Hz, 6 harmonised channels, float32
 
     print(f"\n{'=' * 80}\nConversion complete!\n{'=' * 80}")
-    print(f"Output: {OUTPUT_DIR}")
-    print(f"  - {session_count} sessions across {len(pid_files)} participants")
-    print(f"  - mean unmapped-annotation fraction: "
-          f"{np.mean(total_unmapped_frac):.2%} (skipped)")
-    print("\nActivity distribution:")
-    for a, c in sorted(label_counts.items(), key=lambda kv: -kv[1]):
-        print(f"  {a:18s} {c}")
+    print(f"Output dir            : {OUTPUT_DIR}")
+    print(f"Sessions written      : {session_count} across {len(pid_files)} participants")
+    print(f"Mean unmapped fraction: {np.mean(unmapped_fracs):.2%} (dropped)")
+    print(f"Total labelled seconds: {total_seconds:,.0f} ({total_seconds / 3600:,.1f} h)")
+    print("\nSessions per label (label: sessions, hours):")
+    for lab in sorted(label_session_counts, key=lambda k: -label_session_counts[k]):
+        print(f"  {lab:18s} {label_session_counts[lab]:7d}   {label_second_counts[lab] / 3600:8.1f} h")
+    print(f"\nEstimated full-corpus 6 s windows : ~{est_windows:,}")
+    print(f"Estimated harmonised grid size    : ~{est_grid_gb:,.1f} GB "
+          f"(windows x 360 x 6 x 4 bytes)")
+    print("Do NOT run `build_grids --dataset capture24` on the full set (in-RAM OOM).")
     return True
 
 
-def create_manifest(num_subjects: int) -> dict:
-    return {
+def write_manifest(num_subjects: int) -> None:
+    manifest = {
         "dataset_name": "CAPTURE-24",
         "description": (
-            "Large free-living wrist-worn accelerometer corpus. 151 participants, "
-            "~24 h each, Axivity AX3 on the dominant wrist at 100 Hz. Raw triaxial "
-            "acceleration in g (INCLUDES gravity). Camera+diary annotations mapped "
-            "to the WillettsSpecific2018 10-class activity scheme. Accelerometer only."
+            "Large free-living wrist-worn accelerometer corpus. 151 participants, ~24 h "
+            "each, Axivity AX3 on the dominant wrist at 100 Hz. Raw triaxial acceleration "
+            "in g (INCLUDES gravity). Camera+diary annotations mapped to the "
+            "WillettsSpecific2018 10-class activity scheme. Accelerometer only (no gyro). "
+            "Sessions are raw contiguous-label runs; build_grids does the 6 s windowing."
         ),
         "source": "https://ora.ox.ac.uk/objects/uuid:99d7c092-d865-4a19-b096-cc16440cd001",
         "num_subjects": num_subjects,
@@ -205,10 +234,39 @@ def create_manifest(num_subjects: int) -> dict:
             {"name": "acc_z", "description": "Wrist accelerometer Z-axis in g (raw, includes gravity)", "sampling_rate_hz": SAMPLE_RATE},
         ],
     }
+    with open(OUTPUT_DIR / "manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+
+
+def update_metadata(num_sessions: int, activities: list) -> None:
+    """Refresh informational fields of metadata.json while preserving split/role fields that
+    downstream tooling relies on. build_grids reads `sampling_rate_hz`; never set `pre_windowed`."""
+    meta_path = OUTPUT_DIR / "metadata.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+
+    meta["display_name"] = meta.get("display_name", "CAPTURE-24")
+    meta["num_sessions"] = num_sessions
+    meta["sampling_rate_hz"] = int(SAMPLE_RATE)
+    meta["channels"] = list(OUTPUT_COLUMNS)
+    meta["core_channels"] = {c: c for c in OUTPUT_COLUMNS}
+    meta["extra_channels"] = []
+    meta["placement"] = meta.get("placement", "wrist")
+    meta["num_subjects"] = 151
+    meta["activities"] = activities
+    meta["role"] = meta.get("role", "train")
+    meta.setdefault("train_subjects", [])
+    meta.setdefault("test_subjects", [])
+    meta.pop("pre_windowed", None)
+
+    meta_path.write_text(json.dumps(meta, indent=2))
 
 
 def main() -> int:
-    return 0 if convert_dataset() else 1
+    p = argparse.ArgumentParser(description="Convert CAPTURE-24 to HALO raw sessions.")
+    p.add_argument("--limit", type=int, default=None,
+                   help="Convert only the first N participant files (for quick verification).")
+    args = p.parse_args()
+    return 0 if convert_dataset(limit=args.limit) else 1
 
 
 if __name__ == "__main__":
