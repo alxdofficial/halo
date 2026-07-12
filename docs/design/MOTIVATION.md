@@ -57,6 +57,24 @@ and combinations never seen. **That deferral is the thing you cannot preprocess.
 strictly richer than invariance: invariance is *lossy* (rotation-invariance discards the orientation
 some activities depend on), whereas conditioning stays orientation-*aware* and adapts only when told.
 
+## 2b. Closest prior art — and the one-line differentiation
+
+The nearest work, and the one a reviewer *will* raise, is **ZeroHAR** (Chowdhury et al., AAAI 2025) —
+notably from the same group as UniMTS (shared author). ZeroHAR also conditions on sensor context and
+aligns the motion latent to it. **The distinction is the interface:**
+
+> ZeroHAR conditions on a **fixed, closed set of context attributes** (sensor type, Cartesian axis, body
+> position — a categorical vector). **HALO conditions on free-form natural-language** channel
+> descriptions, which is what lets it **generalize compositionally to acquisition descriptions never
+> seen in training** (a new placement phrase, a new sensor, a combination). Fixed attributes cover only
+> the configurations enumerated at train time; language does not. That is the same open-set argument as
+> for labels, now on the input side.
+
+(No code/weights are publicly released for ZeroHAR as of 2026-07, so it is a **related-work / cite**
+target, not a runnable frozen baseline. UniMTS remains the runnable closest competitor, differentiated
+by invariance-vs-conditioning per §2.) Adjacent, on the *output* side: **ActivityNarrated** (Ray et al.,
+2026) explores open-vocabulary sensor-language recognition — relevant to `LANGUAGE_HIERARCHY.md`.
+
 ## 3. The falsifiable claim and the experiment that ConSE cannot rebut
 
 **Claim.** Under realistic, physically-meaningful **input-side** nuisance transforms, a model *told* the
