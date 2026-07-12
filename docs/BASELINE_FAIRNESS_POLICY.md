@@ -5,10 +5,9 @@
 baseline is justified here, once, against a single contract. If a change to a baseline is not
 sanctioned by Section 3, it does not ship.
 
-Supporting detail lives in [`baseline_flexibility.md`](baseline_flexibility.md) (the capability
-matrix) and [`BASELINE_IMPLEMENTATION_NOTES.md`](BASELINE_IMPLEMENTATION_NOTES.md) (per-model
-published contracts + citations). Where those disagree with this file on a *decision*, this file
-wins.
+The **roster + verified input contracts + the frozen-vs-self-train rationale + the channel/rate defense +
+the 3-part reporting design** live in [`BASELINES.md`](BASELINES.md) (paper-ready). This file is the
+*treatment contract*; `BASELINES.md` is the *roster and comparison design*.
 
 **Scope note.** This document is the fair-comparison **scaffold**, not the paper's contribution. The
 contribution is the language-conditioned open-set + acquisition-config generalization defined in
