@@ -362,7 +362,7 @@ class IMUAugmenter:
     @staticmethod
     def _triads(channel_names):
         """Return {location: [(indices3, group_name), ...]} for x/y/z triads only."""
-        from data.scripts.channels import (
+        from data.scripts.curate.channels import (
             group_channels_by_sensor,
         )
         groups = group_channels_by_sensor(channel_names)
@@ -525,7 +525,7 @@ class IMUAugmenter:
 
     # ---------- P4: channel / sensor-group dropout ----------
     def _channel_dropout(self, s, spec):
-        from data.scripts.channels import (
+        from data.scripts.curate.channels import (
             group_channels_by_sensor,
         )
         names = s.channel_names
@@ -565,7 +565,7 @@ class IMUAugmenter:
 
     # ---------- text: label paraphrase (dataset-specific synonyms + templates) ----------
     def _label_text(self, s, spec):
-        from data.scripts.label_augmentation import augment_label
+        from data.scripts.labels.label_augmentation import augment_label
         # Outer `p` already decided we augment; call augment_label unconditionally (rate=1.0).
         s.label_text = augment_label(
             s.label, s.dataset_name, augmentation_rate=1.0,

@@ -4,9 +4,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data.scripts.assemble import assemble
-from data.scripts.accel_units import GRAVITY_MS2
-from data.scripts.deployment_policy import all_source_channels, get_stream_spec
+from data.scripts.assembly.assemble import assemble
+from data.scripts.curate.accel_units import GRAVITY_MS2
+from data.scripts.curate.deployment_policy import all_source_channels, get_stream_spec
 
 ACC = ("acc_x", "acc_y", "acc_z")
 GYRO = ("gyro_x", "gyro_y", "gyro_z")

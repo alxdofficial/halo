@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from data.scripts import accel_units as au
-from data.scripts import deployment_policy as dp
+from data.scripts.curate import accel_units as au
+from data.scripts.curate import deployment_policy as dp
 
 
 def test_unit_sets_are_disjoint():

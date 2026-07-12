@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data.scripts.deployment_policy import (
+from data.scripts.curate.deployment_policy import (
     EXCLUDED_PRIMARY_DATASETS,
     PRIMARY_EVAL_DATASETS,
     PRIMARY_TRAIN_DATASETS,

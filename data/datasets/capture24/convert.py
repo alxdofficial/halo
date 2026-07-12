@@ -40,7 +40,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.windowing import create_variable_windows
+from data.scripts.assembly.windowing import create_variable_windows
 
 RAW_DIR = Path("data/raw/capture24")
 OUTPUT_DIR = Path("data/capture24")

@@ -29,7 +29,7 @@ from typing import Dict, List, Tuple
 
 # Add datascripts to path for shared imports
 sys.path.insert(0, str(Path(__file__).parent))
-from data.scripts.windowing import create_variable_windows, get_window_range
+from data.scripts.assembly.windowing import create_variable_windows, get_window_range
 
 
 # Activity code to label mapping (using underscores to match other datasets)

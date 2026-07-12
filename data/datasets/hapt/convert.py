@@ -25,7 +25,7 @@ import pandas as pd
 
 # Add parent to path for shared utilities
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.windowing import create_variable_windows
+from data.scripts.assembly.windowing import create_variable_windows
 
 
 # Activity mapping - standardized names
@@ -256,7 +256,7 @@ def convert_hapt():
     # Generate visualizations
     try:
         sys.path.insert(0, str(Path(__file__).parent.parent))
-        from data.scripts.visualization_utils import generate_debug_visualizations
+        from data.scripts.debug.visualization_utils import generate_debug_visualizations
         generate_debug_visualizations(OUTPUT_DIR)
     except ImportError:
         pass

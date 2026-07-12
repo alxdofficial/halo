@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
-from data.scripts.deployment_policy import STANDARD_CHANNEL_ORDER, source_channel_is_allowed
+from data.scripts.curate.deployment_policy import STANDARD_CHANNEL_ORDER, source_channel_is_allowed
 
 _STANDARD = set(STANDARD_CHANNEL_ORDER)
 _AXIS = re.compile(r"_([xyz]|[1-4])$")

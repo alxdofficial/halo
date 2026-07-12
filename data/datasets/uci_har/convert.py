@@ -218,7 +218,7 @@ def main():
     try:
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent))  # Add datascripts/ to path
-        from data.scripts.visualization_utils import generate_debug_visualizations
+        from data.scripts.debug.visualization_utils import generate_debug_visualizations
 
         generate_debug_visualizations(OUTPUT_DIR)
     except ImportError as e:

@@ -21,8 +21,9 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from data.scripts import accel_units, baseline_view
-from data.scripts.deployment_policy import StreamSpec, curate_frame
+from data.scripts.curate import accel_units
+from data.scripts.assembly import baseline_view
+from data.scripts.curate.deployment_policy import StreamSpec, curate_frame
 
 
 @dataclass(frozen=True)

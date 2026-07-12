@@ -41,7 +41,7 @@ import pandas as pd
 
 # Add parent to path for shared utilities
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.windowing import create_variable_windows
+from data.scripts.assembly.windowing import create_variable_windows
 
 RAW_CSV = Path("data/raw/inclusivehar/InclusiveHAR.csv")
 OUTPUT_DIR = Path("data/inclusivehar")

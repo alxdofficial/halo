@@ -3,7 +3,7 @@
 import glob
 import json
 
-from data.scripts.canonical_labels import SYNONYMS, canonicalize
+from data.scripts.labels.canonical_labels import SYNONYMS, canonicalize
 
 TRAIN = ["uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar", "hapt", "mhealth", "capture24"]
 
