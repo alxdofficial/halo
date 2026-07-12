@@ -233,6 +233,20 @@ Exactly what we do to each model, and why it passes Section 3.
 
 ## 5. How the results read, tier by tier
 
+**Comparison design — each model at its fullest.** Heterogeneity-capable models are trained/evaluated
+on the **real (non-harmonised)** data (HALO's native habitat); fixed-layout models that cannot ingest
+it (CrossHAR, LiMU-BERT, harnet) run on the **harmonised** corpus (60 Hz, fixed 6-ch, unified labels —
+their designed input). This is the fair call: forcing a placement-blind, fixed model onto raw
+heterogeneous data either collapses to the harmonised tensor anyway (§2A) or just handicaps it, so we
+give each method its designed input and compare the best each can do — where *handling heterogeneity
+is itself part of the method*. The **parity row** (HALO neutralized to the harmonised input) keeps this
+airtight: it proves HALO's win is not merely "richer data" — even at the baselines' footing the
+architecture stands, and **HALO-full − HALO-parity** is the value of heterogeneity handling that the
+baselines structurally cannot claim. The harmonised corpus has two variants via a `placement_strict`
+flag: **harmonised-strict** (phones only) and **harmonised** (phone + watch as separate samples). Its
+labels use one **unified canonical vocabulary** (`data/scripts/canonical_labels.py`) so a harmonised
+activity is never named two ways; eval sets keep native labels (the zero-shot targets).
+
 - **Headline ZS-XD** — every zero-shot model at its native level → HALO's end-to-end advantage.
 - **Parity row** — HALO neutralized to a baseline's level (fixed rate + neutral channel text) →
   isolates the T0 base architecture from HALO's T1/T2 heterogeneity mechanisms.
