@@ -5,7 +5,7 @@ One subfolder per baseline we compare against. Each `<name>/` holds everything a
 - **`citation.json`** + the paper / publication(s) that identify it
 - **`repo/`** — a clone of the baseline's upstream repository (**gitignored**; re-clone from the URL in `citation.json`)
 - **`adapter.py`** — the thin wrapper that runs the baseline under our protocol, honoring its input
-  contract (rate / channels / open-set handling) per [`../docs/BASELINE_FAIRNESS_POLICY.md`](../docs/BASELINE_FAIRNESS_POLICY.md)
+  contract (rate / channels / open-set handling) per [`../docs/baselines/BASELINE_FAIRNESS_POLICY.md`](../docs/baselines/BASELINE_FAIRNESS_POLICY.md)
 
 Planned baselines:
 

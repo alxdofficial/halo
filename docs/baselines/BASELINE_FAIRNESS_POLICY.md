@@ -11,7 +11,7 @@ the 3-part reporting design** live in [`BASELINES.md`](BASELINES.md) (paper-read
 
 **Scope note.** This document is the fair-comparison **scaffold**, not the paper's contribution. The
 contribution is the language-conditioned open-set + acquisition-config generalization defined in
-[`MOTIVATION.md`](MOTIVATION.md); the tier stack below exists to make the comparison airtight, so that
+[`MOTIVATION.md`](../design/MOTIVATION.md); the tier stack below exists to make the comparison airtight, so that
 what remains after controlling for rate/channels/labels is the language interface. Channel-count and
 order handling in particular is **cheap preprocessing, not a claim** — it appears here only to
 guarantee every fixed baseline sees an equal input.

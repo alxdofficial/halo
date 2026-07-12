@@ -26,7 +26,7 @@ prior tree lives beside it as `legacy_code/` (not part of this repo) and is mine
 - **Tiered, faithful baseline comparison.** Heterogeneity is compared as a stack — **T0** base model,
   **T1** rate, **T2** channels/placement, **T3** open-set labels — with an explicit faithfulness
   contract for what may/may not be done to a baseline. See
-  [`docs/BASELINE_FAIRNESS_POLICY.md`](docs/BASELINE_FAIRNESS_POLICY.md).
+  [`docs/baselines/BASELINE_FAIRNESS_POLICY.md`](docs/baselines/BASELINE_FAIRNESS_POLICY.md).
 
 ## Layout
 
