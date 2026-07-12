@@ -1,0 +1,36 @@
+{
+  "display_name": "TNDA-HAR",
+  "num_sessions": 3353,
+  "sampling_rate_hz": 50,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z",
+    "gyro_x": "gyro_x",
+    "gyro_y": "gyro_y",
+    "gyro_z": "gyro_z"
+  },
+  "extra_channels": [],
+  "placement": "wrist",
+  "num_subjects": 23,
+  "activities": [
+    "ascending_stairs",
+    "descending_stairs",
+    "jogging",
+    "lying_down",
+    "riding",
+    "sitting",
+    "standing",
+    "walking"
+  ],
+  "role": "eval",
+  "provenance": "FALLBACK: raw TNDA-HAR is behind IEEE DataPort sign-in (https://ieee-dataport.org/open-access/tnda-har-0, DOI 10.21227/4epb-pg26). Source used is the UniMTS-released preprocessed bundle (HuggingFace xiyuanz/UniMTS -> UniMTS_data/TNDA-HAR). Bundle samples are native-rate (50 Hz) 10 s segments; the right-wrist IMU is columns 12:18. Accelerometer is total acceleration in m/s^2 (gravity present, |acc|~9.8); gyroscope in rad/s. The bundle carries no per-sample subject id, so the `subject` field records the UniMTS train/test partition, not individual participants (original dataset has 23 subjects)."
+}

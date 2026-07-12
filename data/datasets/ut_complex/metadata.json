@@ -1,0 +1,41 @@
+{
+  "display_name": "UT-Complex",
+  "num_sessions": 130,
+  "sampling_rate_hz": 50,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z",
+    "gyro_x": "gyro_x",
+    "gyro_y": "gyro_y",
+    "gyro_z": "gyro_z"
+  },
+  "extra_channels": [],
+  "placement": "wrist",
+  "num_subjects": 10,
+  "activities": [
+    "biking",
+    "drinking_coffee",
+    "eating",
+    "jogging",
+    "sitting",
+    "smoking",
+    "standing",
+    "talking",
+    "typing",
+    "walking",
+    "walking_downstairs",
+    "walking_upstairs",
+    "writing"
+  ],
+  "role": "eval",
+  "source": "https://www.utwente.nl/en/eemcs/ps/research/dataset/ (ut-data-complex.rar). Original raw CSV: wrist-worn Samsung Galaxy S2 (smartwatch emulation), 50 Hz, tri-axial accelerometer in m/s^2 (gravity present, |acc|~9.8) + gyroscope in rad/s. 10 participants x 13 activities. Per-subject sessions recovered by splitting each contiguous 30-min activity block into 10 equal 3-min participant chunks."
+}

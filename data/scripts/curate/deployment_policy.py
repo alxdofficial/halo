@@ -39,6 +39,9 @@ PRIMARY_EVAL_DATASETS = (
     "mobiact",
     "shoaib",
     "inclusivehar",
+    "usc_had",
+    "tnda_har",
+    "ut_complex",
 )
 
 EXCLUDED_PRIMARY_DATASETS = {
@@ -139,6 +142,15 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
     StreamSpec("inclusivehar", "phone_waist", "phone", "waist",
                _total_acc("acc_", "gravity_"), _GENERIC_GYRO, "present",
                note="Total acceleration is reconstructed from iOS userAcceleration + gravity; attitude is QA-only."),
+    StreamSpec("usc_had", "phone_hip", "phone", "front-right hip",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               note="MotionNode IMU on the hip; accelerometer native in g, gyroscope in dps. UniMTS eval suite."),
+    StreamSpec("tnda_har", "watch_wrist", "watch", "right wrist",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               note="Right-wrist IMU from the UniMTS TNDA-HAR bundle (cols 12:18); accel m/s^2 (gravity present), gyro rad/s."),
+    StreamSpec("ut_complex", "watch_wrist", "watch", "wrist",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               note="Wrist-worn phone (smartwatch emulation); complex hand-gesture activities. Accel m/s^2 (gravity present)."),
 
     # Deployment-plausible diagnostic views, never mixed into the primary score.
     StreamSpec("shoaib", "phone_left_pocket", "phone", "left trouser pocket",

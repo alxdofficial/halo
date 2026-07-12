@@ -34,6 +34,9 @@ EXPECTED_PRIMARY_CHANNELS = {
     "mobiact": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "shoaib": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "inclusivehar": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+    "usc_had": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+    "tnda_har": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+    "ut_complex": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
 }
 
 

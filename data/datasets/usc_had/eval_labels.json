@@ -1,0 +1,48 @@
+{
+  "dataset": "usc_had",
+  "protocol_version": "v2",
+  "source": "Native USC-HAD activity names (Readme Section 3), cleaned/underscored, matching the converter's labels.json. Frozen for eval v2 - no rephrasing at evaluation time.",
+  "labels": [
+    "elevator_down",
+    "elevator_up",
+    "jumping_up",
+    "running_forward",
+    "sitting",
+    "sleeping",
+    "standing",
+    "walking_downstairs",
+    "walking_forward",
+    "walking_left",
+    "walking_right",
+    "walking_upstairs"
+  ],
+  "idx_to_label": {
+    "0": "elevator_down",
+    "1": "elevator_up",
+    "2": "jumping_up",
+    "3": "running_forward",
+    "4": "sitting",
+    "5": "sleeping",
+    "6": "standing",
+    "7": "walking_downstairs",
+    "8": "walking_forward",
+    "9": "walking_left",
+    "10": "walking_right",
+    "11": "walking_upstairs"
+  },
+  "n_classes": 12,
+  "sampling_rate_hz": 100,
+  "n_subjects": 14,
+  "common_classes_exact": [
+    "sitting",
+    "standing",
+    "walking_downstairs",
+    "walking_upstairs"
+  ],
+  "proposed_semantic_pairs": {},
+  "conse": {
+    "text_encoder": "all-MiniLM-L6-v2",
+    "pooling": "mean",
+    "top_T": 10
+  }
+}

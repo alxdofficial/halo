@@ -1,0 +1,52 @@
+{
+  "dataset": "ut_complex",
+  "protocol_version": "v2",
+  "source": "Native UT-Complex activity names (Readme activity-label codes), cleaned/underscored, matching the converter's labels.json. Frozen for eval v2 - no rephrasing at evaluation time.",
+  "labels": [
+    "biking",
+    "drinking_coffee",
+    "eating",
+    "jogging",
+    "sitting",
+    "smoking",
+    "standing",
+    "talking",
+    "typing",
+    "walking",
+    "walking_downstairs",
+    "walking_upstairs",
+    "writing"
+  ],
+  "idx_to_label": {
+    "0": "biking",
+    "1": "drinking_coffee",
+    "2": "eating",
+    "3": "jogging",
+    "4": "sitting",
+    "5": "smoking",
+    "6": "standing",
+    "7": "talking",
+    "8": "typing",
+    "9": "walking",
+    "10": "walking_downstairs",
+    "11": "walking_upstairs",
+    "12": "writing"
+  },
+  "n_classes": 13,
+  "sampling_rate_hz": 50,
+  "n_subjects": 10,
+  "common_classes_exact": [
+    "jogging",
+    "sitting",
+    "standing",
+    "walking",
+    "walking_downstairs",
+    "walking_upstairs"
+  ],
+  "proposed_semantic_pairs": {},
+  "conse": {
+    "text_encoder": "all-MiniLM-L6-v2",
+    "pooling": "mean",
+    "top_T": 10
+  }
+}

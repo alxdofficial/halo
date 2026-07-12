@@ -32,6 +32,7 @@ GRAVITY_MS2 = 9.80665
 # both in g, so they ARRIVE here in g.
 ACC_UNIT_G = frozenset({
     "uci_har", "hapt", "unimib_shar", "capture24", "harth", "motionsense", "inclusivehar",
+    "usc_had",  # MotionNode accelerometer reported in g (USC-HAD Readme); |acc|~1.07 g still.
 })
 
 # --- Accelerometer in m/s² → scale 1/9.80665 -------------------------------------------------------
@@ -40,6 +41,7 @@ ACC_UNIT_G = frozenset({
 # never fabricated here.
 ACC_UNIT_MS2 = frozenset({
     "hhar", "pamap2", "wisdm", "kuhar", "mhealth", "realworld", "mobiact", "shoaib",
+    "tnda_har", "ut_complex",  # accelerometer in m/s^2 (gravity present, |acc|~9.8) -> rescale to g.
 })
 
 

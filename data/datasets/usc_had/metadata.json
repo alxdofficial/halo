@@ -1,0 +1,40 @@
+{
+  "display_name": "USC-HAD",
+  "num_sessions": 840,
+  "sampling_rate_hz": 100,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z",
+    "gyro_x": "gyro_x",
+    "gyro_y": "gyro_y",
+    "gyro_z": "gyro_z"
+  },
+  "extra_channels": [],
+  "placement": "hip",
+  "num_subjects": 14,
+  "activities": [
+    "elevator_down",
+    "elevator_up",
+    "jumping_up",
+    "running_forward",
+    "sitting",
+    "sleeping",
+    "standing",
+    "walking_downstairs",
+    "walking_forward",
+    "walking_left",
+    "walking_right",
+    "walking_upstairs"
+  ],
+  "role": "eval",
+  "source": "https://sipi.usc.edu/had/ (USC-HAD.zip). Original raw .mat recordings: MotionNode IMU on the front-right hip, 100 Hz, tri-axial accelerometer in g (+-6g, gravity present) and gyroscope in dps (+-500). 14 subjects x 12 activities x 5 trials."
+}

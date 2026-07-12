@@ -1,0 +1,40 @@
+{
+  "dataset": "tnda_har",
+  "protocol_version": "v2",
+  "source": "TNDA-HAR label strings from the UniMTS TNDA-HAR.json label_dictionary, cleaned/underscored, matching the converter's labels.json. Frozen for eval v2 - no rephrasing at evaluation time.",
+  "labels": [
+    "ascending_stairs",
+    "descending_stairs",
+    "jogging",
+    "lying_down",
+    "riding",
+    "sitting",
+    "standing",
+    "walking"
+  ],
+  "idx_to_label": {
+    "0": "ascending_stairs",
+    "1": "descending_stairs",
+    "2": "jogging",
+    "3": "lying_down",
+    "4": "riding",
+    "5": "sitting",
+    "6": "standing",
+    "7": "walking"
+  },
+  "n_classes": 8,
+  "sampling_rate_hz": 50,
+  "n_subjects": 23,
+  "common_classes_exact": [
+    "jogging",
+    "sitting",
+    "standing",
+    "walking"
+  ],
+  "proposed_semantic_pairs": {},
+  "conse": {
+    "text_encoder": "all-MiniLM-L6-v2",
+    "pooling": "mean",
+    "top_T": 10
+  }
+}
