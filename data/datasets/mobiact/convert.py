@@ -26,8 +26,10 @@ import numpy as np
 import pandas as pd
 
 # Add parent to path for shared utilities
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from data.scripts.assembly.windowing import create_variable_windows
+# NOTE: mobiact is Kaggle-terms-gated (kmknation/mobifall-dataset-v20 returns 403 until the terms are
+# accepted on kaggle.com), so this converter follows the standard recipe but is UNTESTED here — verify
+# the grids once the download is available.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 
 # Activity mapping - standardized names
@@ -52,8 +54,9 @@ ACTIVITIES = {
 }
 
 # Paths
-RAW_DIR = Path("data/raw/mobiact")
-OUTPUT_DIR = Path("data/mobiact")
+DS_DIR = Path(__file__).resolve().parent
+RAW_DIR = DS_DIR / "downloads"
+OUTPUT_DIR = DS_DIR
 
 # Target sampling rate
 TARGET_SAMPLE_RATE = 50.0
@@ -373,25 +376,17 @@ def convert_dataset():
             activity = trial_info["activity"]
             subject = trial_info["subject"]
             trial = trial_info["trial"]
-            session_prefix = f"{activity}_{subject:02d}_{trial:02d}"
+            session_id = f"{activity}_{subject:02d}_{trial:02d}"
 
-            # Split long sessions into variable-length windows
-            windows = create_variable_windows(
-                df=df,
-                session_prefix=session_prefix,
-                activity=activity_name,
-                sample_rate=TARGET_SAMPLE_RATE,
-                seed=42 + subject * 100 + trial,
-            )
+            # Whole continuous single-activity trial = ONE session (build_grids does the 6 s
+            # windowing). Subject id for subject-disjoint splits (read by iter_sessions).
+            df["subject"] = f"s{subject:02d}"
+            session_dir = sessions_dir / session_id
+            session_dir.mkdir(exist_ok=True)
+            df.to_parquet(session_dir / "data.parquet", index=False)
 
-            # Save each window
-            for window_id, window_df, window_activity in windows:
-                window_path = sessions_dir / window_id
-                window_path.mkdir(exist_ok=True)
-                window_df.to_parquet(window_path / "data.parquet", index=False)
-
-                all_labels[window_id] = [window_activity]
-                session_count += 1
+            all_labels[session_id] = [activity_name]
+            session_count += 1
 
             if session_count % 100 == 0:
                 print(f"  Processed {session_count} sessions...")
@@ -426,25 +421,16 @@ def convert_dataset():
                     skipped_count += 1
                     continue
 
-                session_prefix = f"{activity}_{subject:02d}_{trial:02d}"
+                session_id = f"{activity}_{subject:02d}_{trial:02d}"
 
-                # Split long sessions into variable-length windows
-                windows = create_variable_windows(
-                    df=df,
-                    session_prefix=session_prefix,
-                    activity=activity_name,
-                    sample_rate=TARGET_SAMPLE_RATE,
-                    seed=42 + subject * 100 + trial,
-                )
+                # Whole continuous single-activity trial = ONE session (build_grids windows it).
+                df["subject"] = f"s{subject:02d}"
+                session_dir = sessions_dir / session_id
+                session_dir.mkdir(exist_ok=True)
+                df.to_parquet(session_dir / "data.parquet", index=False)
 
-                # Save each window
-                for window_id, window_df, window_activity in windows:
-                    window_path = sessions_dir / window_id
-                    window_path.mkdir(exist_ok=True)
-                    window_df.to_parquet(window_path / "data.parquet", index=False)
-
-                    all_labels[window_id] = [window_activity]
-                    session_count += 1
+                all_labels[session_id] = [activity_name]
+                session_count += 1
 
     # Save labels.json
     with open(OUTPUT_DIR / "labels.json", "w") as f:
