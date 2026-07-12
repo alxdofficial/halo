@@ -82,10 +82,34 @@ Closed-vocab baselines (CrossHAR, LiMU-BERT, harnet) reach the open-set eval via
 text-native ones (UniMTS, NormWear) use their own text tower. Metric: **macro-F1**, subject-disjoint,
 zero-shot vs each dataset's own label strings.
 
-## 5. Completeness of the frozen-SOTA set
+## 5. Completeness of the frozen-SOTA set (verified survey, 2026-07-12)
 
-Current frozen set spans three archetypes: large-scale **accel SSL** (harnet), **language-aligned
-mocap-sim** (UniMTS), **multimodal physiological FM** (NormWear). Candidates to consider adding are
-tracked by a verified landscape survey (see the session notes / `[[halo-baseline-verified-contracts]]`);
-the leading candidate is **ImageBind** (frozen multimodal binding with an IMU tower + text — used as a
-baseline by *both* UniMTS and NormWear). This section is updated once the survey lands.
+The current set spans the three foundation-model schools cleanly — large-scale **accel SSL** (harnet),
+**language-aligned mocap-sim** (UniMTS), **multimodal physiological FM** (NormWear) — plus the two
+small-SSL floors (CrossHAR, LiMU-BERT). A verified landscape survey found it **nearly comprehensive**,
+with **one gap a reviewer will flag**.
+
+**ADD:**
+- **ImageBind** (Meta, CVPR 2023) — **recommended, high priority, cheap.** The canonical multimodal
+  foundation model with a released IMU tower (accel+gyro) + text zero-shot, and — decisively — **both
+  UniMTS and NormWear benchmark against it.** Released `imagebind_huge` checkpoint; frozen; needs only an
+  input adapter (cosine tier, like UniMTS). Its IMU was trained on Ego4D head-mounted single-location, so
+  it scores low on phone/watch HAR (~12.5% acc in UniMTS Table 1) — that is the *point*: the "generic
+  multimodal binding fails on phone/watch HAR" reference floor. Closes the obvious reviewer gap with no
+  retraining.
+- **PRIMUS** (Nokia Bell Labs, ICASSP 2025) — **optional.** Released IMU-SSL encoder (Zenodo weights,
+  Ego4D, accel+gyro 50 Hz). Downstream use is **few-shot/linear-probe, not zero-shot** → belongs in the
+  SSL tier alongside CrossHAR/LiMU-BERT, only if we want a fresh 2024–25 IMU-SSL point. Else cite.
+
+**SKIP (with reviewer-ready reasons):**
+- **IMU2CLIP** — code only, **no released weights** (UniMTS re-pretrained it); Ego4D; already reported by UniMTS. Cite.
+- **SensorLM (Google, NeurIPS 2025) / SensorLLM (EMNLP 2025) / LLaSA** — sensor-language models; **no distributable weights** (private Fitbit/Pixel data) and/or captioning-QA, not clean open-set classifiers, and slow. Cite as concurrent SOTA. *(Also the works to check for the "free-language channel-conditioning is unique to HALO" claim — see §6.)*
+- **AURA-MFM** — preprint, no release, smartglasses. Cite.
+- **HARGPT / IMUGPT / LLaVA** — prompt-only LLM/VLM; **already in UniMTS's zero-shot table and beaten by it**, so including UniMTS subsumes this tier. Skip the run.
+- **Generic TS FMs — Chronos, MOIRAI, TimesFM** — forecasting; cannot do zero-shot open-set classification (no label-semantic head). Skip.
+- **MOMENT, GPT4TS, UniTS, OTiS** — classify only with a **trained head** (not zero-shot/open-set) and are heavy. Skip. *(Rationale upgraded from "too slow" to "generic TS FM, not zero-shot/open-set-capable" — more defensible.)*
+
+**Verdict:** the **3 frozen + 2 self-trained** set is defensible; adding **ImageBind** makes it
+reviewer-proof. No general-purpose TS FM and no LLM-prompting method belongs in the *run* set (UniMTS
+subsumes the zero-shot LLM/CLIP tier; TS FMs can't do open-set zero-shot HAR). Reference survey:
+"Foundation Models Defining A New Era in Sensor-based HAR" (arXiv:2604.02711).
