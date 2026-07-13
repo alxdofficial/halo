@@ -50,7 +50,8 @@ def main(argv=None):
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=3431)
     ap.add_argument("--max-per-stream", type=int, default=800,
-                    help="subsample each train stream (smoke); omit / 0 = full corpus")
+                    help="per-stream window cap. DEFAULT 800 = smoke; omitting KEEPS this cap. "
+                         "Pass 0 for the full corpus, or e.g. 20000 for the balanced corpus.")
     ap.add_argument("--gpu", action="store_true")
     args = ap.parse_args(argv)
 
