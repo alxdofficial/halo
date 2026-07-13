@@ -28,6 +28,7 @@ SMOKE (what we run to prove the wiring; under-trained by design):
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from pathlib import Path
 
@@ -43,6 +44,21 @@ CROSSHAR_REPO = Path("/home/alex/code/HALO/legacy_code/auxiliary_repos/CrossHAR"
 
 _HERE = Path(__file__).resolve().parent
 BACKBONE_CKPT = _HERE / "crosshar_backbone.pt"
+
+
+def _seed_worker(worker_id):
+    """Reseed numpy AND stdlib-random per DataLoader worker.
+
+    CrossHAR's span-mask draws from both ``np.random`` (utils.span_mask) and stdlib
+    ``random`` (utils.bert_mask -> random.sample), and masks each item TWICE (two
+    contrastive views). Forked workers inherit identical global RNG state, so without
+    this they emit correlated/duplicate masks -- changing the SSL objective. torch
+    gives each worker a unique ``initial_seed()``; derive both RNGs from it so masking
+    stays diverse AND the run stays reproducible.
+    """
+    seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(seed)
+    random.seed(seed)
 
 
 def main(argv=None):
@@ -82,6 +98,13 @@ def main(argv=None):
         data, labels = augument_dataset(data, labels, method="channel_aug")
         print(f"[crosshar] after channel_aug: {data.shape[0]} windows")
 
+    # augument_dataset seeds its accumulators with float64 np.empty and concatenates,
+    # silently upcasting the whole x6 array to float64 (~12.7 GB -> ~6-7 GB after this).
+    # aug1/aug2 are re-cast to float32 in the Dataset ctor anyway, so float32 is
+    # value-identical to what the model sees; keep the dummy SSL labels float32 too.
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    labels = labels.astype(np.float32, copy=False)
+
     model_cfg = PretrainModelConfig(feature_num=6, hidden=72, hidden_ff=144,
                                     n_layers=1, n_heads=4, seq_len=120, emb_norm=True)
     train_cfg = TrainConfig(seed=args.seed, batch_size=args.batch_size, lr=args.lr,
@@ -96,8 +119,18 @@ def main(argv=None):
 
     ds_train = Dataset4Pretrain(d_train, pipeline=pipeline)
     ds_test = Dataset4Pretrain(d_test, pipeline=pipeline)
-    ld_train = DataLoader(ds_train, shuffle=True, batch_size=train_cfg.batch_size, drop_last=True)
-    ld_test = DataLoader(ds_test, shuffle=False, batch_size=train_cfg.batch_size, drop_last=True)
+    # num_workers>0 overlaps CrossHAR's per-item span-masking -- which runs TWICE per
+    # item (two contrastive views) and is the dominant cost -- with GPU compute.
+    # _seed_worker keeps each worker's mask RNG independent (see above). drop_last kept
+    # (NT-Xent needs a fixed batch size). Pure-speed, faithful. Measured ~1.6x fp32.
+    ld_train = DataLoader(ds_train, shuffle=True, batch_size=train_cfg.batch_size,
+                          drop_last=True, num_workers=4, pin_memory=True,
+                          persistent_workers=True, prefetch_factor=4,
+                          worker_init_fn=_seed_worker)
+    ld_test = DataLoader(ds_test, shuffle=False, batch_size=train_cfg.batch_size,
+                         drop_last=True, num_workers=2, pin_memory=True,
+                         persistent_workers=True, prefetch_factor=4,
+                         worker_init_fn=_seed_worker)
     if len(ld_train) == 0 or len(ld_test) == 0:
         raise SystemExit(
             f"batch_size={train_cfg.batch_size} too large for train={len(d_train)}/"

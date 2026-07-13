@@ -26,6 +26,7 @@ SMOKE (what we run to prove the wiring; under-trained by design):
 from __future__ import annotations
 
 import argparse
+import random
 import sys
 from pathlib import Path
 
@@ -41,6 +42,21 @@ LIMU_REPO = Path("/home/alex/code/HALO/legacy_code/auxiliary_repos/LIMU-BERT-Pub
 
 _HERE = Path(__file__).resolve().parent
 BACKBONE_CKPT = _HERE / "limubert_backbone.pt"
+
+
+def _seed_worker(worker_id):
+    """Reseed numpy AND stdlib-random per DataLoader worker.
+
+    LiMU-BERT's span-mask draws from both ``np.random`` (utils.span_mask) and
+    stdlib ``random`` (utils.bert_mask -> random.sample). Forked workers inherit
+    identical global RNG state, so without this they emit correlated/duplicate
+    masks across workers -- shrinking mask diversity and changing the SSL
+    objective. torch assigns each worker a unique ``initial_seed()``; derive both
+    RNGs from it so masking stays diverse AND the run stays reproducible.
+    """
+    seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(seed)
+    random.seed(seed)
 
 
 def main(argv=None):
@@ -71,6 +87,12 @@ def main(argv=None):
     labels = np.zeros((data.shape[0], data.shape[1], 2), dtype=np.float32)  # dummy (SSL)
     print(f"[limubert] corpus: {data.shape[0]} windows, shape {data.shape}")
 
+    # Apply LiMU-BERT's deterministic accel normalization ONCE to the pooled array
+    # instead of inside every __getitem__. For 6-ch data Preprocess4Normalization is
+    # exactly accel[:3] /= 9.8 (the magnetometer branch only fires at 9 channels), so
+    # this is value-identical and lets the per-item pipeline drop to masking-only.
+    data[:, :, :3] /= 9.8
+
     model_cfg = PretrainModelConfig(hidden=72, hidden_ff=144, feature_num=6,
                                     n_layers=4, n_heads=4, seq_len=120, emb_norm=True)
     train_cfg = TrainConfig(seed=args.seed, batch_size=args.batch_size, lr=args.lr,
@@ -79,14 +101,23 @@ def main(argv=None):
     mask_cfg = MaskConfig(mask_ratio=0.15, mask_alpha=6, max_gram=10,
                           mask_prob=0.8, replace_prob=0.0)
 
-    pipeline = [Preprocess4Normalization(model_cfg.feature_num), Preprocess4Mask(mask_cfg)]
+    # Normalization applied once above (value-identical); per-item work is now masking only.
+    pipeline = [Preprocess4Mask(mask_cfg)]
     d_train, _, d_test, _ = prepare_pretrain_dataset(data, labels, 0.8, seed=train_cfg.seed)
     print(f"[limubert] train={len(d_train)} val={len(d_test)}")
 
     ds_train = LIBERTDataset4Pretrain(d_train, pipeline=pipeline)
     ds_test = LIBERTDataset4Pretrain(d_test, pipeline=pipeline)
-    ld_train = DataLoader(ds_train, shuffle=True, batch_size=train_cfg.batch_size)
-    ld_test = DataLoader(ds_test, shuffle=False, batch_size=train_cfg.batch_size)
+    # num_workers>0 overlaps the CPU span-masking (the measured bottleneck) with GPU
+    # compute; _seed_worker keeps each worker's mask RNG independent (see above).
+    # pin_memory + persistent_workers + prefetch trim per-epoch overhead. Pure-speed,
+    # faithful (identical objective, just parallelized). Measured ~1.6x on the box.
+    ld_train = DataLoader(ds_train, shuffle=True, batch_size=train_cfg.batch_size,
+                          num_workers=4, pin_memory=True, persistent_workers=True,
+                          prefetch_factor=4, worker_init_fn=_seed_worker)
+    ld_test = DataLoader(ds_test, shuffle=False, batch_size=train_cfg.batch_size,
+                         num_workers=2, pin_memory=True, persistent_workers=True,
+                         prefetch_factor=4, worker_init_fn=_seed_worker)
 
     model = lb_models.LIMUBertModel4Pretrain(model_cfg)
     criterion = nn.MSELoss(reduction="none")
