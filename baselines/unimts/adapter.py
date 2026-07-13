@@ -183,7 +183,9 @@ class UniMTSAdapter(CosineAdapter):
         import torch
 
         model = state["model"]
-        tok = clip.tokenize([s.strip() for s in labels]).to(device)          # (L,77)
+        # de-underscore to MATCH eval.scoring's ConSE humanization (scoring.py:400), so the
+        # text tower sees the same label strings as HALO/ConSE (symmetric; audit Q1).
+        tok = clip.tokenize([s.replace("_", " ").strip() for s in labels]).to(device)  # (L,77)
         with torch.no_grad():
             t = model.encode_text(tok)                                       # (L,512)
             t = t / t.norm(dim=-1, keepdim=True)

@@ -236,7 +236,7 @@ class HarnetAdapter(ConSEAdapter):
         label_to_idx = {l: i for i, l in enumerate(vocab)}
         # Head-fit is compute-heavy (frozen features over ~250k windows); use the
         # GPU for it when present, regardless of the (cpu) eval device.
-        fit_device = torch.device("cuda" if torch.cuda.is_available() else device)
+        fit_device = device if isinstance(device, torch.device) else torch.device(device)
         model.to(fit_device)
 
         feats, labs, subjs, used, skipped = [], [], [], [], []

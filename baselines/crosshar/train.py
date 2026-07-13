@@ -86,6 +86,20 @@ def main(argv=None):
     from utils import (Dataset4Pretrain, Preprocess4Mask, prepare_pretrain_dataset,
                        augument_dataset)
 
+    # FIX (audit P0): the upstream CrossHAR Trainer.run() switches models to .eval() for
+    # validation each epoch and NEVER restores .train(), so every epoch after the first
+    # trains with dropout/BatchNorm frozen -- degrading the Contrastive head's BatchNorm1d
+    # (its running stats freeze at epoch-0 values) through the entire contrastive phase.
+    # Restore train mode after each validation. Patched here rather than in the un-versioned
+    # vendored repo so the correctness fix is tracked in git.
+    _ch_orig_run = ch_train.Trainer.run
+    def _run_then_restore_train(self, *a, **k):
+        out = _ch_orig_run(self, *a, **k)
+        self.masked_model.train()
+        self.Contrastive_model.train()
+        return out
+    ch_train.Trainer.run = _run_then_restore_train
+
     device = torch.device("cuda" if (args.gpu and torch.cuda.is_available()) else "cpu")
     print(f"[crosshar] device={device}")
 
@@ -149,6 +163,14 @@ def main(argv=None):
                                str(save_prefix), device, batch_size=train_cfg.batch_size,
                                criterion=criterion)
     trainer.pretrain(ld_train, ld_test)
+
+    # Regression guard for the audit-P0 .train()-restore patch: pretrain's last op is a
+    # validation run() (which sets .eval()); our patch follows it with .train(). If the
+    # models are in eval mode here, the patch is inactive and the contrastive phase trained
+    # with frozen BatchNorm -- fail loudly rather than ship a silently-degraded backbone.
+    assert masked_model.training and contrastive_model.training, (
+        "CrossHAR left in eval mode after pretrain -- the .train()-restore patch is inactive "
+        "(contrastive-phase BatchNorm would be frozen).")
 
     # Trainer saves the best masked model to "<prefix>_masked_6_1.pt"; promote it
     # to the canonical checkpoint the adapter loads.

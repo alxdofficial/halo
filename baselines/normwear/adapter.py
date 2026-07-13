@@ -107,7 +107,8 @@ def _signal_encode_np(model, x_np, query, device):
 @torch.no_grad()
 def _encode_labels(label_strings: Sequence[str], model, device) -> np.ndarray:
     """(L, 2048) TinyLlama embeddings of the candidate labels in NormWear's answer template."""
-    sents = [ANSWER_TEMPLATE.format(l.strip()) for l in label_strings]
+    # de-underscore to MATCH eval.scoring's ConSE humanization (scoring.py:400) -> symmetric label text (audit Q1).
+    sents = [ANSWER_TEMPLATE.format(l.replace("_", " ").strip()) for l in label_strings]
     return model.txt_encode(sents).float().cpu().numpy()
 
 

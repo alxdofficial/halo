@@ -253,7 +253,7 @@ class LiMUBERTAdapter(ConSEAdapter):
         """Fit the softmax head on frozen backbone features over the training
         corpus, selecting the best epoch on a SUBJECT-DISJOINT held-out fold."""
         label_to_idx = {l: i for i, l in enumerate(vocab)}
-        fit_device = torch.device("cuda" if torch.cuda.is_available() else device)
+        fit_device = device if isinstance(device, torch.device) else torch.device(device)
         backbone.to(fit_device)
 
         feats, labs, subjs, used = [], [], [], []

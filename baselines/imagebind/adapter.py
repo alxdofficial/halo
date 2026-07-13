@@ -183,7 +183,8 @@ class ImageBindAdapter(CosineAdapter):
         import torch
 
         model, ModalityType, tok = state["model"], state["ModalityType"], state["tokenizer"]
-        toks = torch.cat([tok(s.strip()).unsqueeze(0) for s in labels], dim=0).to(device)  # (L,77)
+        # de-underscore to MATCH eval.scoring's ConSE humanization (scoring.py:400) -> symmetric label text (audit Q1).
+        toks = torch.cat([tok(s.replace("_", " ").strip()).unsqueeze(0) for s in labels], dim=0).to(device)  # (L,77)
         with torch.no_grad():
             t = model({ModalityType.TEXT: toks})[ModalityType.TEXT]    # (L,1024)
             t = t / t.norm(dim=-1, keepdim=True)
