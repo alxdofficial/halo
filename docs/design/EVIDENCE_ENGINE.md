@@ -83,6 +83,25 @@ VRAM is **not** the binding constraint — you could hold the whole corpus. Elec
    encoder); only *which-k* is non-differentiable, which is fine — we learn an encoder that
    puts good neighbors nearby, not "which neighbor to pick" (kNN-LM / Neural Episodic Control).
 
+### 4.1 Patch vs primitive (memory atom granularity) — build patch-level first
+- **Patch-level atom:** pool the patch's features into one embedding + one clean label. Holistic
+  retrieval ("your window looks like this walking window"). Simple → the MVP (≈ learned ConSE).
+- **Primitive-level atom:** store/retrieve the *parts* (a primitive = a named feature component
+  *within* a patch — a band energy, the eigen-ratio, cadence, …). Parts-based retrieval ("your window
+  has a familiar vertical-rhythm part + arm-swing part") → **compositional** recognition of a
+  never-seen activity as a novel *combination* of familiar parts. Richer, but a primitive has a
+  *diffuse* label (a rhythm appears in many activities), so it needs the constellation-decoder (§6).
+- **Mechanism for patch→primitive: learned subspace heads (multi-vector / ColBERT-style).** Project
+  the patch vector into H sub-vectors (separate projections, not a hard dim-split); each is a primitive
+  that retrieves from its own memory partition; the decoder aggregates per-head evidence. **CATCH:**
+  splitting alone yields *entangled, redundant* heads (no free disentanglement) — and specialization is
+  load-bearing (entangled heads make primitive-level == patch-level with extra steps). Force it via
+  (a) cross-head **decorrelation** (VICReg/Barlow-style), (b) **independent per-head memory + contribution**
+  (a head with no match → "aspect unfamiliar" → feeds novelty/abstain), and — the anchor —
+  (c) **ground a subset of heads in the physical primitives** (supervise head_i to predict cadence /
+  eigen-ratio / coherence). Mix **grounded heads** (interpretable — keep the analysis readable) +
+  **free heads** (decorrelated — capture what we didn't hand-design).
+
 ## 5. "Useful even when wrong" — two testable properties (the foundation-model claim + its eval)
 1. **Analysis-consistency (same-label ⇒ same-analysis).** The evidence/analysis object should
    cluster by *true label* even when top-1 is wrong. A metric-learning objective *on the
