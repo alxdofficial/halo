@@ -144,7 +144,8 @@ model/tokenizer/     SHARED — port the legacy PhysicalFilterbankTokenizer + th
 model/evidence/      NEW — primitive encoder, archetypal memory, evidence decoder.
 training/evidence/    NEW — the retrieval/evidence training harness (its own loop, NOT a
                      conventional classifier trainer). See training/evidence/README.md.
-docs/design/EVIDENCE_ENGINE.md   this file.
+docs/design/EVIDENCE_ENGINE.md   this file (design/rationale).
+docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md   the milestoned build plan (how + order + gates).
 ```
 The tokenizer is the only shared component; the mechanism + harness are self-contained so this
 line never conflates with a standard softmax/cosine training path.

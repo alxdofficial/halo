@@ -5,6 +5,7 @@ evidence-accumulation* mechanism, deliberately **kept separate from any conventi
 softmax/cosine-classifier training path** so the two never conflate.
 
 - **Design:** see [`docs/design/EVIDENCE_ENGINE.md`](../../docs/design/EVIDENCE_ENGINE.md).
+- **Build plan:** see [`docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md`](../../docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md).
 - **Shared with the rest of HALO:** the tokenizer (`model/tokenizer/`, physical filterbank +
   extensions). Everything else here — the archetypal memory, the evidence decoder, the training
   loop — is bespoke to this approach.
