@@ -16,13 +16,46 @@
    can prove it earns its place on a held-out **config** (not just held-out labels).
 5. **MVP spine first, frontier later** (see last section).
 
-## Target file layout (concern-oriented)
+## Two pipelines (top-level decomposition)
+The build is **two pipelines** with a clean seam between them; they can be developed and tested
+largely independently.
+
+**Pipeline A — Representation ("the tokenizer", broadly).** *Everything that turns raw signal into a
+heterogeneity-salient representation:* time-domain **preprocessing** (gravity-align), **cross-channel
+relational/causal learning** (masked-channel set model → residuals), the **learnable frequency
+domain** (fixed physical filterbank + constrained-learnable scattering/SincNet), and the
+**primitives**. This pipeline is itself *learnable and trained* — not a fixed transform.
+
+**Pipeline B — Evidence (memory + prediction).** Maintain the curated non-parametric **archetypal
+memory**, treat retrieved + hypothesis signals as **evidence**, and **predict** an analysis
+(evidential, abstaining).
+
+**Milestone → pipeline:** A = M0–M3 · B = M4–M5 · M6 (eval) spans both · M7 is B.
+
+**The seam (pin it early):** Pipeline A emits, per patch, `{query representation vector(s) + the
+structured primitives + each channel's text id}`; Pipeline B consumes that + a memory of past
+A-representations & labels → analysis. Fix this contract first so each side can be built against a
+stub of the other.
+
+**Training regime — two phases, matching the split:** **Phase 1** pretrains Pipeline A on its own
+objectives (masked-channel SSL + config-conditional salient-contrastive + analysis-consistency),
+validated by the robustness probe + consistency metrics *before B exists*. **Phase 2** builds
+Pipeline B on top (A frozen initially; optional joint fine-tune later). De-risks: prove the
+representation is good before spending effort on the evidence machinery.
+
+## File layout (grouped by pipeline)
 ```
-model/tokenizer/   filterbank.py · primitives.py · scattering.py · preprocess.py   (SHARED)
-model/evidence/    channel_set.py · encoder.py · memory.py · decoder.py · config.py
-training/evidence/ losses.py · train.py · probe_robustness.py · README.md
-eval/              evidence_adapter.py · analysis_metrics.py
-docs/design/       EVIDENCE_ENGINE.md · EVIDENCE_ENGINE_BUILD_PLAN.md (this)
+PIPELINE A — Representation ("the tokenizer": learnable + trained)
+  model/tokenizer/    preprocess.py (gravity-align) · filterbank.py · scattering.py
+                      primitives.py · channel_set.py (masked-channel set model) · encoder.py
+  training/tokenizer/ losses_repr.py (masked-channel SSL + salient-contrastive + consistency)
+                      pretrain.py · probe_robustness.py (M0) · README.md
+PIPELINE B — Evidence (memory + prediction)
+  model/evidence/     memory.py · decoder.py · config.py
+  training/evidence/  train.py (evidence/decoder training on A's representations) · README.md
+SHARED / SEAM
+  eval/               evidence_adapter.py · analysis_metrics.py
+  docs/design/        EVIDENCE_ENGINE.md · EVIDENCE_ENGINE_BUILD_PLAN.md (this)
 ```
 
 ---

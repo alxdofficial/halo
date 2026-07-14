@@ -1,8 +1,9 @@
-# training/evidence/ — evidence-engine harness (separate line of work)
+# training/evidence/ — Pipeline B (Evidence: memory + prediction)
 
-This directory is reserved for the **evidence-engine** training harness — a *retrieval /
-evidence-accumulation* mechanism, deliberately **kept separate from any conventional
-softmax/cosine-classifier training path** so the two never conflate.
+**Pipeline B** of the evidence engine — a *retrieval / evidence-accumulation* mechanism (archetypal
+memory → evidence → evidential/abstaining prediction), trained on top of Pipeline A's representations
+(`training/tokenizer/`). Deliberately **kept separate from any conventional softmax/cosine-classifier
+training path** so the two never conflate.
 
 - **Design:** see [`docs/design/EVIDENCE_ENGINE.md`](../../docs/design/EVIDENCE_ENGINE.md).
 - **Build plan:** see [`docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md`](../../docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md).
