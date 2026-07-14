@@ -38,7 +38,9 @@ A-representations & labels → analysis. Fix this contract first so each side ca
 stub of the other.
 
 **Training regime — two phases, matching the split:** **Phase 1** pretrains Pipeline A on its own
-objectives (masked-channel SSL + config-conditional salient-contrastive + analysis-consistency),
+objectives (masked-channel SSL + causal **next-latent-state prediction** [latent forward-dynamics /
+"HAR world model"; prediction-error = surprise → feeds Pipeline B abstention] + config-conditional
+salient-contrastive + analysis-consistency),
 validated by the robustness probe + consistency metrics *before B exists*. **Phase 2** builds
 Pipeline B on top (A frozen initially; optional joint fine-tune later). De-risks: prove the
 representation is good before spending effort on the evidence machinery.

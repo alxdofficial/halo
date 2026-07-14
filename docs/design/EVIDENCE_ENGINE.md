@@ -114,6 +114,22 @@ VRAM is **not** the binding constraint — you could hold the whole corpus. Elec
    similar samples and (b) slots in coherently. Same machinery as deployment-time learning.
    (Caveat: "aha" as a feeling is not a metric; GT evidence-rank + online improvement are.)
 
+### 5.1 HAR world model: latent forward-dynamics (cheap add; unifies representation + abstention)
+Supervisor suggestion — a "HAR world model." Scope it honestly as a **latent forward-dynamics /
+next-latent-state predictor** (predict future patch latents from the past, JEPA-style, in embedding
+space), **NOT** an action-conditioned RL world model (HAR has no agent-actions to condition on; skip
+rollouts / long-horizon generation / planning — not needed).
+- **Cheap:** it's the research-recommended JEPA latent-masked objective (CHARM) extended along the
+  TEMPORAL axis — same masked-prediction SSL machinery with a causal/temporal mask instead of a channel
+  mask, reusing the causal physical-time (RoPE) encoder we already plan/port. Just a predictor head + a
+  mask schedule added to Pipeline A's Phase-1 pretraining.
+- **Earns its place (not a bolt-on):** the **prediction error = surprise = novelty signal.** A model
+  that predicts motion dynamics is *surprised* when reality deviates (an activity it has no dynamics for)
+  → that surprise feeds Pipeline B's abstention/density gate directly (stacks with the density-aware
+  Dirichlet). So the world model is the *source* of "I don't know": learn dynamics → deviation → surprise
+  → abstain + flag novelty. Unifies the representation objective with open-set, and is a **fresher framing**
+  than the saturated label-interface (do a quick "sensor/IMU world model" novelty-check before leaning on it).
+
 ## 6. Structured positive/negative, located evidence (the frontier — high ceiling, high risk)
 "A,B,C present at locations A,B,C **and** D,E,F absent ⇒ Y" — a structured energy / factor
 graph over *located* features with **inhibitory** (negative) terms. Negative evidence is
