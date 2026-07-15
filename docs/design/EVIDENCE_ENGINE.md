@@ -102,6 +102,41 @@ VRAM is **not** the binding constraint — you could hold the whole corpus. Elec
   eigen-ratio / coherence). Mix **grounded heads** (interpretable — keep the analysis readable) +
   **free heads** (decorrelated — capture what we didn't hand-design).
 
+### 4.2 Evidence head — concrete mechanism + training pipeline (the MVP, made real)
+The "evidence engine" concretely = **a retrieval head over a labeled memory that emits per-candidate
+EVIDENCE (not logits) and can ABSTAIN.** Reduces to ConSE as an ablation (fix τ, uniform weights, no
+head, argmax). *This is more than a classifier precisely because a classifier is what the baselines are.*
+
+**Forward pass** (query rep `z`, candidate labels `{c}` as text):
+```
+1. top-k neighbors of z in memory M={(z_i,label_i)} by a learned metric:  s_i = <g(z), g(z_i)>
+2. per-candidate evidence (the language bridge does the "unseen label" work):
+       e_c = Σ_i softmax(s/τ)_i · relu(<t(label_i), t(c)>)      # neighbor votes ∝ query-sim × label-text-sim
+3. density gate ρ(z)=mean neighbor sim → ê_c = ρ·e_c            # DAEDL: far from memory → low evidence
+4. Dirichlet head: α_c = ê_c + 1;  belief b_c = α_c/Σα;  total S = Σê_c;  uncertainty u = C/Σα
+5. predict argmax b_c  if u < θ  else ABSTAIN
+6. analysis = { e_c, b_c, top-k analogues (z_i,label_i,s_i), u }   # the "useful even when wrong" payload
+```
+Learned = `g, t, τ, density-gate, head` (SMALL); **memory `z_i` are FIXED (non-parametric)** → cheap to
+train, no convergence nightmare (that risk lives entirely in Pipeline A).
+
+**Training pipeline (Phase 2, Pipeline A FROZEN):**
+```
+STEP 0  encode train windows w/ frozen A → memory M (reps + label + config + subject)
+STEP 1  episodic loop:
+   • sample query q (true y, subject subj); M' = M − subj's entries      # subject-disjoint, no self-retrieval leak
+   • with prob p_novel: ALSO drop class y from M'                        # SIMULATED NOVELTY (the abstain trick)
+   • candidates = deploy vocab; forward evidence head → {e_c}, α, belief, u
+   • loss: normal → evidential (Sensoy: grow evidence for y, KL non-y evidence → 0)
+           novelty → abstain (drive total S low / uncertainty u high)
+   • backprop g,t,τ,gate,head only (memory reps stop-grad)
+STEP 2  validate on HELD-OUT configs/datasets: macro-F1 + OSCR/AUROC/FPR95 + ECE + analysis-consistency
+```
+**Key trick:** class-holdout is the *only* way to train abstention — you manufacture novelty so the model
+learns "nothing here supports any candidate → abstain." MVP = frozen A + fixed memory (prototypes) + this
+small head; full engine adds curated/evolving memory (§4), top-down hypothesis + structured evidence (§6),
+online write-on-GT.
+
 ## 5. "Useful even when wrong" — two testable properties (the foundation-model claim + its eval)
 1. **Analysis-consistency (same-label ⇒ same-analysis).** The evidence/analysis object should
    cluster by *true label* even when top-1 is wrong. A metric-learning objective *on the
@@ -129,6 +164,25 @@ rollouts / long-horizon generation / planning — not needed).
   Dirichlet). So the world model is the *source* of "I don't know": learn dynamics → deviation → surprise
   → abstain + flag novelty. Unifies the representation objective with open-set, and is a **fresher framing**
   than the saturated label-interface (do a quick "sensor/IMU world model" novelty-check before leaning on it).
+
+### 5.2 Training objectives — cut to the ELITE 3 (discipline over a menu)
+Risk: a pile of overlapping fancy objectives = a convergence project that yields a *compromise*
+representation that then underperforms downstream. So **Pipeline A Phase-1 = exactly 3**:
+1. **Masked spatio-temporal latent prediction** (JEPA/CHARM: mask *channels AND time*, predict in latent
+   space) — the generative workhorse; **folds in** the masked-channel relational model *and* the world
+   model (masking the future = the dynamics/surprise objective). One objective, two axes.
+2. **Config-conditional supervised contrastive** — the discriminative workhorse; gives discrimination +
+   the heterogeneity-robustness thesis + the retrieval metric structure Pipeline B needs.
+3. **Physical-primitive grounding** (predict cadence / eigen-ratio from the rep) — cheap; keeps features
+   interpretable + physically anchored; = the "grounded heads" idea.
+**Why trust it:** #1+#2 is CrossHAR's *proven* masked+contrastive recipe (we watched it converge and give
+usable HAR features — 35.7 mean). **DEFERRED to ablations** (where the convergence risk lives, so they
+don't gate v1): the **equivariance / augmentation-response operator** (Siamese/BYOL-predictor of Δ *under*
+the transform = equivariance not invariance), **sparse feature-space reconstruction** (bank-as-dictionary,
+sparse code = evidence; feature-space because invariance kills raw reconstruction), and analysis-consistency
+as a *separate* loss (overlaps the contrastive). **Augmentations:** the one non-redundant geometric aug is
+the **physically-correct time-warp** (`accel×1/α², gyro×1/α`) — rotation/translation/uniform-scale commute
+with `d²/dt²`, so the integrate→transform→differentiate detour reduces them to the SO(3)/gain augs we have.
 
 ## 6. Structured positive/negative, located evidence (the frontier — high ceiling, high risk)
 "A,B,C present at locations A,B,C **and** D,E,F absent ⇒ Y" — a structured energy / factor
