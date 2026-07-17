@@ -175,6 +175,26 @@ different-activity apart on held-out configs, and (c) A3 primitive heads learn w
 **Resolves:** open fork #1 (the load-bearing loss) and #2 (task- vs self-consistency utility — decide
 the blend here).
 
+**RESULT (2026-07-18 — HARD GATE PASSED on run 3; `training/tokenizer/outputs/m2_gate/`):**
+Tiny CPU setup (frozen M1 front end + 2-layer trivial encoder, M0 4-stream data, pamap2/wrist held
+out entirely = hardest config transfer). **Held-out-config kNN-BA 0.366 vs 0.284 handcrafted
+grav_band_energy on the same split (+29% rel), monotone 0.178→0.366 over 600 steps and still
+rising; all 3 losses train (a1 2.08→0.07, supcon 4.05→2.89, a3 0.27→0.03); no collapse (eff-rank
+13.6, growing).** Losses live in `training/tokenizer/losses_repr.py` (unit-tested; tests caught a
+0×-inf SupCon NaN + a non-complementary mask coin). The gate itself needed 3 runs — each FAIL was a
+HARNESS flaw, each a real lesson for Phase-1:
+1. **Contrastive must see the CLEAN view** (two forwards: masked for A1, clean for A2/A3) — SupCon
+   computed from the masked forward fights mask noise.
+2. **Config-dropout (p≈0.2) trains the UNKNOWN-config token** — deployment IS an unseen config; an
+   untrained fallback token distorts held-out eval. Keep this in the real system.
+3. **Gravity-align is part of the front end, ALWAYS** (run 2→3: 0.238→0.366) — skipping the
+   canonicalization asks the encoder to relearn M0's winning transform from scratch.
+Also from the M2 visual inspection: time_warp used an unconstrained cubic → clip SATURATION
+edge-held a dead flat tail (~25% of window) and could locally reverse time — fixed with monotone
+PCHIP in `data/scripts/augmentations.py`.
+M2 simplifications to resolve at M3/Phase-1: per-stream config token (→ real channel-text),
+fixed patch_seconds=1.0 (→ multi-scale bucketed sampler), SO(3)+gain only (→ full aug stack).
+
 ## M3 — Config-conditional set encoder (channels as a text-keyed set)  ·  ~4–5 days
 **Goal:** an encoder over the primitive set that is **permutation- and count-invariant** and
 **physical-time-aware** — solving variable channels by construction.

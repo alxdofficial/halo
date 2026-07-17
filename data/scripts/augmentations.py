@@ -417,10 +417,12 @@ class IMUAugmenter:
         vals = np.clip(knots + np.random.randn(spec.n_knots) * spec.strength, 0, 1)
         vals[0], vals[-1] = 0, 1
         vals = np.sort(vals)
-        warped_t = np.clip(
-            interpolate.interp1d(knots, vals, kind="cubic", fill_value="extrapolate")(orig),
-            0, 1,
-        )
+        # PCHIP (monotone cubic), NOT interp1d cubic: an unconstrained cubic through the
+        # knots overshoots past [0,1]; the clip then SATURATES warped_t, which edge-holds
+        # the signal into a flat tail (dead ~25% of the window on strong draws) and can
+        # even locally reverse time between knots. PCHIP is monotone + bounded by
+        # construction -> a true time reparametrization. (Caught by M2 visual inspection.)
+        warped_t = np.clip(interpolate.PchipInterpolator(knots, vals)(orig), 0, 1)
         x = s.data.detach().cpu().numpy()
         out = np.stack(
             [interpolate.interp1d(orig, x[:, c], kind="linear", fill_value="extrapolate")(warped_t)
