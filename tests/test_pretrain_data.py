@@ -1,0 +1,121 @@
+"""Tests for the Phase-1 pretraining data pipeline (real grids; skip when absent)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+import torch
+
+pytestmark = pytest.mark.skipif(
+    not (Path(__file__).resolve().parents[1]
+         / "data/datasets/hhar/grids/harmonised").exists(),
+    reason="harmonised train grids not built",
+)
+
+from training.tokenizer.pretrain_data import (  # noqa: E402
+    CHANNELS,
+    PATCH_SECONDS_CHOICES,
+    BalancedBatchSampler,
+    CorpusIndex,
+    MultiScaleCollate,
+    PretrainDataset,
+    WindowKey,
+    stream_channel_descriptions,
+)
+
+
+@pytest.fixture(scope="module")
+def index():
+    return CorpusIndex(max_per_stream=150, seed=7)
+
+
+def test_corpus_index_is_subject_disjoint(index):
+    train_subj = {(index.refs[k.stream_i].dataset, index.refs[k.stream_i].subjects[k.window_i])
+                  for k in index.train}
+    val_subj = {(index.refs[k.stream_i].dataset, index.refs[k.stream_i].subjects[k.window_i])
+                for k in index.val}
+    assert not (train_subj & val_subj), "train/val share subjects"
+    assert index.train and index.val
+
+
+def test_corpus_excludes_eval_datasets(index):
+    datasets = {r.dataset for r in index.refs}
+    for banned in ("motionsense", "realworld", "shoaib", "inclusivehar",
+                   "tnda_har", "ut_complex"):
+        assert banned not in datasets, f"eval dataset {banned} leaked into pretraining"
+
+
+def test_balanced_sampler_composition(index):
+    sampler = BalancedBatchSampler(index.train, classes_per_batch=4,
+                                   samples_per_class=3, steps_per_epoch=5, seed=1)
+    batches = list(sampler)
+    assert len(batches) == 5
+    for batch in batches:
+        assert len(batch) == 12
+        labels = [index.train[i].label_id for i in batch]
+        counts = {l: labels.count(l) for l in set(labels)}
+        assert all(v == 3 for v in counts.values()), counts
+
+
+def test_item_canonical_slots_and_mask(index):
+    ds = PretrainDataset(index, index.train[:32], augment=True)
+    torch.manual_seed(0)
+    import random as stdlib_random
+
+    import numpy as np
+    np.random.seed(0)
+    stdlib_random.seed(0)
+    for i in range(16):
+        item = ds[i]
+        assert item["data"].shape[1] == 6
+        assert item["channel_mask"].shape == (6,)
+        assert len(item["texts"]) == 6
+        # masked-out slots must be zero-filled
+        for c in range(6):
+            if not item["channel_mask"][c]:
+                assert torch.allclose(item["data"][:, c],
+                                      torch.zeros_like(item["data"][:, c]))
+
+
+@pytest.mark.parametrize("ps", PATCH_SECONDS_CHOICES)
+def test_collate_shapes_and_positions(index, ps):
+    ds = PretrainDataset(index, index.train[:8], augment=False)
+    collate = MultiScaleCollate(fixed_patch_seconds=ps)
+    out = collate([ds[i] for i in range(8)])
+    P = out["patches"].shape[1]
+    assert P == max(1, round(6.0 / ps))
+    assert out["patches"].shape == (8, P, 256, 6)
+    assert out["positions"].shape == (8, P)
+    # positions are patch CENTERS in seconds
+    assert torch.allclose(out["positions"][0, 0], torch.tensor(ps / 2))
+    assert (out["patch_len"] >= 1).all()
+    # A3 targets carry validity, never silent NaN in the valid entries
+    valid_cad = out["cadence_target"][out["cadence_valid"]]
+    assert torch.isfinite(valid_cad).all()
+
+
+def test_collate_handles_per_sample_rates(index):
+    """Rate augmentation gives every sample its own rate; the collate must produce
+    per-sample patch lengths, not assume a shared one."""
+    ds = PretrainDataset(index, index.train[:24], augment=True)
+    import random as stdlib_random
+
+    import numpy as np
+    np.random.seed(3)
+    stdlib_random.seed(3)
+    torch.manual_seed(3)
+    items = [ds[i] for i in range(24)]
+    rates = {round(it["rate"], 1) for it in items}
+    out = MultiScaleCollate(fixed_patch_seconds=1.0)(items)
+    if len(rates) > 1:                      # rate aug fired at least once
+        assert len(set(out["patch_len"].tolist())) > 1, \
+            "per-sample rates must yield per-sample patch lengths"
+    assert (out["patch_len"].float() - out["rates"] * 1.0).abs().max() < 1.0
+
+
+def test_stream_text_parses_placement():
+    texts = stream_channel_descriptions("hhar", "phone_waist")
+    assert len(texts) == 6
+    assert "waist" in texts[0] and "phone" in texts[0]
+    assert "gyroscope" in texts[3]
