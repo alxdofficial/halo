@@ -105,18 +105,10 @@ def git_commit() -> str:
 
 
 def align_batch(batch: dict) -> dict:
-    """Gravity-align every patch stack (M2 lesson 3: ALWAYS part of the front end).
-
-    Alignment runs per patch on the zero-padded (B*P, S, C) view; the gravity
-    estimate uses only the real samples implicitly (zeros contribute nothing to the
-    low-pass mean beyond dilution, and per-patch means the same R applies within a
-    patch — full-window alignment happens upstream in eval paths).
-    """
-    B, P, S, C = batch["patches"].shape
-    flat = batch["patches"].reshape(B * P, S, C)
-    rate = float(batch["rates"].median())
-    aligned, _, _ = gravity_align(flat, list(CHANNELS), rate)
-    batch["patches"] = aligned.reshape(B, P, S, C)
+    """DEPRECATED no-op. Gravity alignment now happens PER WINDOW on real-length data
+    inside MultiScaleCollate (the sweep found aligning the zero-padded patch buffer here
+    was diluted to a ~96% no-op and rotated each patch independently). Kept as a pass-
+    through so older call sites don't break; do not add logic here."""
     return batch
 
 
@@ -142,12 +134,12 @@ def embed(model: PipelineAModel, loader: DataLoader, device, max_windows: int):
     zs, ys = [], []
     seen = 0
     for batch in loader:
-        batch = align_batch(batch)
         out = model.encoder(
             batch["patches"].to(device), batch["rates"].to(device),
             batch["patch_len"].to(device), batch["texts"],
             batch["positions"].to(device),
             channel_mask=batch["channel_mask"].to(device),
+            patch_padding_mask=batch["patch_padding_mask"].to(device),
         )
         zs.append(out["pooled"].cpu())
         ys.append(batch["labels"])
@@ -212,9 +204,10 @@ def main() -> None:
     target_tok.reset_norm_accumulator()
     calib_iter = iter(train_loader)
     for _ in range(cfg.calib_batches):
-        batch = align_batch(next(calib_iter))
-        target_tok.accumulate_norm_stats(batch["patches"], batch["rates"],
-                                         batch["patch_len"])
+        batch = next(calib_iter)          # gravity-aligned + patch-masked in the collate
+        target_tok.accumulate_norm_stats(
+            batch["patches"], batch["rates"], batch["patch_len"],
+            patch_mask=batch["patch_padding_mask"], channel_mask=batch["channel_mask"])
     target_tok.finalize_norm_stats()
     target_tok.eval()
     for p in target_tok.parameters():
@@ -259,12 +252,12 @@ def main() -> None:
 
     model.train()
     for step, batch in enumerate(train_loader, start=1):
-        batch = align_batch(batch)
-        patches = batch["patches"].to(device, non_blocking=True)
+        patches = batch["patches"].to(device, non_blocking=True)   # gravity-aligned in collate
         rates = batch["rates"].to(device)
         patch_len = batch["patch_len"].to(device)
         positions = batch["positions"].to(device)
         channel_mask = batch["channel_mask"].to(device)
+        patch_pad = batch["patch_padding_mask"].to(device)
         labels = batch["labels"].to(device)
         B, P, _, C = patches.shape
 
@@ -276,21 +269,28 @@ def main() -> None:
             eigen_valid=batch["eigen_valid"].to(device),
         )
 
-        # A1 loss only counts tokens that are BOTH masked AND a real channel — otherwise
-        # ~67% accel-only windows waste loss budget "predicting" zero-filled fake gyro.
-        a1_loss_mask = plan.token_mask & channel_mask.unsqueeze(1)
+        # A1 loss only counts tokens that are masked AND a real channel AND a real patch —
+        # otherwise accel-only windows + rate-shortened phantom patches waste loss budget
+        # "predicting" the zero-padding signature.
+        a1_loss_mask = plan.token_mask & channel_mask.unsqueeze(1) & patch_pad.unsqueeze(2)
 
         with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
-            with torch.no_grad():
-                a1_target = target_tok(patches, rates, patch_len)
-            # Filterbank + text computed ONCE; only the transformer tail runs twice.
-            sensor_tokens = model.encoder.tokenize(patches, rates, patch_len)
+            # The filterbank DSP (rDFT + constant-Q einsum) runs in fp32 — fp16 has too
+            # little headroom for the band-energy magnitudes (sweep finding 15). The
+            # transformer/heads stay in autocast fp16. sensor_tokens keeps grad (trainable
+            # proj); only the A1 TARGET is under no_grad.
+            with torch.amp.autocast(device.type, enabled=False):
+                with torch.no_grad():
+                    a1_target = target_tok(patches.float(), rates, patch_len)
+                sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len)
             text_embs, text_masks = model.encoder.encode_texts(batch["texts"], device)
             masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
                                           token_mask=plan.token_mask,
-                                          channel_mask=channel_mask)
+                                          channel_mask=channel_mask,
+                                          patch_padding_mask=patch_pad)
             clean = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
-                                         channel_mask=channel_mask)
+                                         channel_mask=channel_mask,
+                                         patch_padding_mask=patch_pad)
             z = model.a2_proj(clean["pooled"])
             out = elite3_loss(
                 a1_pred=model.a1_head(masked["tokens"]), a1_target=a1_target,

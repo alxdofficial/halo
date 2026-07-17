@@ -316,7 +316,8 @@ class PhysicalFilterbankTokenizer(nn.Module):
         self._dc_acc_sqsum.zero_()
 
     @torch.no_grad()
-    def accumulate_norm_stats(self, patches, sampling_rate_hz, patch_len_samples=None, patch_mask=None):
+    def accumulate_norm_stats(self, patches, sampling_rate_hz, patch_len_samples=None,
+                              patch_mask=None, channel_mask=None):
         """Fold one (augmented) batch into the running per-band log-energy stats.
 
         Only *observable* bands are folded in (Nyquist mask applied per band), so a band
@@ -324,9 +325,12 @@ class PhysicalFilterbankTokenizer(nn.Module):
         filter-tail energy. This keeps the frozen mean equal to the observable-conditional
         mean, so the neutral 0 that forward() imputes for masked bands matches their mean.
 
-        patch_mask: optional (B, P) bool — padded patches are excluded from the stats.
+        patch_mask:   optional (B, P) bool — padded/phantom patches excluded from stats.
+        channel_mask: optional (B, C) bool — ABSENT (zero-filled) channels excluded, so
+                      the frozen mean/sd reflect REAL sensor energy and are not dragged
+                      toward the all-zero signature (~67% of the corpus is accel-only).
         """
-        B, P = patches.shape[0], patches.shape[1]
+        B, P, S, C = patches.shape
         r, N = self._prep_rate_len(sampling_rate_hz, patch_len_samples, B,
                                    patches.device, patches.dtype)
         E, centers, sigma, dc = self._band_energy(patches, r, N)         # (B,P,C,K), dc (B,P,C)
@@ -335,6 +339,8 @@ class PhysicalFilterbankTokenizer(nn.Module):
         w = o.view(B, 1, 1, self.n_bands).expand_as(e).to(torch.float64)
         if patch_mask is not None:
             w = w * patch_mask.view(B, P, 1, 1).to(torch.float64)      # exclude padded patches
+        if channel_mask is not None:
+            w = w * channel_mask.view(B, 1, C, 1).to(torch.float64)    # exclude absent channels
         e = e.reshape(-1, self.n_bands)
         w = w.reshape(-1, self.n_bands)
         self._acc_count += w.sum(dim=0)                                 # per-band counts
@@ -343,13 +349,14 @@ class PhysicalFilterbankTokenizer(nn.Module):
 
         # Signed DC (gravity/tilt) stats: pooled over all channels+patches (one scalar
         # mu/sd), so the feature is axis-agnostic and the m/s^2-vs-g scale is normalized
-        # out. No log1p (dc is signed). Padded patches excluded via patch_mask.
+        # out. No log1p (dc is signed). Padded patches + absent channels excluded.
         if self.use_dc:
             d = dc.to(torch.float64).reshape(B, P, -1)                 # (B,P,C)
+            dw = torch.ones_like(d)
             if patch_mask is not None:
-                dw = patch_mask.view(B, P, 1).to(torch.float64).expand_as(d)
-            else:
-                dw = torch.ones_like(d)
+                dw = dw * patch_mask.view(B, P, 1).to(torch.float64)
+            if channel_mask is not None:
+                dw = dw * channel_mask.view(B, 1, C).to(torch.float64)
             d = d.reshape(-1)
             dw = dw.reshape(-1)
             self._dc_acc_count += dw.sum()

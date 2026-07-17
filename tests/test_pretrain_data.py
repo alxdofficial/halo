@@ -119,3 +119,41 @@ def test_stream_text_parses_placement():
     assert len(texts) == 6
     assert "waist" in texts[0] and "phone" in texts[0]
     assert "gyroscope" in texts[3]
+
+
+def test_no_hapt_uci_leak(index):
+    """hapt (UCI-HAR re-release) must be dropped from the corpus (sweep finding E)."""
+    datasets = {r.dataset for r in index.refs}
+    assert "hapt" not in datasets
+    assert "uci_har" in datasets
+
+
+def test_patch_padding_mask_flags_phantom_patches(index):
+    """Every filled patch is flagged real; any trailing unfilled patch is flagged pad
+    AND is exactly zero (sweep findings B/9/17)."""
+    ds = PretrainDataset(index, index.train[:16], augment=True)
+    out = MultiScaleCollate(fixed_patch_seconds=2.0)([ds[i] for i in range(16)])
+    pad = out["patch_padding_mask"]
+    patches = out["patches"]
+    assert pad.shape == (16, patches.shape[1])
+    assert pad[:, 0].all()                              # first patch always real
+    for b in range(16):
+        for p in range(patches.shape[1]):
+            if not pad[b, p]:
+                assert torch.count_nonzero(patches[b, p]) == 0, "phantom patch not zero"
+
+
+def test_gravity_aligned_in_collate(index):
+    """Collate output must be gravity-canonicalized: for gravity-present accel-only
+    windows, the DC of the filled region points ~+z after alignment."""
+    ds = PretrainDataset(index, index.train[:64], augment=False)   # no aug -> gravity present
+    out = MultiScaleCollate(fixed_patch_seconds=1.0, align_gravity=True)(
+        [ds[i] for i in range(64)])
+    n = int(out["patch_len"][0])
+    # first patch, accel triad, real samples -> mean should be dominated by +z
+    acc0 = out["patches"][:, 0, :n, :3].mean(dim=1)     # (64, 3) DC per window
+    mag = acc0.norm(dim=1)
+    present = mag > 0.5
+    if present.any():
+        z_frac = acc0[present, 2].abs() / mag[present].clamp(min=1e-6)
+        assert z_frac.median() > 0.9, "gravity not aligned to +z in collate"

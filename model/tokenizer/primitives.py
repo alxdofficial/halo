@@ -239,6 +239,15 @@ def cadence(acc: torch.Tensor, rate: float) -> Primitive:
     peak_val, rel_idx = search.max(dim=1)
     peak_lag = rel_idx + lag_lo                                     # (B,)
 
+    # A real fundamental is an INTERIOR local maximum: ac[lag] must exceed both
+    # neighbours. A peak pinned at the search boundary is monotonic decay from a
+    # higher-frequency lobe (fabricates ~4 Hz at lag_lo) or a period longer than the
+    # window (fabricates ~0.5 Hz at lag_hi) — reject it. (Sweep finding 18.)
+    left = ac.gather(1, (peak_lag - 1).clamp(min=0).unsqueeze(1)).squeeze(1)
+    right = ac.gather(1, (peak_lag + 1).clamp(max=T - 1).unsqueeze(1)).squeeze(1)
+    is_local_max = (peak_val >= left) & (peak_val >= right) \
+        & (rel_idx > 0) & (rel_idx < (lag_hi - lag_lo - 1))
+
     # Octave disambiguation: half lag = double frequency (stride -> step).
     half_lag = (peak_lag // 2).clamp(min=1)
     half_val = ac.gather(1, half_lag.unsqueeze(1)).squeeze(1)
@@ -247,7 +256,7 @@ def cadence(acc: torch.Tensor, rate: float) -> Primitive:
     strength = torch.where(use_half, half_val, peak_val)
 
     log2_hz = torch.log2(rate / lag.to(acc.dtype))
-    valid = motion_ok & (strength >= CADENCE_MIN_STRENGTH)
+    valid = motion_ok & (strength >= CADENCE_MIN_STRENGTH) & is_local_max
     values = torch.stack([log2_hz, strength], dim=1)
     return Primitive(values=values, valid=valid)
 

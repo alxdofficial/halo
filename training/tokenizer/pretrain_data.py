@@ -35,13 +35,17 @@ from torch.utils.data import Dataset, Sampler
 
 from data.scripts.augmentations import AugmentationConfig, IMUAugmenter, IMUSample
 from data.scripts.eda.grid_io import GridRef, discover_grids
+from model.tokenizer.preprocess import gravity_align
 from model.tokenizer.primitives import compute_primitives
 
 # ----------------------------------------------------------------------------------------------
 # Corpus configuration
 # ----------------------------------------------------------------------------------------------
+# hapt DROPPED: the sweep confirmed it is the UCI-HAR re-release — same 30 subjects /
+# recordings (per-window NCC 0.98 vs uci_har), so keeping both leaks near-duplicate val
+# windows into train across the pair. uci_har is the canonical windowed release; keep it.
 TRAIN_DATASETS = (
-    "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar", "hapt",
+    "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar",
     "mhealth", "capture24",
 )
 MAX_PER_STREAM = 20_000          # the balanced-corpus cap (107k-scale); PER-STREAM (so
@@ -128,6 +132,10 @@ class CorpusIndex:
                 else:
                     self.train.append(key)
         self.label_ids = label_ids
+        # Shuffle val so any truncated eval subset (embed() caps at val_max_windows) is a
+        # representative cross-dataset sample — index.val is otherwise stream-ordered, so a
+        # 2k cap saw only capture24 (alphabetically first) = 8 of 56 labels.
+        rng.shuffle(self.val)
 
     def summary(self) -> str:
         return (f"{len(self.refs)} streams · {len(self.train)} train / {len(self.val)} val "
@@ -256,26 +264,43 @@ class BalancedBatchSampler(Sampler[list[int]]):
 class MultiScaleCollate:
     """Draw ONE patch_seconds per batch; patchify each sample at its OWN rate.
 
-    Output: patches (B, P, S, 6) zero-padded, patch_len (B,), rates (B,),
-    positions (B, P) seconds, channel_mask (B, 6), texts, labels, and the A3
-    grounding targets computed on the augmented views (validity-masked).
+    Per sample, in order: compute A3 targets on the raw augmented window (dc_tilt needs
+    the un-aligned frame) -> **gravity-align the whole window on its REAL length** (one
+    rotation per window; NOT per zero-padded patch — the sweep found the padded-patch
+    estimate is diluted to a no-op) -> patchify. Trailing patches that the (possibly
+    rate-shortened) window can't fill are flagged in `patch_padding_mask`, never treated
+    as real.
+
+    Output: patches (B, P, S, 6) zero-padded · patch_len (B,) · rates (B,) ·
+    positions (B, P) s · channel_mask (B, 6) · patch_padding_mask (B, P) True=real ·
+    texts · labels · A3 targets (validity-masked).
     """
 
     def __init__(self, dft_size: int = DFT_SIZE,
                  patch_choices: Sequence[float] = PATCH_SECONDS_CHOICES,
-                 fixed_patch_seconds: float | None = None, seed: int = SEED):
+                 fixed_patch_seconds: float | None = None, seed: int = SEED,
+                 align_gravity: bool = True):
         self.dft_size = dft_size
         self.patch_choices = tuple(patch_choices)
         self.fixed = fixed_patch_seconds
-        self.rng = np.random.default_rng(seed)
+        self.align_gravity = align_gravity
+        self.seed = seed
+
+    def _patch_seconds(self, batch: list[dict]) -> float:
+        if self.fixed is not None:
+            return self.fixed
+        # Seed from the batch content (label ids) so the draw is deterministic yet
+        # DIFFERENT across batches/workers — a single cloned rng repeats across workers.
+        key = hash(tuple(item["label_id"] for item in batch)) ^ self.seed
+        return float(np.random.default_rng(key & 0xFFFFFFFF).choice(self.patch_choices))
 
     def __call__(self, batch: list[dict]) -> dict:
-        ps = self.fixed if self.fixed is not None else \
-            float(self.rng.choice(self.patch_choices))
+        ps = self._patch_seconds(batch)
         P = max(1, int(round(WINDOW_SECONDS / ps)))
         B = len(batch)
         patches = torch.zeros(B, P, self.dft_size, len(CHANNELS))
         patch_len = torch.zeros(B, dtype=torch.long)
+        patch_pad = torch.zeros(B, P, dtype=torch.bool)     # True = real patch
         rates = torch.zeros(B)
         cadence_t = torch.zeros(B)
         cadence_v = torch.zeros(B, dtype=torch.bool)
@@ -287,17 +312,22 @@ class MultiScaleCollate:
             n = max(1, int(round(rate * ps)))
             if n > self.dft_size:
                 raise ValueError(f"patch length {n} exceeds dft_size {self.dft_size}")
-            usable = min(P, data.shape[0] // n)
-            for p in range(usable):
-                patches[b, p, :n] = data[p * n:(p + 1) * n]
-            patch_len[b] = n
-            rates[b] = rate
-            # A3 targets on the FINAL augmented view (the §5.2.3 rule)
+            # A3 targets on the RAW augmented view (rotation-invariant; dc_tilt pre-align)
             prims = compute_primitives(data.unsqueeze(0), CHANNELS, rate)
             cadence_t[b] = prims["cadence"].values[0, 0].nan_to_num(0.0)
             cadence_v[b] = prims["cadence"].valid[0]
             eigen_t[b] = prims["eigen_ratios"].values[0]
             eigen_v[b] = prims["eigen_ratios"].valid[0]
+            # Gravity-align the whole window on its true length (one R per window)
+            if self.align_gravity:
+                data, _, _ = gravity_align(data.unsqueeze(0), list(CHANNELS), rate)
+                data = data[0]
+            usable = min(P, data.shape[0] // n)
+            for p in range(usable):
+                patches[b, p, :n] = data[p * n:(p + 1) * n]
+            patch_pad[b, :usable] = True
+            patch_len[b] = n
+            rates[b] = rate
 
         # .contiguous(): expand() aliases memory and pin_memory refuses aliased tensors
         positions = (torch.arange(P).float() * ps + ps / 2).unsqueeze(0) \
@@ -311,6 +341,7 @@ class MultiScaleCollate:
             "texts": [item["texts"] for item in batch],
             "labels": torch.tensor([item["label_id"] for item in batch]),
             "channel_mask": torch.stack([item["channel_mask"] for item in batch]),
+            "patch_padding_mask": patch_pad,
             "cadence_target": cadence_t,
             "cadence_valid": cadence_v,
             "eigen_target": eigen_t,
