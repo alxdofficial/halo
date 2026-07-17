@@ -63,6 +63,8 @@ def make_mask_plan(
     gyro_bias: float = GYRO_DROP_BIAS,
     causal_p: float = CAUSAL_FRACTION,
     device: torch.device = torch.device("cpu"),
+    valid_patches: Optional[torch.Tensor] = None,   # (B, T) True = real patch
+    channel_mask: Optional[torch.Tensor] = None,    # (B, C) True = real channel
 ) -> MaskPlan:
     """Structured spatio-temporal mask (A1 spec §5.2.1).
 
@@ -71,41 +73,62 @@ def make_mask_plan(
     - channel stream: whole-channel mask events, biased toward dropping the gyro triad;
     - temporal stream: contiguous random block, or the causal variant (mask the tail =
       predict the future = the world-model objective).
+
+    VALIDITY-AWARE (pass valid_patches + channel_mask): the temporal block lands only on
+    REAL patches (per-sample `usable` count) and channel drops hit only REAL channels, so
+    A1 supervision (masked ∩ real) is non-empty for every window with >= 2 real patches.
+    Without them (defaults None) the legacy blind grid mask is used — kept for unit tests.
     """
     rnd = lambda *s: torch.rand(*s, generator=generator, device=device)  # noqa: E731
     mask = torch.zeros(B, T, C, dtype=torch.bool, device=device)
-
-    # --- temporal stream (per sample): contiguous block of ~time_ratio * T ---
-    causal = rnd(B) < causal_p
-    block = max(1, min(T - MIN_VISIBLE_TIME, int(round(time_ratio * T))))
-    starts = (rnd(B) * (T - block + 1)).long()
     t_idx = torch.arange(T, device=device).unsqueeze(0)                  # (1, T)
-    random_block = (t_idx >= starts.unsqueeze(1)) & (t_idx < (starts + block).unsqueeze(1))
-    causal_block = t_idx >= (T - block)                                  # mask the tail
+
+    # per-sample number of maskable time steps: real patches if known, else all T
+    usable = (valid_patches.sum(dim=1) if valid_patches is not None
+              else torch.full((B,), T, device=device)).long()           # (B,)
+
+    # --- temporal stream: contiguous block within [0, usable) per sample ---
+    causal = rnd(B) < causal_p
+    keep_vis = torch.clamp(usable - 1, min=1)                            # leave >=1 visible
+    keep_vis = torch.minimum(keep_vis, torch.full_like(keep_vis, MIN_VISIBLE_TIME))
+    max_block = torch.clamp(usable - keep_vis, min=0)                    # (B,) 0 if usable<=1
+    block = torch.minimum(torch.clamp(torch.round(time_ratio * usable.float()).long(),
+                                      min=1), max_block)                 # (B,) 0 where usable<=1
+    max_start = torch.clamp(usable - block, min=0)
+    start = (rnd(B) * (max_start + 1).float()).long()
+    lo = start.unsqueeze(1)
+    hi = (start + block).unsqueeze(1)
+    random_block = (t_idx >= lo) & (t_idx < hi) & (block.unsqueeze(1) > 0)
+    causal_block = (t_idx >= (usable - block).unsqueeze(1)) & (t_idx < usable.unsqueeze(1)) \
+        & (block.unsqueeze(1) > 0)
     time_mask = torch.where(causal.unsqueeze(1), causal_block, random_block)  # (B, T)
     mask |= time_mask.unsqueeze(2)
 
-    # --- channel stream (per sample event): whole channels across all time.
-    # ONE coin decides the event type: gyro-triad drop (the modality shift) vs a single
-    # random channel drop (dead-channel robustness; may hit any channel).
+    # --- channel stream (per sample event): whole channels across all time ---
     event = rnd(B) < channel_event_p
     coin = rnd(B)
     if gyro_channels:
-        drop_gyro = event & (coin < gyro_bias)
+        gyro_real = (channel_mask[:, gyro_channels].all(dim=1) if channel_mask is not None
+                     else torch.ones(B, dtype=torch.bool, device=device))
+        drop_gyro = event & (coin < gyro_bias) & gyro_real       # only drop REAL gyro
         for c in gyro_channels:
             mask[drop_gyro, :, c] = True
-        single = event & (coin >= gyro_bias)
+        single = event & ~((coin < gyro_bias) & gyro_real)
     else:
         single = event
-    chan = (rnd(B) * C).long()
+    # single drop picks a REAL channel (score absent channels out) so it never wastes
+    scores = rnd(B, C)
+    if channel_mask is not None:
+        scores = scores.masked_fill(~channel_mask, -1.0)
+    chan = scores.argmax(dim=1)
     rows = torch.nonzero(single).squeeze(1)
     mask[rows, :, chan[rows]] = True
 
-    # --- floor: guarantee MIN_VISIBLE_TIME fully-visible time steps ---
-    visible_t = (~mask).any(dim=2)                                       # (B, T)
-    starving = visible_t.sum(dim=1) < MIN_VISIBLE_TIME
-    if bool(starving.any()):
-        mask[starving, :MIN_VISIBLE_TIME, :] = False
+    # never mask a non-real token (keeps the mask itself clean; loss also intersects)
+    if valid_patches is not None:
+        mask &= valid_patches.unsqueeze(2)
+    if channel_mask is not None:
+        mask &= channel_mask.unsqueeze(1)
 
     return MaskPlan(token_mask=mask, kind="mixed")
 

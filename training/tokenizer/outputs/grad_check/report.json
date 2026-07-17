@@ -6,34 +6,34 @@
     6
   ],
   "loss_parts": {
-    "a1_masked": 1.774514079093933,
-    "a2_supcon": 5.549581527709961,
-    "a3_grounding": 0.24550741910934448
+    "a1_masked": 1.8300141096115112,
+    "a2_supcon": 5.5520124435424805,
+    "a3_grounding": 0.4284414052963257
   },
   "activation_rms": {
-    "sensor_tokens(filterbank)": 0.5531,
-    "text_embeddings(raw MiniLM)": 0.4463,
-    "text_after_proj": 0.2556,
-    "fused_tokens": 0.5654,
-    "fusion_delta(fused-sensor)": 0.1001,
+    "sensor_tokens(filterbank)": 0.5636,
+    "text_embeddings(raw MiniLM)": 0.4459,
+    "text_after_proj": 0.2735,
+    "fused_tokens": 0.5778,
+    "fusion_delta(fused-sensor)": 0.1022,
     "transformer_out": 1.0,
-    "pooled": 0.9117,
-    "a2_proj_out": 0.1968
+    "pooled": 0.8896,
+    "a2_proj_out": 0.1682
   },
   "fusion_delta_ratio": 0.181,
   "grad_norms": {
-    "filterbank.proj": 2.33983,
-    "mask_token": 1.35847,
-    "fusion": 10.87761,
-    "a1_head": 3.55561,
-    "a2_proj": 1.92867,
-    "a3_cadence": 0.04825,
-    "a3_eigen": 0.09984,
+    "filterbank.proj": 2.53404,
+    "mask_token": 1.09046,
+    "fusion": 7.91773,
+    "a1_head": 3.87011,
+    "a2_proj": 2.46729,
+    "a3_cadence": 0.41558,
+    "a3_eigen": 0.07817,
     "transformer_layers(shallow->deep)": [
-      4.86986,
-      3.25045,
-      3.13752,
-      3.1912
+      4.52268,
+      3.11678,
+      2.9921,
+      3.01264
     ]
   },
   "checks": {

@@ -268,7 +268,10 @@ def main() -> None:
         labels = batch["labels"].to(device)
         B, P, _, C = patches.shape
 
-        plan = make_mask_plan(B, P, C, GYRO_IDX, device=device)
+        # validity-aware: temporal block lands on real patches, drops hit real channels,
+        # so A1 supervision is non-empty for every window with >=2 real patches
+        plan = make_mask_plan(B, P, C, GYRO_IDX, device=device,
+                              valid_patches=patch_pad, channel_mask=channel_mask)
         targets = GroundingTargets(
             cadence_log2hz=batch["cadence_target"].to(device),
             cadence_valid=batch["cadence_valid"].to(device),

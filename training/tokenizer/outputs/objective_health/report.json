@@ -1,0 +1,110 @@
+{
+  "batches": 60,
+  "windows": 15360,
+  "batch_size": 256,
+  "patch_seconds_draws": [
+    0.5,
+    0.75,
+    1.0,
+    1.5
+  ],
+  "A1_masked_latent": {
+    "patches_per_window(T)": {
+      "n": 15360,
+      "p0": 4.0,
+      "p10": 4.0,
+      "p50": 6.0,
+      "p90": 12.0,
+      "p100": 12.0,
+      "mean": 7.533
+    },
+    "real_patches_per_window": {
+      "n": 15360,
+      "p0": 1.0,
+      "p10": 3.0,
+      "p50": 6.0,
+      "p90": 12.0,
+      "p100": 12.0,
+      "mean": 6.374
+    },
+    "real_channels_per_window": {
+      "n": 15360,
+      "p0": 3.0,
+      "p10": 3.0,
+      "p50": 3.0,
+      "p90": 6.0,
+      "p100": 6.0,
+      "mean": 3.78
+    },
+    "supervised_tokens_per_window": {
+      "n": 15360,
+      "p0": 0.0,
+      "p10": 3.0,
+      "p50": 12.0,
+      "p90": 24.0,
+      "p100": 54.0,
+      "mean": 13.25
+    },
+    "masked_fraction_of_real_tokens": {
+      "n": 15360,
+      "p0": 0.0,
+      "p10": 0.4,
+      "p50": 0.5,
+      "p90": 0.667,
+      "p100": 0.786,
+      "mean": 0.524
+    },
+    "windows_with_ZERO_supervision": 116,
+    "windows_with_ZERO_supervision_frac": 0.0076
+  },
+  "A2_supcon": {
+    "positives_per_anchor": {
+      "n": 15360,
+      "p0": 7.0,
+      "p10": 7.0,
+      "p50": 7.0,
+      "p90": 7.0,
+      "p100": 7.0,
+      "mean": 7.0
+    },
+    "valid_anchors_per_batch(of 256)": {
+      "n": 60,
+      "p0": 256.0,
+      "p10": 256.0,
+      "p50": 256.0,
+      "p90": 256.0,
+      "p100": 256.0,
+      "mean": 256.0
+    },
+    "distinct_labels_per_batch": {
+      "n": 60,
+      "p0": 32.0,
+      "p10": 32.0,
+      "p50": 32.0,
+      "p90": 32.0,
+      "p100": 32.0,
+      "mean": 32.0
+    },
+    "anchors_with_ZERO_positives_frac": 0.0
+  },
+  "A3_grounding": {
+    "cadence_valid_per_batch(of 256)": {
+      "n": 60,
+      "p0": 47.0,
+      "p10": 54.8,
+      "p50": 70.0,
+      "p90": 79.1,
+      "p100": 89.0,
+      "mean": 68.617
+    },
+    "eigen_valid_per_batch(of 256)": {
+      "n": 60,
+      "p0": 256.0,
+      "p10": 256.0,
+      "p50": 256.0,
+      "p90": 256.0,
+      "p100": 256.0,
+      "mean": 256.0
+    }
+  }
+}

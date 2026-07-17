@@ -59,7 +59,10 @@ GRAVITY_AUG_P = 0.15             # DROP from default_v2's 0.5: the audit found g
                                  # iOS-userAcceleration robustness without dominating.
 MIN_WINDOWS_TO_ANCHOR = 8        # labels below this can't form real SupCon positives
                                  # (would be duplicate-oversampled); excluded from anchoring
-PATCH_SECONDS_CHOICES = (0.5, 0.75, 1.0, 1.5, 2.0)   # per-batch multi-scale draw
+# per-batch multi-scale draw -> T = 6s / ps in {12, 8, 6, 4}. 2.0s (T=3) DROPPED: T=3 is
+# too coarse for masked prediction, and it's where native-short windows (uci_har 2.56s,
+# unimib falls) collapse to a single un-maskable patch (objective-health audit 2026-07-18).
+PATCH_SECONDS_CHOICES = (0.5, 0.75, 1.0, 1.5)
 DFT_SIZE = 256                   # must cover max rate (100 Hz) x max patch (2 s) = 200
 CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
 SEED = 20260718

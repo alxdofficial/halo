@@ -244,7 +244,9 @@ xyz]` (pad+mask for accel-only sources). Tokenizer patch is defined in **seconds
 `T × C` where `T = window_s / patch_s`.
 - **Patch-duration is a multi-scale augmentation axis, NOT a fixed HP.** The current `patch_seconds=1.5`
   gives only `T=4` — too coarse for a temporal/world-model mask. Instead **sample `patch_seconds` per
-  batch** from a range (~`{0.5, 0.75, 1.0, 1.5, 2.0}` s → `T≈3–12`). Multi-resolution robustness falls
+  batch** from a range (`{0.5, 0.75, 1.0, 1.5}` s → `T∈{12,8,6,4}`; 2.0 s/T=3 dropped after the
+  objective-health audit — too coarse to mask, and it collapses native-short windows to one
+  un-maskable patch). Multi-resolution robustness falls
   out, and the short-patch batches are where rich temporal masking happens.
 - **Rate ≠ patch count (precise distinction).** Resampling changes *samples-per-patch* but NOT `T`
   (patches are in seconds), so `RateCfg` stresses the filterbank's **physical-Hz invariance**; it does

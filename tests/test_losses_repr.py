@@ -57,6 +57,28 @@ def test_gyro_triad_dropped_jointly():
     assert not bool((gyro_count == 2).any()), "2-of-3 gyro drop: triad event not joint"
 
 
+def test_validity_aware_mask_guarantees_supervision():
+    """With valid_patches + channel_mask, every window with >=2 real patches must get
+    at least one masked REAL token (the A1 zero-supervision fix), and no non-real token
+    is ever masked."""
+    B, T, C = 256, 6, 6
+    g = gen(5)
+    # random per-window real-patch counts (1..6) and accel-only vs full-IMU
+    usable = torch.randint(1, T + 1, (B,), generator=g)
+    valid_patches = torch.arange(T).unsqueeze(0) < usable.unsqueeze(1)      # (B,T) prefix
+    channel_mask = torch.ones(B, C, dtype=torch.bool)
+    accel_only = torch.rand(B, generator=g) < 0.6
+    channel_mask[accel_only, 3:] = False                                    # drop gyro
+    plan = make_mask_plan(B, T, C, GYRO, generator=g,
+                          valid_patches=valid_patches, channel_mask=channel_mask)
+    real = valid_patches.unsqueeze(2) & channel_mask.unsqueeze(1)
+    # no non-real token masked
+    assert not bool((plan.token_mask & ~real).any())
+    # every window with >=2 real patches has >=1 masked real token
+    sup = (plan.token_mask & real).flatten(1).sum(1)
+    assert (sup[usable >= 2] >= 1).all(), "zero A1 supervision on a >=2-patch window"
+
+
 def test_causal_variant_masks_the_tail():
     plan = make_mask_plan(B=256, T=10, C=4, gyro_channels=None,
                           generator=gen(3), causal_p=1.0, channel_event_p=0.0)
