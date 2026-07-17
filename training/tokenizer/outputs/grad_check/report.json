@@ -1,0 +1,47 @@
+{
+  "device": "cuda",
+  "batch": [
+    256,
+    6,
+    6
+  ],
+  "loss_parts": {
+    "a1_masked": 1.774514079093933,
+    "a2_supcon": 5.549581527709961,
+    "a3_grounding": 0.24550741910934448
+  },
+  "activation_rms": {
+    "sensor_tokens(filterbank)": 0.5531,
+    "text_embeddings(raw MiniLM)": 0.4463,
+    "text_after_proj": 0.2556,
+    "fused_tokens": 0.5654,
+    "fusion_delta(fused-sensor)": 0.1001,
+    "transformer_out": 1.0,
+    "pooled": 0.9117,
+    "a2_proj_out": 0.1968
+  },
+  "fusion_delta_ratio": 0.181,
+  "grad_norms": {
+    "filterbank.proj": 2.33983,
+    "mask_token": 1.35847,
+    "fusion": 10.87761,
+    "a1_head": 3.55561,
+    "a2_proj": 1.92867,
+    "a3_cadence": 0.04825,
+    "a3_eigen": 0.09984,
+    "transformer_layers(shallow->deep)": [
+      4.86986,
+      3.25045,
+      3.13752,
+      3.1912
+    ]
+  },
+  "checks": {
+    "text_lm_has_no_grad": true,
+    "no_dead_trainable_params": true,
+    "dead_params": [],
+    "fusion_balanced(0.1<ratio<10)": true,
+    "layer_grads_monotone_healthy(no >20x jump)": true,
+    "all_activations_finite": true
+  }
+}

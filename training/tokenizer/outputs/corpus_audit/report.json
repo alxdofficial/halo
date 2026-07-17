@@ -1,0 +1,216 @@
+{
+  "per_dataset": {
+    "capture24": {
+      "streams": 1,
+      "windows_total": 144142,
+      "windows_used": 20000,
+      "subjects": 151
+    },
+    "hapt": {
+      "streams": 1,
+      "windows_total": 2112,
+      "windows_used": 2112,
+      "subjects": 30
+    },
+    "hhar": {
+      "streams": 1,
+      "windows_total": 9587,
+      "windows_used": 9587,
+      "subjects": 9
+    },
+    "kuhar": {
+      "streams": 1,
+      "windows_total": 9333,
+      "windows_used": 9333,
+      "subjects": 89
+    },
+    "mhealth": {
+      "streams": 1,
+      "windows_total": 1104,
+      "windows_used": 1104,
+      "subjects": 10
+    },
+    "pamap2": {
+      "streams": 1,
+      "windows_total": 3186,
+      "windows_used": 3186,
+      "subjects": 9
+    },
+    "uci_har": {
+      "streams": 1,
+      "windows_total": 10299,
+      "windows_used": 10299,
+      "subjects": 30
+    },
+    "unimib_shar": {
+      "streams": 1,
+      "windows_total": 11771,
+      "windows_used": 11771,
+      "subjects": 30
+    },
+    "wisdm": {
+      "streams": 2,
+      "windows_total": 70884,
+      "windows_used": 40000,
+      "subjects": 51
+    }
+  },
+  "totals": {
+    "streams": 10,
+    "windows_available": 262418,
+    "windows_used": 107392,
+    "train": 96109,
+    "val": 11283,
+    "labels": 58
+  },
+  "label_distribution": {
+    "histogram": {
+      "walking": 10031,
+      "sitting": 8714,
+      "standing": 8516,
+      "walking_upstairs": 4322,
+      "walking_downstairs": 4118,
+      "cycling": 3349,
+      "lying": 3268,
+      "running": 2483,
+      "jogging": 2149,
+      "drinking": 2145,
+      "dribbling": 2094,
+      "kicking": 2066,
+      "clapping": 2060,
+      "eating_soup": 2059,
+      "writing": 2050,
+      "brushing_teeth": 2044,
+      "sleeping": 2028,
+      "playing_catch": 2016,
+      "folding_clothes": 1985,
+      "eating_sandwich": 1983,
+      "household_chores": 1957,
+      "mixed_activity": 1949,
+      "eating_chips": 1947,
+      "stairs": 1943,
+      "vehicle": 1924,
+      "typing": 1891,
+      "eating_pasta": 1846,
+      "sports": 1189,
+      "standing_up_from_sitting": 958,
+      "standing_up_from_lying": 921,
+      "jumping": 895,
+      "manual_work": 890,
+      "talking_standing": 798,
+      "talking_sitting": 773,
+      "falling_hitting_obstacle": 604,
+      "picking_up": 559,
+      "falling_forward": 486,
+      "falling_left": 483,
+      "falling_backward": 471,
+      "syncope": 465,
+      "falling_right": 462,
+      "falling_with_protection": 430,
+      "falling_backward_sitting": 388,
+      "sit_up": 354,
+      "ironing": 346,
+      "lying_down_from_standing": 271,
+      "nordic_walking": 260,
+      "vacuum_cleaning": 254,
+      "table_tennis": 176,
+      "sitting_down": 173,
+      "walking_backwards": 116,
+      "push_up": 112,
+      "frontal_elevation_arms": 85,
+      "knees_bending": 84,
+      "waist_bends_forward": 83,
+      "rope_jumping": 57,
+      "jump_front_back": 27,
+      "lying_down_from_sitting": 2
+    },
+    "top5_share": 0.371,
+    "max_over_min": 5015,
+    "labels_below_8_windows": [
+      "lying_down_from_sitting"
+    ],
+    "labels_below_64_windows": 3
+  },
+  "dataset_share_of_train": {
+    "wisdm": 0.378,
+    "capture24": 0.18,
+    "unimib_shar": 0.109,
+    "uci_har": 0.096,
+    "hhar": 0.09,
+    "kuhar": 0.088,
+    "pamap2": 0.029,
+    "hapt": 0.02,
+    "mhealth": 0.01
+  },
+  "loading": {
+    "nan_windows": 0,
+    "inf_windows": 0,
+    "checked": 500,
+    "acc_median_mag_by_stream": {
+      "capture24/watch_wrist": 1.002,
+      "hapt/phone_waist": 1.02,
+      "hhar/phone_waist": 0.992,
+      "kuhar/phone_waist": 0.057,
+      "mhealth/watch_wrist": 0.997,
+      "pamap2/watch_wrist": 0.994,
+      "uci_har/phone_waist": 1.026,
+      "unimib_shar/phone_pocket": 0.959,
+      "wisdm/phone_pocket": 1.007,
+      "wisdm/watch_wrist": 0.997
+    }
+  },
+  "task_distribution": {
+    "sampled_items": 800,
+    "rate_changed_frac": 0.48,
+    "rate_range_hz": [
+      15.6,
+      99.4
+    ],
+    "channels_dropped_frac": 0.761,
+    "gravity_absent_frac": 0.522,
+    "cadence_valid_frac": 0.351,
+    "eigen_valid_frac": 1.0,
+    "coherence_valid_frac": 1.0,
+    "cadence_valid_by_label": {
+      "sitting": "8/84",
+      "walking": "58/76",
+      "standing": "4/70",
+      "walking_downstairs": "31/48",
+      "walking_upstairs": "26/33",
+      "cycling": "9/27",
+      "lying": "2/27",
+      "kicking": "11/23",
+      "brushing_teeth": "8/23",
+      "mixed_activity": "3/21",
+      "jogging": "18/20",
+      "eating_soup": "4/20",
+      "playing_catch": "7/20",
+      "dribbling": "10/19",
+      "running": "15/19"
+    }
+  },
+  "mask_plan": {
+    "realized_ratio_by_T[3,4,6,8,12]": [
+      0.398,
+      0.549,
+      0.549,
+      0.549,
+      0.549
+    ],
+    "gyro_triad_drop_frac": 0.172,
+    "patch_seconds_choices": [
+      0.5,
+      0.75,
+      1.0,
+      1.5,
+      2.0
+    ]
+  },
+  "sampler": {
+    "labels_never_anchored_in_200_steps": [],
+    "min_anchor_count": 91,
+    "oversampled_labels(<8 windows, drawn with replacement)": [
+      "lying_down_from_sitting"
+    ]
+  }
+}

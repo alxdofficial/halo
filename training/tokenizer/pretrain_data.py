@@ -44,9 +44,17 @@ TRAIN_DATASETS = (
     "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar", "hapt",
     "mhealth", "capture24",
 )
-MAX_PER_STREAM = 20_000          # the balanced-corpus cap (107k-scale)
+MAX_PER_STREAM = 20_000          # the balanced-corpus cap (107k-scale); PER-STREAM (so
+                                 # wisdm's 2 streams get 2x — kept for baseline parity,
+                                 # phone+watch ARE distinct configs; audited 2026-07-18)
 WINDOW_SECONDS = 6.0
 VAL_SUBJECT_FRACTION = 0.10      # subject-disjoint val within the train datasets
+GRAVITY_AUG_P = 0.15             # DROP from default_v2's 0.5: the audit found gravity
+                                 # removed on 52% of windows, killing the M0 gravity-align /
+                                 # DC-tilt features on half the corpus. 0.15 keeps the
+                                 # iOS-userAcceleration robustness without dominating.
+MIN_WINDOWS_TO_ANCHOR = 8        # labels below this can't form real SupCon positives
+                                 # (would be duplicate-oversampled); excluded from anchoring
 PATCH_SECONDS_CHOICES = (0.5, 0.75, 1.0, 1.5, 2.0)   # per-batch multi-scale draw
 DFT_SIZE = 256                   # must cover max rate (100 Hz) x max patch (2 s) = 200
 CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
@@ -143,9 +151,10 @@ class PretrainDataset(Dataset):
                  augment: bool = True):
         self.index = index
         self.keys = keys
-        self.augmenter = IMUAugmenter(
-            AugmentationConfig.default_v2() if augment else AugmentationConfig.none()
-        )
+        cfg = AugmentationConfig.default_v2() if augment else AugmentationConfig.none()
+        if augment:
+            cfg.gravity.p = GRAVITY_AUG_P     # audit: 0.5 killed gravity on half the corpus
+        self.augmenter = IMUAugmenter(cfg)
         self._data_cache: dict[int, np.ndarray] = {}
 
     def __len__(self) -> int:
@@ -204,10 +213,18 @@ class BalancedBatchSampler(Sampler[list[int]]):
     simply oversampled with replacement instead of dropped)."""
 
     def __init__(self, keys: list[WindowKey], classes_per_batch: int,
-                 samples_per_class: int, steps_per_epoch: int, seed: int = SEED):
-        self.by_label: dict[int, list[int]] = {}
+                 samples_per_class: int, steps_per_epoch: int, seed: int = SEED,
+                 min_windows: int = MIN_WINDOWS_TO_ANCHOR):
+        by_label: dict[int, list[int]] = {}
         for i, k in enumerate(keys):
-            self.by_label.setdefault(k.label_id, []).append(i)
+            by_label.setdefault(k.label_id, []).append(i)
+        # Exclude labels too small to form real positives — anchoring an 8-slot batch
+        # with a 2-window class means 4x duplicated windows (degenerate SupCon positives).
+        self.excluded = sorted(l for l, w in by_label.items() if len(w) < min_windows)
+        self.by_label = {l: w for l, w in by_label.items() if len(w) >= min_windows}
+        if self.excluded:
+            print(f"[sampler] excluded {len(self.excluded)} labels below "
+                  f"{min_windows} windows from anchoring: {self.excluded}")
         self.labels = list(self.by_label)
         self.classes_per_batch = min(classes_per_batch, len(self.labels))
         self.samples_per_class = samples_per_class
@@ -282,7 +299,9 @@ class MultiScaleCollate:
             eigen_t[b] = prims["eigen_ratios"].values[0]
             eigen_v[b] = prims["eigen_ratios"].valid[0]
 
-        positions = (torch.arange(P).float() * ps + ps / 2).unsqueeze(0).expand(B, P)
+        # .contiguous(): expand() aliases memory and pin_memory refuses aliased tensors
+        positions = (torch.arange(P).float() * ps + ps / 2).unsqueeze(0) \
+            .expand(B, P).contiguous()
         return {
             "patches": patches,
             "patch_len": patch_len,

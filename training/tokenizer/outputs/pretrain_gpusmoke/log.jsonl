@@ -1,0 +1,4 @@
+{"step": 1, "lr": 5.998519681097194e-07, "elapsed_s": 5.1, "patch_seconds": 0.75, "a1_masked": 2.0545761585235596, "a2_supcon": 5.350706100463867, "a3_grounding": 0.3697400689125061}
+{"step": 50, "lr": 7.65e-06, "elapsed_s": 12.8, "patch_seconds": 1.0, "a1_masked": 0.6410769820213318, "a2_supcon": 5.132253646850586, "a3_grounding": 0.34627005457878113}
+{"step": 100, "lr": 0.0, "elapsed_s": 21.0, "patch_seconds": 2.0, "a1_masked": 0.5439371466636658, "a2_supcon": 4.940830230712891, "a3_grounding": 0.2994202971458435}
+{"step": 100, "val_knn_ba": 0.270789586536211}

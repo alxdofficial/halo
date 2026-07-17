@@ -276,18 +276,25 @@ def main() -> None:
             eigen_valid=batch["eigen_valid"].to(device),
         )
 
+        # A1 loss only counts tokens that are BOTH masked AND a real channel — otherwise
+        # ~67% accel-only windows waste loss budget "predicting" zero-filled fake gyro.
+        a1_loss_mask = plan.token_mask & channel_mask.unsqueeze(1)
+
         with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
             with torch.no_grad():
                 a1_target = target_tok(patches, rates, patch_len)
-            masked = model.encoder(patches, rates, patch_len, batch["texts"],
-                                   positions, token_mask=plan.token_mask,
-                                   channel_mask=channel_mask)
-            clean = model.encoder(patches, rates, patch_len, batch["texts"],
-                                  positions, channel_mask=channel_mask)
+            # Filterbank + text computed ONCE; only the transformer tail runs twice.
+            sensor_tokens = model.encoder.tokenize(patches, rates, patch_len)
+            text_embs, text_masks = model.encoder.encode_texts(batch["texts"], device)
+            masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
+                                          token_mask=plan.token_mask,
+                                          channel_mask=channel_mask)
+            clean = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
+                                         channel_mask=channel_mask)
             z = model.a2_proj(clean["pooled"])
             out = elite3_loss(
                 a1_pred=model.a1_head(masked["tokens"]), a1_target=a1_target,
-                a1_mask=plan.token_mask,
+                a1_mask=a1_loss_mask,
                 a2_embeddings=z, a2_labels=labels,
                 a3_cadence_pred=model.a3_cadence(clean["pooled"]).squeeze(1),
                 a3_eigen_pred=model.a3_eigen(clean["pooled"]).view(B, 4, 3),
