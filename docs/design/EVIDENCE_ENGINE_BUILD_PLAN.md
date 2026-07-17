@@ -37,6 +37,10 @@ structured primitives + each channel's text id}`; Pipeline B consumes that + a m
 A-representations & labels → analysis. Fix this contract first so each side can be built against a
 stub of the other.
 
+**Phase-1 pre-flight (2026-07-18):** the full data/HP/profiling/gradient/debug-sweep/objective-health
+audit + all decisions are recorded in [`PIPELINE_A_PREFLIGHT.md`](./PIPELINE_A_PREFLIGHT.md) —
+read that before touching the pretraining setup.
+
 **Training regime — two phases, matching the split:** **Phase 1** pretrains Pipeline A on the
 **ELITE 3** objectives (see EVIDENCE_ENGINE.md §5.2): (1) masked spatio-temporal latent prediction
 [folds in masked-channel + the "HAR world model"], (2) config-conditional supervised contrastive,
