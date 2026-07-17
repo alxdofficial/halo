@@ -137,14 +137,25 @@ def masked_latent_loss(
     predicted: torch.Tensor,
     target: torch.Tensor,
     token_mask: torch.Tensor,
+    feature_valid: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """A1: regression in LATENT space on masked tokens only.
 
     predicted: (B, T, C, D) head outputs; target: (B, T, C, D) the (stop-grad) latent
     targets for the same grid; token_mask: (B, T, C) True where masked. Targets are
     L2-normalized per token (direction, not magnitude — standard JEPA/BYOL hygiene).
+
+    feature_valid: optional broadcastable-to-(B,T,C,D) mask over the FEATURE dims. Bands
+    above a sample's Nyquist are zero in the target and trivial to predict; zeroing those
+    dims in BOTH pred and target before the cosine excludes them from the objective so A1
+    only supervises OBSERVABLE signal (refinement to the signal-only-target fix).
     """
-    target = F.normalize(target.detach(), dim=-1)
+    target = target.detach()
+    if feature_valid is not None:
+        fv = feature_valid.to(target.dtype)
+        target = target * fv
+        predicted = predicted * fv
+    target = F.normalize(target, dim=-1)
     predicted = F.normalize(predicted, dim=-1)
     per_token = 2.0 - 2.0 * (predicted * target).sum(dim=-1)            # cosine loss
     masked = token_mask & torch.isfinite(per_token)
@@ -265,9 +276,10 @@ def elite3_loss(
     a3_eigen_pred: torch.Tensor,
     a3_targets: GroundingTargets,
     weights: EliteLossWeights = EliteLossWeights(),
+    a1_feature_valid: Optional[torch.Tensor] = None,
 ) -> EliteLossOutput:
     """Weighted sum of the elite 3. Exactly these; additions go through an ablation."""
-    l1 = masked_latent_loss(a1_pred, a1_target, a1_mask)
+    l1 = masked_latent_loss(a1_pred, a1_target, a1_mask, feature_valid=a1_feature_valid)
     l2 = supcon_config_conditional(a2_embeddings, a2_labels)
     l3 = grounding_loss(a3_cadence_pred, a3_eigen_pred, a3_targets)
     total = weights.a1_masked * l1 + weights.a2_supcon * l2 + weights.a3_grounding * l3

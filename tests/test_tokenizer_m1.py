@@ -264,6 +264,35 @@ def test_eigen_ratios_live_on_simplex():
 
 
 # ------------------------------------------------------------------ frontend factory
+def test_a1_signal_indices_exclude_rate_metadata():
+    """The A1 target must be SIGNAL only. signal_feature_indices() must exclude the
+    nyquist + resolution mask dims (rate-determined metadata that otherwise dominates
+    the target norm and turns A1 into 'echo the rate') and keep band energies + amp + dc.
+    """
+    from model.tokenizer.filterbank import PhysicalFilterbankTokenizer
+    tok = PhysicalFilterbankTokenizer(d_model=1, n_bands=32, dft_size=256)
+    K = tok.n_bands
+    idx = set(tok.signal_feature_indices())
+    assert idx == set(range(K)) | {3 * K, 3 * K + 1}          # e_hat + amp + dc
+    assert idx.isdisjoint(range(K, 3 * K))                    # NO nyquist/resolution dims
+
+    # and the metadata we exclude really did carry most of the raw-feature norm
+    import torch.nn as nn
+    tok.proj = nn.Identity()
+    n = 90
+    g = torch.Generator().manual_seed(0)
+    x = torch.zeros(8, 4, 256, 6)
+    x[:, :, :n] = torch.randn(8, 4, n, 6, generator=g) * 0.1
+    x[:, :, :, 2] += 1.0
+    tok.fit_norm_stats(x, RATE, torch.tensor([n] * 8))
+    with torch.no_grad():
+        feat = torch.nn.functional.normalize(tok(x, RATE, torch.tensor([n] * 8)), dim=-1)
+    meta_share = (feat[..., K:3 * K] ** 2).sum(-1).mean()
+    signal_share = (feat[..., list(tok.signal_feature_indices())] ** 2).sum(-1).mean()
+    assert meta_share > 0.5, f"metadata share unexpectedly low ({meta_share})"
+    assert signal_share == pytest.approx(1.0 - meta_share, abs=1e-4)
+
+
 def test_frontend_factory_flags():
     assert not build_frontend("fixed").learnable
     assert build_frontend("sincnet").learnable

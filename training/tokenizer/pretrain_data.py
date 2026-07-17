@@ -36,7 +36,7 @@ from torch.utils.data import Dataset, Sampler
 from data.scripts.augmentations import AugmentationConfig, IMUAugmenter, IMUSample
 from data.scripts.eda.grid_io import GridRef, discover_grids
 from model.tokenizer.preprocess import gravity_align
-from model.tokenizer.primitives import compute_primitives
+from model.tokenizer.primitives import cadence, eigen_ratios
 
 # ----------------------------------------------------------------------------------------------
 # Corpus configuration
@@ -315,12 +315,17 @@ class MultiScaleCollate:
             n = max(1, int(round(rate * ps)))
             if n > self.dft_size:
                 raise ValueError(f"patch length {n} exceeds dft_size {self.dft_size}")
-            # A3 targets on the RAW augmented view (rotation-invariant; dc_tilt pre-align)
-            prims = compute_primitives(data.unsqueeze(0), CHANNELS, rate)
-            cadence_t[b] = prims["cadence"].values[0, 0].nan_to_num(0.0)
-            cadence_v[b] = prims["cadence"].valid[0]
-            eigen_t[b] = prims["eigen_ratios"].values[0]
-            eigen_v[b] = prims["eigen_ratios"].valid[0]
+            # A3 targets on the RAW augmented view (rotation-invariant, so pre-align).
+            # Call cadence + eigen DIRECTLY on the accel triad (canonical slots 0:3) — the
+            # full compute_primitives would also gravity-align internally and compute 4
+            # unused families (grav-energy/coherence/shape/dc_tilt); that redundant work +
+            # the double align is the second-agent efficiency finding.
+            acc = data[:, :3].unsqueeze(0)                               # (1, T, 3)
+            cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
+            cadence_t[b] = cad.values[0, 0].nan_to_num(0.0)
+            cadence_v[b] = cad.valid[0]
+            eigen_t[b] = eig.values[0]
+            eigen_v[b] = eig.valid[0]
             # Gravity-align the whole window on its true length (one R per window)
             if self.align_gravity:
                 data, _, _ = gravity_align(data.unsqueeze(0), list(CHANNELS), rate)

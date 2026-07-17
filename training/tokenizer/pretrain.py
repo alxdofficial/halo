@@ -221,7 +221,11 @@ def main() -> None:
         p.requires_grad_(False)
 
     # ------------------------------------------------------------------ model
-    model = PipelineAModel(cfg, a1_target_dim=target_tok.in_dim).to(device)
+    # A1 predicts only the SIGNAL-content dims of the filterbank feature (band energies +
+    # amplitude + dc); the rate-metadata masks are dropped (they were ~81% of the target
+    # norm and turned A1 into 'echo the rate' — second-agent audit 2026-07-18).
+    signal_idx = torch.tensor(target_tok.signal_feature_indices(), device=device)
+    model = PipelineAModel(cfg, a1_target_dim=len(signal_idx)).to(device)
     # M3 lesson: copy the calibrated norm into the encoder's inner filterbank.
     model.encoder.filterbank.norm_mu.copy_(target_tok.norm_mu.to(device))
     model.encoder.filterbank.norm_sd.copy_(target_tok.norm_sd.to(device))
@@ -291,7 +295,12 @@ def main() -> None:
             # proj); only the A1 TARGET is under no_grad.
             with torch.amp.autocast(device.type, enabled=False):
                 with torch.no_grad():
-                    a1_target = target_tok(patches.float(), rates, patch_len)
+                    a1_target = target_tok(patches.float(), rates, patch_len)[..., signal_idx]
+                    # observable-band validity over the SIGNAL dims: band dims use the
+                    # Nyquist mask o (B,K); amplitude/dc dims are always valid.
+                    o, _ = target_tok.masks(rates, patch_len)            # (B, K)
+                    extra = o.new_ones(B, len(signal_idx) - o.shape[1])
+                    a1_feature_valid = torch.cat([o, extra], dim=1).view(B, 1, 1, -1)
                 sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len)
             text_embs, text_masks = model.encoder.encode_texts(batch["texts"], device)
             masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
@@ -309,6 +318,7 @@ def main() -> None:
                 a3_cadence_pred=model.a3_cadence(clean["pooled"]).squeeze(1),
                 a3_eigen_pred=model.a3_eigen(clean["pooled"]).view(B, 4, 3),
                 a3_targets=targets, weights=weights,
+                a1_feature_valid=a1_feature_valid,
             )
 
         opt.zero_grad(set_to_none=True)

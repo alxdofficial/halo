@@ -197,6 +197,25 @@ class PhysicalFilterbankTokenizer(nn.Module):
     def get_output_dim(self) -> int:
         return self.d_model
 
+    def signal_feature_indices(self) -> list[int]:
+        """Indices (into the raw ``in_dim`` feature) of the SIGNAL-content features —
+        band energies + amplitude + DC — EXCLUDING the rate-determined observability
+        metadata (nyquist mask, resolution flag). Those masks are deterministic
+        functions of (rate, patch_len), constant across a window and trivially
+        computable, so they must NOT be an A1 prediction target: as the raw 98-dim
+        feature they carry ~81% of the target norm and turn A1 into 'echo the rate'.
+
+        Feature layout (see forward): [e_hat(K) | nyquist(K) | resolution(K)? | amp? | dc?].
+        """
+        K = self.n_bands
+        idx = list(range(K))                                    # e_hat band energies
+        off = 2 * K + (K if self.use_resolution_mask else 0)    # skip nyquist (+ resolution)
+        if self.use_amplitude:
+            idx.append(off); off += 1
+        if self.use_dc:
+            idx.append(off)
+        return idx
+
     def get_config(self) -> dict:
         """Hyperparameters needed to reconstruct this tokenizer (for save/load, M4)."""
         return {

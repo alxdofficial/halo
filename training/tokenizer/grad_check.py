@@ -57,7 +57,8 @@ def main() -> None:
     for p in target_tok.parameters():
         p.requires_grad_(False)
 
-    model = PipelineAModel(cfg, a1_target_dim=target_tok.in_dim).to(device)
+    signal_idx = target_tok.signal_feature_indices()      # A1 target = signal dims only
+    model = PipelineAModel(cfg, a1_target_dim=len(signal_idx)).to(device)
     for buf in ("norm_mu", "norm_sd", "dc_mu", "dc_sd"):
         getattr(model.encoder.filterbank, buf).copy_(getattr(target_tok, buf))
 
@@ -94,7 +95,7 @@ def main() -> None:
     plan = make_mask_plan(B, P, C, GYRO_IDX, device=device)
     a1_mask = plan.token_mask & cmask.unsqueeze(1)
     with torch.no_grad():
-        a1_target = target_tok(patches, rates, plen)
+        a1_target = target_tok(patches, rates, plen)[..., signal_idx]
     st = enc.tokenize(patches, rates, plen)
     te, tm = enc.encode_texts(batch["texts"], device)
     masked = enc.encode(st, te, tm, pos, token_mask=plan.token_mask, channel_mask=cmask)
