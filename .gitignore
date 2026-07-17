@@ -54,3 +54,4 @@ credentials*.json
 .idea/
 .vscode/
 *.swp
+training/tokenizer/outputs/**/*.pt

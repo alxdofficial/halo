@@ -121,6 +121,26 @@ sweep caught 3 HIGH bugs that (a) missed — this is why we gate on it.
   the floor (42 %); data loading is not a bottleneck (< 1 % wait).
 - **181/181 unit tests** green.
 
+## 5b. Phase-1 run RESULT (2026-07-18, first real run — GREEN)
+
+Config as above (d256/6L, 7.28M params, balanced corpus, fixed 1:1:0.1, `label_text` off,
+A1 signal-only target). 20k steps, **86 ms/step**, ~35 min, 5.6 GB VRAM. Checkpoint
+`training/tokenizer/outputs/pretrain/best.pt` (git 806665d, step 11k; kept local, gitignored).
+
+- **Internal val-kNN** (subject-disjoint, 57-way, within train datasets): 0.46 → peak **0.614 @ 11k**,
+  then plateaued ~0.59 (best retained). Healthy converging curve, no collapse, losses balanced
+  (A1 became a *real* task at 1.8 after the metadata-shortcut fix).
+- **Held-out-config transfer** (`eval_transfer.py`; frozen encoder, subject-disjoint kNN-BA over each
+  UNSEEN eval dataset's own labels): **mean 0.745** — shoaib 0.890, motionsense 0.844, realworld
+  0.748, inclusivehar 0.499 (hardest; disability-inclusive). ~5× chance on datasets never trained on.
+- **CAVEAT — not the baseline number.** This kNN-BA is a *representation-clustering / few-shot-retrieval*
+  probe (uses each eval set's own windows as the bank), NOT the ConSE **zero-shot macro-F1** the
+  baseline table reports. It validates that same-activity windows cluster on unseen configs — exactly
+  what Pipeline B's retrieval needs — but it is NOT a head-to-head "beats harnet 49.5" claim. That comes
+  at M6 (ConSE adapter into the eval harness).
+- **Verdict: Pipeline A cleared its bar** (a config-transferable, retrieval-ready representation) →
+  GREEN to build Pipeline B (M4 memory + M5 evidence head on this frozen checkpoint).
+
 ## 6. Deferred / open (not blockers)
 
 - **Model-scale sweep** — d256 chosen by reasoning; a d192-vs-d256-vs-d384 A/B is a later ablation.

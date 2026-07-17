@@ -165,6 +165,9 @@ class PretrainDataset(Dataset):
         cfg = AugmentationConfig.default_v2() if augment else AugmentationConfig.none()
         if augment:
             cfg.gravity.p = GRAVITY_AUG_P     # audit: 0.5 killed gravity on half the corpus
+            cfg.label_text.enabled = False    # A2 uses label IDs, not text — this aug is
+                                              # computed-then-discarded in pretraining (label
+                                              # text is a Pipeline-B concern)
         self.augmenter = IMUAugmenter(cfg)
         self._data_cache: dict[int, np.ndarray] = {}
 
