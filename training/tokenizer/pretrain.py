@@ -56,10 +56,14 @@ OUT_DIR = Path(__file__).resolve().parent / "outputs" / "pretrain"
 
 @dataclass
 class PretrainConfig:
-    d_model: int = 192
-    num_layers: int = 4
+    # d256/6L/~7.3M: clears all three consumer floors (tokenizer rep, A1/A2/A3 heads,
+    # evidence-engine multi-vector memory), data-appropriate for the 96k-window corpus
+    # (well below the shortcut-prone 20M legacy scale), ~70 min/20k-step run. Committing:
+    # the frozen encoder's d sets the memory-bank vector width. (User-approved 2026-07-18.)
+    d_model: int = 256
+    num_layers: int = 6
     num_heads: int = 8
-    dim_feedforward: int = 384
+    dim_feedforward: int = 1024
     dropout: float = 0.1
     classes_per_batch: int = 32
     samples_per_class: int = 8            # batch = 256
@@ -202,7 +206,10 @@ def main() -> None:
     target_tok.proj = nn.Identity()
     print(f"calibrating filterbank norm on {cfg.calib_batches} batches ...", flush=True)
     target_tok.reset_norm_accumulator()
-    calib_iter = iter(train_loader)
+    def _cycle(loader):
+        while True:
+            yield from loader
+    calib_iter = _cycle(train_loader)     # robust if calib_batches > sampler steps (smoke)
     for _ in range(cfg.calib_batches):
         batch = next(calib_iter)          # gravity-aligned + patch-masked in the collate
         target_tok.accumulate_norm_stats(
