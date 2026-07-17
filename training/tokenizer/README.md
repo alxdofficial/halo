@@ -14,4 +14,6 @@ filterbank + constrained-learnable scattering/SincNet), and the **primitives**.
 - **Model components:** `model/tokenizer/`.
 - **Seam to Pipeline B:** emits `{query representation + structured primitives + per-channel text id}`.
 
-Status: design only; no implementation yet.
+Status: M0 probe (`probe_robustness.py` + `outputs/m0_probe/`) and the M1 front end
+(`model/tokenizer/`: filterbank port, gravity-align, primitives, frontend flag) are built
+and gate-tested (`tests/test_tokenizer_m1.py`, `tests/test_filterbank.py`). Next: M2 losses.

@@ -125,6 +125,20 @@ threshold), missing-channel paths don't crash and mask correctly, and rate-invar
 20/50/100 Hz resamples. **Port + tests green.**
 **Reuse:** legacy filterbank, DC feature, SO(3) rotation util (for tests).
 
+**RESULT (2026-07-17 — gate PASSED, 139/139 tests green):** built `model/tokenizer/`
+{`filterbank.py` (verbatim port + its 21-test legacy suite → `tests/test_filterbank.py`),
+`preprocess.py` (patching port + NEW joint gravity-align, g-unit thresholds, yaw-free documented),
+`primitives.py` (M0-surviving set as named `Primitive(values, valid)` dict; octave-aware cadence
+with motion floor; text-identified triads; graceful degradation), `scattering.py` (frontend flag:
+fixed | sincnet implemented; scattering deferred; free_conv deliberately refused)}. M1 gate tests in
+`tests/test_tokenizer_m1.py` (23): real-data rotation invariance (cos > 0.99 on motionsense walking),
+gain/rotation invariance per family, 20/50/100 Hz rate-invariance (shared-observable-band energies
+cos > 0.999; full tokens only compared where all bands observable — Nyquist-mask features
+*deliberately* differ across rates), missing-channel masking, cadence motion-floor + octave rule
+(recovers 2 Hz step from stride-dominant autocorr), eigen-ratios on the simplex. Runtime env:
+`legacy_code/.venv/bin/python` (torch 2.9). NOTE: cadence in synthetic tests must bounce ALONG
+gravity — perpendicular components enter |acc| only at second order (physics, not a bug).
+
 ## M2 — The load-bearing loss (does the theory cohere?)  ·  ~2–3 days · **HARD GATE**
 **Goal:** write and sanity-check the objective *before* the full model, because if it doesn't cohere,
 nothing downstream matters. Concrete per-objective spec lives in **EVIDENCE_ENGINE.md §5.2.1–5.2.3**;
