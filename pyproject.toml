@@ -16,9 +16,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+eda = ["matplotlib", "torch"]
+experiments = ["torch"]
 
 [tool.setuptools.packages.find]
-include = ["data*"]
+include = ["data*", "experiments*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

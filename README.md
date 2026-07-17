@@ -42,6 +42,7 @@ data/
     baseline_view.py      # harmonised vs non-harmonised assembly
 model/                # the HALO model (tokenizer + encoder + language-alignment head)
 training/             # training harness; harmonised + normal modes
+experiments/          # isolated representation studies with their own configs and outputs
 eval/                 # (proposed) zero-shot / few-shot scoring + tiered ablations
 docs/                 # BASELINE_FAIRNESS_POLICY.md — design of record
 tests/                # regression tests (green)

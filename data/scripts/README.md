@@ -2,7 +2,8 @@
 
 Shared, cross-dataset data logic, grouped by pipeline stage. Import as `data.scripts.<group>.<module>`.
 
-Pipeline order: **curate → assemble** (→ grids). `labels/` and `debug/` are cross-cutting.
+Pipeline order: **curate → assemble** (→ grids). `labels/`, `debug/`, and
+`eda/` are cross-cutting.
 
 ## `curate/` — which signal (device/channel selection + units)
 | Module | Role |
@@ -26,6 +27,10 @@ Pipeline order: **curate → assemble** (→ grids). `labels/` and `debug/` are 
 
 ## `debug/` — per-session plots
 `visualization_utils.py`, `plot_sessions.py`
+
+## `eda/` — reproducible exploratory analysis
+Read-only channel inventories, cross-dataset sensor plots, rotation-aware views,
+and generated artifacts under `eda/outputs/`. See [`eda/README.md`](eda/README.md).
 
 ## top level
 | Module | Role |
