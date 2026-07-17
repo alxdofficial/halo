@@ -67,7 +67,7 @@ SHARED / SEAM
 ## M0 — Robustness probe (decide the front end empirically)  ·  ~0.5 day
 **Goal:** adjudicate which preprocessing/primitives/transforms actually deliver invariance to the
 nuisances we care about, before designing the tokenizer around guesses.
-**Build:** `training/evidence/probe_robustness.py` — load real grids; apply synthetic **gain**,
+**Build:** `training/tokenizer/probe_robustness.py` — load real grids; apply synthetic **gain**,
 **SO(3) rotation**, **yaw-only rotation**, and mild **time-warp/resample**; compute candidate
 features **before vs after** and report an invariance score (e.g. cosine / relative-L2 drift) per
 feature family:
@@ -77,8 +77,32 @@ feature family:
 - accel↔gyro **coherence**, **relative spectral shape**, **cadence**
 - (if quick) a fixed **scattering** first-order coefficient vs a plain STFT bin under time-warp.
 **Gate:** a ranked table of "invariance vs discriminability" per feature. **Keep only families that
-are both invariant to the nuisance AND still separate activities.** This fixes the M1 primitive set.
+are both invariant to the nuisance AND still separate activities.** This fixes the M1 primitive set,
+**and** doubles as the A3-target check (§5.2.3): **plot eigen-ratios & cadence across activities
+(walk/run/sit/stairs) and confirm they visibly separate** before admitting them as grounding targets —
+if not, widen the bands. Also record each candidate's aug-response so only **invariant-or-analytic**
+primitives (the A3 selection criterion) survive.
 **Resolves:** §7 tokenizer forks; the scattering-vs-STFT deformation question (partly).
+
+**RESULT (2026-07-17 — gate PASSED; `training/tokenizer/outputs/m0_probe/REPORT.md`, 1040 windows,
+4 streams pocket/wrist/waist/pocket):**
+- **The thesis in numbers:** `raw_band_energy` wins within-dataset (0.855 kNN-BA) but the fully
+  rotation-invariant `grav_band_energy` (gravity-aligned, vertical + horizontal-pooled = yaw-killed)
+  wins cross-dataset (**0.502 vs 0.461**) — raw's edge is config-specific shortcut info that does not
+  transfer. Invariance verified: raw drifts under SO(3)/yaw (0.956/0.982 cos); grav/eigen/coherence/
+  shape/cadence are exactly invariant to gain+rotation (1.000/0.000).
+- **Primitive set fixed for M1:** gravity-aligned band energy (vert/horiz-pool) · eigen-ratios ·
+  spectral shape · cadence · coherence (+ DC/tilt from the existing tokenizer). `raw_band_energy`
+  EXCLUDED (fragile as predicted; keep only as ablation baseline).
+- **Per-dim efficiency:** cadence = 0.394 xds-BA from 2 dims; eigen-ratios weak alone (0.212) but
+  visually separate jog/run crisply (linearity ~0.95 tight) → grounding targets, not standalone.
+- **Naive concat does NOT fuse** (`invariant_union` 0.461 ≤ grav alone 0.502 — weak families dilute
+  kNN distance) → **fusion is the learned encoder's job; M2/M3 empirically justified.**
+- **Two A3 caveats confirmed empirically:** (1) cadence validity needs a **motion-energy floor**
+  (std |acc| ≥ 0.03 g), not just autocorr strength — static windows otherwise fabricate cadences;
+  (2) **octave ambiguity** (walking locks to stride ~0.95 Hz, running to step ~2.5 Hz) — the
+  research-pass "adaptive cadence estimator" risk is real; grounding target OK, refine estimator at M1.
+- Corpus accel is unit-canonicalized to **g** (|gravity|≈1.0) — thresholds must be in g-units.
 
 ## M1 — Front end: preprocessing + primitive tokenizer  ·  ~3–4 days
 **Goal:** a `signal → structured primitives` front end that is rate-, gain-, orientation-robust and
@@ -103,18 +127,37 @@ threshold), missing-channel paths don't crash and mask correctly, and rate-invar
 
 ## M2 — The load-bearing loss (does the theory cohere?)  ·  ~2–3 days · **HARD GATE**
 **Goal:** write and sanity-check the objective *before* the full model, because if it doesn't cohere,
-nothing downstream matters.
+nothing downstream matters. Concrete per-objective spec lives in **EVIDENCE_ENGINE.md §5.2.1–5.2.3**;
+this milestone implements the **ELITE 3** (A1/A2/A3) as `training/tokenizer/` + `training/evidence/`
+losses.
 **Build:** `training/evidence/losses.py`:
-- **Config-conditional salient contrastive:** same-activity-across-configs pull together / different
-  push apart, **conditioned on the channel-text** (not blind-invariant). Precise form to pin here.
-- **Analysis-consistency:** same-*label* samples produce same *analysis* vector (metric loss on the
-  analysis, decoupled from label correctness).
-- **Masked-channel prediction** (SSL pretext; see M3): predict masked channels from present ones.
-- **Evidential/abstention** term (Dirichlet evidence; deferred detail to M5).
+- **A1 — masked spatio-temporal latent prediction** (§5.2.1): token grid `T×C`, `T=window_s/patch_s`.
+  **`patch_seconds` is a per-batch multi-scale augmentation axis** (~`{0.5,0.75,1.0,1.5,2.0}`s → `T≈3–12`),
+  **not** a fixed HP — and note **rate resample ≠ patch count** (rate stresses filterbank Hz-invariance;
+  `patch_seconds` is the token-count knob). Mask = **ratio** over the variable grid (floor `T`), two
+  structured streams: whole-**channel** mask biased to dropping the **gyro triplet** + **temporal** block
+  mask (random-block + causal/future = the world-model variant). Latent-space target → ~50 % start.
+  **Batch-aware:** the tokenizer needs one patch-length/batch → **bucket batches by `(rate, patch_seconds)`**
+  (or pad+mask to a common grid). **Before committing ranges: draw a batch of augmented samples and
+  visually inspect** rate/patch-duration/channel-drop are sane.
+- **A2 — config-conditional supervised contrastive** (§5.2.2): **window-level sensor↔sensor SupCon**,
+  same-activity-across-configs pull together, **conditioned on the channel-text** (not blind-invariant).
+  **No CLIP-style sensor↔text term** (label transfer is text→text in the evidence head) — that's an
+  optional ablation only if M6 shows weak unseen-label transfer.
+- **A3 — physical-primitive grounding** (§5.2.3): small MLP head regresses **cadence (log-Hz, window)** +
+  **per-band eigen-ratios (linearity/planarity/isotropy, per band/patch)**, weighted small. **Targets
+  computed on the augmented view** (analytic transform where known: time-warp → `cadence×1/α`; rotation/
+  gain/rate invariant), **validity-masked** (channel-drop→coherence, sub-Nyquist→cadence). Admit a
+  primitive **only if aug-response is invariant or analytic** (selection criterion).
+- **Analysis-consistency:** deferred to an ablation (overlaps A2; see §5.2 deferred list).
+- **Evidential/abstention** term (Dirichlet evidence; detail in M5/§4.2).
+**Positional encoding (shared, decided):** **time = RoPE physical-Δt** (absorbs variable rate *and* patch
+duration); **channels = text-keyed set, no positional index** (replaces the crude 2-way modality embedding).
+Full self-attention over the flattened `T·C≈60` tokens (no axial needed).
 **Gate (HARD):** on a *tiny* real+synthetic setup with a frozen M1 front end + a trivial encoder,
 show the salient-contrastive loss (a) trains, (b) pulls same-activity/different-config together and
-different-activity apart on held-out configs, and (c) the analysis-consistency term doesn't collapse
-representations. **If the loss is incoherent or collapses, STOP and redesign — do not build M3+.**
+different-activity apart on held-out configs, and (c) A3 primitive heads learn without dominating.
+**If the loss is incoherent or collapses, STOP and redesign — do not build M3+.**
 **Resolves:** open fork #1 (the load-bearing loss) and #2 (task- vs self-consistency utility — decide
 the blend here).
 
@@ -137,9 +180,11 @@ same-activity clustering improves vs the M1 primitives alone.
 ## M4 — Archetypal memory (retrieval + curation)  ·  ~4–5 days
 **Goal:** the curated non-parametric evidence store.
 **Build:** `model/evidence/memory.py`, staged to de-risk:
-- **M4a:** frozen bank of encoded training primitives; **ANN top-k + soft attention** retrieval
-  (differentiable blend over the k; which-k non-diff, fine). Prediction = confidence-weighted labels
-  of neighbors (a learned ConSE). Establishes the retrieval-evidence baseline.
+- **M4a:** frozen bank of encoded training primitives; retrieval as **one softness dial**
+  (`k, τ, τ-anneal, full-soft@train / ANN@infer`) — differentiable blend over the k, which-k non-diff by
+  design (we learn placement, not a selection policy; corpus fits VRAM so full-soft@train is available).
+  Voting = the **shared `t` text kernel** (not a per-neighbor MLP); candidates = runtime label list.
+  Prediction = confidence-weighted labels of neighbors (a learned ConSE). Establishes the retrieval baseline.
 - **M4b:** **drift management** — store signal + cached embedding, lazy re-encode (or momentum
   encoder). Verify retrieval quality doesn't degrade across training epochs.
 - **M4c:** **curation gate** — bounded bank with **discriminability + coverage** utility (per-class
@@ -153,8 +198,14 @@ drift-mgmt and curation each help; confirm rare classes retained.
 **Build:** `model/evidence/decoder.py` — cross-attention over {retrieved neighbors + candidate text
 hypotheses}, **accumulating across patches**; an **evidential (Dirichlet)** head → per-candidate
 {evidence-for, evidence-against, calibrated confidence, **abstain**}. Output = the structured analysis.
-**Gate:** calibration (are confidences honest?), abstention behaves (low evidence → abstain), and the
-per-candidate evidence is non-degenerate. Zero-shot macro-F1 ≥ M4 (decoder shouldn't hurt).
+**Loss (EVIDENCE_ENGINE.md §4.2, two regimes via class-holdout):** KNOWN → `EDL_CE(α,y) + λ·KL(wrong→Dir(1))`
+(λ annealed↑); NOVEL → `KL(Dir(α)‖Dir(1))` (drive vacuous → abstain). No separate confidence loss
+(calibration from EDL + density gate + post-hoc). Learnable surface = `{g, t-adapter, τ, density-calib,
+head}`; base LM + Pipeline A + memory `z_i` frozen/stop-grad (gradient stops at A → drift-free).
+**Abstain `θ` calibrated on VAL, not learned.**
+**Gate:** calibration (ECE — are confidences honest?), abstention reads **vacuity** not entropy (low total
+evidence → abstain; conflict between knowns → still answers), per-candidate evidence non-degenerate.
+Zero-shot macro-F1 ≥ M4 (decoder shouldn't hurt).
 
 ## M6 — Analysis eval + HALO adapter into the existing harness  ·  ~2–3 days
 **Goal:** measure the foundation-model claim and slot into the current eval.

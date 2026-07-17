@@ -137,6 +137,57 @@ learns "nothing here supports any candidate → abstain." MVP = frozen A + fixed
 small head; full engine adds curated/evolving memory (§4), top-down hypothesis + structured evidence (§6),
 online write-on-GT.
 
+**Voting mechanism (precise):** a neighbor does NOT run a per-neighbor MLP over labels. It carries one
+**text** label; the **shared** `t` kernel spreads that label's weight across *all* candidates by text
+similarity (`relu⟨t(label_i), t(c)⟩`), scaled by the neighbor's query-similarity weight. Candidates are a
+**runtime argument** = the target task's label list (train: ~86-way global vocab; eval: the dataset's small
+set). Two distinct "open" axes: **open-vocabulary** (novel candidate *label* still scored via text sim —
+the voting kernel) vs **open-set novelty** (no candidate supported → vacuity → abstain — a separate path).
+Text geometry is **load-bearing**: transfer is only as good as `t` places candidate labels vs seen labels
+→ the M6 lever if weak = fine-tune the `t` adapter and/or add the sensor↔text alignment term (A2 ablation).
+
+**Abstain reads VACUITY, not entropy.** `u = C/Σα` measures *total* evidence, so it fires on "nothing
+matched" (density-gated to ~0). It does NOT fire on *conflict* (two known classes both strongly supported →
+belief looks split but `Σα` is high → confidently ambiguous → answers). Threshold the total (`u`), never the
+belief entropy.
+
+**Learnable vs frozen vs calibrated (the whole Phase-2 surface):**
+- **Learned (small):** `g` (query/metric projection), `t`-**adapter only** (base text LM FROZEN), `τ`
+  (retrieval temperature, clamped), the **density-gate calibration** (the density *signal* ρ=mean-sim is
+  computed; a tiny monotonic map is learned), the evidential head.
+- **Frozen / non-parametric:** the base text LM, **all of Pipeline A (the patch vectors)**, and the memory
+  `z_i` (stop-grad). Gradient from the loss flows into `t`-adapter, `g`, `τ`, density-calib — and **stops at
+  frozen A** (it does NOT reach the patch feature vector; that freeze is what keeps the memory drift-free).
+- **Calibrated, not learned:** the abstain threshold **`θ` is set on VALIDATION** (an operating point, not a
+  weight — learning it risks always/never-abstain collapse). Other HPs (`k`, `p_novel`, loss weights, the
+  Dirichlet `+1` prior) are swept/structural. **No hand-tuned constant sits in the forward decision beyond
+  `θ`.**
+
+**Loss (two regimes, selected by class-holdout):**
+```
+KNOWN (true y in memory):   L = EDL_CE(α, y)              # grow evidence for y (Sensoy expected-CE)
+                              + λ · KL( Dir(α̃) ‖ Dir(1) )   # α̃ = wrong-class evidence → uniform prior; λ annealed↑
+NOVEL (y held out):         L = KL( Dir(α) ‖ Dir(1) )      # drive ALL evidence → vacuous ⇒ u→1 ⇒ abstain
+```
+The KL-to-uniform term does **double duty**: zeroes *wrong-class* evidence on knowns, *all* evidence on
+novelties. **No separate confidence loss** — calibration comes from (i) the evidential form, (ii) the
+density gate (the EDL-mirage fix), (iii) post-hoc ECE + `θ` on val; an explicit calibration penalty is an
+M6 *ablation* if calibration is weak, not a default.
+
+**Retrieval softness is one dial (`k`, `τ`, `τ`-anneal, full-soft@train / ANN@infer).** Selection (which-k)
+is hard/non-diff *by design* — we don't learn a selection policy, we learn an encoder that places good
+neighbors nearby (kNN-LM / NEC); the *weighting* (softmax over the k, gate, Dirichlet) is fully
+differentiable. Our corpus fits in VRAM (~0.5 GB) so **full-soft attention at train time is available** for
+exact gradients; default = generous-k soft + annealed `τ` (soft→sharp), ANN top-k at inference. Avoid
+small-k + cold-`τ` from step 1 (sharpest = hardest to train).
+
+**Sequencing (why NOT end-to-end from scratch):** train Pipeline A **first** (Phase 1), freeze, then B.
+Joint-from-scratch has three failure modes — (1) **cold-start**: the retrieval/evidence loss is meaningless
+until the space is already good; (2) **drift**: A moving vs a snapshot memory = matching across encoder
+generations; (3) **collapse**: embedding-collapse (everything retrieves everything) + abstain-collapse
+(cheapest novelty-loss minimum = always abstain). End-to-end is a legitimate *later* polish, but only
+**warm-started from both trained phases + a momentum/slow memory encoder** — never from scratch.
+
 ## 5. "Useful even when wrong" — two testable properties (the foundation-model claim + its eval)
 1. **Analysis-consistency (same-label ⇒ same-analysis).** The evidence/analysis object should
    cluster by *true label* even when top-1 is wrong. A metric-learning objective *on the
@@ -183,6 +234,95 @@ sparse code = evidence; feature-space because invariance kills raw reconstructio
 as a *separate* loss (overlaps the contrastive). **Augmentations:** the one non-redundant geometric aug is
 the **physically-correct time-warp** (`accel×1/α², gyro×1/α`) — rotation/translation/uniform-scale commute
 with `d²/dt²`, so the integrate→transform→differentiate detour reduces them to the SO(3)/gain augs we have.
+The implemented stack (`data/scripts/augmentations.py`) already provides the nuisance/heterogeneity axes:
+`RateCfg` (P3, anti-aliased resample → rate-invariance, co-varies the Hz channel-text), `TimeWarpCfg`
+(cadence), `ChannelDropoutCfg` (P4, whole-group drop → masked-channel objective), rotation/gravity/gain.
+
+#### 5.2.1 A1 — masked spatio-temporal latent prediction (concrete spec)
+Data shapes (harmonised corpus): **6 s window · 60 Hz · 360 samples · 6 canonical channels** `[acc xyz, gyro
+xyz]` (pad+mask for accel-only sources). Tokenizer patch is defined in **seconds**, so the token grid is
+`T × C` where `T = window_s / patch_s`.
+- **Patch-duration is a multi-scale augmentation axis, NOT a fixed HP.** The current `patch_seconds=1.5`
+  gives only `T=4` — too coarse for a temporal/world-model mask. Instead **sample `patch_seconds` per
+  batch** from a range (~`{0.5, 0.75, 1.0, 1.5, 2.0}` s → `T≈3–12`). Multi-resolution robustness falls
+  out, and the short-patch batches are where rich temporal masking happens.
+- **Rate ≠ patch count (precise distinction).** Resampling changes *samples-per-patch* but NOT `T`
+  (patches are in seconds), so `RateCfg` stresses the filterbank's **physical-Hz invariance**; it does
+  *not* give more tokens to mask. The token-count knob is `patch_seconds`. Keep the two axes separate.
+- **Masking = a RATIO over the resulting variable grid** (not a fixed token count), with a **floor on
+  `T`** so a long-patch draw can't make the temporal mask degenerate. Two structured streams:
+  (a) **channel/modality mask** — whole channels, **biased toward dropping the gyro triplet** at ~the
+  corpus accel-only fraction (matches the real deployment shift) + occasional single-channel drops;
+  (b) **temporal mask** — MAE/JEPA block mask (**random-block** variant → representation; **causal/future**
+  variant → the §5.1 world-model / surprise objective). Prediction is in **latent space**, so high ratios
+  are fine — start ~50 % masked, ablate up.
+- **Attention:** `T·C ≈ 60` tokens → **full self-attention over the flattened grid** (no need for axial).
+- **Positional encoding:** **time = RoPE keyed to physical Δt (seconds), never patch index** — this is what
+  absorbs both variable rate *and* variable patch duration with zero special-casing. **Channels = a
+  text-keyed SET (no positional index)** — identity comes from the channel's free-form-text content
+  embedding + modality tag, which is what makes channel count/order free; this **replaces** the crude 2-way
+  `modality_embedding`/`[0,0,0,1,1,1]` buffer in the current experiment code.
+- **Batch constraint to design around:** the tokenizer requires a **single patch-length (in samples) per
+  batch** (`patch_length = round(rate × patch_seconds)`), so rate and patch-duration **cannot both vary
+  freely per-sample** — **bucket batches by `(rate, patch_seconds)`** (or pad+mask patches to a common
+  grid). The current experiment runs the fixed harmonised 60 Hz grid precisely to sidestep this, so the
+  minimal experiment ↔ full multi-rate/multi-scale design has a **gap not yet closed**.
+- **Build discipline (M2):** pick the ranges, then **draw a batch of augmented samples and visually inspect**
+  that the rate/patch-duration/channel-drop ranges are sane *before* committing; wire the bucketed sampler.
+
+#### 5.2.2 A2 — config-conditional supervised contrastive (concrete spec)
+- **Sensor↔sensor SupCon at the WINDOW (pooled) level** (labels are per-window; A1 is the patch-level loss).
+- **Config-conditional:** same-activity windows from *different placements* are **positives** (nuisance
+  invariance), but the placement/sensor config is fed as **input text** so the model factors placement out
+  *because it's told*, not blindly (the UniMTS failure mode).
+- **CLIP-style sensor↔text alignment is NOT required for the MVP.** In the evidence head, retrieval is
+  sensor→sensor (`⟨g(z), g(z_i)⟩`) and unseen-label transfer is **text→text** (`⟨t(label_i), t(c)⟩`), so
+  the two spaces never have to be jointly aligned — A2 only needs the sensor space to be a good
+  same-activity metric, which SupCon delivers. A sensor↔label-text term is an **optional ablation**, added
+  only if M6 shows unseen-label transfer is weak; keeping it out keeps the retrieval geometry SupCon-owned.
+
+#### 5.2.3 A3 — physical-primitive grounding (concrete spec)
+Auxiliary **regression** of DSP-computed physical targets from the representation (MaskFeat-style
+feature-prediction; see provenance below). A cheap **grounding rail**, low loss weight, near-zero
+convergence risk.
+- **Primitives (v1 core):** **cadence** (dominant locomotion rate, Hz; window-level; predicted in
+  **log-Hz**) + **per-band eigen-ratios** — eigenvalues `λ₁≥λ₂≥λ₃` of the per-band 3-axis accel spatial
+  covariance → **linearity `(λ₁−λ₂)/λ₁`, planarity `(λ₂−λ₃)/λ₁`, isotropy `λ₃/λ₁`** (per band/patch).
+  Easy adds: accel↔gyro **coherence**, relative **spectral shape**. DC/gravity-tilt is already an explicit
+  tokenizer feature → predict a derived **tilt angle** or drop (avoid redundancy).
+- **Why these:** eigenvalues are **rotation-invariant** (`C→RCRᵀ` leaves them fixed); the **ratios cancel
+  gain** (`C→g²C`); cadence-in-Hz is rotation- and gain-invariant. i.e. invariant to exactly the nuisances
+  we kill, while still describing motion geometry — the "salient-not-invariant" thesis in one feature.
+- **Objective:** per-primitive Huber/MSE (simplex-aware for the eigen-ratio triple), **weighted small**;
+  levels: cadence ← pooled window, eigen-ratios/coherence ← per band/patch.
+- **Augmentation-aware target rule (REQUIRED — corrects the earlier "cache once offline"):** compute the
+  target on the **exact augmented view the encoder consumes** — never predict a clean-signal primitive from
+  an augmented input. Because aug params are known, **transform the cached target analytically**
+  (time-warp α → `cadence ×= 1/α`; rotation/gain/rate → invariant → nothing to do) and only recompute for
+  the messy augs (magnitude-warp, jitter). This makes nuisance augs act as **free invariance regularizers**
+  and physical augs (time-warp) teach **genuine sensitivity**.
+- **Validity mask, re-derived on the augmented view (per primitive, per sample):** channel-drop → coherence
+  **undefined → mask**; sub-Nyquist downsample or jitter-killed periodicity → cadence **mask** (else the
+  head learns to hallucinate a step rate on stationary activities). **M0-confirmed:** the cadence mask
+  needs a **motion-energy floor** (std |acc| ≥ ~0.03 g) *in addition to* autocorr strength — static windows
+  autocorrelate on drift and fabricate cadences otherwise. Also M0-confirmed: raw autocorrelation has
+  **octave ambiguity** (walking locks to stride, running to step) — usable as a grounding target, but the
+  estimator should be made octave-aware at M1 (the research-pass "adaptive cadence estimator" risk).
+- **Selection criterion (this is the real answer to "aug-robust"):** admit a primitive **only if its
+  response to *every* augmentation is invariant OR analytically known.** Eigen-ratios & cadence pass;
+  coherence passes with a channel-drop mask; anything that changes non-analytically is disqualified as a
+  target. Heterogeneity-robust *by construction*.
+- **Verify before committing:** **plot** eigen-ratios & cadence across activities (walk/run/sit/stairs) and
+  confirm they separate; if not, the bands are too narrow — widen them.
+- **Provenance / novelty (honest — this is the deliberately un-novel rail):** the *method* = **MaskFeat**
+  (Wei et al., CVPR 2022 — mask & predict a hand-crafted feature, HOG there, physical primitives here); the
+  *quantities* are textbook — eigen-ratio linearity/planarity/sphericity are **structure-tensor / DTI shape
+  descriptors** (Westin-style; Demantké-style point-cloud dimensionality), cadence = classic
+  autocorrelation gait estimation, coherence = Welch cross-spectrum, orientation/gain-invariant
+  covariance features are standard HAR. **No single ingredient is novel** (consistent with the research
+  verdict) — novelty budget stays on the conjunction (config-conditional evidential memory + abstain).
+  **TODO before citing:** log in `references/` and run a verification pass to pin canonical citations. See
+  [[halo-references-folder]].
 
 ## 6. Structured positive/negative, located evidence (the frontier — high ceiling, high risk)
 "A,B,C present at locations A,B,C **and** D,E,F absent ⇒ Y" — a structured energy / factor
