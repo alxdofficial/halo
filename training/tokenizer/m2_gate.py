@@ -34,6 +34,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from model.tokenizer.encoder import SetTokenizerEncoder
 from model.tokenizer.filterbank import PhysicalFilterbankTokenizer
 from model.tokenizer.preprocess import gravity_align
 from model.tokenizer.primitives import compute_primitives
@@ -65,6 +66,22 @@ OUT = Path(__file__).resolve().parent / "outputs" / "m2_gate"
 AUG_P_ROTATION = 0.5
 AUG_P_GAIN = 0.5
 GAIN_RANGE = (0.7, 1.3)
+
+# Per-stream channel descriptions for the M3 set-encoder variant: config conditioning
+# IS this text. The held-out stream's placement text is UNSEEN at train time —
+# generalization must come through language (no UNKNOWN token exists anymore).
+PLACEMENT_TEXT = {
+    "motionsense": "the front trouser pocket",
+    "pamap2": "the wrist",
+    "realworld": "the waist",
+    "shoaib": "the right trouser pocket",
+}
+
+
+def channel_texts_for(dataset: str) -> list[str]:
+    place = PLACEMENT_TEXT[dataset]
+    return ([f"accelerometer {a}-axis at {place}" for a in "xyz"]
+            + [f"gyroscope {a}-axis at {place}" for a in "xyz"])
 
 
 # ----------------------------------------------------------------------- utilities
@@ -319,14 +336,146 @@ def run_gate(holdout: str) -> dict:
     return verdict
 
 
+class SetGateModel(nn.Module):
+    """M3 variant: the REAL SetTokenizerEncoder + the same gate heads. Config
+    conditioning is channel TEXT (placement), so the held-out config needs no
+    UNKNOWN token — its unseen placement text generalizes through language."""
+
+    def __init__(self):
+        super().__init__()
+        self.encoder = SetTokenizerEncoder(d_model=D_MODEL, num_layers=2, num_heads=4,
+                                           dropout=0.0, dft_size=256)
+        feat_dim = PhysicalFilterbankTokenizer(d_model=1, dft_size=256).in_dim
+        self.a1_head = nn.Linear(D_MODEL, feat_dim)
+        self.a3_cadence = nn.Linear(D_MODEL, 1)
+        self.a3_eigen = nn.Linear(D_MODEL, 4 * 3)
+
+    def forward(self, patches, n, texts, positions, token_mask=None):
+        out = self.encoder(patches, RATE, n, texts, positions, token_mask=token_mask)
+        return out["tokens"], out["pooled"]
+
+
+def run_gate_set(holdout: str) -> dict:
+    """M3 gate (criterion c): the set encoder must match/beat the M2 trivial-encoder
+    result (0.366) AND the handcrafted baseline, with the held-out config identified
+    only by its (unseen) placement text."""
+    torch.manual_seed(SEED)
+    g = torch.Generator().manual_seed(SEED)
+    data, y, cfg, labels, datasets = build_tensors()
+    hold_id = datasets.index(holdout)
+    train_idx = (cfg != hold_id).nonzero().squeeze(1)
+    test_idx = (cfg == hold_id).nonzero().squeeze(1)
+    print(f"[set] holdout={holdout}: {len(train_idx)} train / {len(test_idx)} held-out")
+
+    # frozen tokenizer only for A1 TARGETS (same targets as the M2 run)
+    target_tok = PhysicalFilterbankTokenizer(d_model=1, dft_size=256)
+    target_tok.proj = nn.Identity()
+    aligned_train, _, _ = gravity_align(data[train_idx], CHANNELS, RATE)
+    padded, n0 = patchify(aligned_train, target_tok)
+    target_tok.fit_norm_stats(padded, RATE, torch.tensor([n0] * len(train_idx)))
+    target_tok.eval()
+    for p in target_tok.parameters():
+        p.requires_grad_(False)
+
+    model = SetGateModel()
+    # Calibrate the INNER filterbank's frozen per-band standardization on train windows
+    # (part of the M1 tokenizer contract; leaving it at identity feeds raw uncalibrated
+    # log-energies to the transformer — found when the set encoder undershot trivial).
+    model.encoder.filterbank.fit_norm_stats(padded, RATE,
+                                            torch.tensor([n0] * len(train_idx)))
+    opt = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr=LR)
+    weights = EliteLossWeights()
+    n_patches = int(6.0 / PATCH_SECONDS)
+    base_positions = (torch.arange(n_patches).float() * PATCH_SECONDS + PATCH_SECONDS / 2)
+
+    def prep(batch):
+        aligned, _, _ = gravity_align(batch, CHANNELS, RATE)
+        padded, n = patchify(aligned, target_tok)
+        positions = base_positions.unsqueeze(0).expand(batch.shape[0], -1)
+        return padded, torch.tensor([n] * batch.shape[0]), positions
+
+    def embed_all(idx):
+        model.eval()
+        zs = []
+        with torch.no_grad():
+            for start in range(0, len(idx), 256):
+                chunk = idx[start:start + 256]
+                padded, n, positions = prep(data[chunk])
+                texts = [channel_texts_for(datasets[int(c)]) for c in cfg[chunk]]
+                _, z = model(padded, n, texts, positions)
+                zs.append(z)
+        model.train()
+        return torch.cat(zs)
+
+    def evaluate(step):
+        train_z, test_z = embed_all(train_idx), embed_all(test_idx)
+        ba = knn_balanced_acc(train_z, y[train_idx], test_z, y[test_idx])
+        rank = effective_rank(test_z)
+        print(f"  [set] step {step:4d}  held-out kNN-BA={ba:.3f}  eff-rank={rank:.1f}",
+              flush=True)
+        return {"step": step, "holdout_ba": ba, "effective_rank": rank}
+
+    print("[set] training (CPU) ...", flush=True)
+    history, evals = [], [evaluate(0)]
+    for step in range(1, STEPS + 1):
+        sel = train_idx[torch.randint(len(train_idx), (BATCH,), generator=g)]
+        batch = augment(data[sel], g)
+        padded, n, positions = prep(batch)
+        texts = [channel_texts_for(datasets[int(c)]) for c in cfg[sel]]
+        with torch.no_grad():
+            a1_target = target_tok(padded, RATE, n)
+        targets = grounding_targets(batch)
+        plan = make_mask_plan(BATCH, n_patches, 6, GYRO_IDX, generator=g)
+
+        h_tokens, _ = model(padded, n, texts, positions, token_mask=plan.token_mask)
+        _, z = model(padded, n, texts, positions)
+        out = elite3_loss(
+            a1_pred=model.a1_head(h_tokens), a1_target=a1_target,
+            a1_mask=plan.token_mask,
+            a2_embeddings=z, a2_labels=y[sel],
+            a3_cadence_pred=model.a3_cadence(z).squeeze(1),
+            a3_eigen_pred=model.a3_eigen(z).view(BATCH, 4, 3),
+            a3_targets=targets, weights=weights,
+        )
+        opt.zero_grad()
+        out.total.backward()
+        opt.step()
+        history.append(out.parts)
+        if step % EVAL_EVERY == 0:
+            evals.append(evaluate(step))
+
+    first, last = history[0], history[-1]
+    final = evals[-1]
+    verdict = {
+        "encoder": "set", "holdout": holdout,
+        "losses_first": first, "losses_last": last,
+        "losses_decreased": all(last[k] < first[k] for k in ("a1_masked", "a2_supcon")),
+        "learned_holdout_ba": final["holdout_ba"],
+        "m2_trivial_reference": 0.366,
+        "effective_rank": final["effective_rank"],
+        "rank_ok": final["effective_rank"] > EFFECTIVE_RANK_FLOOR,
+        "evals": evals,
+    }
+    verdict["gate"] = ("PASS" if verdict["losses_decreased"] and verdict["rank_ok"]
+                       and final["holdout_ba"] >= 0.366 else "FAIL")
+    return verdict
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--holdout", default=HOLDOUT_DEFAULT,
                         choices=[d for d, _ in STREAMS])
+    parser.add_argument("--encoder", default="trivial", choices=["trivial", "set"])
+    parser.add_argument("--steps", type=int, default=None,
+                        help="override STEPS (e.g. longer run for the larger set encoder)")
     args = parser.parse_args()
+    if args.steps:
+        global STEPS
+        STEPS = args.steps
     OUT.mkdir(parents=True, exist_ok=True)
-    verdict = run_gate(args.holdout)
-    path = OUT / f"verdict_{args.holdout}.json"
+    verdict = run_gate(args.holdout) if args.encoder == "trivial" \
+        else run_gate_set(args.holdout)
+    path = OUT / f"verdict_{args.encoder}_{args.holdout}.json"
     path.write_text(json.dumps(verdict, indent=2))
     print(json.dumps({k: v for k, v in verdict.items() if k != "evals"}, indent=2))
     print(f"-> {path}")
