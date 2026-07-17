@@ -211,6 +211,25 @@ informative, (b) the encoder consumes 3/6/9/12-channel inputs unchanged, (c) hel
 same-activity clustering improves vs the M1 primitives alone.
 **Reuse:** legacy RoPE-physical-time encoder; channel-text/`ChannelTextFusion` idea.
 
+**RESULT (2026-07-18 — gate PASSED; `model/tokenizer/{transformer,channel_text,encoder}.py`,
+`tests/test_encoder_m3.py` 13/13, 167/167 suite):** ported the legacy dual-branch transformer
+(temporal attn w/ physical-time RoPE + channel-mask cross-channel attn; **factorized, not flat T×C**
+— recorded deviation, flat = ablation) + TokenTextEncoder/ChannelTextFusion (**frozen LM pinned to
+CPU** — SentenceTransformer auto-grabs CUDA another job may own). `SetTokenizerEncoder` applies the
+A1 [MASK] **before** text fusion (the masked token keeps its channel identity — that's what makes
+masked-channel modeling well-posed). Config conditioning IS the channel text; the M2 per-stream
+config token + UNKNOWN fallback are gone. Structural gates all green: 3/6/9/12 channels unchanged,
+permutation equivariance + pooled invariance, text is load-bearing (wrist→ankle changes the rep),
+RoPE shift-invariant but spacing-sensitive (**assert on per_patch — mean-pooling cancels attention
+re-weighting**), causal mode provably blocks future→past, masked channels contribute nothing.
+**Transfer gate (all-4-holdout comparison, toy scale):** set encoder mean **0.556** > trivial 0.528 >
+handcrafted grav 0.507; set wins motionsense +0.058 and shoaib +0.121, ties realworld, loses only the
+noisy single-wrist pamap2 fold (−0.057). Single-fold snapshots are noise-bound (±0.05 @ 320 windows)
+— judge on fold means, never one fold. **Found en route:** the inner filterbank's frozen per-band
+norm must be **calibrated** (fit_norm_stats) — leaving it at identity feeds raw log-energies to the
+transformer and cost ~0.05 BA. THE TOKENIZER IS NOW COMPLETE (per the user's build order) → next:
+Pipeline A Phase-1 training at scale (needs GPU scheduling), then Pipeline B.
+
 ## M4 — Archetypal memory (retrieval + curation)  ·  ~4–5 days
 **Goal:** the curated non-parametric evidence store.
 **Build:** `model/evidence/memory.py`, staged to de-risk:
