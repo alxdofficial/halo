@@ -33,6 +33,9 @@ GRAVITY_MS2 = 9.80665
 ACC_UNIT_G = frozenset({
     "uci_har", "hapt", "capture24", "harth", "motionsense", "inclusivehar",
     "usc_had",  # MotionNode accelerometer reported in g (USC-HAD Readme); |acc|~1.07 g still.
+    "sp_sw_har",  # converter already divides raw m/s² by 9.81 -> g (see convert.py).
+    "nfi_fared",  # NFI-FARED accelerometer reported in g (verified at-rest |acc|~1.00).
+    "xrf_v2",     # 5-pos IMU acc in g (verified still |acc|~0.9-1.0); AirPods total acc=grav+userAccel (g).
 })
 
 # --- Accelerometer in m/s² → scale 1/9.80665 -------------------------------------------------------
@@ -45,6 +48,7 @@ ACC_UNIT_G = frozenset({
 ACC_UNIT_MS2 = frozenset({
     "hhar", "pamap2", "wisdm", "kuhar", "mhealth", "realworld", "mobiact", "shoaib",
     "tnda_har", "ut_complex", "unimib_shar",  # accelerometer in m/s^2 (gravity present) -> rescale to g.
+    "harmes",  # WearOS right-wrist acc in m/s^2 (verified at-rest |acc|~9.81) -> rescale to g.
 })
 
 

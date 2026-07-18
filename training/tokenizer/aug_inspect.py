@@ -44,15 +44,15 @@ def one_axis_config(axis: str) -> AugmentationConfig:
     return cfg
 
 
-def fetch_windows() -> list[tuple[str, torch.Tensor]]:
-    refs = {r.dataset: r for r in discover_grids("harmonised")}
+def fetch_windows() -> list[tuple[str, torch.Tensor, float]]:
+    refs = {r.dataset: r for r in discover_grids("native")}
     out = []
     for dataset, label in (("motionsense", "walking"), ("motionsense", "sitting"),
                            ("pamap2", "walking")):
         ref = refs[dataset]
         idx = int(sample_indices(ref, label, 1, SEED)[0])
         data = torch.tensor(np.asarray(ref.load_data()[idx]), dtype=torch.float32)
-        out.append((f"{dataset}:{label}", data))
+        out.append((f"{dataset}:{label}", data, float(ref.rate_hz)))   # native rate per window
     return out
 
 
@@ -69,18 +69,18 @@ def main() -> None:
         augmenter = IMUAugmenter(one_axis_config(axis))
         fig, axes_grid = plt.subplots(len(windows), 2, figsize=(12, 3 * len(windows)),
                                       sharex="col")
-        for row, (name, data) in enumerate(windows):
+        for row, (name, data, rate) in enumerate(windows):
             stdlib_random.seed(SEED + row)
             np.random.seed(SEED + row)
             torch.manual_seed(SEED + row)
             sample = IMUSample(data=data.clone(), channel_names=list(CHANNELS),
-                               sampling_rate=RATE,
+                               sampling_rate=rate,
                                channel_descriptions=list(DESCRIPTIONS), label=name)
             aug = augmenter(sample)
-            t0 = np.arange(data.shape[0]) / RATE
+            t0 = np.arange(data.shape[0]) / rate
             t1 = np.arange(aug.data.shape[0]) / aug.sampling_rate
             for col, (sig, t, title) in enumerate(
-                ((data, t0, f"{name} — original (60 Hz)"),
+                ((data, t0, f"{name} — original ({rate:g} Hz)"),
                  (aug.data, t1, f"{axis} -> {aug.sampling_rate:g} Hz, "
                                 f"{aug.data.shape[0]} samples"))
             ):
@@ -99,16 +99,16 @@ def main() -> None:
         made.append(path)
 
     # multi-scale patch grid: token count per patch_seconds draw
-    name, data = windows[0]
+    name, data, rate = windows[0]
     fig, axs = plt.subplots(len(PATCH_SECONDS_GRID), 1, figsize=(12, 8), sharex=True)
-    t = np.arange(data.shape[0]) / RATE
+    t = np.arange(data.shape[0]) / rate
     for ax, ps in zip(axs, PATCH_SECONDS_GRID):
         ax.plot(t, data[:, 2].numpy(), lw=0.7)
-        n_patches = int(data.shape[0] / (ps * RATE))
+        n_patches = int(data.shape[0] / (ps * rate))
         for k in range(1, n_patches + 1):
             ax.axvline(k * ps, color="red", lw=0.8, alpha=0.6)
         ax.set_title(f"patch_seconds={ps} -> T={n_patches} time tokens "
-                     f"({int(ps * RATE)} samples/patch)", fontsize=9)
+                     f"({int(ps * rate)} samples/patch)", fontsize=9)
     axs[-1].set_xlabel("seconds")
     fig.suptitle(f"multi-scale patch-duration axis on {name} (acc_z)")
     fig.tight_layout()

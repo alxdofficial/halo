@@ -57,8 +57,10 @@ OUT_DIR = Path(__file__).resolve().parent / "outputs" / "pretrain"
 @dataclass
 class PretrainConfig:
     # d256/6L/~7.3M: clears all three consumer floors (tokenizer rep, A1/A2/A3 heads,
-    # evidence-engine multi-vector memory), data-appropriate for the 96k-window corpus
-    # (well below the shortcut-prone 20M legacy scale), ~70 min/20k-step run. Committing:
+    # evidence-engine multi-vector memory), data-appropriate for the ~307k-window native corpus
+    # (306,666 train / 38,167 val, 93 labels; well below the shortcut-prone 20M legacy scale).
+    # NOTE: the 20k-step budget dates from the old ~96k-window corpus — re-justify/re-tune it for
+    # the ~3.2x larger native corpus using the repaired val metric before the real run (F11).
     # the frozen encoder's d sets the memory-bank vector width. (User-approved 2026-07-18.)
     d_model: int = 256
     num_layers: int = 6
@@ -75,11 +77,11 @@ class PretrainConfig:
     a3_weight: float = 0.1
     calib_batches: int = 50               # filterbank norm calibration pass
     val_every: int = 1_000
-    val_max_windows: int = 2_000
+    val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
     knn_k: int = 5
     num_workers: int = 4
     seed: int = 20260718
-    max_per_stream: int = 20_000
+    max_per_stream: int | None = None     # None = use ALL windows; the sampler is source-balanced
     device: str = "cpu"
 
 
@@ -100,12 +102,28 @@ class PipelineAModel(nn.Module):
 
 
 def git_commit() -> str:
+    """Short HEAD, suffixed '-dirty' when the working tree has uncommitted changes, so a checkpoint
+    honestly records that its source was not a clean commit (F5 — converters/loader are often dirty)."""
     try:
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                              capture_output=True, text=True, timeout=5,
-                              cwd=Path(__file__).resolve().parents[2]).stdout.strip()
+        repo = Path(__file__).resolve().parents[2]
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
+                              text=True, timeout=5, cwd=repo).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
+                              text=True, timeout=5, cwd=repo).stdout.strip()
+        return f"{head}-dirty" if dirty else (head or "unknown")
     except Exception:
         return "unknown"
+
+
+def corpus_fingerprint(index) -> str:
+    """Stable 16-hex signature of the assembled TRAINING corpus (per-stream dataset/rate/shape +
+    label vocab), stored in the checkpoint so it records WHICH corpus produced the weights (F5 —
+    grid meta.json carries no raw fingerprint; this captures the corpus identity a checkpoint needs)."""
+    import hashlib
+    sig = [f"{r.dataset}/{r.stream}:{r.rate_hz}:{tuple(r.shape)}:{len(set(r.labels))}"
+           for r in sorted(index.refs, key=lambda r: (r.dataset, r.stream))]
+    sig.append("labels=" + ",".join(sorted(index.label_ids)))
+    return hashlib.sha256("|".join(sig).encode()).hexdigest()[:16]
 
 
 def align_batch(batch: dict) -> dict:
@@ -117,7 +135,12 @@ def align_batch(batch: dict) -> dict:
 
 
 def knn_balanced_acc(train_z, train_y, test_z, test_y, k: int) -> float:
-    labels = sorted(set(train_y.tolist()) & set(test_y.tolist()))
+    # Score EVERY query label (F1 fix). A query class absent from the support scores 0 — kNN
+    # retrieves other-class neighbours — instead of being dropped from the metric. The old
+    # `set(train_y) & set(test_y)` intersection silently omitted unsupported query classes,
+    # inflating the number and making best.pt selection depend on which classes the random
+    # support cap happened to include.
+    labels = sorted(set(test_y.tolist()))
     per_class = []
     for label in labels:
         idx = (test_y == label).nonzero().squeeze(1)
@@ -133,22 +156,37 @@ def knn_balanced_acc(train_z, train_y, test_z, test_y, k: int) -> float:
 
 
 @torch.no_grad()
-def embed(model: PipelineAModel, loader: DataLoader, device, max_windows: int):
+def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_label: int,
+                     target_labels: set | None = None):
+    """Embed up to ``per_label`` windows PER LABEL (deterministic — the loader must be
+    shuffle=False / pre-shuffled). Guarantees every label is represented so the kNN metric covers
+    all classes and best.pt selection is stable — replaces the old 'first max_windows in loader
+    order' cap that silently missed rare labels and overshot by a batch (F1). When ``target_labels``
+    is given (the support over the huge train set), stops early once every target label is saturated."""
+    from collections import Counter
     model.eval()
     zs, ys = [], []
-    seen = 0
+    counts: Counter = Counter()
+    done: set = set()
     for batch in loader:
-        out = model.encoder(
-            batch["patches"].to(device), batch["rates"].to(device),
-            batch["patch_len"].to(device), batch["texts"],
-            batch["positions"].to(device),
-            channel_mask=batch["channel_mask"].to(device),
-            patch_padding_mask=batch["patch_padding_mask"].to(device),
-        )
-        zs.append(out["pooled"].cpu())
-        ys.append(batch["labels"])
-        seen += len(batch["labels"])
-        if seen >= max_windows:
+        lab = batch["labels"]
+        take = [j for j, l in enumerate(lab.tolist()) if counts[l] < per_label]
+        if take:
+            out = model.encoder(
+                batch["patches"].to(device), batch["rates"].to(device),
+                batch["patch_len"].to(device), batch["texts"],
+                batch["positions"].to(device),
+                channel_mask=batch["channel_mask"].to(device),
+                patch_padding_mask=batch["patch_padding_mask"].to(device),
+            )
+            pooled = out["pooled"].cpu()
+            zs.append(pooled[take])
+            ys.append(lab[take])
+            for l in lab[take].tolist():
+                counts[l] += 1
+                if counts[l] >= per_label:
+                    done.add(l)
+        if target_labels is not None and target_labels <= done:
             break
     model.train()
     return torch.cat(zs), torch.cat(ys)
@@ -161,6 +199,8 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true",
                         help="tiny corpus + tiny model for a fast CPU end-to-end check")
     parser.add_argument("--out", type=Path, default=OUT_DIR)
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite an existing non-empty output dir (default: refuse)")
     args = parser.parse_args()
 
     cfg = PretrainConfig(device=args.device)
@@ -171,12 +211,22 @@ def main() -> None:
             d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
             classes_per_batch=8, samples_per_class=4, steps=args.steps or 10,
             warmup_steps=2, calib_batches=3, val_every=max(args.steps or 10, 5),
-            val_max_windows=200, num_workers=0, max_per_stream=200,
+            val_per_label=10, num_workers=0, max_per_stream=200,
             device=args.device,
         )
     device = torch.device(cfg.device)
     torch.manual_seed(cfg.seed)
     args.out.mkdir(parents=True, exist_ok=True)
+    # F5: never silently append to / overwrite a prior run. A stale checkpoint or log in the out dir
+    # means a fresh run would mix results and append to the old log — refuse unless --force/--smoke.
+    stale = list(args.out.glob("*.pt")) + list(args.out.glob("log.jsonl"))
+    if stale:
+        if args.force or args.smoke:
+            for p in stale:
+                p.unlink()
+        else:
+            raise SystemExit(f"output dir {args.out} already contains {[p.name for p in stale]}; "
+                             f"choose a fresh --out or pass --force to overwrite.")
 
     # ------------------------------------------------------------------ data
     index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.seed)
@@ -186,7 +236,8 @@ def main() -> None:
     train_loader = DataLoader(
         train_ds,
         batch_sampler=BalancedBatchSampler(index.train, cfg.classes_per_batch,
-                                           cfg.samples_per_class, cfg.steps, cfg.seed),
+                                           cfg.samples_per_class, cfg.steps, cfg.seed,
+                                           stream_datasets=index.stream_datasets),
         collate_fn=MultiScaleCollate(seed=cfg.seed),
         num_workers=cfg.num_workers, worker_init_fn=_seed_worker,
         persistent_workers=cfg.num_workers > 0, pin_memory=device.type == "cuda",
@@ -249,6 +300,7 @@ def main() -> None:
     t0 = time.time()
 
     def checkpoint(name: str, step: int, val_ba: float):
+        import random as _stdrandom
         torch.save({
             "encoder": model.encoder.state_dict(),
             "heads": {k: v.state_dict() for k, v in
@@ -259,6 +311,14 @@ def main() -> None:
             "step": step, "val_ba": val_ba,
             "git": git_commit(),
             "corpus": index.summary(),
+            "corpus_fingerprint": corpus_fingerprint(index),   # which corpus produced this (F5)
+            # Full restart state so a killed run resumes without silently diverging (F5).
+            "optimizer": opt.state_dict(),
+            "scheduler": sched.state_dict(),
+            "scaler": scaler.state_dict(),
+            "rng": {"torch": torch.get_rng_state(),
+                    "numpy": np.random.get_state(),
+                    "python": _stdrandom.getstate()},
         }, args.out / name)
 
     model.train()
@@ -338,9 +398,11 @@ def main() -> None:
                 f.write(json.dumps(rec) + "\n")
 
         if step % cfg.val_every == 0 or step == cfg.steps:
-            train_z, train_y = embed(model, train_eval_loader, device,
-                                     cfg.val_max_windows)
-            val_z, val_y = embed(model, val_loader, device, cfg.val_max_windows)
+            # Query = every val label (stratified, so all classes are scored); support = the same
+            # labels drawn from the train set (early-stops once saturated). F1: covers all classes.
+            val_z, val_y = embed_stratified(model, val_loader, device, cfg.val_per_label)
+            train_z, train_y = embed_stratified(model, train_eval_loader, device,
+                                                cfg.val_per_label, target_labels=set(val_y.tolist()))
             ba = knn_balanced_acc(train_z, train_y, val_z, val_y, cfg.knn_k)
             rec = {"step": step, "val_knn_ba": ba}
             print(json.dumps(rec), flush=True)

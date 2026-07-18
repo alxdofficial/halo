@@ -29,6 +29,10 @@ EXPECTED_PRIMARY_CHANNELS = {
     "hapt": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "mhealth": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "capture24": ("acc_x", "acc_y", "acc_z"),
+    "sp_sw_har": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+    "nfi_fared": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+    "harmes": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+    "xrf_v2": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "motionsense": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "realworld": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "mobiact": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
@@ -140,12 +144,15 @@ def test_channel_text_names_device_placement_axis_and_gravity_state():
     assert channel_description(metadata, "gyro_z") == "phone gyroscope Z-axis at waist"
 
 
-def test_deployment_streams_non_strict_includes_phone_and_watch():
+def test_deployment_streams_non_strict_includes_phone_watch_and_device():
     from data.scripts.curate.deployment_policy import deployment_streams
     streams = deployment_streams(placement_strict=False)
-    assert {s.device_profile for s in streams} == {"phone", "watch"}
+    # non-strict ("harmonised", all-wearable) admits phone + watch + body-strapped `device`
+    # IMUs (nfi_fared back/wrist); phone-strict (below) keeps only phone.
+    assert {s.device_profile for s in streams} == {"phone", "watch", "device"}
     datasets = {s.dataset for s in streams}
     assert {"pamap2", "mhealth", "capture24"}.issubset(datasets)   # watch datasets present
+    assert "nfi_fared" in datasets                                   # body-strapped device present
     assert sum(s.dataset == "wisdm" for s in streams) == 2          # wisdm phone + watch
 
 

@@ -121,6 +121,34 @@ def test_stream_text_parses_placement():
     assert "gyroscope" in texts[3]
 
 
+def test_stream_text_uses_rich_distinct_placement():
+    """Channel text must use the StreamSpec placement, not collapse distinct configs (review #2)."""
+    def t(ds, st):
+        return stream_channel_descriptions(ds, st)[0]
+    lw, rw = t("xrf_v2", "left_wrist"), t("xrf_v2", "right_wrist")
+    assert "left wrist" in lw and "right wrist" in rw and lw != rw     # L/R not collapsed
+    assert "head" in t("xrf_v2", "glasses")                            # glasses = head, not "body"
+    assert "ear" in t("xrf_v2", "airpods_ear")                         # ear placement preserved
+    assert t("xrf_v2", "left_pocket") != t("xrf_v2", "right_pocket")   # L/R pockets distinct
+    assert "forearm" in t("nfi_fared", "wrist")                        # NFI = forearm (per paper)
+    assert "lower back" in t("nfi_fared", "back")
+
+
+def test_sampler_source_balances_within_label():
+    """A shared label's draws are spread evenly across its datasets, not by raw count."""
+    from collections import Counter
+    from training.tokenizer.pretrain_data import WindowKey
+    # label 0 present in a 'big' stream (1000 windows) and a 'small' one (10) — 100:1 imbalance.
+    keys = [WindowKey(0, w, 0) for w in range(1000)] + [WindowKey(1, w, 0) for w in range(10)]
+    sd = ["big", "small"]
+    bal = BalancedBatchSampler(keys, 1, 8, steps_per_epoch=300, stream_datasets=sd)
+    c = Counter(sd[keys[i].stream_i] for batch in bal for i in batch)
+    assert 0.4 < c["small"] / (c["big"] + c["small"]) < 0.6      # source-balanced ~50/50
+    uni = BalancedBatchSampler(keys, 1, 8, steps_per_epoch=300)  # no stream_datasets -> old behaviour
+    c2 = Counter(sd[keys[i].stream_i] for batch in uni for i in batch)
+    assert c2["small"] / (c2["big"] + c2["small"]) < 0.1         # uniform-over-pool follows raw count
+
+
 def test_no_hapt_uci_leak(index):
     """hapt (UCI-HAR re-release) must be dropped from the corpus (sweep finding E)."""
     datasets = {r.dataset for r in index.refs}
@@ -141,6 +169,111 @@ def test_patch_padding_mask_flags_phantom_patches(index):
         for p in range(patches.shape[1]):
             if not pad[b, p]:
                 assert torch.count_nonzero(patches[b, p]) == 0, "phantom patch not zero"
+
+
+def test_short_window_yields_at_least_one_patch(index):
+    """A window shorter than one patch at the drawn scale (e.g. sp_sw_har's 1.0 s TUG
+    windows at ps=1.5) must still get exactly one REAL short patch spanning the whole
+    window — never an all-padding window (which would pool to a degenerate A2 embedding).
+    patch_len is honest (< round(rate*ps))."""
+    ds = PretrainDataset(index, index.train[:32], augment=True)
+    items = [ds[i] for i in range(32)]
+    for ps in PATCH_SECONDS_CHOICES:
+        out = MultiScaleCollate(fixed_patch_seconds=ps)(items)
+        real_per_win = out["patch_padding_mask"].sum(1)
+        assert (real_per_win >= 1).all(), f"all-padding window at ps={ps}"
+        assert torch.isfinite(out["patches"]).all()
+        # every real patch's declared length fits inside the window it came from
+        assert (out["patch_len"] >= 1).all()
+
+
+def test_window_crop_varies_observation_length():
+    """P5 window-crop keeps a random contiguous sub-window (session-length invariance), floored at
+    min_samples, and never lengthens."""
+    from data.scripts.augmentations import AugmentationConfig, IMUAugmenter, IMUSample
+    import numpy as np
+    cfg = AugmentationConfig.none()
+    cfg.window_crop.enabled = True
+    cfg.window_crop.p = 1.0
+    aug = IMUAugmenter(cfg)
+    np.random.seed(0)
+    lens = []
+    for _ in range(128):
+        s = IMUSample(data=torch.zeros(360, 6), channel_names=list(CHANNELS),
+                      sampling_rate=60.0, channel_descriptions=["x"] * 6,
+                      label="walking", dataset_name="hhar")
+        lens.append(aug(s).data.shape[0])
+    lens = np.asarray(lens)
+    assert lens.max() <= 360 and lens.min() >= int(0.5 * 360)     # in [min_frac*T, T], never longer
+    assert len(set(lens.tolist())) > 10                          # genuinely variable
+    # floor: a window already near the min_samples floor is not cropped below it
+    short = IMUSample(data=torch.zeros(40, 6), channel_names=list(CHANNELS), sampling_rate=50.0,
+                      channel_descriptions=["x"] * 6, label="walking", dataset_name="hhar")
+    assert aug(short).data.shape[0] >= 32
+
+
+def test_window_crop_in_default_v2_is_enabled():
+    from data.scripts.augmentations import AugmentationConfig
+    assert AugmentationConfig.default_v2().window_crop.enabled
+    assert not AugmentationConfig.none().window_crop.enabled
+
+
+def test_gravity_state_removed_skips_collate_alignment():
+    """F9: gravity-removed streams skip alignment via the authoritative state, not the heuristic."""
+    from model.tokenizer.preprocess import gravity_align
+    w = torch.zeros(1, 120, 6)
+    w[:, :, 0] = 1.0                                   # 1 g DC on x — the heuristic WOULD rotate it
+    _, _, aligned_auto = gravity_align(w.clone(), list(CHANNELS), 50.0)
+    _, r_rem, aligned_rem = gravity_align(w.clone(), list(CHANNELS), 50.0, gravity_state="removed")
+    assert bool(aligned_auto[0])                       # heuristic aligns a strong-DC window
+    assert not bool(aligned_rem[0])                    # authoritative 'removed' skips it
+    assert torch.allclose(r_rem[0], torch.eye(3))      # ...and returns identity (no rotation)
+
+
+def test_collate_fallback_position_is_window_center():
+    """F4a: a window shorter than one patch emits ONE short patch whose position is the window's
+    TRUE center (0.5*T/rate), not the nominal ps/2."""
+    item = {"data": torch.randn(100, 6), "rate": 100.0, "texts": ["x"] * 6, "label_id": 0,
+            "channel_mask": torch.ones(6, dtype=torch.bool), "gravity_state": "present"}
+    out = MultiScaleCollate(fixed_patch_seconds=1.5)([item])   # 100 samples @100Hz = 1.0 s < 1.5 s patch
+    assert int(out["patch_len"][0]) == 100                     # whole window in one short patch
+    assert abs(float(out["positions"][0, 0]) - 0.5) < 1e-4     # 0.5 s (not the nominal 0.75)
+
+
+def test_sampler_draws_without_replacement_in_group():
+    """F6: a class-group of samples_per_class draws contains no duplicate window index (unless a
+    source pool is smaller than its slot count)."""
+    from training.tokenizer.pretrain_data import WindowKey
+    keys = [WindowKey(0, w, 0) for w in range(500)] + [WindowKey(1, w, 0) for w in range(500)]
+    sd = ["a", "b"]
+    bal = BalancedBatchSampler(keys, classes_per_batch=1, samples_per_class=8,
+                               steps_per_epoch=200, stream_datasets=sd)
+    for batch in bal:
+        assert len(set(batch)) == len(batch), "duplicate window in a class-group"
+
+
+def test_wisdm_native_grid_is_full_six_channel(index):
+    """F2: wisdm native grids carry REAL gyro (merged), not accel-only [1,1,1,0,0,0]."""
+    import numpy as np
+    from data.scripts.eda.grid_io import discover_grids
+    wisdm = [r for r in discover_grids("native") if r.dataset == "wisdm"]
+    if not wisdm:
+        pytest.skip("wisdm native grids not built")
+    for r in wisdm:
+        assert all(r.mask), f"{r.key} mask has padded channels {r.mask}"
+        data = r.load_data()
+        assert float(np.abs(np.asarray(data[:200, :, 3:])).mean()) > 0.0, "gyro is all-zero"
+
+
+def test_knn_scores_unsupported_query_labels_as_failures():
+    """F1: knn_balanced_acc scores every QUERY label; a class absent from the support scores 0
+    instead of being intersected away (which inflated the metric)."""
+    from training.tokenizer.pretrain import knn_balanced_acc
+    train_z = torch.tensor([[0., 0.], [0.01, 0.], [0., 0.01]])
+    train_y = torch.tensor([0, 0, 0])                          # support has only class 0
+    test_z = torch.tensor([[0., 0.], [0.02, 0.], [5., 5.], [6., 6.]])
+    test_y = torch.tensor([0, 0, 1, 1])                        # query has classes 0 and 1
+    assert abs(knn_balanced_acc(train_z, train_y, test_z, test_y, k=3) - 0.5) < 1e-9
 
 
 def test_gravity_aligned_in_collate(index):

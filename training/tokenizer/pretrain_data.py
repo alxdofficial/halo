@@ -1,9 +1,11 @@
 """Pipeline A Phase-1 data pipeline (pretraining corpus + sampler + collate).
 
 Design decisions carried in from the gates:
-  * Corpus = the 9 TRAIN datasets' harmonised grids (eval sets never touched),
-    balanced at MAX_PER_STREAM per stream — the same balanced-corpus recipe the
-    baselines were trained on (apples-to-apples).
+  * Corpus = the 12 TRAIN datasets' **native** grids (eval sets never touched): native sampling
+    RATE (no 60 Hz resample) + canonical labels + 6-ch pad+mask. The filterbank tokenizer is
+    rate-invariant, so HALO trains on the corpus's REAL native rates (20/50/100 Hz) instead of a
+    homogenized 60 Hz base — the 60 Hz "harmonised" grids are the layout-locked baselines' crutch,
+    not HALO's. Source-balanced sampling (no per-stream cap) spreads each activity across configs.
   * Subject-disjoint train/val split per dataset.
   * Label-balanced batches (classes x samples) so A2 SupCon always has positives.
   * The FULL augmentation stack (data/scripts/augmentations.py default_v2), with
@@ -46,7 +48,7 @@ from model.tokenizer.primitives import cadence, eigen_ratios
 # windows into train across the pair. uci_har is the canonical windowed release; keep it.
 TRAIN_DATASETS = (
     "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar",
-    "mhealth", "capture24",
+    "mhealth", "capture24", "sp_sw_har", "nfi_fared", "harmes", "xrf_v2",
 )
 MAX_PER_STREAM = 20_000          # the balanced-corpus cap (107k-scale); PER-STREAM (so
                                  # wisdm's 2 streams get 2x — kept for baseline parity,
@@ -63,7 +65,8 @@ MIN_WINDOWS_TO_ANCHOR = 8        # labels below this can't form real SupCon posi
 # too coarse for masked prediction, and it's where native-short windows (uci_har 2.56s,
 # unimib falls) collapse to a single un-maskable patch (objective-health audit 2026-07-18).
 PATCH_SECONDS_CHOICES = (0.5, 0.75, 1.0, 1.5)
-DFT_SIZE = 256                   # must cover max rate (100 Hz) x max patch (2 s) = 200
+DFT_SIZE = 256                   # must cover max NATIVE rate (100 Hz) x max patch (1.5 s) = 150;
+                                 # the rate aug caps at 100 Hz too, so 256 keeps ample headroom
 CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
 SEED = 20260718
 
@@ -74,14 +77,56 @@ PLACEMENT_WORDS = {
 }
 
 
+_DEVICE_WORDS = {"phone": "phone", "watch": "watch", "watch_proxy": "phone",
+                 "device": "wearable device"}
+
+
 def stream_channel_descriptions(dataset: str, stream: str) -> list[str]:
-    """Per-channel base text from the stream id (e.g. 'phone_waist')."""
-    tokens = stream.lower().split("_")
-    device = "phone" if "phone" in tokens else ("watch" if "watch" in tokens else "device")
-    place = next((PLACEMENT_WORDS[w] for w in tokens if w in PLACEMENT_WORDS), "the body")
+    """Per-channel base text for a deployment stream — HALO's configuration-conditioning input.
+
+    Uses the StreamSpec's curated `placement` + `device_profile` from the deployment policy (e.g.
+    "smart glasses on the head" / "the left wrist" / "an earbud in the ear"), which distinguishes
+    left vs right, head vs ear vs pocket, etc. Falls back to stream-id tokens only if no spec exists.
+    """
+    try:
+        from data.scripts.curate.deployment_policy import get_stream_spec
+        spec = get_stream_spec(dataset, stream)
+        place = spec.placement if spec.placement.startswith(("the ", "a ", "an ", "smart")) \
+            else f"the {spec.placement}"
+        device = _DEVICE_WORDS.get(spec.device_profile, spec.device_profile.replace("_", " "))
+        gravity_removed = (spec.gravity_state == "removed")
+    except (KeyError, ValueError, ImportError):
+        tokens = stream.lower().split("_")
+        device = "phone" if "phone" in tokens else ("watch" if "watch" in tokens else "device")
+        place = next((PLACEMENT_WORDS[w] for w in tokens if w in PLACEMENT_WORDS), "the body")
+        gravity_removed = False
     where = f"{place} ({device})"
-    return ([f"accelerometer {a}-axis worn at {where}" for a in "xyz"]
+    # Gravity state is a real acquisition-config axis: accelerometer from gravity-removed streams
+    # (kuhar, xrf_v2/airpods_ear) has |DC|~0 vs ~1 g for gravity-present streams. Only the
+    # accelerometer carries it (the gyroscope is unaffected). The clause mirrors the sibling
+    # deployment_policy.channel_description() and is read back as AUTHORITATIVE by the gravity
+    # augmentation's _gravity_present() / _mark_gravity_removed() (so it also gates rotation/
+    # gravity-removal correctly on native gravity-removed streams, not the misfiring heuristic).
+    grav = "; gravity removed" if gravity_removed else "; includes gravity"
+    return ([f"accelerometer {a}-axis worn at {where}{grav}" for a in "xyz"]
             + [f"gyroscope {a}-axis worn at {where}" for a in "xyz"])
+
+
+_GRAVITY_STATE_CACHE: dict[tuple[str, str], str | None] = {}
+
+
+def _stream_gravity_state(dataset: str, stream: str) -> str | None:
+    """Authoritative per-stream gravity state ('present'/'removed') from the deployment policy,
+    cached. Fed to the collate's gravity_align so gravity-removed streams (kuhar, xrf/airpods_ear)
+    skip alignment instead of trusting the magnitude heuristic (which misfires on ~3% of them)."""
+    key = (dataset, stream)
+    if key not in _GRAVITY_STATE_CACHE:
+        try:
+            from data.scripts.curate.deployment_policy import get_stream_spec
+            _GRAVITY_STATE_CACHE[key] = get_stream_spec(dataset, stream).gravity_state
+        except (KeyError, ValueError, ImportError):
+            _GRAVITY_STATE_CACHE[key] = None
+    return _GRAVITY_STATE_CACHE[key]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -97,13 +142,20 @@ class WindowKey:
 class CorpusIndex:
     """Discover, balance, split, and label the pretraining corpus (lazy windows)."""
 
-    def __init__(self, max_per_stream: int = MAX_PER_STREAM, seed: int = SEED,
-                 datasets: Sequence[str] = TRAIN_DATASETS):
+    def __init__(self, max_per_stream: int | None = None, seed: int = SEED,
+                 datasets: Sequence[str] = TRAIN_DATASETS, alignment: str = "native"):
+        # HALO trains on the "native" grids: native sampling RATE (no 60 Hz resample — the filterbank
+        # is rate-invariant, so real rates beat a homogenized base + synthetic rate aug) with the
+        # canonical labels + 6-ch pad+mask layout this loader expects. The 60 Hz "harmonised" grids
+        # remain the layout-locked baselines' source; they are not used here.
+        self.alignment = alignment
         self.refs: list[GridRef] = [
-            r for r in discover_grids("harmonised") if r.dataset in set(datasets)
+            r for r in discover_grids(alignment) if r.dataset in set(datasets)
         ]
         if not self.refs:
-            raise FileNotFoundError("no harmonised train grids found — build grids first")
+            raise FileNotFoundError(f"no {alignment} train grids found — build grids first "
+                                    f"(python -m data.scripts.build_grids --alignment {alignment})")
+        self.stream_datasets = [r.dataset for r in self.refs]   # stream_i -> dataset (for the sampler)
         rng = np.random.default_rng(seed)
 
         # subject-disjoint split per dataset
@@ -123,8 +175,8 @@ class CorpusIndex:
         self.val: list[WindowKey] = []
         for stream_i, ref in enumerate(self.refs):
             n = ref.n_windows
-            chosen = (rng.choice(n, size=max_per_stream, replace=False)
-                      if n > max_per_stream else np.arange(n))
+            chosen = (np.arange(n) if max_per_stream is None or n <= max_per_stream
+                      else rng.choice(n, size=max_per_stream, replace=False))
             for w in np.sort(chosen):
                 label = ref.labels[int(w)]
                 if label not in label_ids:
@@ -192,6 +244,7 @@ class PretrainDataset(Dataset):
             channel_descriptions=stream_channel_descriptions(ref.dataset, ref.stream),
             label=ref.labels[key.window_i],
             dataset_name=ref.dataset,
+            channel_mask=[bool(m) for m in ref.mask],   # real vs zero-padded channels (F10b)
         )
         sample = self.augmenter(sample)
 
@@ -217,29 +270,49 @@ class PretrainDataset(Dataset):
             "texts": texts6,
             "label_id": key.label_id,
             "channel_mask": mask6,
+            "gravity_state": _stream_gravity_state(ref.dataset, ref.stream),
         }
 
 
 class BalancedBatchSampler(Sampler[list[int]]):
     """classes_per_batch x samples_per_class over the train keys — guarantees SupCon
-    positives. Classes with too few windows are excluded from anchoring (still seen
-    as negatives via other classes' batches is NOT possible here, so rare labels are
-    simply oversampled with replacement instead of dropped)."""
+    positives. Classes with too few windows are excluded from anchoring (rare labels are
+    oversampled with replacement instead of dropped).
+
+    When ``stream_datasets`` is given, the per-class draw is additionally **source-balanced**:
+    a label's `samples_per_class` slots are spread evenly across the datasets/configs that
+    carry that label (round-robin over datasets, then a window drawn within each), instead of
+    uniformly over the pooled windows. This stops a large single-config dataset (e.g. capture24,
+    acc-only wrist free-living) from dominating a shared activity's window pool, so each activity
+    is seen across many acquisition configs — the point of the config-generalization corpus. It
+    also makes SupCon positives cross-config. Without it, behaviour is the old uniform-over-pool."""
 
     def __init__(self, keys: list[WindowKey], classes_per_batch: int,
                  samples_per_class: int, steps_per_epoch: int, seed: int = SEED,
-                 min_windows: int = MIN_WINDOWS_TO_ANCHOR):
+                 min_windows: int = MIN_WINDOWS_TO_ANCHOR, *,
+                 stream_datasets: list[str] | None = None):
         by_label: dict[int, list[int]] = {}
         for i, k in enumerate(keys):
             by_label.setdefault(k.label_id, []).append(i)
         # Exclude labels too small to form real positives — anchoring an 8-slot batch
         # with a 2-window class means 4x duplicated windows (degenerate SupCon positives).
         self.excluded = sorted(l for l, w in by_label.items() if len(w) < min_windows)
-        self.by_label = {l: w for l, w in by_label.items() if len(w) >= min_windows}
+        kept = {l: w for l, w in by_label.items() if len(w) >= min_windows}
         if self.excluded:
             print(f"[sampler] excluded {len(self.excluded)} labels below "
                   f"{min_windows} windows from anchoring: {self.excluded}")
-        self.labels = list(self.by_label)
+        # Per label, group key indices by their source dataset (for source-balanced draws).
+        # stream_datasets is None -> a single pooled group per label (old uniform behaviour).
+        self.by_label_ds: dict[int, list[np.ndarray]] = {}
+        for l, idxs in kept.items():
+            if stream_datasets is None:
+                self.by_label_ds[l] = [np.asarray(idxs)]
+            else:
+                per_ds: dict[str, list[int]] = {}
+                for i in idxs:
+                    per_ds.setdefault(stream_datasets[keys[i].stream_i], []).append(i)
+                self.by_label_ds[l] = [np.asarray(v) for v in per_ds.values()]
+        self.labels = list(self.by_label_ds)
         self.classes_per_batch = min(classes_per_batch, len(self.labels))
         self.samples_per_class = samples_per_class
         self.steps = steps_per_epoch
@@ -257,10 +330,20 @@ class BalancedBatchSampler(Sampler[list[int]]):
                                  replace=False)
             batch: list[int] = []
             for c in classes:
-                pool = self.by_label[self.labels[int(c)]]
-                take = rng.choice(len(pool), size=self.samples_per_class,
-                                  replace=len(pool) < self.samples_per_class)
-                batch.extend(pool[int(t)] for t in take)
+                pools = self.by_label_ds[self.labels[int(c)]]   # one array per source dataset
+                order = rng.permutation(len(pools))             # round-robin datasets, shuffled
+                # Assign each of samples_per_class slots to a source round-robin, then draw the
+                # slots for each source WITHOUT replacement (F6): no duplicate window indices in a
+                # class-group unless a source pool is smaller than its assigned slot count (a rare
+                # tiny pool), which keeps SupCon positives distinct.
+                counts: dict[int, int] = {}
+                for s in range(self.samples_per_class):
+                    src = int(order[s % len(pools)])
+                    counts[src] = counts.get(src, 0) + 1
+                for src, cnt in counts.items():
+                    pool = pools[src]
+                    picks = rng.choice(len(pool), size=cnt, replace=cnt > len(pool))
+                    batch.extend(int(pool[p]) for p in picks)
             yield batch
 
 
@@ -312,6 +395,9 @@ class MultiScaleCollate:
         cadence_v = torch.zeros(B, dtype=torch.bool)
         eigen_t = torch.full((B, 4, 3), float("nan"))
         eigen_v = torch.zeros(B, dtype=torch.bool)
+        # Per-sample patch-CENTER positions (seconds). Default = the nominal patch grid; the
+        # usable==0 fallback below overrides row b's single patch to the window's TRUE center (F4a).
+        positions = (torch.arange(P).float() * ps + ps / 2).unsqueeze(0).repeat(B, 1)
 
         for b, item in enumerate(batch):
             data, rate = item["data"], item["rate"]
@@ -329,20 +415,37 @@ class MultiScaleCollate:
             cadence_v[b] = cad.valid[0]
             eigen_t[b] = eig.values[0]
             eigen_v[b] = eig.valid[0]
-            # Gravity-align the whole window on its true length (one R per window)
+            # Gravity-align the whole window on its true length (one R per window). Pass the
+            # AUTHORITATIVE gravity_state so gravity-removed streams skip alignment (F9).
             if self.align_gravity:
-                data, _, _ = gravity_align(data.unsqueeze(0), list(CHANNELS), rate)
+                data, _, _ = gravity_align(data.unsqueeze(0), list(CHANNELS), rate,
+                                           gravity_state=item.get("gravity_state"))
                 data = data[0]
+            per_patch = n
             usable = min(P, data.shape[0] // n)
-            for p in range(usable):
-                patches[b, p, :n] = data[p * n:(p + 1) * n]
+            if usable == 0 and data.shape[0] > 0:
+                # Window shorter than one patch at this scale (e.g. sp_sw_har's 1.0 s TUG
+                # windows in a ps=1.5 batch). Emit ONE short patch spanning the whole
+                # window rather than an all-padding window (which yields a degenerate
+                # pooled embedding that poisons A2). patch_len is honest (< n); the
+                # filterbank flags the under-resolved bands via its resolution mask.
+                per_patch, usable = data.shape[0], 1
+                positions[b, 0] = 0.5 * per_patch / rate   # true center of the short patch (F4a)
+                patches[b, 0, :per_patch] = data[:per_patch]
+            else:
+                for p in range(usable):
+                    patches[b, p, :n] = data[p * n:(p + 1) * n]
+                # F4b: recover the discarded tail (data.shape[0] % n samples) with ONE extra patch
+                # anchored to the END of the window, when a patch slot is free. Uniform length n
+                # (it overlaps the previous patch); its position is that end-anchored patch's true
+                # center. Floors used to silently drop up to one patch of real signal per window.
+                if usable < P and data.shape[0] > usable * n:
+                    patches[b, usable, :n] = data[-n:]
+                    positions[b, usable] = (data.shape[0] - 0.5 * n) / rate
+                    usable += 1
             patch_pad[b, :usable] = True
-            patch_len[b] = n
+            patch_len[b] = per_patch
             rates[b] = rate
-
-        # .contiguous(): expand() aliases memory and pin_memory refuses aliased tensors
-        positions = (torch.arange(P).float() * ps + ps / 2).unsqueeze(0) \
-            .expand(B, P).contiguous()
         return {
             "patches": patches,
             "patch_len": patch_len,

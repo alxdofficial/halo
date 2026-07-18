@@ -84,113 +84,98 @@ def load_sensor_data(device: str, sensor: str):
     return subject_data
 
 
-def segment_by_subject_activity(subject_data_dict: dict, device_label: str, sensor_label: str):
-    """Segment data by subject and activity."""
+# Merge / segmentation parameters
+GAP_SPLIT_NS = 200_000_000       # split a subject/activity at timestamp gaps > 200 ms — WISDM has
+                                 # multi-second clock gaps within an activity (max ~56 s); never
+                                 # concatenate discontinuous segments across them.
+MIN_SEG_ROWS = 20                # skip segments shorter than ~1 s @ 20 Hz
+
+
+def _by_subject(sensor_dict: dict) -> dict:
+    """Re-key a {file_stem: df} sensor dict by the NUMERIC subject id (the raw first column), so a
+    subject's accelerometer and gyroscope files (different stems) pair up."""
+    out = {}
+    for df in sensor_dict.values():
+        if len(df):
+            out[str(int(df['subject'].iloc[0]))] = df
+    return out
+
+
+def merged_sessions(device_label: str, accel_dict: dict, gyro_dict: dict):
+    """Merge co-located accel+gyro into 6-channel sessions per subject/activity, split at clock gaps.
+
+    WISDM records phone (pocket) and watch (wrist) accel AND gyro at 20 Hz on a SHARED clock
+    (nearest accel<->gyro timestamp diff ~0 ms). The old converter emitted accel-only and gyro-only
+    sessions and the deployment policy then dropped `_gyro_`, so wisdm trained ACCEL-ONLY despite
+    having usable gyro. Here we nearest-join the gyro onto every accel row (never a fabricated
+    channel — direction='nearest' always matches an existing gyro sample), then split a
+    subject/activity into contiguous segments wherever the accel timestamp gap exceeds 200 ms.
+    """
+    accel_by_subj, gyro_by_subj = _by_subject(accel_dict), _by_subject(gyro_dict)
     sessions = []
-
-    for subject_id, df in subject_data_dict.items():
-        # Group by activity
-        for activity_code in df['activity'].unique():
-            activity_data = df[df['activity'] == activity_code].copy()
-
-            if len(activity_data) < 20:  # Skip very short segments (< 1 second at 20Hz)
+    for subject_id, adf in accel_by_subj.items():
+        gdf = gyro_by_subj.get(subject_id)
+        for activity_code in sorted(adf['activity'].unique()):
+            a = adf[adf['activity'] == activity_code].sort_values('timestamp')
+            if len(a) < MIN_SEG_ROWS:
                 continue
-
-            # Sort by timestamp
-            activity_data = activity_data.sort_values('timestamp')
-
-            # Create session ID
+            g = None if gdf is None else gdf[gdf['activity'] == activity_code].sort_values('timestamp')
+            if g is None or len(g) == 0:
+                continue     # require gyro so every wisdm session is a uniform 6-channel grid
+            a = a.rename(columns={'x': f'{device_label}_accel_x', 'y': f'{device_label}_accel_y',
+                                  'z': f'{device_label}_accel_z'})
+            g = g[['timestamp', 'x', 'y', 'z']].rename(
+                columns={'x': f'{device_label}_gyro_x', 'y': f'{device_label}_gyro_y',
+                         'z': f'{device_label}_gyro_z'})
+            merged = pd.merge_asof(a, g, on='timestamp', direction='nearest')
+            ts = merged['timestamp'].to_numpy(dtype=np.float64)
+            splits = np.flatnonzero(np.diff(ts) > GAP_SPLIT_NS) + 1
+            bounds = [0, *splits.tolist(), len(merged)]
             activity_name = ACTIVITIES.get(activity_code, 'unknown')
-            session_id = f"{device_label}_{sensor_label}_{subject_id}_{activity_code}"
-
-            # Calculate duration
-            duration_sec = len(activity_data) / 20.0  # 20 Hz
-
-            sessions.append({
-                'session_id': session_id,
-                'data': activity_data,
-                'activity_name': activity_name,
-                'duration_sec': duration_sec,
-                'device': device_label,
-                'sensor': sensor_label
-            })
-
+            for si in range(len(bounds) - 1):
+                seg = merged.iloc[bounds[si]:bounds[si + 1]]
+                if len(seg) < MIN_SEG_ROWS:
+                    continue
+                sessions.append({
+                    'session_id': f"{device_label}_{subject_id}_{activity_code}_{si}",
+                    'data': seg, 'activity_name': activity_name,
+                    'device': device_label, 'subject': str(subject_id),
+                })
     return sessions
 
 
 def merge_device_sensors():
-    """Merge data from phone and watch, accel and gyro."""
+    """Build 6-channel (accel+gyro) sessions for phone and watch."""
     print("\nLoading sensor data...")
-
-    # Load all combinations
-    phone_accel = load_sensor_data("phone", "accel")
-    phone_gyro = load_sensor_data("phone", "gyro")
-    watch_accel = load_sensor_data("watch", "accel")
-    watch_gyro = load_sensor_data("watch", "gyro")
-
-    print(f"  Phone accel: {len(phone_accel)} subjects")
-    print(f"  Phone gyro: {len(phone_gyro)} subjects")
-    print(f"  Watch accel: {len(watch_accel)} subjects")
-    print(f"  Watch gyro: {len(watch_gyro)} subjects")
-
-    # For simplicity, create separate sessions for each device-sensor combo
-    # In a more advanced version, we could try to align and merge them
-
-    all_sessions = []
-    all_sessions.extend(segment_by_subject_activity(phone_accel, "phone", "accel"))
-    all_sessions.extend(segment_by_subject_activity(phone_gyro, "phone", "gyro"))
-    all_sessions.extend(segment_by_subject_activity(watch_accel, "watch", "accel"))
-    all_sessions.extend(segment_by_subject_activity(watch_gyro, "watch", "gyro"))
-
-    return all_sessions
+    phone_accel, phone_gyro = load_sensor_data("phone", "accel"), load_sensor_data("phone", "gyro")
+    watch_accel, watch_gyro = load_sensor_data("watch", "accel"), load_sensor_data("watch", "gyro")
+    print(f"  phone accel/gyro files: {len(phone_accel)}/{len(phone_gyro)} · "
+          f"watch: {len(watch_accel)}/{len(watch_gyro)}")
+    return (merged_sessions("phone", phone_accel, phone_gyro)
+            + merged_sessions("watch", watch_accel, watch_gyro))
 
 
 def save_sessions(sessions):
-    """Save all sessions to parquet with variable-length windowing."""
+    """Save each merged 6-channel session to parquet (build_grids does the fixed 6 s windowing)."""
     labels_dict = {}
-    sample_rate = 20.0  # WISDM is 20Hz
-
-    total_windows = 0
-
     for session in sessions:
-        base_session_id = session['session_id']
+        sid = session['session_id']
         data = session['data'].copy()
-        activity = session['activity_name']
-
-        # Reset timestamp to start from 0 (convert from nanoseconds to seconds)
-        min_timestamp = data['timestamp'].min()
-        data['timestamp_sec'] = (data['timestamp'] - min_timestamp) / 1e9  # Unix nanoseconds to sec
-        data['timestamp_sec'] = data['timestamp_sec'].astype(float)  # Ensure float type
-
-        # Keep only sensor columns
+        # timestamp -> seconds from the segment start (WISDM timestamps are nanoseconds)
+        data['timestamp_sec'] = ((data['timestamp'] - data['timestamp'].min()) / 1e9).astype(float)
         device = session['device']
-        sensor = session['sensor']
-
-        # Subject id (from the raw first column) for subject-disjoint splits; the session id starts
-        # with the device, so build_grids.iter_sessions reads the subject from this column.
-        subject_id = str(data['subject'].iloc[0]) if 'subject' in data.columns else base_session_id.split('_')[2]
-
-        # Rename x, y, z to be device/sensor-specific and ensure float
-        data = data.rename(columns={
-            'x': f'{device}_{sensor}_x',
-            'y': f'{device}_{sensor}_y',
-            'z': f'{device}_{sensor}_z'
-        })
-
-        # Select final columns; keep the whole continuous single-activity recording as ONE session
-        # (build_grids does the fixed 6 s windowing — avoids double-windowing).
-        cols = ['timestamp_sec', f'{device}_{sensor}_x', f'{device}_{sensor}_y', f'{device}_{sensor}_z']
+        cols = ['timestamp_sec',
+                f'{device}_accel_x', f'{device}_accel_y', f'{device}_accel_z',
+                f'{device}_gyro_x', f'{device}_gyro_y', f'{device}_gyro_z']
         out = data[cols].astype(float)
-        out['subject'] = subject_id
+        out['subject'] = session['subject']
 
-        session_dir = OUTPUT_DIR / "sessions" / base_session_id
+        session_dir = OUTPUT_DIR / "sessions" / sid
         session_dir.mkdir(parents=True, exist_ok=True)
         out.to_parquet(session_dir / "data.parquet", index=False)
+        labels_dict[sid] = [session['activity_name']]
 
-        labels_dict[base_session_id] = [activity]
-        total_windows += 1
-
-    print(f"  Created {total_windows} sessions from {len(sessions)} original segments")
+    print(f"  Created {len(labels_dict)} merged 6-channel sessions")
     return labels_dict
 
 
@@ -282,8 +267,12 @@ def main():
         print("Run: python -m data.scripts.download_datasets wisdm")
         return
 
-    # Create output directory
+    # Create output directory; wipe any prior sessions (old accel-only/gyro-only layout must not
+    # linger — stale `phone_accel_*` sessions would still route into the merged 6-ch stream).
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    import shutil
+    if (OUTPUT_DIR / "sessions").exists():
+        shutil.rmtree(OUTPUT_DIR / "sessions")
 
     # Merge and segment all data
     sessions = merge_device_sensors()

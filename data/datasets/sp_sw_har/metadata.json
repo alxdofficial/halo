@@ -1,0 +1,5 @@
+{
+  "dataset": "sp_sw_har",
+  "sampling_rate_hz": 100.0,
+  "pre_windowed": true
+}

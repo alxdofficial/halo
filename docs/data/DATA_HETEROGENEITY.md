@@ -19,20 +19,27 @@ Pipeline order (fixed): `raw session → deployment_policy → accel_units → w
 
 | Axis | Normalized to | Where |
 |---|---|---|
-| **Device / placement** | one phone *or* watch stream (pocket/waist/thigh, wrist/arm); everything else pruned | deployment_policy |
+| **Device / placement** | one stream per device: phone (pocket/waist/thigh), watch (wrist), or body-strapped `device` (lower-back, forearm, head-glasses, ear). The **strict** deployment view keeps phone only; the **harmonised** (all-wearable) view keeps phone + watch + `device`. | deployment_policy |
 | **Channels** | `[acc_xyz(, gyro_xyz)]`, standard order; ≤ 6 | deployment_policy → baseline_view |
-| **Gravity** | present (reconstructed for iOS); kuhar stays gravity-removed (never faked) | deployment_policy |
+| **Gravity** | present (reconstructed for iOS); kuhar **and** xrf_v2's AirPods stay gravity-removed (never faked) | deployment_policy |
 | **Unit** | accelerometer in **g** (|acc| ≈ 1 at rest); gyro untouched | accel_units |
 
 Sampling-rate heterogeneity is **not** flattened in the corpus (it's a first-class comparison axis);
-rate is recorded per dataset and resampled per-model downstream.
+rate is recorded per dataset. `build_grids` materialises **three** regimes (`_ALIGNMENTS`):
+
+- **`harmonised`** — resampled to **60 Hz**, 6-ch pad+mask, canonical labels. The fixed-rate crutch the
+  layout-locked baselines (CrossHAR/LiMU-BERT/harnet) require.
+- **`non_harmonised`** — native rate, native 3/6-ch, native labels. The raw eval/baseline source.
+- **`native`** — **native rate** (no resample), 6-ch pad+mask, canonical labels. **HALO's source:** the
+  filterbank tokenizer is rate-invariant, so HALO trains on the corpus's REAL native rates (20/50/100 Hz)
+  plus the `rate`/`window_crop` augmentations — not a 60 Hz base with synthetic rate diversity.
 
 > **The "Channels" column below = the dataset's REAL sensors.** The accelerometer is *always* present
 > and *never* removed. Some datasets have no usable gyroscope — it is either physically absent
 > (capture24/unimib_shar/harth are accelerometer-only devices) or unrecoverable — so they contribute
-> 3 real channels. This is **not** a choice about the tensor: the **harmonised** view is *always*
-> 6-channel `[acc_xyz, gyro_xyz]` (acc-only datasets get **zero-padded + masked** gyro slots), and the
-> **non-harmonised** view keeps the native 3 or 6. Nothing is ever "taken out".
+> 3 real channels. This is **not** a choice about the tensor: the **harmonised**/**native** views are
+> *always* 6-channel `[acc_xyz, gyro_xyz]` (acc-only datasets get **zero-padded + masked** gyro slots),
+> and the **non-harmonised** view keeps the native 3 or 6. Nothing is ever "taken out".
 
 ## Per-dataset table
 
@@ -47,6 +54,10 @@ rate is recorded per dataset and resampled per-model downstream.
 | hapt | train | phone · waist | 50 Hz | g | present | acc+gyro | UCI-HAR family (Android, ~1.02 g). |
 | mhealth | train | watch · wrist (arm IMU) | 50 Hz | m/s² | present | acc+gyro | Right-lower-arm IMU (co-located acc+gyro). Gyro is somewhat sample-and-hold but **real**, so it is kept as a 6-ch stream. Drop chest, ankle, ECG, mag. |
 | capture24 | train | watch · wrist | 100 Hz | g | present | acc only | Free-living Axivity, accelerometer-only. |
+| sp_sw_har | train | phone · front pocket **and** watch · wrist (2 streams) | ~102.5 → 100 Hz | g | present | acc+gyro | Paired Timed-Up-and-Go. Per-row labels → **fixed 1.0 s windows** (`turning` is ~1 s; a 6 s window would discard it), `pre_windowed`. Resampled on the real `timestamp` (true ~102.5 Hz, dup timestamps + gaps), not a synthetic clock. |
+| nfi_fared | train | body-strapped **lower back** + **dominant forearm** (2 streams) | 100 Hz | g | present | acc+gyro | Forensic activities (incl. transport → `vehicle`, punch/kick/drag as new labels). Gyro **deg/s → rad/s**. SHA-256 dedupe of byte-identical source CSVs (pp10 exp2==exp3). Placement is **forearm** per the Hi-OSCAR paper, not wrist. |
+| harmes | train | watch · dominant wrist | 50 Hz | m/s² | present | acc+gyro | 15 fine-grained kitchen/bath hand ADLs. **Right wrist only** — the left Puck.js gyro saturates the int16 rail with an undocumented full-scale (unrecoverable), so we do not ship it. Labels from the start/end event log; corrected a **+1 h clock offset** on 39/71 recordings (DST bug). |
+| xrf_v2 | train | 6 streams: L/R **wrist**, L/R **pocket phone**, **head glasses**, **AirPods ear** | 50 Hz (AirPods 25→50) | g | present (**AirPods removed**) | acc+gyro | 16 volunteers, 30 indoor ADLs (arXiv 2501.19034). Device→placement order read from the h5's own `device_order`. Gyro **deg/s → rad/s**. AirPods = iOS **user acceleration (gravity removed)** + gyro; upsampled to 50 Hz. Glasses/ear placements exist nowhere else in the corpus. |
 | motionsense | eval | phone · front pocket | 50 Hz | iOS → g | present | acc+gyro | iOS: total accel = **userAcceleration + gravity** (both g), reconstructed in deployment_policy; attitude is QA-only. |
 | realworld | eval | phone · waist | 50 Hz | m/s² | present | acc(+gyro) | Gyro retained only when the converted waist stream has a complete finite triad. |
 | mobiact | eval | phone · trouser pocket | 50 Hz | m/s² | present | acc+gyro | — |

@@ -10,6 +10,31 @@ consume must be applied to the baselines *too* — otherwise a reviewer correctl
 HALO more diverse training data," and the conditioning result means nothing. Only augmentations a fixed
 model **structurally cannot ingest**, or that **train HALO's language interface**, are HALO-exclusive.
 
+## Active configuration (`AugmentationConfig.default_v2`, used by Phase-1 pretraining)
+
+Source of truth: `data/scripts/augmentations.py`. Applied per-sample in the loader (`pretrain_data.py`).
+
+| Aug | Enabled | p | Params |
+|---|---|---|---|
+| `jitter` | ✅ | 0.5 | σ = 0.05 |
+| `scale` | ✅ | 0.5 | ×[0.9, 1.1] |
+| `gravity` (remove gravity) | ✅ | **0.15** | cutoff 0.4 Hz — **lowered from 0.5** (audit: p=0.5 stripped gravity on 52 % of windows, killing the DC/gravity feature on half the corpus) |
+| `rotation_3d` (SO(3)) | ✅ | 0.5 | requires gravity present (rotates acc+gyro jointly) |
+| `rate` (resample) | ✅ | 0.5 | 15–100 Hz, min 32 samples |
+| `channel_dropout` | ✅ | 0.3 | drops the `gyro` group (acc never dropped) |
+| `window_crop` (P5) | ✅ | 0.5 | keep a random contiguous ≥50 % sub-window (session-length invariance); floor 32 samples |
+| `channel_text_phrase` / `channel_text_dropout` | ✅ | 0.5 / 0.15 | text-side augs (channel-text paraphrase, channel-desc dropout) |
+| `label_text` | ❌ **off in Phase-A** | (0.8) | label synonyms/templates — **computed then discarded** in pretraining: A2 contrasts on label **IDs**, not text, so the loader disables it (`pretrain_data.py:185`). A Pipeline-B (language-tower) concern. |
+| `time_shift` / `time_warp` / `magnitude_warp` | ❌ off | — | available but disabled by default |
+
+**Rate/length diversity is now REAL, not synthetic (changed 2026-07-18).** HALO trains on the
+`native` grids (`build_grids._ALIGNMENTS`): the corpus's **native sampling rates** (20/50/100 Hz) and
+**native window lengths**, *not* a 60 Hz resampled base. The 60 Hz "harmonised" grids are the
+layout-locked baselines' crutch (CrossHAR/LiMU-BERT need a fixed rate); the filterbank tokenizer is
+rate-invariant, so HALO does not. On top of the real native anchors, `rate` (15–100 Hz) interpolates
+between them and `window_crop` varies the observation length — both are layout-breaking (Bucket 2),
+so a fixed-window/fixed-rate baseline structurally cannot ingest them.
+
 ## Three buckets
 
 ### Bucket 1 — Symmetric robustness (apply to baselines too)
@@ -42,6 +67,7 @@ A fixed-layout model **structurally cannot ingest** these — not a boost, a har
 |---|---|---|
 | `rate` (P3) | sampling rate | a 60 Hz-fixed model must resample back, which cancels the augmentation |
 | `channel_dropout` (P4) | channel count | drops channels → variable width; a fixed 6-ch model can't take it |
+| `window_crop` (P5) | observation length | variable-length window → variable token count; a fixed-window model can't take it |
 
 ### Bucket 3 — HALO-only by design (interface-training)
 

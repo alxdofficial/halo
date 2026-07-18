@@ -4,6 +4,15 @@
 > corpus, objectives, hyperparameters, and the bugs we fixed without re-deriving them.
 > Code: `training/tokenizer/` (harness + diagnostics), `model/tokenizer/` (the encoder).
 > Status: **all gates PASS; launch held on GPU availability + explicit go.**
+>
+> **⚠️ Corpus + regime superseded (2026-07-18).** The table below is the ORIGINAL 8-dataset /
+> 57-label / ~105k-window **60 Hz harmonised** corpus. HALO now trains on the **`native`** grids
+> (native sampling rate, no 60 Hz resample — the filterbank is rate-invariant) at **12 datasets, 20
+> streams, 93 labels, ~305k train / ~38k val windows**, native rates 20/50/100 Hz (added sp_sw_har,
+> nfi_fared, harmes, xrf_v2 — placement diversity: back, forearm, dual-wrist, head-glasses, ear).
+> The corpus was further hardened per the external audit (WISDM gyro merged, XRF AirPods off-by-one,
+> SP/NFI gap-split & signal-dedup, honest val metric). See memory `halo-corpus-expansion-2026-07` and
+> each dataset's `convert.py`. The audit reasoning below still holds; only the numbers/regime changed.
 
 ---
 

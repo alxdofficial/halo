@@ -11,5 +11,9 @@ Shared, **cross-dataset** logic (unit/gravity canonicalization, the device/chann
 harmonised-vs-raw assembly, augmentations, the setup-all entry point) lives in [`../scripts`](../scripts),
 not here.
 
-Train (phone/watch, primary): uci_har, hhar, pamap2, wisdm, kuhar, unimib_shar, hapt, mhealth, capture24.
-Eval (held out, primary): motionsense, realworld, mobiact, shoaib, inclusivehar.
+Train (primary): uci_har, hhar, pamap2, wisdm, kuhar, unimib_shar, hapt, mhealth, capture24,
+sp_sw_har (phone+watch TUG), nfi_fared (back+forearm), harmes (wrist ADLs), xrf_v2 (dual-wrist +
+dual-pocket + head-glasses + AirPods ear, 16 subjects). 12 datasets / 20 streams / 96 labels.
+Non-strict ("harmonised") training admits phone + watch + body-strapped `device` placements; the
+strict deployment view keeps phone only.
+Eval (held out, primary): motionsense, realworld, mobiact, shoaib, inclusivehar, usc_had, tnda_har, ut_complex.

@@ -1,0 +1,5 @@
+{
+  "dataset": "nfi_fared",
+  "sampling_rate_hz": 100.0,
+  "pre_windowed": false
+}

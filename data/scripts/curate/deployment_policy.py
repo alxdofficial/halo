@@ -31,6 +31,10 @@ PRIMARY_TRAIN_DATASETS = (
     "hapt",
     "mhealth",
     "capture24",
+    "sp_sw_har",
+    "nfi_fared",
+    "harmes",
+    "xrf_v2",
 )
 
 PRIMARY_EVAL_DATASETS = (
@@ -115,6 +119,43 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                _xyz("watch_accel_"), _gyro("watch_gyro_"), "present",
                session_contains=("watch_",), session_excludes=("_gyro_",),
                note="Legacy conversion stores acceleration and gyro separately; gyro is optional until the converter emits merged IMU sessions."),
+    StreamSpec("sp_sw_har", "phone_pocket", "phone", "left front trouser pocket",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               session_contains=("_sp_",),
+               note="Paired phone+watch TUG capture; smartphone (orientation-variable pocket)."),
+    StreamSpec("sp_sw_har", "watch_wrist", "watch", "left wrist",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               session_contains=("_sw_",),
+               note="Paired phone+watch TUG capture; smartwatch on the left wrist."),
+    StreamSpec("nfi_fared", "back", "device", "the lower back",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               session_contains=("_back_",),
+               note="NFI-FARED lower-back strapped IMU (rare placement); gyro deg/s->rad/s in convert."),
+    StreamSpec("harmes", "watch_wrist", "watch", "the dominant wrist",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               note="WearOS smartwatch, 15 fine-grained kitchen/bathroom hand ADLs. Acc m/s^2 "
+                    "(gravity present); gyro rad/s. Left-wrist Puck.js excluded (unrecoverable gyro)."),
+    # XRF V2 (WWADL): five-position body IMU + AirPods ear IMU; 34 indoor ADLs, 3 volunteers.
+    # Device->placement per repo imu.py name_to_id (NOT the newer Plus README order). Acc g, gyro rad/s.
+    StreamSpec("xrf_v2", "glasses", "device", "smart glasses on the head",
+               _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_glasses_",),
+               note="Head-worn glasses IMU — a placement absent elsewhere in the corpus."),
+    StreamSpec("xrf_v2", "left_wrist", "watch", "the left wrist",
+               _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_left_wrist_",)),
+    StreamSpec("xrf_v2", "right_wrist", "watch", "the right wrist",
+               _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_right_wrist_",)),
+    StreamSpec("xrf_v2", "left_pocket", "phone", "the left trouser pocket",
+               _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_left_pocket_",)),
+    StreamSpec("xrf_v2", "right_pocket", "phone", "the right trouser pocket",
+               _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_right_pocket_",)),
+    StreamSpec("xrf_v2", "airpods_ear", "device", "an earbud in the ear",
+               _GENERIC_ACC, _GENERIC_GYRO, "removed", session_contains=("_airpods_ear_",),
+               note="AirPods Pro ear IMU @25 Hz (Plus release): user acceleration (gravity REMOVED) "
+                    "+ gyro rad/s. Ear placement absent elsewhere in the corpus."),
+    StreamSpec("nfi_fared", "wrist", "device", "the dominant forearm",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               session_contains=("_arm_",),
+               note="NFI-FARED dominant-wrist strapped IMU; gyro deg/s->rad/s in convert."),
     StreamSpec("kuhar", "phone_waist", "phone", "waist",
                _GENERIC_ACC, _GENERIC_GYRO, "removed"),
     StreamSpec("unimib_shar", "phone_pocket", "phone", "trouser pocket",
@@ -203,12 +244,13 @@ def deployment_streams(placement_strict: bool = False, role: str = "primary") ->
     - ``placement_strict=True``  → **phone streams only** ("harmonised-strict"). Watch-placement
       datasets (pamap2, mhealth, capture24) and wisdm's watch stream are dropped, because mixing
       phone and watch placement is a problem for placement-blind models.
-    - ``placement_strict=False`` → **phone + watch** ("harmonised"): a session recorded on both a
-      phone and a watch contributes two separate single-device samples.
+    - ``placement_strict=False`` → **all wearables** ("harmonised"): phone + watch + body-strapped
+      ``device`` IMUs (e.g. nfi_fared back/wrist). A session recorded on multiple devices contributes
+      one separate single-device sample each.
 
     ``watch_proxy`` / ``non_deployment`` streams are excluded — they are diagnostic/stress, not primary.
     """
-    keep = {"phone"} if placement_strict else {"phone", "watch"}
+    keep = {"phone"} if placement_strict else {"phone", "watch", "device"}
     return tuple(s for s in STREAM_SPECS if s.role == role and s.device_profile in keep)
 
 

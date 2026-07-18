@@ -191,12 +191,19 @@ def gravity_align(
     channel_names: Sequence[str],
     sampling_rate_hz: float,
     enabled: bool = True,
+    gravity_state: Optional[str] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Rotate each window so the estimated gravity ("up") is canonical +z.
 
     windows: (B, T, C); channels identified by TEXT (accel triad required for the
     estimate; every complete xyz triad — accel AND gyro — is rotated by the SAME R,
     joint and physical). Non-triad channels pass through untouched.
+
+    ``gravity_state`` is the AUTHORITATIVE per-stream state from the deployment policy: when
+    ``"removed"`` (iOS userAcceleration / gravity-removed streams like kuhar, XRF AirPods) the
+    accel carries no gravity direction, so alignment is skipped outright rather than trusting the
+    magnitude heuristic — which otherwise spuriously rotates ~3% of gravity-removed windows whose
+    residual DC happens to exceed the threshold. ``None``/``"present"`` fall back to the estimate.
 
     Returns (aligned windows (B, T, C), R (B, 3, 3), aligned (B,) bool). Windows whose
     gravity estimate is absent/implausible are returned UNROTATED with aligned=False —
@@ -205,7 +212,7 @@ def gravity_align(
     """
     B = windows.shape[0]
     eye = torch.eye(3, device=windows.device, dtype=windows.dtype).expand(B, 3, 3).clone()
-    if not enabled:
+    if not enabled or gravity_state == "removed":
         return windows, eye, torch.zeros(B, dtype=torch.bool, device=windows.device)
 
     acc_idx, _ = accel_gyro_triads(channel_names)

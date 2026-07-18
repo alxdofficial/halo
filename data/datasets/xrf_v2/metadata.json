@@ -1,0 +1,5 @@
+{
+  "dataset": "xrf_v2",
+  "sampling_rate_hz": 50.0,
+  "pre_windowed": false
+}

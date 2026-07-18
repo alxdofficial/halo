@@ -37,7 +37,6 @@ EVAL_STREAMS = (
     ("inclusivehar", "phone_waist"),
 )
 PATCH_SECONDS = 1.0
-RATE = 60.0
 KNN_K = 5
 SEED = 20260718
 
@@ -53,21 +52,21 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
 
 
 @torch.no_grad()
-def encode_dataset(enc, data, texts, device) -> torch.Tensor:
-    """(N, T, 6) raw windows -> (N, d) pooled embeddings (align + patchify + encode)."""
-    n = int(round(RATE * PATCH_SECONDS))
-    P = data.shape[1] // n
+def encode_dataset(enc, data, texts, device, rate: float) -> torch.Tensor:
+    """(N, T, 6) raw windows at the stream's NATIVE rate -> (N, d) pooled embeddings."""
+    n = int(round(rate * PATCH_SECONDS))
+    P = max(1, data.shape[1] // n)
     embs = []
     for start in range(0, len(data), 256):
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
-        aligned, _, _ = gravity_align(block, list(CHANNELS), RATE)
+        aligned, _, _ = gravity_align(block, list(CHANNELS), rate)
         B = aligned.shape[0]
         patches = torch.zeros(B, P, DFT_SIZE, 6)
         for p in range(P):
             patches[:, p, :n] = aligned[:, p * n:(p + 1) * n]
         positions = (torch.arange(P).float() * PATCH_SECONDS + PATCH_SECONDS / 2)
         positions = positions.unsqueeze(0).expand(B, P).contiguous()
-        out = enc(patches.float().to(device), RATE, torch.tensor([n] * B).to(device),
+        out = enc(patches.float().to(device), rate, torch.tensor([n] * B).to(device),
                   [texts] * B, positions.to(device))
         embs.append(out["pooled"].cpu())
     return torch.cat(embs)
@@ -99,7 +98,7 @@ def main() -> None:
     print(f"loaded {args.checkpoint.name}: step {ckpt['step']}, "
           f"internal val_ba {ckpt['val_ba']:.3f}, git {ckpt['git']}", flush=True)
 
-    refs = {(r.dataset, r.stream): r for r in discover_grids("harmonised")}
+    refs = {(r.dataset, r.stream): r for r in discover_grids("native")}
     rng = np.random.default_rng(SEED)
     results = {}
     for dataset, stream in EVAL_STREAMS:
@@ -110,7 +109,7 @@ def main() -> None:
         labels = np.asarray(ref.labels)
         subjects = np.asarray(ref.subjects)
         texts = stream_channel_descriptions(dataset, stream)
-        z = encode_dataset(enc, data, texts, device)
+        z = encode_dataset(enc, data, texts, device, ref.rate_hz)
 
         # subject-disjoint 50/50 split
         subj = sorted(set(subjects.tolist()))

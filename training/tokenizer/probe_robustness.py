@@ -54,7 +54,7 @@ PROBE_LABELS: tuple[str, ...] = (
 WINDOWS_PER_LABEL = 40
 
 # Physical-Hz analysis bands (shared across families). HI band only in the raw/grav energy
-# families — under a 30 Hz resample it is partially truncated, which is honest signal.
+# families — under a half-rate resample it is partially truncated, which is honest signal.
 BANDS: tuple[tuple[float, float], ...] = ((0.0, 0.5), (0.5, 1.5), (1.5, 3.0), (3.0, 6.0), (6.0, 12.0))
 HI_BAND: tuple[float, float] = (12.0, 25.0)
 ACTIVE_BANDS = BANDS[1:]  # bands used for eigen-ratios / shape / coherence (DC excluded)
@@ -164,10 +164,12 @@ def perturb_rot_yaw(acc, gyro, rate, rng):
 
 
 def perturb_resample(acc, gyro, rate, rng):
-    up, down = int(RESAMPLE_HZ), int(rate)  # 30/60 -> polyphase, anti-aliased
-    acc2 = sps.resample_poly(acc, up, down, axis=0)
-    gyro2 = None if gyro is None else sps.resample_poly(gyro, up, down, axis=0)
-    return acc2, gyro2, RESAMPLE_HZ, 1.0
+    # Downsample to HALF the stream's NATIVE rate (polyphase, anti-aliased). Half is always a real
+    # downsample across the corpus's 20/50/100 Hz native streams, whereas a fixed 30 Hz target would
+    # UPSAMPLE the 20 Hz streams. The features are physical-Hz, so this is the rate-invariance stress.
+    acc2 = sps.resample_poly(acc, 1, 2, axis=0)
+    gyro2 = None if gyro is None else sps.resample_poly(gyro, 1, 2, axis=0)
+    return acc2, gyro2, rate / 2.0, 1.0
 
 
 def perturb_timewarp(acc, gyro, rate, rng):
@@ -184,7 +186,7 @@ PERTURBATIONS = OrderedDict([
     ("gain", perturb_gain),
     ("rot_so3", perturb_rot_so3),
     ("rot_yaw", perturb_rot_yaw),
-    ("resample_30hz", perturb_resample),
+    ("resample_half", perturb_resample),
     ("time_warp", perturb_timewarp),
 ])
 
@@ -301,12 +303,13 @@ class ProbeWindow:
     dataset: str
     label: str
     subject: str
+    rate: float        # the stream's NATIVE rate (grids are native; perturbations/features use it)
     acc: np.ndarray    # (T, 3) float64
     gyro: np.ndarray | None
 
 
 def collect_windows() -> list[ProbeWindow]:
-    refs = {(r.dataset, r.stream): r for r in discover_grids("harmonised")}
+    refs = {(r.dataset, r.stream): r for r in discover_grids("native")}
     windows: list[ProbeWindow] = []
     for dataset, stream in STREAMS:
         ref = refs[(dataset, stream)]
@@ -322,6 +325,7 @@ def collect_windows() -> list[ProbeWindow]:
                 win = np.asarray(data[int(idx)], dtype=np.float64)
                 windows.append(ProbeWindow(
                     dataset=dataset, label=label, subject=ref.subjects[int(idx)],
+                    rate=float(ref.rate_hz),
                     acc=win[:, list(acc_idx)],
                     gyro=None if gyro_idx is None else win[:, list(gyro_idx)],
                 ))
@@ -352,9 +356,9 @@ def invariance_table(windows: list[ProbeWindow]) -> dict[str, dict[str, dict[str
         cadence_err: list[float] = []
         for w_i, w in enumerate(windows):
             rng = _rng(SEED, pname, w_i)
-            acc2, gyro2, rate2, cad_factor = pfn(w.acc, w.gyro, 60.0, rng)
+            acc2, gyro2, rate2, cad_factor = pfn(w.acc, w.gyro, w.rate, rng)
             for fname, ffn in FAMILIES.items():
-                before, after = ffn(w.acc, w.gyro, 60.0), ffn(acc2, gyro2, rate2)
+                before, after = ffn(w.acc, w.gyro, w.rate), ffn(acc2, gyro2, rate2)
                 if before is None or after is None:
                     continue
                 if fname == "cadence":
@@ -384,7 +388,7 @@ def _feature_matrix(windows: list[ProbeWindow], fname: str) -> tuple[np.ndarray,
     ffn = FAMILIES[fname]
     rows, keep = [], []
     for i, w in enumerate(windows):
-        v = ffn(w.acc, w.gyro, 60.0)
+        v = ffn(w.acc, w.gyro, w.rate)
         if v is not None:
             rows.append(v)
             keep.append(i)
@@ -477,7 +481,7 @@ def a3_plots(windows: list[ProbeWindow], out_dir: Path) -> list[Path]:
     cad: dict[str, list[float]] = {l: [] for l in labels}
     for w in windows:
         if w.label in cad:
-            v = feat_cadence(w.acc, w.gyro, 60.0)
+            v = feat_cadence(w.acc, w.gyro, w.rate)
             if np.isfinite(v[CADENCE_DIM]):
                 cad[w.label].append(float(2 ** v[CADENCE_DIM]))
     boxplot(cad, "Cadence by activity (valid windows)", "cadence (Hz)", "a3_cadence.png")
@@ -488,7 +492,7 @@ def a3_plots(windows: list[ProbeWindow], out_dir: Path) -> list[Path]:
         vals: dict[str, list[float]] = {l: [] for l in labels}
         for w in windows:
             if w.label in vals:
-                v = feat_eigen_ratios(w.acc, w.gyro, 60.0)[band_i * 3 + d]
+                v = feat_eigen_ratios(w.acc, w.gyro, w.rate)[band_i * 3 + d]
                 if np.isfinite(v):
                     vals[w.label].append(float(v))
         boxplot(vals, f"Eigen-ratio {dim} (1.5-3 Hz band) by activity", dim, f"a3_eigen_{dim}.png")
@@ -531,7 +535,7 @@ def write_report(inv, disc, plots, n_windows, out_dir: Path) -> Path:
         "Notes: `raw_band_energy` is the deliberate fragile baseline. `time_warp` is a",
         "deformation-stability check (smooth drift expected, exact invariance NOT expected,",
         "except cadence which is analytically corrected by the warp factor). The `12-25 Hz`",
-        "band is truncated under `resample_30hz` by Nyquist — drift there is honest.",
+        "band is truncated under `resample_half` by Nyquist — drift there is honest.",
         "",
         "## A3-target separation plots",
         "",

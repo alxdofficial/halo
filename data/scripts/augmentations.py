@@ -114,7 +114,9 @@ class Rotation3dCfg:
 @dataclass
 class RateCfg:
     """P3 — anti-aliased resample to a random sampling rate (teaches rate-invariance).
-    Updates sample.sampling_rate so the Hz channel-text token co-varies."""
+    Updates sample.sampling_rate; the rate is conveyed NUMERICALLY to the filterbank
+    (via the collate's per-sample ``rate``), NOT through text — the channel text carries no Hz
+    token (rate/duration were stripped from the template), so descriptions stay byte-identical."""
     enabled: bool = False
     p: float = 0.5
     min_hz: float = 15.0
@@ -134,6 +136,19 @@ class ChannelDropoutCfg:
     enabled: bool = False
     p: float = 0.3
     groups: tuple = ("gyro",)   # channel-name substrings eligible for dropping
+
+
+@dataclass
+class WindowCropCfg:
+    """P5 — random temporal crop: keep a contiguous sub-window of a random duration, so the model
+    sees variable OBSERVATION LENGTHS (session-length invariance). The encoder is a set over patches
+    with physical-time positions + a patch-padding mask, so a shorter window is simply FEWER real
+    patches — nothing structural forces the 6 s corpus window. Layout-breaking (changes the token
+    count), so it is HALO-only like rate/channel_dropout: a fixed-window baseline cannot ingest it."""
+    enabled: bool = False
+    p: float = 0.5
+    min_frac: float = 0.5    # keep at least this fraction of the window's timesteps
+    min_samples: int = 32    # never crop below this many samples (one resolvable patch)
 
 
 @dataclass
@@ -213,6 +228,7 @@ class AugmentationConfig:
     rotation_3d: Rotation3dCfg = field(default_factory=Rotation3dCfg)
     rate: RateCfg = field(default_factory=RateCfg)
     channel_dropout: ChannelDropoutCfg = field(default_factory=ChannelDropoutCfg)
+    window_crop: WindowCropCfg = field(default_factory=WindowCropCfg)
     # Text augmentations (unified here so ALL augmentation lives in one config).
     channel_text_phrase: ChannelTextPhraseCfg = field(default_factory=ChannelTextPhraseCfg)
     channel_text_dropout: ChannelTextDropoutCfg = field(default_factory=ChannelTextDropoutCfg)
@@ -222,7 +238,7 @@ class AugmentationConfig:
     # (so channel-text augs see the final, physics-mutated channel set/descriptions).
     # rotation_3d runs BEFORE gravity (it needs gravity present in the acc to gate on);
     # rate runs after gravity/rotation.
-    ORDER = ("channel_dropout", "rotation_3d", "gravity", "rate",
+    ORDER = ("window_crop", "channel_dropout", "rotation_3d", "gravity", "rate",
              "time_warp", "time_shift", "magnitude_warp", "scale", "jitter",
              "channel_text_phrase", "channel_text_dropout", "label_text")
 
@@ -235,6 +251,7 @@ class AugmentationConfig:
         cfg.rotation_3d.enabled = True
         cfg.rate.enabled = True
         cfg.channel_dropout.enabled = True
+        cfg.window_crop.enabled = True    # variable observation length (session-length invariance)
         cfg.channel_text_phrase.enabled = True
         cfg.channel_text_dropout.enabled = True
         cfg.label_text.enabled = True
@@ -277,6 +294,8 @@ class IMUSample:
     label: str = ""                   # raw activity label (input to label-text augmentation)
     dataset_name: str = ""            # for dataset-specific label synonyms
     label_text: str = ""              # augmented label text (output; defaults to raw label)
+    channel_mask: Optional[List[bool]] = None   # True = REAL channel (False = zero-padded absent);
+                                                # lets text dropout skip padded channels (F10b)
 
     def __post_init__(self):
         if not self.label_text:
@@ -318,8 +337,10 @@ def _mark_gravity_removed(desc: str) -> str:
     (gravity removed)')."""
     import re
     d = re.sub(r"\([^)]*includes gravity[^)]*\)", "", desc, flags=re.I)
-    d = re.sub(r"\bincludes gravity\b", "", d, flags=re.I)
-    d = re.sub(r"\s{2,}", " ", d).strip().rstrip(",").strip()
+    # strip a "; includes gravity" / "includes gravity" clause with any leading separator, so the
+    # sibling channel_description() format ("...; includes gravity") does not leave a dangling ";".
+    d = re.sub(r"\s*;?\s*\bincludes gravity\b", "", d, flags=re.I)
+    d = re.sub(r"\s{2,}", " ", d).strip().rstrip(",;").strip()
     if "gravity removed" not in d.lower():
         d = f"{d} (gravity removed)"
     return d
@@ -525,6 +546,18 @@ class IMUAugmenter:
         s.sampling_rate = old * up / down               # actual achieved rate
         return s
 
+    # ---------- P5: random temporal crop (variable observation length) ----------
+    def _window_crop(self, s, spec):
+        T = s.data.shape[0]
+        floor = min(T, spec.min_samples)
+        lo = max(floor, int(round(spec.min_frac * T)))
+        if lo >= T:                                        # nothing to crop (already at/below floor)
+            return s
+        length = int(np.random.randint(lo, T + 1))         # keep [lo, T] contiguous samples
+        start = int(np.random.randint(0, T - length + 1))
+        s.data = s.data[start:start + length].contiguous()
+        return s
+
     # ---------- P4: channel / sensor-group dropout ----------
     def _channel_dropout(self, s, spec):
         from data.scripts.curate.channels import (
@@ -542,6 +575,8 @@ class IMUAugmenter:
         s.data = s.data[:, keep]
         s.channel_names = kept_names
         s.channel_descriptions = [s.channel_descriptions[i] for i in keep]
+        if s.channel_mask is not None:
+            s.channel_mask = [s.channel_mask[i] for i in keep]
         return s
 
     # ---------- text: channel-description phrase paraphrase ----------
@@ -553,14 +588,19 @@ class IMUAugmenter:
 
     # ---------- text: channel-description dropout (neutralize, keep signal) ----------
     def _channel_text_dropout(self, s, spec):
-        n = len(s.channel_descriptions)
-        if n <= 1:
+        # Neutralize only REAL channels and never all of them (F10b): padded/absent channels are
+        # masked out by the encoder, so neutralizing their text is a no-op — and counting them in
+        # the budget let `max_frac` consume every real placement description on an acc-only stream
+        # (3 real of 6 slots). Bound over the REAL-channel count and always keep >=1 real described.
+        cm = s.channel_mask
+        real = [i for i in range(len(s.channel_descriptions))
+                if cm is None or (i < len(cm) and cm[i])]
+        if len(real) <= 1:
             return s
-        max_drop = max(1, int(spec.max_frac * n))
-        k = _random.randint(1, max_drop)
-        idxs = _random.sample(range(n), min(k, n))
+        max_drop = max(1, int(spec.max_frac * len(real)))
+        k = min(_random.randint(1, max_drop), len(real) - 1)   # keep >=1 real channel described
         desc = list(s.channel_descriptions)
-        for i in idxs:
+        for i in _random.sample(real, k):
             desc[i] = spec.neutral
         s.channel_descriptions = desc
         return s

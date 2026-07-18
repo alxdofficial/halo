@@ -45,8 +45,8 @@ def _rand_so3(rng):
                          [2*(x*z-y*w), 2*(y*z+x*w), 1 - 2*(x*x+y*y)]], dtype=torch.float32)
 
 
-def transform_windows(data, kind, rng):
-    """Return a nuisance-transformed copy of (N,T,6) windows."""
+def transform_windows(data, kind, rng, base_rate):
+    """Return a nuisance-transformed copy of (N,T,6) windows at the stream's NATIVE `base_rate`."""
     x = torch.tensor(np.asarray(data), dtype=torch.float32)
     if kind == "rotation":
         r = _rand_so3(rng)
@@ -56,9 +56,9 @@ def transform_windows(data, kind, rng):
         x = x * float(rng.uniform(0.7, 1.3))
     elif kind == "rate":
         from scipy.signal import resample_poly
-        y = resample_poly(x.numpy(), 1, 2, axis=1)      # 60 -> 30 Hz (half the samples)
-        return torch.tensor(y, dtype=torch.float32), 30.0
-    return x, RATE
+        y = resample_poly(x.numpy(), 1, 2, axis=1)      # halve the native rate (anti-aliased)
+        return torch.tensor(y, dtype=torch.float32), base_rate / 2.0
+    return x, base_rate
 
 
 # --------------------------------------------------------------------------- encoding
@@ -66,7 +66,7 @@ def transform_windows(data, kind, rng):
 def encode(enc, data, texts, device, rate=RATE, accel_only=False):
     x = data if torch.is_tensor(data) else torch.tensor(np.asarray(data), dtype=torch.float32)
     n = max(1, int(round(rate * PS)))
-    P = x.shape[1] // n
+    P = max(1, x.shape[1] // n)
     cmask = torch.tensor([True]*3 + [not accel_only]*3)
     embs = []
     for s in range(0, len(x), 256):
@@ -117,7 +117,7 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     enc = build_encoder(ckpt, device)
-    refs = {(r.dataset, r.stream): r for r in discover_grids("harmonised")}
+    refs = {(r.dataset, r.stream): r for r in discover_grids("native")}
     rng = np.random.default_rng(SEED)
     report = {"checkpoint": str(args.checkpoint), "step": ckpt["step"]}
 
@@ -130,17 +130,17 @@ def main():
             continue
         data = ref.load_data(); labels = np.asarray(ref.labels); subj = np.asarray(ref.subjects)
         texts = stream_channel_descriptions(dataset, stream)
-        z = encode(enc, data, texts, device)
+        z = encode(enc, data, texts, device, rate=ref.rate_hz)
         tr, te = subj_split(subj, rng)
         y_tr, y_te = labels[tr].tolist(), labels[te].tolist()
         knn = knn_balanced_acc(z[tr], y_tr, z[te], y_te)
         lin = linear_probe(z[tr], y_tr, z[te], y_te)
-        z_ao = encode(enc, data, texts, device, accel_only=True)
+        z_ao = encode(enc, data, texts, device, rate=ref.rate_hz, accel_only=True)
         knn_ao = knn_balanced_acc(z_ao[tr], y_tr, z_ao[te], y_te)
-        # handcrafted grav_band_energy on the same split
+        # handcrafted grav_band_energy on the same split (at the stream's native rate)
         hand = torch.tensor(np.stack([
             FAMILIES["grav_band_energy"](np.asarray(w[:, :3], np.float64),
-                                         np.asarray(w[:, 3:], np.float64), RATE)
+                                         np.asarray(w[:, 3:], np.float64), ref.rate_hz)
             for w in data]), dtype=torch.float32)
         hand = torch.where(torch.isfinite(hand), hand, hand.nan_to_num())
         hand = (hand - hand.mean(0)) / (hand.std(0) + 1e-6)
@@ -159,11 +159,11 @@ def main():
     ref = refs[("motionsense", "phone_front_pocket")]
     data = ref.load_data(); labels = np.asarray(ref.labels); subj = np.asarray(ref.subjects)
     texts = stream_channel_descriptions("motionsense", "phone_front_pocket")
-    z0 = encode(enc, data, texts, device)
+    z0 = encode(enc, data, texts, device, rate=ref.rate_hz)
     tr, te = subj_split(subj, rng)
     base_knn = knn_balanced_acc(z0[tr], labels[tr].tolist(), z0[te], labels[te].tolist())
     for kind in ("rotation", "gain", "rate"):
-        xt, rt = transform_windows(data, kind, np.random.default_rng(SEED))
+        xt, rt = transform_windows(data, kind, np.random.default_rng(SEED), ref.rate_hz)
         zt = encode(enc, xt, texts, device, rate=rt)
         cos = torch.nn.functional.cosine_similarity(z0, zt, dim=1).mean().item()
         rel = ((z0 - zt).norm(dim=1) / (z0.norm(dim=1) + 1e-9)).mean().item()
@@ -179,8 +179,10 @@ def main():
     # ---------- 3. cross-placement (wisdm phone -> watch; TRAIN data, flagged) ----------
     try:
         rp = refs[("wisdm", "phone_pocket")]; rw = refs[("wisdm", "watch_wrist")]
-        zp = encode(enc, rp.load_data(), stream_channel_descriptions("wisdm", "phone_pocket"), device)
-        zw = encode(enc, rw.load_data(), stream_channel_descriptions("wisdm", "watch_wrist"), device)
+        zp = encode(enc, rp.load_data(), stream_channel_descriptions("wisdm", "phone_pocket"),
+                    device, rate=rp.rate_hz)
+        zw = encode(enc, rw.load_data(), stream_channel_descriptions("wisdm", "watch_wrist"),
+                    device, rate=rw.rate_hz)
         yp, yw = list(map(str, rp.labels)), list(map(str, rw.labels))
         p2w = knn_balanced_acc(zp, yp, zw, yw)
         w2p = knn_balanced_acc(zw, yw, zp, yp)
