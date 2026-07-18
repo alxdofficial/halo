@@ -1,0 +1,66 @@
+{
+  "checkpoint": "training/tokenizer/outputs/pretrain/best.pt",
+  "step": 11000,
+  "discriminability": {
+    "motionsense": {
+      "knn_ba": 0.842,
+      "linear_f1": 0.895,
+      "knn_accel_only": 0.754,
+      "knn_handcrafted": 0.898,
+      "eff_rank": 90.6,
+      "labels": 6
+    },
+    "realworld": {
+      "knn_ba": 0.744,
+      "linear_f1": 0.78,
+      "knn_accel_only": 0.69,
+      "knn_handcrafted": 0.711,
+      "eff_rank": 74.9,
+      "labels": 8
+    },
+    "shoaib": {
+      "knn_ba": 0.891,
+      "linear_f1": 0.924,
+      "knn_accel_only": 0.822,
+      "knn_handcrafted": 0.94,
+      "eff_rank": 86.2,
+      "labels": 7
+    },
+    "inclusivehar": {
+      "knn_ba": 0.502,
+      "linear_f1": 0.569,
+      "knn_accel_only": 0.464,
+      "knn_handcrafted": 0.545,
+      "eff_rank": 83.0,
+      "labels": 6
+    }
+  },
+  "invariance": {
+    "rotation": {
+      "emb_cosine": 0.979,
+      "emb_rel_l2": 0.179,
+      "knn_transformed_query": 0.861
+    },
+    "gain": {
+      "emb_cosine": 0.972,
+      "emb_rel_l2": 0.222,
+      "knn_transformed_query": 0.836
+    },
+    "rate": {
+      "emb_cosine": 0.902,
+      "emb_rel_l2": 0.388,
+      "knn_transformed_query": 0.769
+    },
+    "clean_knn": 0.861
+  },
+  "cross_placement_wisdm(train-data)": {
+    "phone->watch": 0.413,
+    "watch->phone": 0.272
+  },
+  "means": {
+    "knn_ba": 0.745,
+    "linear_f1": 0.792,
+    "knn_accel_only": 0.682,
+    "knn_handcrafted": 0.773
+  }
+}
