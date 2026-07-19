@@ -29,10 +29,23 @@ Save this next to the run.
 | filterbank norm | calibrated over 50 augmented batches (frozen) |
 | val | every 1k steps, kNN-BA, **40 windows/label stratified** (all classes scored), best.pt on val |
 
-**Active augmentations (`default_v2`):** window_crop, channel_dropout, rotation_3d, gravity (p=0.15),
-rate (15–100 Hz), scale, jitter, channel_text_phrase, channel_text_dropout.
-`label_text` is present in the config but **disabled by the loader** (A2 contrasts on label IDs, not
-text). `time_shift`/`time_warp`/`magnitude_warp` off.
+**Active augmentations (`default_v2`):** window_crop, channel_dropout (drops the whole gyro triad →
+accel-only, the real deployment shift), rotation_3d, gravity-remove (p=0.15), rate (15–100 Hz), scale,
+jitter, channel_text_phrase, channel_text_dropout. `label_text` is in the config but **disabled by the
+loader** (A2 contrasts on label IDs). `time_shift`/`time_warp`/`magnitude_warp` off.
+
+**Gravity is NOT aligned (design decision, 2026-07-19).** The signed-DC feature exposes gravity
+direction (posture stays readable) and `rotation_3d` teaches pose-robustness; aligning had flattened
+every posture's DC to +z and cancelled the rotation aug. Eval/inference match this (no align).
+Consequence: with align off, `rotation_3d` (p=0.5, full SO(3)) is now *fully* effective (previously
+the align undid most of it) — worth watching in the pilot.
+
+**Augmentation magnitude telemetry** (`python -m training.tokenizer.aug_telemetry`, 200 windows):
+value-space augs are gentle (jitter rel-L2 0.03, scale 0.06, amplitude/frequency preserved);
+`rotation_3d` is large in rel-L2 (~1.4) but **norm- and cadence-preserving** (a valid re-orientation,
+not corruption); `gravity`-remove is the biggest-magnitude physics change (RMS→0.42, ~90% of signal)
+— which is why it sits at p=0.15; `rate`/`window_crop`/`channel_dropout` are structural and
+physics-faithful (cadence drift ≈0). Nothing looks over-powering.
 
 ## Audit status — clean
 Native-rate switch + two adversarial audits + external review, all fixes landed and tested (200 CPU

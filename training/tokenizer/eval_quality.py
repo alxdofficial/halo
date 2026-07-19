@@ -74,7 +74,7 @@ def encode(enc, data, texts, device, rate=RATE, accel_only=False, gravity_state=
         block = x[s:s+256].clone().float()
         if accel_only:
             block[:, :, 3:] = 0.0
-        aligned, _, _ = gravity_align(block, list(CHANNELS), rate, gravity_state=gravity_state)
+        aligned = block   # NO gravity-align — matches training (HALO reads gravity via the DC feature)
         B = aligned.shape[0]
         patches = torch.zeros(B, P, DFT_SIZE, 6)
         for p in range(P):

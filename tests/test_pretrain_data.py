@@ -276,9 +276,25 @@ def test_knn_scores_unsupported_query_labels_as_failures():
     assert abs(knn_balanced_acc(train_z, train_y, test_z, test_y, k=3) - 0.5) < 1e-9
 
 
+def test_collate_default_does_not_rotate_gravity():
+    """Design decision (2026-07-19): the DEFAULT collate does NOT gravity-align — a window with
+    gravity on +x keeps its DC on +x (posture direction preserved for the tokenizer's DC feature),
+    whereas align_gravity=True rotates it to +z."""
+    w = torch.zeros(120, 6)
+    w[:, 0] = 1.0                                            # 1 g DC on x (gravity present)
+    item = {"data": w, "rate": 50.0, "texts": ["x"] * 6, "label_id": 0,
+            "channel_mask": torch.ones(6, dtype=torch.bool), "gravity_state": "present"}
+    d = MultiScaleCollate(fixed_patch_seconds=1.0)([item])                       # default: no align
+    dc_d = d["patches"][0, 0, :int(d["patch_len"][0]), :3].mean(0)
+    assert dc_d[0].abs() > 0.9 and dc_d[2].abs() < 0.1, dc_d                     # DC stays on x
+    a = MultiScaleCollate(fixed_patch_seconds=1.0, align_gravity=True)([item])   # ablation: align
+    dc_a = a["patches"][0, 0, :int(a["patch_len"][0]), :3].mean(0)
+    assert dc_a[2].abs() > 0.9 and dc_a[0].abs() < 0.1, dc_a                     # DC rotated to z
+
+
 def test_gravity_aligned_in_collate(index):
-    """Collate output must be gravity-canonicalized: for gravity-present accel-only
-    windows, the DC of the filled region points ~+z after alignment."""
+    """Ablation path (align_gravity=True) still canonicalizes: for gravity-present accel-only
+    windows the DC of the filled region points ~+z after alignment."""
     ds = PretrainDataset(index, index.train[:64], augment=False)   # no aug -> gravity present
     out = MultiScaleCollate(fixed_patch_seconds=1.0, align_gravity=True)(
         [ds[i] for i in range(64)])

@@ -60,7 +60,7 @@ def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None) ->
     embs = []
     for start in range(0, len(data), 256):
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
-        aligned, _, _ = gravity_align(block, list(CHANNELS), rate, gravity_state=gravity_state)
+        aligned = block   # NO gravity-align — matches training (HALO reads gravity via the DC feature)
         B = aligned.shape[0]
         patches = torch.zeros(B, P, DFT_SIZE, 6)
         for p in range(P):

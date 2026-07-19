@@ -353,12 +353,16 @@ class BalancedBatchSampler(Sampler[list[int]]):
 class MultiScaleCollate:
     """Draw ONE patch_seconds per batch; patchify each sample at its OWN rate.
 
-    Per sample, in order: compute A3 targets on the raw augmented window (dc_tilt needs
-    the un-aligned frame) -> **gravity-align the whole window on its REAL length** (one
-    rotation per window; NOT per zero-padded patch — the sweep found the padded-patch
-    estimate is diluted to a no-op) -> patchify. Trailing patches that the (possibly
-    rate-shortened) window can't fill are flagged in `patch_padding_mask`, never treated
-    as real.
+    Per sample: compute A3 targets on the raw augmented window (rotation-invariant) -> patchify.
+    Trailing patches the (possibly rate-shortened / cropped) window can't fill are flagged in
+    `patch_padding_mask`, never treated as real.
+
+    **Gravity is NOT aligned by default (design decision, 2026-07-19).** The tokenizer's signed-DC
+    feature already exposes the gravity DIRECTION per channel, so posture (stand/sit/lie, which differ
+    only in that direction) stays readable by the model; and the `rotation_3d` augmentation teaches
+    pose/mount-rotation robustness. Canonicalizing pitch/roll to +z did the opposite of both — it
+    flattened every posture's DC to (0,0,1) and cancelled most of `rotation_3d`. `align_gravity=True`
+    is kept only for the align-vs-no-align ablation. NOTE: eval/inference must match this (no align).
 
     Output: patches (B, P, S, 6) zero-padded · patch_len (B,) · rates (B,) ·
     positions (B, P) s · channel_mask (B, 6) · patch_padding_mask (B, P) True=real ·
@@ -368,7 +372,7 @@ class MultiScaleCollate:
     def __init__(self, dft_size: int = DFT_SIZE,
                  patch_choices: Sequence[float] = PATCH_SECONDS_CHOICES,
                  fixed_patch_seconds: float | None = None, seed: int = SEED,
-                 align_gravity: bool = True):
+                 align_gravity: bool = False):
         self.dft_size = dft_size
         self.patch_choices = tuple(patch_choices)
         self.fixed = fixed_patch_seconds
