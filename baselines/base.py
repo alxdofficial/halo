@@ -185,7 +185,13 @@ def load_gt(
 def score(gt_names, pred_names, subjects, extra: Optional[dict] = None) -> dict:
     """v2 metric bundle: macro-F1 (primary) + balanced-acc + subject CIs + per-class."""
     m = scoring.classification_metrics(gt_names, pred_names)
-    m.update(scoring.subject_bootstrap_ci(gt_names, pred_names, subjects, metric="f1_macro"))
+    # Small-cohort datasets (few subjects) get a jagged, over-wide subject bootstrap → use the
+    # leave-one-subject-out jackknife CI instead; larger cohorts keep the bootstrap (#7).
+    import numpy as _np
+    if len(_np.unique(subjects)) < scoring.SMALL_COHORT_MAX_SUBJECTS:
+        m.update(scoring.subject_groupkfold_ci(gt_names, pred_names, subjects, metric="f1_macro"))
+    else:
+        m.update(scoring.subject_bootstrap_ci(gt_names, pred_names, subjects, metric="f1_macro"))
     m["per_class_f1"] = scoring.per_class_f1(gt_names, pred_names)
     if extra:
         m.update(extra)

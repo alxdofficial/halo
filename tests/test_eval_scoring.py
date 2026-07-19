@@ -149,6 +149,43 @@ def test_bootstrap_ci_degenerate_with_one_subject():
     assert np.isnan(ci["f1_macro_ci_lo"]) and np.isnan(ci["f1_macro_ci_hi"])
 
 
+def test_groupkfold_ci_brackets_point_deterministic_and_degenerate():
+    """#7: leave-one-subject-out jackknife CI for small cohorts — brackets the point, is a valid
+    deterministic interval, and stays flagged-degenerate for a single-subject cohort."""
+    rng = np.random.RandomState(0)
+    subjects = np.repeat([f"s{i}" for i in range(10)], 30)     # small cohort
+    gt = rng.choice(["a", "b", "c"], size=len(subjects)).tolist()
+    pred = [g if rng.rand() < 0.7 else rng.choice(["a", "b", "c"]) for g in gt]
+    point = scoring.classification_metrics(gt, pred)["f1_macro"]
+    ci = scoring.subject_groupkfold_ci(gt, pred, subjects)
+    assert ci["ci_degenerate"] is False and ci["ci_method"] == "subject_groupkfold_loso"
+    assert ci["n_folds"] == 10
+    lo, hi = ci["f1_macro_ci_lo"], ci["f1_macro_ci_hi"]
+    assert 0.0 <= lo <= point <= hi <= 100.0                    # brackets the pooled point
+    assert ci == scoring.subject_groupkfold_ci(gt, pred, subjects)   # deterministic
+    deg = scoring.subject_groupkfold_ci(["a"] * 6, ["a"] * 6, np.array(["only"] * 6))
+    assert deg["ci_degenerate"] is True and np.isnan(deg["f1_macro_ci_lo"])
+
+
+def test_fit_temperature_calibrates_overconfident_head():
+    """#82: temperature scaling on a held-out set returns T>1 for over-confident logits, lowers NLL,
+    and preserves argmax; degenerate input returns T=1."""
+    import torch
+    rng = np.random.RandomState(0)
+    n, C = 300, 4
+    y = rng.randint(0, C, size=n)
+    logits = rng.normal(0, 0.5, size=(n, C))
+    for i in range(n):                                   # 70% accurate but big margins -> over-confident
+        logits[i, y[i] if rng.rand() < 0.7 else rng.randint(C)] += 8.0
+    T = scoring.fit_temperature(logits, y)
+    lg = torch.tensor(logits, dtype=torch.float32); yt = torch.tensor(y)
+    nll1 = torch.nn.functional.cross_entropy(lg, yt).item()
+    nllT = torch.nn.functional.cross_entropy(lg / T, yt).item()
+    assert T > 1.0 and nllT <= nll1 + 1e-6
+    assert (logits.argmax(1) == (logits / T).argmax(1)).all()   # argmax unchanged
+    assert scoring.fit_temperature(np.zeros((0, C)), np.array([])) == 1.0   # degenerate -> 1.0
+
+
 # =============================================================================
 # ConSE bridge
 # =============================================================================

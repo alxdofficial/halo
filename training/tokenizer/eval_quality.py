@@ -29,7 +29,8 @@ import torch
 from data.scripts.eda.grid_io import discover_grids
 from model.tokenizer.preprocess import gravity_align
 from training.tokenizer.eval_transfer import EVAL_STREAMS, build_encoder, knn_balanced_acc
-from training.tokenizer.pretrain_data import CHANNELS, DFT_SIZE, stream_channel_descriptions
+from training.tokenizer.pretrain_data import (CHANNELS, DFT_SIZE, stream_channel_descriptions,
+                                              _stream_gravity_state)
 
 RATE = 60.0
 PS = 1.0
@@ -63,7 +64,7 @@ def transform_windows(data, kind, rng, base_rate):
 
 # --------------------------------------------------------------------------- encoding
 @torch.no_grad()
-def encode(enc, data, texts, device, rate=RATE, accel_only=False):
+def encode(enc, data, texts, device, rate=RATE, accel_only=False, gravity_state=None):
     x = data if torch.is_tensor(data) else torch.tensor(np.asarray(data), dtype=torch.float32)
     n = max(1, int(round(rate * PS)))
     P = max(1, x.shape[1] // n)
@@ -73,7 +74,7 @@ def encode(enc, data, texts, device, rate=RATE, accel_only=False):
         block = x[s:s+256].clone().float()
         if accel_only:
             block[:, :, 3:] = 0.0
-        aligned, _, _ = gravity_align(block, list(CHANNELS), rate)
+        aligned, _, _ = gravity_align(block, list(CHANNELS), rate, gravity_state=gravity_state)
         B = aligned.shape[0]
         patches = torch.zeros(B, P, DFT_SIZE, 6)
         for p in range(P):
@@ -130,12 +131,13 @@ def main():
             continue
         data = ref.load_data(); labels = np.asarray(ref.labels); subj = np.asarray(ref.subjects)
         texts = stream_channel_descriptions(dataset, stream)
-        z = encode(enc, data, texts, device, rate=ref.rate_hz)
+        gstate = _stream_gravity_state(dataset, stream)
+        z = encode(enc, data, texts, device, rate=ref.rate_hz, gravity_state=gstate)
         tr, te = subj_split(subj, rng)
         y_tr, y_te = labels[tr].tolist(), labels[te].tolist()
         knn = knn_balanced_acc(z[tr], y_tr, z[te], y_te)
         lin = linear_probe(z[tr], y_tr, z[te], y_te)
-        z_ao = encode(enc, data, texts, device, rate=ref.rate_hz, accel_only=True)
+        z_ao = encode(enc, data, texts, device, rate=ref.rate_hz, accel_only=True, gravity_state=gstate)
         knn_ao = knn_balanced_acc(z_ao[tr], y_tr, z_ao[te], y_te)
         # handcrafted grav_band_energy on the same split (at the stream's native rate)
         hand = torch.tensor(np.stack([

@@ -26,7 +26,8 @@ import torch
 from data.scripts.eda.grid_io import discover_grids
 from model.tokenizer.encoder import SetTokenizerEncoder
 from model.tokenizer.preprocess import gravity_align
-from training.tokenizer.pretrain_data import CHANNELS, DFT_SIZE, stream_channel_descriptions
+from training.tokenizer.pretrain_data import (CHANNELS, DFT_SIZE, stream_channel_descriptions,
+                                              _stream_gravity_state)
 
 # Held-out eval datasets (never in TRAIN_DATASETS). tnda_har/ut_complex excluded
 # (degenerate subject ids -> can't do subject-disjoint kNN).
@@ -52,14 +53,14 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
 
 
 @torch.no_grad()
-def encode_dataset(enc, data, texts, device, rate: float) -> torch.Tensor:
+def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None) -> torch.Tensor:
     """(N, T, 6) raw windows at the stream's NATIVE rate -> (N, d) pooled embeddings."""
     n = int(round(rate * PATCH_SECONDS))
     P = max(1, data.shape[1] // n)
     embs = []
     for start in range(0, len(data), 256):
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
-        aligned, _, _ = gravity_align(block, list(CHANNELS), rate)
+        aligned, _, _ = gravity_align(block, list(CHANNELS), rate, gravity_state=gravity_state)
         B = aligned.shape[0]
         patches = torch.zeros(B, P, DFT_SIZE, 6)
         for p in range(P):
@@ -109,7 +110,8 @@ def main() -> None:
         labels = np.asarray(ref.labels)
         subjects = np.asarray(ref.subjects)
         texts = stream_channel_descriptions(dataset, stream)
-        z = encode_dataset(enc, data, texts, device, ref.rate_hz)
+        z = encode_dataset(enc, data, texts, device, ref.rate_hz,
+                           _stream_gravity_state(dataset, stream))
 
         # subject-disjoint 50/50 split
         subj = sorted(set(subjects.tolist()))

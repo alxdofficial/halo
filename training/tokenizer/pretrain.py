@@ -201,6 +201,9 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=OUT_DIR)
     parser.add_argument("--force", action="store_true",
                         help="overwrite an existing non-empty output dir (default: refuse)")
+    parser.add_argument("--resume", type=Path, default=None,
+                        help="warm-resume from a checkpoint (restore encoder/heads/opt/sched/scaler/"
+                             "RNG + step and continue the remaining steps)")
     args = parser.parse_args()
 
     cfg = PretrainConfig(device=args.device)
@@ -219,14 +222,15 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     # F5: never silently append to / overwrite a prior run. A stale checkpoint or log in the out dir
     # means a fresh run would mix results and append to the old log — refuse unless --force/--smoke.
+    # --resume KEEPS the dir (that is where the checkpoint we continue from lives).
     stale = list(args.out.glob("*.pt")) + list(args.out.glob("log.jsonl"))
-    if stale:
+    if stale and not args.resume:
         if args.force or args.smoke:
             for p in stale:
                 p.unlink()
         else:
             raise SystemExit(f"output dir {args.out} already contains {[p.name for p in stale]}; "
-                             f"choose a fresh --out or pass --force to overwrite.")
+                             f"choose a fresh --out or pass --force to overwrite (or --resume).")
 
     # ------------------------------------------------------------------ data
     index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.seed)
@@ -321,8 +325,30 @@ def main() -> None:
                     "python": _stdrandom.getstate()},
         }, args.out / name)
 
+    # F5b: warm-resume — restore weights + optimizer/scheduler/scaler/RNG + step, then continue the
+    # REMAINING steps. Not bit-exact (the sampler re-draws a fresh epoch for the remaining steps), but
+    # training continues correctly from the saved state rather than restarting from scratch.
+    start_step = 0
+    if args.resume:
+        rk = torch.load(args.resume, map_location=device, weights_only=False)
+        model.encoder.load_state_dict(rk["encoder"])
+        for k, head in (("a1", model.a1_head), ("a2", model.a2_proj),
+                        ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen)):
+            head.load_state_dict(rk["heads"][k])
+        opt.load_state_dict(rk["optimizer"])
+        sched.load_state_dict(rk["scheduler"])
+        scaler.load_state_dict(rk["scaler"])
+        if "rng" in rk:
+            import random as _sr
+            torch.set_rng_state(rk["rng"]["torch"])
+            np.random.set_state(rk["rng"]["numpy"])
+            _sr.setstate(rk["rng"]["python"])
+        start_step = int(rk["step"])
+        best_ba = float(rk["val_ba"])
+        print(f"resumed from {args.resume} at step {start_step} (best_ba {best_ba:.3f})", flush=True)
+
     model.train()
-    for step, batch in enumerate(train_loader, start=1):
+    for step, batch in enumerate(train_loader, start=start_step + 1):
         patches = batch["patches"].to(device, non_blocking=True)   # gravity-aligned in collate
         rates = batch["rates"].to(device)
         patch_len = batch["patch_len"].to(device)

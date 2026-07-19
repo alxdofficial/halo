@@ -41,6 +41,8 @@ from sklearn.metrics import accuracy_score, f1_score, recall_score
 CONSE_TOP_T = 10
 BOOTSTRAP_B = 1000
 BOOTSTRAP_SEED = 3431
+SMALL_COHORT_MAX_SUBJECTS = 12   # below this, the subject bootstrap is jagged (few distinct subject
+                                 # multisets) — use the leave-one-subject-out jackknife CI instead
 SOFT_POOL_TAU = 0.07  # matches the training temperature
 
 
@@ -376,8 +378,92 @@ def subject_bootstrap_ci(
         f"{metric}_ci_hi": float(hi),
         "bootstrap_B": B,
         "n_subjects": int(len(uniq)),
+        "ci_method": "subject_bootstrap",
         "ci_degenerate": False,
     }
+
+
+def subject_groupkfold_ci(
+    gt_names: Sequence[str],
+    pred_names: Sequence[str],
+    subjects: np.ndarray,
+    metric: str = "f1_macro",
+) -> Dict[str, float]:
+    """Leave-one-subject-out jackknife CI — for SMALL-cohort datasets (tnda_har=1, shoaib/ut_complex
+    =10 subjects) where the subject bootstrap resamples too few distinct subject multisets and gives a
+    jagged, over-wide interval. Rotates the held-out subject across ALL groups (GroupKFold with one
+    group per fold); the interval is the pooled point estimate ± t_{0.975,n-1}·(jackknife SE), so it
+    brackets the point by construction and is defined for small n. Same guards + keys as
+    ``subject_bootstrap_ci`` (adds ``ci_method``/``n_folds``); with < 2 subjects returns the flagged
+    NaN interval — rotation cannot rescue a single-subject cohort."""
+    gt = np.asarray(gt_names)
+    pred = np.asarray(pred_names)
+    subjects = np.asarray(subjects)
+    uniq = np.unique(subjects)
+
+    if len(uniq) < 2:
+        return {
+            f"{metric}_ci_lo": float("nan"),
+            f"{metric}_ci_hi": float("nan"),
+            "n_subjects": int(len(uniq)),
+            "n_folds": 0,
+            "ci_method": "subject_groupkfold_loso",
+            "ci_degenerate": True,
+        }
+
+    f1_classes = macro_f1_classes(gt.tolist(), pred.tolist())      # FROZEN estimand (same as bootstrap)
+    recall_classes = sorted(set(gt.tolist()))
+
+    def score(g, p) -> float:
+        if metric == "f1_macro":
+            return f1_score(g, p, labels=f1_classes, average="macro", zero_division=0) * 100
+        if metric == "balanced_accuracy":
+            return recall_score(g, p, labels=recall_classes, average="macro", zero_division=0) * 100
+        if metric == "accuracy":
+            return accuracy_score(g, p) * 100
+        raise ValueError(f"unsupported ci metric: {metric}")
+
+    n = len(uniq)
+    point = score(gt.tolist(), pred.tolist())                     # pooled point estimate
+    # leave-one-subject-out replicates: score on ALL windows EXCEPT the held-out subject's
+    loo = np.array([score(gt[subjects != s].tolist(), pred[subjects != s].tolist()) for s in uniq])
+    mean = float(loo.mean())
+    se = float(np.sqrt((n - 1) / n * np.sum((loo - mean) ** 2)))  # jackknife standard error
+    from scipy.stats import t as _t
+    tcrit = float(_t.ppf(0.975, n - 1))
+    return {
+        f"{metric}_ci_lo": float(max(0.0, point - tcrit * se)),
+        f"{metric}_ci_hi": float(min(100.0, point + tcrit * se)),
+        "n_subjects": int(n),
+        "n_folds": int(n),
+        "ci_method": "subject_groupkfold_loso",
+        "ci_degenerate": False,
+    }
+
+
+def fit_temperature(logits, labels, max_iter: int = 100) -> float:
+    """Temperature scaling (Guo et al., 2017): the scalar T>0 minimizing NLL of softmax(logits/T)
+    on a HELD-OUT set. Calibrates a ConSE head's probabilities so the top-K convex combination in
+    the SBERT bridge (`conse_embeddings`) is weighted by CALIBRATED confidences rather than raw
+    over-confident softmax. Returns T (1.0 = no change / degenerate input)."""
+    import math
+    import torch
+    lg = torch.as_tensor(np.asarray(logits), dtype=torch.float32)
+    y = torch.as_tensor(np.asarray(labels), dtype=torch.long)
+    if lg.ndim != 2 or lg.shape[0] == 0 or int(torch.unique(y).numel()) < 2:
+        return 1.0
+    log_t = torch.zeros(1, requires_grad=True)          # optimise log T so T = exp(log_t) > 0
+    opt = torch.optim.LBFGS([log_t], lr=0.1, max_iter=max_iter)
+
+    def closure():
+        opt.zero_grad()
+        loss = torch.nn.functional.cross_entropy(lg / log_t.exp(), y)
+        loss.backward()
+        return loss
+
+    opt.step(closure)
+    T = float(log_t.exp().item())
+    return T if math.isfinite(T) and T > 0 else 1.0
 
 
 # =============================================================================

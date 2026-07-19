@@ -214,13 +214,14 @@ class HarnetAdapter(ConSEAdapter):
 
         cached = self._load_cached_head(vocab, device)
         if cached is not None:
-            model.classifier.load_state_dict(cached)
+            head_sd, temperature = cached
+            model.classifier.load_state_dict(head_sd)
             model.train(False)
-            return {"model": model}
+            return {"model": model, "temperature": temperature}
 
-        self._fit_head(model, vocab, device)
+        temperature = self._fit_head(model, vocab, device)
         model.train(False)
-        return {"model": model}
+        return {"model": model, "temperature": temperature}
 
     def _load_cached_head(self, vocab, device):
         if not _HEAD_CACHE.exists():
@@ -228,7 +229,9 @@ class HarnetAdapter(ConSEAdapter):
         blob = torch.load(str(_HEAD_CACHE), map_location=device, weights_only=True)
         if list(blob.get("labels", [])) != list(vocab):
             return None   # global vocab changed -> re-fit
-        return blob["head"]
+        if "temperature" not in blob:
+            return None   # pre-calibration cache -> re-fit (#82)
+        return blob["head"], float(blob["temperature"])
 
     def _fit_head(self, model, vocab, device):
         """Fit the EvaClassifier head on frozen harnet features over the training
@@ -300,19 +303,28 @@ class HarnetAdapter(ConSEAdapter):
         if best_sd is not None:
             head.load_state_dict(best_sd)
 
+        # Calibrate on the SAME subject-disjoint val fold (temperature scaling) so the ConSE bridge
+        # weights top-K classes by CALIBRATED confidences, not raw over-confident softmax (#82).
+        head.eval()
+        with torch.no_grad():
+            temperature = scoring.fit_temperature(head(Xv).cpu().numpy(), Yv)
+
         n_val_subj = len(set(S[vi]))
-        print(f"[harnet] fitted head: val_acc={best_acc:.3f} over {n_val_subj} held-out subjects")
+        print(f"[harnet] fitted head: val_acc={best_acc:.3f}, T={temperature:.3f} "
+              f"over {n_val_subj} held-out subjects")
         torch.save({"head": {k: v.cpu() for k, v in head.state_dict().items()},
-                    "labels": list(vocab)}, str(_HEAD_CACHE))
+                    "labels": list(vocab), "temperature": float(temperature)}, str(_HEAD_CACHE))
         model.to(device)
+        return float(temperature)
 
     # ---- window_probs: (N, 59) softmax over the global vocab -------------------
     def window_probs(self, stream, state, device) -> np.ndarray:
         model = state["model"]
+        T = float(state.get("temperature", 1.0))    # calibrated temperature (#82)
         x = _to_30hz_150(_select_accel(stream.windows, stream.channels), stream.rate_hz)
         probs = []
         with torch.no_grad():
             for s in range(0, len(x), EMBED_BATCH):
                 b = torch.from_numpy(x[s:s + EMBED_BATCH]).float().to(device)
-                probs.append(F.softmax(model(b), dim=1).cpu().numpy())
+                probs.append(F.softmax(model(b) / T, dim=1).cpu().numpy())
         return np.concatenate(probs, axis=0)

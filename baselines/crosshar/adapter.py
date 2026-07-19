@@ -224,11 +224,12 @@ class CrossHARAdapter(ConSEAdapter):
         head = nn.Linear(FEAT_DIM, len(vocab)).to(device)
         cached = self._load_cached_head(vocab, device)
         if cached is not None:
-            head.load_state_dict(cached)
+            head_sd, temperature = cached
+            head.load_state_dict(head_sd)
         else:
-            self._fit_head(backbone, head, vocab, device)
+            temperature = self._fit_head(backbone, head, vocab, device)
         head.eval()
-        return {"backbone": backbone, "head": head}
+        return {"backbone": backbone, "head": head, "temperature": temperature}
 
     def _load_backbone(self, device) -> nn.Module:
         if not _BACKBONE_CKPT.exists():
@@ -254,7 +255,9 @@ class CrossHARAdapter(ConSEAdapter):
         # a head fit on the old backbone's feature space is invalid for new features.
         if blob.get("backbone_fp") != _backbone_fp():
             return None
-        return blob["head"]
+        if "temperature" not in blob:
+            return None   # pre-calibration cache -> re-fit (#82)
+        return blob["head"], float(blob["temperature"])
 
     def _fit_head(self, backbone, head, vocab, device):
         """Fit the softmax head on frozen backbone features over the training
@@ -310,21 +313,31 @@ class CrossHARAdapter(ConSEAdapter):
         if best_sd is not None:
             head.load_state_dict(best_sd)
 
+        # Temperature-scale on the SAME subject-disjoint val fold so ConSE weights top-K by
+        # calibrated confidences, not raw over-confident softmax (#82).
+        head.eval()
+        with torch.no_grad():
+            temperature = scoring.fit_temperature(head(Xv).cpu().numpy(), Yv)
+
         n_val_subj = len(set(S[vi]))
-        print(f"[crosshar] fitted head: val_acc={best_acc:.3f} over {n_val_subj} held-out subjects")
+        print(f"[crosshar] fitted head: val_acc={best_acc:.3f}, T={temperature:.3f} "
+              f"over {n_val_subj} held-out subjects")
         torch.save({"head": {k: v.cpu() for k, v in head.state_dict().items()},
-                    "labels": list(vocab), "backbone_fp": _backbone_fp()}, str(_HEAD_CACHE))
+                    "labels": list(vocab), "backbone_fp": _backbone_fp(),
+                    "temperature": float(temperature)}, str(_HEAD_CACHE))
         backbone.to(device)
         head.to(device)
+        return float(temperature)
 
     # ---- window_probs: (N, 59) softmax over the global vocab ------------------
     def window_probs(self, stream, state, device) -> np.ndarray:
         backbone, head = state["backbone"], state["head"]
+        T = float(state.get("temperature", 1.0))    # calibrated temperature (#82)
         x6 = prep.grid_to_contract(stream.windows, stream.channels, stream.rate_hz)
         feats = _features(backbone, x6, device)
         probs = []
         with torch.no_grad():
             for s in range(0, len(feats), EMBED_BATCH):
                 b = torch.from_numpy(feats[s:s + EMBED_BATCH]).float().to(device)
-                probs.append(F.softmax(head(b), dim=1).cpu().numpy())
+                probs.append(F.softmax(head(b) / T, dim=1).cpu().numpy())
         return np.concatenate(probs, axis=0)
