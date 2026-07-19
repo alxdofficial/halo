@@ -164,6 +164,24 @@ def masked_latent_loss(
     return per_token[masked].mean()
 
 
+def masked_latent_per_window(predicted, target, token_mask, feature_valid=None) -> torch.Tensor:
+    """Per-WINDOW A1 loss (B,) for telemetry — same cosine loss as `masked_latent_loss` but reduced
+    per window instead of globally, so it can be grouped by data source. Windows with no masked token
+    return NaN (caller filters). Pure diagnostic; not part of the training gradient."""
+    target = target.detach()
+    if feature_valid is not None:
+        fv = feature_valid.to(target.dtype)
+        target = target * fv
+        predicted = predicted * fv
+    target = F.normalize(target, dim=-1)
+    predicted = F.normalize(predicted, dim=-1)
+    per_token = 2.0 - 2.0 * (predicted * target).sum(dim=-1)            # (B, T, C)
+    m = (token_mask & torch.isfinite(per_token)).to(per_token.dtype)
+    denom = m.sum(dim=(1, 2))
+    win = (per_token.nan_to_num(0.0) * m).sum(dim=(1, 2)) / denom.clamp(min=1)
+    return torch.where(denom > 0, win, torch.full_like(win, float("nan")))
+
+
 # ================================================================================================
 # A2 — config-conditional supervised contrastive (window level)
 # ================================================================================================

@@ -39,6 +39,7 @@ from training.tokenizer.losses_repr import (
     GroundingTargets,
     elite3_loss,
     make_mask_plan,
+    masked_latent_per_window,
 )
 from training.tokenizer.pretrain_data import (
     CHANNELS,
@@ -165,7 +166,7 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
     is given (the support over the huge train set), stops early once every target label is saturated."""
     from collections import Counter
     model.eval()
-    zs, ys = [], []
+    zs, ys, srcs = [], [], []
     counts: Counter = Counter()
     done: set = set()
     for batch in loader:
@@ -182,6 +183,7 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
             pooled = out["pooled"].cpu()
             zs.append(pooled[take])
             ys.append(lab[take])
+            srcs.extend(batch["sources"][j] for j in take)      # per-window source (telemetry)
             for l in lab[take].tolist():
                 counts[l] += 1
                 if counts[l] >= per_label:
@@ -189,7 +191,29 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
         if target_labels is not None and target_labels <= done:
             break
     model.train()
-    return torch.cat(zs), torch.cat(ys)
+    return torch.cat(zs), torch.cat(ys), srcs
+
+
+def module_grad_norms(model) -> dict:
+    """Per-module gradient L2 norm (call AFTER unscale_, BEFORE clip → real, un-clipped scale).
+    A cheap reduction — computed only on log steps, so no hot-loop cost. Diagnoses vanish/explode
+    per component (encoder vs each head)."""
+    mods = (("encoder", model.encoder), ("a1", model.a1_head), ("a2", model.a2_proj),
+            ("a3_cad", model.a3_cadence), ("a3_eig", model.a3_eigen))
+    out = {}
+    for name, mod in mods:
+        sq = sum(float(p.grad.detach().pow(2).sum()) for p in mod.parameters() if p.grad is not None)
+        out[f"grad/{name}"] = sq ** 0.5
+    return out
+
+
+def per_source_mean(values: torch.Tensor, sources: list) -> dict:
+    """Group a (B,) tensor of per-window values by source dataset (NaN-safe) for telemetry."""
+    agg: dict = {}
+    for s, v in zip(sources, values.tolist()):
+        if v == v:                                              # skip NaN
+            agg.setdefault(s, []).append(v)
+    return {s: round(float(np.mean(vs)), 4) for s, vs in agg.items()}
 
 
 def main() -> None:
@@ -397,8 +421,9 @@ def main() -> None:
                                          channel_mask=channel_mask,
                                          patch_padding_mask=patch_pad)
             z = model.a2_proj(clean["pooled"])
+            a1_pred = model.a1_head(masked["tokens"])
             out = elite3_loss(
-                a1_pred=model.a1_head(masked["tokens"]), a1_target=a1_target,
+                a1_pred=a1_pred, a1_target=a1_target,
                 a1_mask=a1_loss_mask,
                 a2_embeddings=z, a2_labels=labels,
                 a3_cadence_pred=model.a3_cadence(clean["pooled"]).squeeze(1),
@@ -407,18 +432,25 @@ def main() -> None:
                 a1_feature_valid=a1_feature_valid,
             )
 
+        do_log = step % 50 == 0 or step == 1
         opt.zero_grad(set_to_none=True)
         scaler.scale(out.total).backward()
         scaler.unscale_(opt)
+        gnorms = module_grad_norms(model) if do_log else {}     # pre-clip per-module grad norms
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
         scaler.step(opt)
         scaler.update()
         sched.step()
 
-        if step % 50 == 0 or step == 1:
+        if do_log:
+            with torch.no_grad():                               # per-source A1 (diagnostic, off-graph)
+                a1_pw = masked_latent_per_window(a1_pred.float(), a1_target, a1_loss_mask,
+                                                 feature_valid=a1_feature_valid)
             rec = {"step": step, "lr": sched.get_last_lr()[0],
                    "elapsed_s": round(time.time() - t0, 1),
-                   "patch_seconds": batch["patch_seconds"], **out.parts}
+                   "patch_seconds": batch["patch_seconds"],
+                   "total": round(float(out.total.detach()), 4), **out.parts, **gnorms,
+                   "a1_by_source": per_source_mean(a1_pw, batch["sources"])}
             print(json.dumps(rec), flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
@@ -426,11 +458,19 @@ def main() -> None:
         if step % cfg.val_every == 0 or step == cfg.steps:
             # Query = every val label (stratified, so all classes are scored); support = the same
             # labels drawn from the train set (early-stops once saturated). F1: covers all classes.
-            val_z, val_y = embed_stratified(model, val_loader, device, cfg.val_per_label)
-            train_z, train_y = embed_stratified(model, train_eval_loader, device,
-                                                cfg.val_per_label, target_labels=set(val_y.tolist()))
+            val_z, val_y, val_src = embed_stratified(model, val_loader, device, cfg.val_per_label)
+            train_z, train_y, _ = embed_stratified(model, train_eval_loader, device,
+                                                   cfg.val_per_label, target_labels=set(val_y.tolist()))
             ba = knn_balanced_acc(train_z, train_y, val_z, val_y, cfg.knn_k)
-            rec = {"step": step, "val_knn_ba": ba}
+            # per-source val kNN-BA — which datasets the representation clusters well
+            vs = np.asarray(val_src)
+            ba_by_src = {}
+            for s in sorted(set(val_src)):
+                mt = torch.from_numpy(vs == s)
+                if int(mt.sum()) >= cfg.knn_k:
+                    ba_by_src[s] = round(knn_balanced_acc(train_z, train_y, val_z[mt], val_y[mt],
+                                                          cfg.knn_k), 4)
+            rec = {"step": step, "val_knn_ba": ba, "val_ba_by_source": ba_by_src}
             print(json.dumps(rec), flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")

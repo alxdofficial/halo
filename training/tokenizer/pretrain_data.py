@@ -271,6 +271,7 @@ class PretrainDataset(Dataset):
             "label_id": key.label_id,
             "channel_mask": mask6,
             "gravity_state": _stream_gravity_state(ref.dataset, ref.stream),
+            "source": ref.dataset,                        # for per-source telemetry
         }
 
 
@@ -458,6 +459,7 @@ class MultiScaleCollate:
             "patch_seconds": ps,
             "texts": [item["texts"] for item in batch],
             "labels": torch.tensor([item["label_id"] for item in batch]),
+            "sources": [item.get("source", "?") for item in batch],   # per-window dataset (telemetry)
             "channel_mask": torch.stack([item["channel_mask"] for item in batch]),
             "patch_padding_mask": patch_pad,
             "cadence_target": cadence_t,
