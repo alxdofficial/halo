@@ -45,8 +45,9 @@ dropped ("do no harm").
 ## 2. Target architecture (locked decoder spec)
 
 One **set-transformer** over a heterogeneous token set of query + evidence patches (across all sensors),
-each token carrying: **config text** (which sensor/placement — text-keyed), **physical time** (RoPE),
-a **role** (QUERY | EVIDENCE), and for evidence tokens its **known label text**.
+each token carrying: **config text** (which sensor/placement — text-keyed), **physical time** (window-
+relative continuous-time features — see §2.2, *not* a global sequence index), a **role** (QUERY |
+EVIDENCE), and for evidence tokens its **known label text**.
 
 ```
 session ─▶ frozen encoder ─▶ per-PATCH vectors {z_p} per sensor  (encoder is already a text-keyed channel SET)
@@ -98,6 +99,69 @@ This is a differentiator baselines structurally lack (harnet/UniMTS/ConSE are fi
 time multi-device fusion, no retraining.** Requires a **data-pipeline change** — currently each placement
 is a separate stream; build **joint sessions** from the paired datasets (SP-SW-HAR phone+watch, xrf_v2
 6-placement). Controlled experiment: does phone+watch fusion beat phone-alone and watch-alone? (See T2.4b.)
+
+### 2.2 Transformer hygiene (locked — get these right or the decoder silently underperforms)
+
+The decoder is small (**L=2–4 layers, d=256** to match the encoder so patch vectors need no up-projection,
+**4–8 heads**, head-dim 32–64). The mechanics below are not defaults-by-omission; each is chosen for the
+fact that this is a **permutation-invariant set spanning multiple windows and sensors**, not a sequence.
+
+**Normalization — pre-LN, always.** Each sublayer is `x = x + gate · sublayer(LN(x))` (pre-norm), with a
+**final LN** before the refiner/pooling heads read the token states. Pre-LN because we train from scratch,
+small, without the long warmup post-LN needs to stay stable; it also makes the identity-init below exact.
+LN is per-token over the feature dim (standard). No BatchNorm anywhere (set sizes vary per session →
+batch stats are meaningless).
+
+**FFN — position-wise, every token, GELU, 4× expansion** (`d→4d→d`). Applied identically to query and
+evidence tokens (it's per-token; roles are handled by the input embedding + attention, not by separate
+FFNs). Dropout 0.1 on attn weights, FFN hidden, and residual.
+
+**Attention — multi-head, `1/√d_head` scaling, full self-attention + key-padding mask.** Everything
+attends to everything (the design), but sessions have variable #sensors / #evidence / #patches → a
+**key-padding mask** (`-inf` on padded keys, masked-softmax) is mandatory. Guard the degenerate case: a
+row must never be fully masked (every token attends to at least itself). Optional **QK-norm** (L2 on q,k
+before the dot) if we see attention-logit blow-up; cheap insurance for a from-scratch small transformer.
+
+**Positional encoding — THE trap here. No global sequence index.** The token set has no canonical order
+across sensors or across evidence windows, and evidence windows come from *other sessions* whose absolute
+clock is meaningless relative to the query. So:
+- **Time = additive continuous-time Fourier features, measured relative to each token's own window start**
+  (sinusoidal over the patch's physical center-time in seconds). This preserves intra-window temporal
+  structure, is permutation-invariant across the set, and — because the query session's sensors share one
+  origin — makes co-temporal cross-sensor patches (phone@2.0s ↔ watch@2.0s) line up. Each evidence window
+  keeps its **own** origin (we match internal temporal *shape*, not the query's clock).
+- **Explicitly do NOT use a single global RoPE / absolute index across the set.** Shared RoPE makes the
+  q·k phase depend on `(t_a − t_b)`; across two different windows that offset is noise, so it would inject
+  a spurious relative geometry between query and evidence. RoPE is fine *only* if scoped strictly
+  intra-window — additive window-relative features are simpler and avoid the footgun, so that's the pick.
+- Compose with (don't duplicate) Phase-A's duration embedding: since tokens are **multi-resolution**
+  patches (short + long grids), each token also carries a **patch-duration** feature so the decoder can
+  tell a 0.5 s patch from a 4 s one.
+
+**Structural (non-positional) token features — how heterogeneity enters:**
+- **Role** (QUERY | EVIDENCE): a 2-way *learned* embedding (only 2 values → parametric is safe).
+- **Config / placement**: **text-keyed**, not a lookup — frozen SBERT of the config text, projected in.
+  Keeps unseen placements open-vocab (a lookup table would break the whole thesis).
+- **Label text** (evidence only): the frozen SBERT label vector, projected in (query tokens get a
+  learned no-label token here so shapes are uniform).
+- **Same-window co-membership**: a single **learned scalar relative bias** added to the attention logit
+  when two tokens share a window. Permutation-invariant (unlike a per-window-index embedding, which would
+  break set-invariance) and lets the model reason about "these patches are one session."
+
+**Identity-at-init = the do-no-harm gate, made concrete at the transformer level.** The whole decoder must
+boot up *equal to the untrained 47.5 mechanism*, then only improve. Three coordinated zero-inits:
+1. **LayerScale gate γ per sublayer, init ≈ 0** (or equivalently zero-init each sublayer's output
+   projection) → at step 0 every `x = x + γ·sublayer(...) ≈ x`, so token states pass through unchanged.
+2. **Refiner Δ head zero-init** → `t'_i = t(label_i) + Δ(context_i) = t(label_i)` at init (no refinement
+   until it earns it; §3 reg-to-identity keeps it honest).
+3. **Pooling as a residual on retrieval weights**: `a_i = softmax(log w_retr,i + φ(token_i))` with **φ
+   zero-init** → at init `a_i = w_retr,i`, exactly reproducing the untrained weighted-sum. Do *not* learn
+   `a_i` from scratch (that would discard the retrieval prior and re-open the M4a overfit).
+With all three, `decoder@init ≡ untrained mechanism`, so any measured gain is strictly additive and the
+"beat 47.5" gate is a true ratchet.
+
+**Optimization**: AdamW, weight decay on linears only (exclude LN/bias/γ/embeddings), linear warmup →
+cosine, grad-clip 1.0. Everything trains under the episodic class-holdout loss of §3, encoder frozen.
 
 ## 3. Loss / training recipe (the core fix)
 
