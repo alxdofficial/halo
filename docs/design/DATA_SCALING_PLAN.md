@@ -205,6 +205,13 @@ HuggingFace-hosted IMU corpora. Prior expectation: most large cohort studies rel
 summaries, not waveform**, which would disqualify them regardless of access friction — but that is a
 prior, not a finding. Worth one focused follow-up session; **do not block Step 1 on it.**
 
+When that follow-up happens, **start with these two** (flagged as the highest expected value):
+1. **Fenland / EPIC-Norfolk** — Cambridge collected **raw wrist Axivity/GENEActiv at Biobank-adjacent
+   scale**; if raw is exportable this is the closest available substitute for the closed UKB.
+2. **NSRR (National Sleep Research Resource)** — comparatively **low access friction**; the whole
+   question is raw-waveform vs epoch/count. One page-read settles it, and if any NSRR study ships
+   waveform it is cheap volume.
+
 ## 8. Uncertainty flags
 - UKB reopening date / incident cause are secondary sources; **the pause itself is confirmed verbatim**.
 - PAAWS licence unconfirmed (403); gravity convention for PAAWS, Nymeria/Aria, DOMINO is **inferred from
