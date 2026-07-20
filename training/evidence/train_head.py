@@ -85,6 +85,15 @@ def build_label_variants(vocab, K: int, seed: int) -> torch.Tensor:
     return torch.from_numpy(embs)
 
 
+def _group_grad_norm(params) -> float:
+    tot = sum(float(p.grad.detach().pow(2).sum()) for p in params if p.grad is not None)
+    return tot ** 0.5
+
+
+def _flat(params) -> torch.Tensor:
+    return torch.cat([p.detach().reshape(-1) for p in params])
+
+
 @torch.no_grad()
 def evaluate(head, y, subj, q_idx, g_mem, t_lab, batch=1024):
     """Balanced accuracy of argmax-evidence for the given query indices (subject-disjoint)."""
@@ -153,6 +162,8 @@ def main() -> None:
     head = EvidenceHead(d_model=d, proj=args.proj).to(device)
     opt = torch.optim.Adam(head.parameters(), lr=args.lr)
     crit = nn.CrossEntropyLoss()
+    g_params, t_params = list(head.g.parameters()), list(head.t.parameters())
+    g_init, t_init = _flat(g_params).clone(), _flat(t_params).clone()
 
     best_val, best_sd, t0 = -1.0, None, time.time()
     for step in range(1, args.steps + 1):
@@ -166,18 +177,38 @@ def main() -> None:
         qi = train_q[sel]
         gq = g_mem[qi]
         mask = subj.unsqueeze(0) != subj[qi].unsqueeze(1)   # (B, N) subject-disjoint
-        e = head.evidence(gq, g_mem, y, cand_proj=t_lab, t_labels=t_lab, retrieval_mask=mask)
+        do_log = step % args.val_every == 0 or step == 1
+        ev = head.evidence(gq, g_mem, y, cand_proj=t_lab, t_labels=t_lab,
+                           retrieval_mask=mask, return_weights=do_log)
+        e = ev[0] if do_log else ev
         loss = crit(head.logits(e), y[qi])
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        grad_tel = {}
+        if do_log:
+            # CREDIT ASSIGNMENT: grad norm on each learned component (read before opt.step()).
+            grad_tel = {
+                "grad/g": round(_group_grad_norm(g_params), 4),
+                "grad/t": round(_group_grad_norm(t_params), 4),
+                "grad/log_tau": round(abs(float(head.log_tau.grad)) if head.log_tau.grad is not None else 0.0, 5),
+                "grad/log_out_scale": round(abs(float(head.log_out_scale.grad)) if head.log_out_scale.grad is not None else 0.0, 5),
+            }
         opt.step()
 
-        if step % args.val_every == 0 or step == 1:
+        if do_log:
+            w = ev[1]                                          # (B, N) retrieval weights
+            same = (y.unsqueeze(0) == y[qi].unsqueeze(1)).float()
+            # retrieval PURITY = softmax mass landing on correct-label neighbors (the core signal:
+            # is retrieval finding the right label, before the text bridge maps it to a candidate?)
+            purity = float((w * same).sum(1).mean())
+            eff_k = float((1.0 / w.pow(2).sum(1).clamp(min=1e-12)).mean())   # effective #neighbors
+            drift = {"drift/g": round(float((_flat(g_params) - g_init).norm() / g_init.norm()), 4),
+                     "drift/t": round(float((_flat(t_params) - t_init).norm() / t_init.norm()), 4)}
             head.eval()
             with torch.no_grad():
-                g_mem = head.project_query(Z)
-                t_lab = head.project_text(label_text)
-                va = evaluate(head, y, subj, val_q, g_mem, t_lab)
+                g_mem_v = head.project_query(Z)
+                t_lab_v = head.project_text(label_text)
+                va = evaluate(head, y, subj, val_q, g_mem_v, t_lab_v)
             if va > best_val:
                 best_val = va
                 best_sd = {k: v.detach().cpu().clone() for k, v in head.state_dict().items()}
@@ -185,6 +216,8 @@ def main() -> None:
                               "val_bal_acc": round(va, 4), "best": round(best_val, 4),
                               "tau": round(float(head.tau.detach()), 4),
                               "out_scale": round(float(head.log_out_scale.detach().exp()), 2),
+                              "retr_purity": round(purity, 4), "eff_k": round(eff_k, 1),
+                              **grad_tel, **drift,
                               "elapsed_s": round(time.time() - t0, 1)}), flush=True)
 
     if best_sd is not None:

@@ -64,13 +64,16 @@ def main() -> None:
     ap.add_argument("--checkpoint", type=Path,
                     default=Path(os.environ.get("HALO_CKPT", _DEFAULT_CKPT)))
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--max-per-stream", type=int, default=20000,
-                    help="cap windows per stream (source balance + tractable encode; "
-                         "None-equivalent = -1 for all)")
+    ap.add_argument("--max-per-stream", type=int, default=50000,
+                    help="cap windows per stream at ENCODE time (tractable; -1 = all)")
+    ap.add_argument("--max-per-label", type=int, default=8000,
+                    help="cap windows per global label AFTER encoding (tames head-class hubness; "
+                         "rare classes kept in full; -1 = no cap)")
     ap.add_argument("--out", type=Path, default=_DEFAULT_OUT)
     args = ap.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     cap = None if args.max_per_stream is not None and args.max_per_stream < 0 else args.max_per_stream
+    label_cap = None if args.max_per_label is not None and args.max_per_label < 0 else args.max_per_label
 
     if not args.checkpoint.exists():
         raise FileNotFoundError(
@@ -121,6 +124,20 @@ def main() -> None:
     y = torch.cat(y_parts)
     subj = torch.cat(subj_parts)
     cfg = torch.cat(cfg_parts)
+
+    # Per-label balance: cap each global label at `label_cap` (rare classes kept in full).
+    # A large but head-class-flooded bank hurts non-parametric retrieval via hubness, so we
+    # trim the common activities rather than curate — the MVP keeps a big, roughly-balanced bank.
+    if label_cap is not None:
+        keep_mask = torch.zeros(len(y), dtype=torch.bool)
+        for c in y.unique().tolist():
+            idx = torch.nonzero(y == c, as_tuple=True)[0]
+            if len(idx) > label_cap:
+                idx = idx[torch.randperm(len(idx), generator=torch.Generator().manual_seed(c))[:label_cap]]
+            keep_mask[idx] = True
+        before = len(y)
+        Z, y, subj, cfg = Z[keep_mask], y[keep_mask], subj[keep_mask], cfg[keep_mask]
+        print(f"[memory] per-label cap {label_cap}: {before} -> {len(y)} windows", flush=True)
 
     sbert = get_sbert_encoder()
     label_text = torch.from_numpy(sbert(vocab).astype(np.float32))   # (L, 384) L2-normalized
