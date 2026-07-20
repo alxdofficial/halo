@@ -38,7 +38,7 @@ import torch.nn.functional as F
 
 from eval.scoring import get_sbert_encoder
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
-from training.evidence.labeltext import ensemble_text
+from training.evidence.labeltext import build_label_variants, ensemble_text
 
 _DIR = Path(__file__).resolve().parent / "outputs"
 _DEFAULT_BANK = _DIR / "memory_bank.pt"
@@ -68,15 +68,38 @@ def label_index(H: torch.Tensor, n_vocab: int, device) -> torch.Tensor:
     return pos
 
 
-def run_episode(dec, Z, y, subj, qi, H, t_ens, k, tau, return_aux=False):
-    """One class-disjoint episode forward. Memory excludes H (+ subject-disjoint); candidates = H."""
+def run_episode(dec, Z, y, subj, qi, H, t_ev, t_cand, k, tau, return_aux=False):
+    """One class-disjoint episode forward. Memory excludes H (+ subject-disjoint); candidates = H.
+
+    ``t_ev`` / ``t_cand`` are (L, 384) label-text tables for the EVIDENCE side and the CANDIDATE side.
+    Passing two *independently sampled* paraphrase tables is what forces semantic matching (see
+    ``sample_text_tables``); passing the same ensembled table twice reproduces the old behaviour.
+    """
     zq = Z[qi]
     not_in_H = ~torch.isin(y, H)                                  # (N,) labels allowed in memory
     allowed = not_in_H.unsqueeze(0) & (subj.unsqueeze(0) != subj[qi].unsqueeze(1))
     idx, w = retrieve(zq, Z, allowed, k, tau)
-    out = dec(zq=zq, zev=Z[idx], ev_label_text=t_ens[y[idx]], w_retr=w,
-              cand_text=t_ens[H], return_aux=return_aux)
+    out = dec(zq=zq, zev=Z[idx], ev_label_text=t_ev[y[idx]], w_retr=w,
+              cand_text=t_cand[H], return_aux=return_aux)
     return (out, w) if return_aux else out
+
+
+def sample_text_tables(variants, gen):
+    """Two (L, 384) tables: an INDEPENDENT paraphrase drawn per label for evidence vs candidates.
+
+    FINDINGS §2 showed the decoder's gains were confined to labels it had seen (r=-0.973 vs
+    unseen-label fraction): with a single fixed anchor per label it can memorize 53 points instead
+    of using text semantics. Re-drawing the surface form every episode removes that shortcut, and
+    drawing the evidence side and the candidate side *independently* means a correct match can never
+    be made on identical surface strings — only on meaning. Variant 0 is the canonical name, so the
+    canonical phrasing stays in the mix.
+    """
+    L, K, _ = variants.shape
+    ev = variants[torch.arange(L, device=variants.device),
+                  torch.randint(0, K, (L,), generator=gen, device=variants.device)]
+    cd = variants[torch.arange(L, device=variants.device),
+                  torch.randint(0, K, (L,), generator=gen, device=variants.device)]
+    return ev, cd
 
 
 def main() -> None:
@@ -96,6 +119,9 @@ def main() -> None:
     ap.add_argument("--lambda-delta", type=float, default=0.1, help="reg-to-identity on Δ")
     ap.add_argument("--lambda-pool", type=float, default=0.1, help="reg-to-identity on pooling (KL to prior)")
     ap.add_argument("--ensemble", type=int, default=8)
+    ap.add_argument("--label-variants", type=int, default=16,
+                    help="paraphrase variants per label sampled per episode (0 = fixed ensemble, "
+                         "the old behaviour that overfit to seen label strings)")
     ap.add_argument("--val-frac-cfg", type=float, default=0.2, help="fraction of CONFIGS held out")
     ap.add_argument("--val-episodes", type=int, default=6)
     ap.add_argument("--val-queries", type=int, default=800)
@@ -114,7 +140,15 @@ def main() -> None:
     vocab = list(bank["vocab"])
     n_vocab, d = len(vocab), Z.shape[1]
     sbert = get_sbert_encoder()
-    t_ens = ensemble_text(vocab, sbert, args.ensemble).to(device)
+    # train_only=True: paraphrases come ONLY from training-dataset tables (FINDINGS §6 F1).
+    t_ens = ensemble_text(vocab, sbert, args.ensemble, train_only=True).to(device)
+    variants = None
+    if args.label_variants > 0:
+        variants = build_label_variants(vocab, sbert, args.label_variants,
+                                        train_only=True).to(device)      # (L, K, 384)
+        print(f"[dec] label augmentation: {args.label_variants} variants/label, resampled per "
+              f"episode, evidence vs candidate sides drawn INDEPENDENTLY", flush=True)
+    txt_gen = torch.Generator(device=device).manual_seed(SEED)
     print(f"[dec] bank {Z.shape[0]} windows d={d} · {n_vocab} vocab · {int(cfg.max()) + 1} configs "
           f"· backbone {bank['backbone']['git']} (val_ba {bank['backbone']['val_ba']:.3f})", flush=True)
 
@@ -157,7 +191,8 @@ def main() -> None:
         dec.eval()
         accs = []
         for H, qi in val_eps:
-            logits = run_episode(dec, Z, y, subj, qi, H, t_ens, args.topk, args.tau_retr)
+            # val always uses the fixed canonical/ensembled text -> a stable selection metric
+            logits = run_episode(dec, Z, y, subj, qi, H, t_ens, t_ens, args.topk, args.tau_retr)
             pred = H[logits.argmax(1)].cpu().numpy()
             accs.append(balanced_accuracy(pred, y[qi].cpu().numpy()))
         return float(np.mean(accs))
@@ -179,8 +214,9 @@ def main() -> None:
         qi = sample_queries(train_q, H, args.batch)
         pos = label_index(H, n_vocab, device)
         target = pos[y[qi]]
-        (logits, aux), w = run_episode(dec, Z, y, subj, qi, H, t_ens, args.topk, args.tau_retr,
-                                       return_aux=True)
+        t_ev, t_cand = (t_ens, t_ens) if variants is None else sample_text_tables(variants, txt_gen)
+        (logits, aux), w = run_episode(dec, Z, y, subj, qi, H, t_ev, t_cand,
+                                       args.topk, args.tau_retr, return_aux=True)
         ce = F.cross_entropy(logits, target)
         a = aux["pool_weights"]
         kl_pool = (w * (torch.log(w.clamp_min(1e-12)) - torch.log(a.clamp_min(1e-12)))).sum(1).mean()

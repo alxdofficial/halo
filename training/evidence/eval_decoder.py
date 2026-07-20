@@ -41,11 +41,14 @@ _DIR = Path(__file__).resolve().parent / "outputs"
 
 
 @torch.no_grad()
-def score_cell(dec, enc, es, Z, mem_y, t_ens_mem, sbert, ens, topk, tau, device, batch=128):
+def score_cell(dec, enc, es, Z, mem_y, t_ens_mem, sbert, ens, topk, tau, device, batch=128,
+               raw_labels=False):
     z = encode_dataset(enc, np.asarray(es.windows), stream_channel_descriptions(es.dataset, es.stream),
                        device, float(es.rate_hz), _stream_gravity_state(es.dataset, es.stream)).to(device)
     z = F.normalize(z, dim=-1)
-    cand_text = ensemble_text(es.eval_labels, sbert, ens).to(device)          # (C, 384) frozen target
+    # raw_labels => bare string, identical to what eval/scoring.py gives every ConSE baseline
+    cand_text = ensemble_text(es.eval_labels, sbert, 1 if raw_labels else ens,
+                              use_descriptions=not raw_labels).to(device)     # (C, 384) frozen target
     preds = np.empty(len(z), dtype=object)
     for s in range(0, len(z), batch):
         zq = z[s:s + batch]
@@ -70,6 +73,10 @@ def main() -> None:
     ap.add_argument("--decoder", type=Path, default=_DIR / "evidence_decoder.pt")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--datasets", nargs="*", default=list(policy.PRIMARY_EVAL_DATASETS))
+    ap.add_argument("--raw-labels", action="store_true",
+                    help="BASELINE PARITY: embed the bare eval label string (what eval/scoring.py "
+                         "gives every ConSE baseline) instead of the paraphrase ensemble. Any "
+                         "HALO-vs-baseline number must use this, or ensemble every model.")
     ap.add_argument("--untrained", action="store_true",
                     help="CONTROL: skip loading the trained weights. Identity-at-init means this is "
                          "EXACTLY the untrained mechanism at the SAME top-k/tau, isolating the "
@@ -111,16 +118,19 @@ def main() -> None:
             except FileNotFoundError:
                 continue
             f1 = score_cell(dec, enc, es, Z, mem_y, t_ens_mem, sbert, blob["ensemble"],
-                            blob["topk"], blob["tau_retr"], device)
+                            blob["topk"], blob["tau_retr"], device,
+                            raw_labels=args.raw_labels)
             if f1 is not None:
                 per_cell[f"{ds}/{spec.stream_id}"] = round(f1, 1)
                 print(f"  {ds}/{spec.stream_id:22} F1={f1:.1f}", flush=True)
     mean = round(float(np.mean(list(per_cell.values()))), 1)
     print(f"  MEAN = {mean}  (ConSE 42.7 · untrained 47.5 · harnet 47.3)", flush=True)
     # separate artifacts so the identity CONTROL never clobbers the trained result
-    out = _DIR / ("eval_decoder_untrained.json" if args.untrained else "eval_decoder.json")
+    tag = ("_untrained" if args.untrained else "") + ("_rawlabels" if args.raw_labels else "")
+    out = _DIR / f"eval_decoder{tag}.json"
     out.write_text(json.dumps({"per_cell": per_cell, "mean": mean,
                                "untrained_control": bool(args.untrained),
+                               "raw_labels_parity": bool(args.raw_labels),
                                "topk": blob["topk"], "tau_retr": blob["tau_retr"]}, indent=2))
     print(f"-> {out}", flush=True)
 

@@ -236,7 +236,66 @@ Also flagged and worth fixing: `BASELINE_FAIRNESS_POLICY.md` claims crosshar/lim
 
 ---
 
-## 7. Reproducing
+## 7. CORRECTED RESULTS after fixing F1 — and a negative result on label augmentation
+
+Two fixes applied: (i) `global_label_paraphrases(train_only=True)` is now the default, so paraphrases
+come **only** from training-dataset tables (no eval-specific phrasing); (ii) `eval_decoder --raw-labels`
+embeds the bare eval label string — exactly what `eval/scoring.py` gives every ConSE baseline.
+
+**Measured cost of the F1 contamination** (untrained mechanism, full-soft, τ=0.03):
+contaminated 8-variant ensemble **47.5** → raw eval labels **46.1**. The advantage was **+1.4**, and
+**46.1 < harnet 47.3**. *The entire "we beat harnet" result was the contaminated text ensemble.*
+
+**All numbers at baseline parity (raw eval labels), top-k=48:**
+
+| configuration | mean macro-F1 |
+|---|---|
+| untrained control (decoder ≡ identity) | 45.1 |
+| **trained decoder, no label augmentation** | **46.1** (+1.0 over control) |
+| trained decoder, 16-variant label augmentation | 43.5 (−1.6 vs control) |
+| *untrained, full-soft (best honest HALO config)* | *46.1* |
+| harnet | **47.3** |
+
+### Negative result: per-episode label augmentation hurt
+
+Hypothesis (a good one): the decoder's gains were confined to seen labels because a single fixed anchor
+per label lets it memorize 53 vectors instead of using semantics; re-drawing the surface form every
+episode — independently on the evidence and candidate sides — should force semantic matching and
+generalize to unseen label strings.
+
+Implemented (`labeltext.build_label_variants`, `train_decoder.sample_text_tables`, `--label-variants`).
+**It did not work at these settings: −2.6 macro-F1 vs no augmentation.**
+
+The diagnostic is that **the internal proxy moved the opposite way from the target**:
+
+| | internal class-disjoint proxy | ZS-XD @ parity | mean ‖Δ‖ |
+|---|---|---|---|
+| no augmentation | 0.694 | **46.1** | 0.65 |
+| 16-variant augmentation | **0.733** | 43.5 | 1.16 |
+
+Mechanism: augmentation nearly **doubled the refinement residual** (‖Δ‖ 0.65 → 1.16). A larger Δ means
+more over-writing of the raw label text — precisely the failure mode that damages unseen labels — and
+the reg-to-identity weight (λ=0.1, never tuned) did not compensate for the added text noise.
+
+**This does not falsify the idea, but it does falsify this implementation.** Untested and plausible:
+λ scaled up with augmentation strength; fewer, *curated* variants (some train-only paraphrases are poor,
+e.g. "heterogeneous device seated"); same-variant rather than independent draws on the two sides;
+LLM-authored descriptions instead of template×synonym products. Single seed, single λ, single K.
+
+**The most consequential lesson is the proxy/target anti-correlation.** Our internal selection metric
+(class-disjoint episodes drawn from the *training* vocabulary and configs) improved while real
+cross-dataset transfer degraded. Any future decoder work needs a selection metric that tracks ZS-XD —
+most likely the open-vocab-only slice (§6, correction 8) — or we will keep optimizing the wrong thing.
+
+### Honest bottom line
+
+At true baseline parity, HALO's best configuration is the **untrained retrieval mechanism at 46.1**,
+which is **below harnet's 47.3**. The trained decoder recovers to 46.1 at top-k. What remains solid and
+internally controlled: **retrieval bridge (46.1) > ConSE bridge (42.7) on the same frozen encoder and
+corpus, with no learning** — a +3.4 mechanism effect, achieved with ~10⁴× less pretraining data than
+harnet at ~2× its parameters. That is the claim to build slides on.
+
+## 8. Reproducing
 
 ```bash
 PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
