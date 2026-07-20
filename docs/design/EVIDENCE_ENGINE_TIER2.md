@@ -195,15 +195,23 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
 
 ## 4. Milestones + gates (each must beat the prior / the 47.5 floor on held-out configs)
 
-- **T2.0 — Lock the baseline into the harness.** Wire the untrained retrieval + text-ensemble mechanism
-  as the `halo_evidence` adapter in `eval/run_baselines` so 47.5 sits in the official table beside ConSE
-  and harnet. Cheap, no training. *Gate: reproduces 47.5 through the harness.*
-- **T2.1 — Fine-grained label descriptions.** Inference-only text upgrade (bare names → descriptions +
-  ensemble), both evidence + target side. *Gate: lifts the fine-grained cells without hurting the mean.*
-- **T2.2 — Loss redesign (frozen encoder).** Reinstate `g`/`t` as residuals; train episodic class-holdout
-  + retrieval objective + reg-to-identity. *Gate: beats 47.5. If not, keep untrained and skip to T2.4.*
-- **T2.3 — Evidence decoder.** Attention among evidence + query-conditioned label refinement (frozen
-  target). *Gate: beats T2.2.*
+- **T2.0 — Lock the baseline into the harness.** ✅ DONE. `baselines/halo_evidence/adapter.py` wires the
+  untrained retrieval + text-ensemble mechanism; reproduces **47.5** exactly through `eval.run_baselines`
+  over the 7 primary cells (motionsense 80.8, realworld 44.2, shoaib 51.5, inclusivehar 29.0, usc_had
+  19.0, tnda 53.4, ut_complex 54.9). *Gate met.*
+- **T2.1 — Fine-grained label descriptions.** Hook built: `training/evidence/labeltext.py` appends a
+  `data/labels/label_descriptions.json` anchor to the ensemble when present (absent ⇒ no-op, still 47.5).
+  *Remaining: author the descriptions. Gate: lifts the fine-grained cells without hurting the mean.*
+- **T2.2 — Loss redesign (frozen encoder).** ✅ BUILT + smoke-passing. `training/evidence/train_decoder.py`:
+  class-disjoint episodes (hold out a label SET; memory excludes it; candidates = it) + reg-to-identity
+  (Δ-norm + KL-to-retrieval-prior) + held-out-config × class-disjoint checkpoint selection on fixed val
+  episodes. Smoke: init transfer bAcc **0.204** (chance 0.043 — the untrained mechanism genuinely
+  transfers), rising to 0.235 in 40 steps with kl_pool≈0. *Gate (full run): beats 47.5 on ZS-XD.*
+- **T2.3 — Evidence decoder.** ✅ BUILT + tested. `model/evidence/decoder.py` implements the §2.2 spec
+  (pre-LN + LayerScale, window-relative Fourier time, role/text-config/label embeddings, same-window
+  bias, zero-init Δ + pooling-as-residual). 9 unit tests incl. **identity-at-init ≡ untrained mechanism**
+  and set-permutation invariance. Gate tooling: `training/evidence/eval_decoder.py` (top-k retrieve →
+  decoder → ZS-XD macro-F1). *Gate (full run): beats T2.2.*
 - **T2.4 — Per-patch evidence + attention accumulation (MIL).** Patch-level memory + patch retrieval;
   decoder attends over patches×evidence; soft accumulation (not majority vote). *Gate: beats T2.3, esp.
   on fine-grained/free-living cells. Open risk: per-patch encoder features may be weaker than pooled —
