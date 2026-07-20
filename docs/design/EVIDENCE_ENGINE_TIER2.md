@@ -64,8 +64,9 @@ Parameter counts measured directly from the checkpoints on disk; pretraining sca
 **Read:** we are **not under-parameterized — we are under-*data*'d.**
 
 1. *vs the model we actually beat.* HALO totals ~2.4× harnet's parameters, but harnet was pretrained on
-   roughly **four orders of magnitude** more sensor data (700 k person-days ≈ 1.7×10⁷ h; our 305 k
-   windows ≈ 10³ h assuming ~10 s windows — an order-of-magnitude estimate, not a measured duration).
+   roughly **four orders of magnitude** more sensor data (700 k person-days ≈ 1.7×10⁷ h; ours is a
+   **measured 547 h materialised / 290 h actually reachable** after `MAX_PER_STREAM` — a ~58,000×
+   ratio. See `DATA_SCALING_PLAN.md` §0, which supersedes the earlier "≈10³ h" estimate here).
    So the 49.5-vs-47.3 win is a **data-efficiency** result, not a scale win, and it is a *narrow* margin
    against a model with an enormous data advantage.
 2. *vs the largest frozen SOTA.* We beat UniMTS and NormWear while being **7×–14× smaller** on the
