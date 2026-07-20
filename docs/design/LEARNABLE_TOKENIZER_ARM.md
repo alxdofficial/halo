@@ -165,19 +165,20 @@ smoke green, and the fixed-arm DSP refactor is numerically identical to the pre-
 eval dataset's own labels, identical protocol for both arms; each arm scored with its own native
 token presentation):
 
-| dataset | fixed (headline) | learnable arm | Δ |
+| dataset | fixed (single-res headline) | **fixed + multiresolution** | learnable arm (frontend + MR) |
 |---|---|---|---|
-| motionsense | 0.897 | 0.916 | +0.019 |
-| realworld | 0.852 | 0.857 | +0.005 |
-| shoaib | 0.949 | 0.972 | +0.023 |
-| inclusivehar | 0.506 | **0.552** | **+0.046** |
-| **mean** | **0.801** | **0.824** | **+0.023** |
+| motionsense | 0.897 | **0.940** | 0.916 |
+| realworld | 0.852 | **0.863** | 0.857 |
+| shoaib | 0.949 | 0.969 | **0.972** |
+| inclusivehar | 0.506 | **0.570** | 0.552 |
+| **mean** | **0.801** | **0.835** | 0.824 |
 
-Every dataset improves; the largest gain is on the free-living `inclusivehar` (+0.046), the weakest
-cell and the one where simultaneous short+long supports were hypothesized to help most. Internal
-validation agrees: best val kNN-BA **0.690** (learnable, step 26k) vs **0.659** (fixed, step 20k),
-and the learnable curve held a steady +0.02–0.04 lead the whole way while the fixed run plateaued
-after 20k.
+**Multiresolution-on-fixed wins outright (0.835), best on 3 of 4 datasets** including +0.064 on the
+free-living `inclusivehar` (the weakest cell). The learnable frontend is a small **net negative**
+(0.835 → 0.824): making the filterbank adaptive slightly *hurt* held-out transfer while adding cost.
+Internal validation agrees: best val kNN-BA 0.681 (fixed+MR) / 0.690 (learnable+MR) / 0.659
+(single-res); across all 30 checkpoints the two MR curves are statistically indistinguishable
+(mean gap ~+0.003, sign flips), both well above single-res.
 
 **Attribution — the gain is multiresolution, not the learnable filterbank.** Final adaptation
 telemetry after 30k steps:
@@ -197,12 +198,16 @@ attributable to **simultaneous multiresolution tokenization on the (effectively)
 frontend**, not to making the filterbank learnable. This is the better outcome for the thesis: two
 fixed temporal supports is still a fully physical, non-learned front end.
 
-**Open (in-flight):** the `--arm fixed --multiresolution` diagnostic (same 30k budget) is running to
-confirm attribution. If it reproduces ~0.824, adopt multiresolution-on-fixed as the new Phase-A
-default and retire the learnable frontend; if it lands meaningfully below, the frontend was
-contributing despite the flat telemetry and stays. The learnable-frontend code is committed but
-opt-in (`--arm learnable` / `--frontend learnable`); the training default is unchanged (fixed,
-single-resolution), and the fixed-arm forward is numerically identical to before.
+**Conclusion (confirmed by the diagnostic):** the `--arm fixed --multiresolution` run (same 30k
+budget) scored **0.835** held-out transfer — *above* the learnable arm's 0.824 — proving the entire
+gain is multiresolution tokenization, not filterbank learnability. **Recommendation: adopt
+multiresolution-on-fixed as the new Phase-A default and retire the learnable frontend.** The learnable
+code stays in-tree but opt-in (`--frontend learnable`) as a documented negative result; it is a small
+net cost. Follow-on work to make it the default: flip `PretrainConfig.multiresolution` on (keep
+`frontend="fixed"`), retrain the headline checkpoint, refit the Pipeline-B ConSE head on the new
+encoder, and refresh `docs/baselines/RESULTS_V2.md`. Caveat unchanged ([[ceiling probe]]): Phase A is
+not the ZS-XD bottleneck (the text bridge is), so this +0.034 encoder gain is real but secondary to
+Phase B.
 
 Reproduce:
 ```bash
