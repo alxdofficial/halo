@@ -17,6 +17,16 @@ M4a is built and diagnosed. On the 7-cell ZS-XD gate (same frozen fixed+MR encod
 | untrained @ top-k=48 (identity CONTROL for the decoder) | 46.7 |
 | **T2.2+T2.3 trained evidence DECODER** (episodic class-disjoint loss) | **49.5** |
 
+> ⚠️ **CORRECTION (2026-07-20, same day):** the "> harnet 47.3" reading below is **RETRACTED**. A
+> fairness audit (see `EVIDENCE_ENGINE_FINDINGS.md` §6, all points code-verified) found the +2.2 margin
+> is the size of a text-ensemble advantage no baseline was given — and which is partly built from
+> hand-authored synonyms for **eval-dataset** labels (70% of eval candidates) — selected using
+> hyperparameters tuned **on the eval cells**, against a harnet head fit on a corpus missing the wrist
+> streams where we win, with no CIs. What survives is the **internally-controlled** claim: on the same
+> frozen encoder + corpus, a retrieval bridge beats the ConSE bridge 42.7 → 47.5 → 49.5, reaching
+> *parity* with harnet at ~10⁴× less pretraining data. Also see §2 of FINDINGS: the decoder's gain is
+> confined to seen-label cells (r = −0.973) and it *regresses* on the most open-vocabulary ones.
+
 **RESULT (2026-07-20): the decoder clears the gate.** 49.5 > 47.5 floor, > harnet 47.3. Against its own
 identity control at the same retrieval config (46.7 — top-k costs 0.8 vs full-soft), the decoder is worth
 **+2.8**, so the gain is attributable to the decoder, not the retrieval change. Per-cell vs control:

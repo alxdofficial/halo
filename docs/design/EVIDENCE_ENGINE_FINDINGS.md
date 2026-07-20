@@ -155,7 +155,88 @@ balance helps exactly where open-vocab transfer is hardest.
 
 ---
 
-## 6. Reproducing
+## 6. ⚠️ Fairness audit — the "beats harnet" claim does NOT survive
+
+An adversarial audit of the comparison found four confounds, **all independently verified by me against
+the code**. Three of them are in code written during this Tier-2 work. The margin over harnet is +2.2
+(49.5 − 47.3); each confound below is of comparable or larger size.
+
+**F1 — Target-label text is hand-engineered for HALO only. CRITICAL. VERIFIED.**
+`training/evidence/labeltext.py:global_label_paraphrases()` merges *every* entry of
+`data/scripts/labels/label_augmentation.py:DATASET_CONFIGS` — and that table contains keys for the
+**held-out eval datasets** `motionsense`, `realworld`, `shoaib`. Measured: **42 of 60 (70%) of eval
+candidate labels receive hand-authored synonym lists** (motionsense 6/6, shoaib 7/7, realworld 6/8).
+ConSE baselines get only `label.replace("_"," ")`; UniMTS gets the raw string; NormWear one fixed
+template. This violates this project's own stated rule — *"Never fit anything on the candidate labels"*
+(EVIDENCE_ENGINE_TIER2.md §1.2). We price the text ensemble at **+2.2**, i.e. **exactly the size of the
+entire claimed margin**, and no baseline was given it.
+
+**F2 — HALO's retrieval hyperparameters were selected ON the eval cells. CRITICAL. VERIFIED.**
+`training/evidence/tier1_sweep.py:90` defaults `--datasets` to `policy.PRIMARY_EVAL_DATASETS`, sweeps 36
+configs (top_k × tau × CSLS × text_ens), and ranks them by **mean macro-F1 on the eval cells**. The
+winner (full-soft, τ=0.03, ensemble ON) was then frozen into `baselines/halo_evidence/adapter.py:50-52`.
+That is textbook test-set model selection. No baseline received any eval-set tuning.
+
+**F3 — harnet's ConSE head is fit on a different, smaller corpus than HALO's memory. HIGH. VERIFIED.**
+`baselines/harnet/adapter.py:73` fits on 9 datasets; HALO's bank uses the 12-dataset
+`pretrain_data.TRAIN_DATASETS`, which adds `sp_sw_har`, `nfi_fared`, `harmes`, `xrf_v2` — supplying
+extra **wrist/forearm** streams. HALO's two clearest wins over harnet are the **wrist** cells
+(tnda_har, ut_complex) — precisely the placements missing from harnet's head-fit corpus.
+Note `crosshar`/`limubert` *are* corpus-matched; only harnet, the model we claim to beat, is not.
+
+**F4 — UniMTS is resampled without anti-aliasing. MEDIUM-HIGH. VERIFIED.**
+`baselines/unimts/adapter.py:110` uses `np.interp` for e.g. 100 Hz → 20 Hz, aliasing high-frequency
+energy into UniMTS's band, while `harnet/adapter.py:129` uses `scipy.signal.resample_poly`. The fairness
+policy promises *one* anti-aliased resampler for all. A real, fixable handicap on the strongest
+text-native baseline.
+
+**F5 — No confidence intervals on the headline. HIGH.** `eval_decoder.py` computes bare per-cell
+macro-F1 with no subject-stratified CI, unlike `baselines/base.py:185-198`. harnet's per-cell CIs run
+±2–5 points; one cell is CI-degenerate. A +2.2 unweighted 7-cell mean with no paired test is not a
+demonstrated win. The 49.5 has also never been through the shared `eval.run_baselines` harness.
+
+### What survives, and the framing to use
+
+**RETRACTED:** "HALO beats frozen SOTA / beats harnet." The margin is the size of F1 alone, selected
+under F2, against a baseline handicapped by F3, with no CIs (F5).
+
+**SURVIVES (internally controlled — same encoder, same corpus, same bank, same bridge):**
+
+> On a fixed frozen representation, a **non-parametric retrieval bridge** transfers to unseen datasets
+> substantially better than the standard **ConSE parametric bridge**: 42.7 → 47.5 with *no learning*,
+> → 49.5 with a transfer-aligned decoder. It reaches **parity** with a wrist-pretrained UK-Biobank model
+> that used ~10⁴× more pretraining data, at ~2× its parameters.
+
+That claim is unaffected by F1–F4 because they sit *inside* the comparison (ConSE vs retrieval on the
+identical encoder/corpus/text treatment). Lead with **data-efficiency and the mechanism**, not a
+leaderboard win.
+
+### Required corrections, in order
+
+1. **Purge eval-dataset synonyms** — restrict `global_label_paraphrases()` to `TRAIN_DATASETS` configs
+   only (or use descriptions authored blind to eval label lists). Re-score. *Correctness fix, not an
+   ablation.*
+2. **Text-ensemble parity row** — apply the same ensemble to *every* baseline's target text and report
+   the table with and without. Expect harnet to gain ~2 and erase the margin.
+3. **Re-select HPs on held-out training configs**, never eval; report both numbers, the delta is the
+   optimism.
+4. **Retrieval-augmented harnet (the killer control)** — build an identical bank from frozen harnet
+   features and run the identical mechanism. If it lands near 49.5, the win is the *mechanism*, not our
+   encoder — still publishable, but a different paper. `build_memory.py` needs ~50 lines to become
+   backbone-agnostic.
+5. **Re-fit harnet's head on the 12-dataset corpus** so it is a same-data control.
+6. **Route the decoder through `eval.run_baselines`** for subject-stratified CIs + a paired per-cell
+   test. (Currently 4–3 vs harnet on cells.)
+7. **Fix UniMTS to `resample_poly`** and re-score as a disclosed correction.
+8. **Open-vocab-only slice** — macro-F1 over just the ~16 eval labels absent from the training vocab.
+   That is the only genuinely zero-shot subset and the only place the language claim can be proven.
+
+Also flagged and worth fixing: `BASELINE_FAIRNESS_POLICY.md` claims crosshar/limubert are retrained at
+60 Hz / seq_len 360, but the code uses 20 Hz / seq_len 120 — the doc is wrong and is an easy reviewer catch.
+
+---
+
+## 7. Reproducing
 
 ```bash
 PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
