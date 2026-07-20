@@ -35,6 +35,46 @@ and *destroys* open-vocab transfer, so the untrained mechanism wins. Retrieval t
 **The floor to beat is 47.5**, not 42.7. Every Tier-2 change must clear it on held-out configs or be
 dropped ("do no harm").
 
+### 0.1 Scale context — are we sized adequately? (measured 2026-07-20)
+
+Parameter counts measured directly from the checkpoints on disk; pretraining scale per
+`docs/baselines/BASELINES.md`.
+
+| model | params | pretraining data |
+|---|---|---|
+| LiMU-BERT | 62.6 k | self-pretrained on **our** corpus |
+| CrossHAR | 62.6 k | self-pretrained on **our** corpus |
+| harnet5 (ssl-wearables trunk) | 4.24 M | UK-Biobank **~700 k person-days** |
+| **HALO Phase-A encoder** | **7.17 M** | our corpus: 305,049 train windows / 20 streams / 93 labels; 25 k of 30 k steps |
+| **HALO evidence decoder** | **2.81 M** | 3 k steps × 256 over 149,774 cached vectors — **52 s** |
+| **HALO total** | **≈ 9.98 M** | |
+| UniMTS | 68.6 M | HumanML3D mocap → simulated IMU + GPT-3.5 text |
+| NormWear | 136 M (+ ~1.1 B TinyLlama text tower) | ~15 k signal-hours, mostly ECG/PPG/EEG |
+
+**Read:** we are **not under-parameterized — we are under-*data*'d.**
+
+1. *vs the model we actually beat.* HALO totals ~2.4× harnet's parameters, but harnet was pretrained on
+   roughly **four orders of magnitude** more sensor data (700 k person-days ≈ 1.7×10⁷ h; our 305 k
+   windows ≈ 10³ h assuming ~10 s windows — an order-of-magnitude estimate, not a measured duration).
+   So the 49.5-vs-47.3 win is a **data-efficiency** result, not a scale win, and it is a *narrow* margin
+   against a model with an enormous data advantage.
+2. *vs the largest frozen SOTA.* We beat UniMTS and NormWear while being **7×–14× smaller** on the
+   backbone (~130× counting NormWear's text tower). That efficiency gap is the more defensible claim.
+3. *Is the ENCODER undersized?* It is the documented bottleneck (retrieval purity flat at 0.68;
+   stairs/ramp/elevator ≈ 0 F1). But with only 305 k windows, that ceiling is far more likely
+   **data-limited than parameter-limited** — widening a 7.2 M encoder on this corpus would mostly
+   overfit. This is the quantitative case for the data-broadening plan and for T2.6, over making the
+   encoder wider.
+4. *Is the DECODER undersized?* Probably not — arguably already at the edge. It converged in 52 s
+   (best at step 2200, drifting down after), it is a *residual* on a strong non-parametric mechanism,
+   and its episodic supervision draws on only 53 training labels. The two regressions (usc_had,
+   ut_complex) look like over-writing/over-fitting rather than insufficient capacity — testable via the
+   λ sweep in the regression diagnosis.
+
+**Consequence for how we report this:** lead with efficiency ("comparable-or-better zero-shot transfer at
+7–50× fewer parameters and ~10⁴× less pretraining data"), not with an absolute-SOTA claim. Scaling *data*
+is higher-leverage than scaling *parameters*.
+
 ## 1. Design principles
 
 1. **Keep the sensor→sensor retrieval bridge.** Query key = frozen encoder vector; retrieve
