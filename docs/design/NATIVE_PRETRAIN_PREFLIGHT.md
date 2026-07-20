@@ -77,8 +77,26 @@ CUDA_VISIBLE_DEVICES=0 /home/alex/code/HALO/legacy_code/.venv/bin/python \
 # resume a killed run:  --resume training/tokenizer/outputs/pretrain_native/last.pt
 ```
 
+## Profiling + config (2026-07-19, RTX 4090)
+Profiled on the native corpus and tuned: **batch 512 (64×8)**, **num_workers 12**, **lr 4.2e-4** (√2 of
+3e-4 for the 256→512 doubling), **30k steps = 50 epochs**. Step ~110 ms (~9.2 steps/s); GPU-compute
+throughput knee is ~512 (no gain past it, and heavy patch scales ps=0.5 lose throughput); peak ~10.6 GB
+of 24. Step breakdown: backward 58%, two forwards ~25%, text-encode ~9%, filterbank ~2%. TF32 enabled
+for the fp32 regions. Full run ≈ ~1 hour.
+
+**Validation was the hidden cost and is fixed:** val loaders skip the unused A3 cadence/eigen DSP
+(`MultiScaleCollate(compute_targets=False)`), run parallel/persistent workers, and kNN is vectorized
+(cdist) — one val went **~571 s → ~12.6 s** (~45×), bit-identical metrics. Added a live **ConSE
+text-cosine zero-shot probe** (`val_conse_ba`) alongside kNN-BA (best.pt still selects on kNN-BA).
+
+**Known micro-opts NOT applied** (each ~1% of step, bit-exact, deferred — not worth churning the core
+forward for): (1) filterbank DSP runs twice/step (frozen A1 target + trainable encoder on identical
+patches) — could hoist the shared pre-proj feature; (2) channel-text fusion *pool* is text-only but
+recomputed in both the masked & clean forwards — could pool once. Fold in if/when the encoder forward
+is refactored anyway.
+
 ## Non-blocking caveats
-- GPU throughput / AMP / peak-memory not yet profiled on the native corpus (CPU-verified only).
+- Peak-memory headroom is comfortable (~10.6/24 GB at batch 512; ~18.8 GB at 1024, not worth it).
 - XRF contributes ~22–23 % of sampled class slots (it uniquely covers the most labels; 6 diverse
   configs, no single config dominates).
 - label-text synonym configs missing for the 4 new datasets — inert in Phase-A (label_text disabled).

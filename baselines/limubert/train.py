@@ -69,6 +69,9 @@ def main(argv=None):
                     help="per-stream window cap. DEFAULT 800 = smoke; omitting KEEPS this cap. "
                          "Pass 0 for the full corpus, or e.g. 20000 for the balanced corpus.")
     ap.add_argument("--gpu", action="store_true")
+    ap.add_argument("--num-workers", type=int, default=4,
+                    help="DataLoader workers. 0 = single-process masking (robust to CPU contention: "
+                         "no worker-starvation stall, degrades gracefully instead of collapsing).")
     args = ap.parse_args(argv)
 
     if str(LIMU_REPO) not in sys.path:
@@ -112,12 +115,13 @@ def main(argv=None):
     # compute; _seed_worker keeps each worker's mask RNG independent (see above).
     # pin_memory + persistent_workers + prefetch trim per-epoch overhead. Pure-speed,
     # faithful (identical objective, just parallelized). Measured ~1.6x on the box.
+    nw = args.num_workers
+    dl_extra = dict(num_workers=nw, persistent_workers=True, prefetch_factor=4,
+                    worker_init_fn=_seed_worker) if nw > 0 else dict(num_workers=0)
     ld_train = DataLoader(ds_train, shuffle=True, batch_size=train_cfg.batch_size,
-                          num_workers=4, pin_memory=True, persistent_workers=True,
-                          prefetch_factor=4, worker_init_fn=_seed_worker)
+                          pin_memory=True, **dl_extra)
     ld_test = DataLoader(ds_test, shuffle=False, batch_size=train_cfg.batch_size,
-                         num_workers=2, pin_memory=True, persistent_workers=True,
-                         prefetch_factor=4, worker_init_fn=_seed_worker)
+                         pin_memory=True, **dl_extra)
 
     model = lb_models.LIMUBertModel4Pretrain(model_cfg)
     criterion = nn.MSELoss(reduction="none")

@@ -32,10 +32,14 @@ TARGET_HZ = 20
 TARGET_LEN = 120          # 6 s @ 20 Hz
 SIX_CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
 
-# The 9 non-eval training datasets (the global-vocab train corpus).
+# The 12 non-eval training datasets — MUST match HALO's corpus for a valid comparison
+# (training/tokenizer/pretrain_data.py TRAIN_DATASETS). hapt DROPPED (UCI-HAR near-duplicate,
+# per-window NCC 0.98 → leakage); the 2026-07 expansion (sp_sw_har/nfi_fared/harmes/xrf_v2) ADDED.
+# Each stream's acc+gyro is mapped into the 6-ch/20 Hz contract; placement is irrelevant to this
+# layout-locked baseline, so xrf_v2's ear/glasses streams are just more valid 6-ch windows.
 TRAIN_DATASETS = [
-    "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar", "hapt",
-    "mhealth", "capture24",
+    "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar",
+    "mhealth", "capture24", "sp_sw_har", "nfi_fared", "harmes", "xrf_v2",
 ]
 
 

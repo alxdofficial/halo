@@ -75,10 +75,13 @@ def render(log_path: Path, out_path: Path):
 
     x, y = series(V, "val_knn_ba")
     if x:
-        ax[1, 1].plot(x, y, "k-o", ms=3, lw=1.5, label="overall")
+        ax[1, 1].plot(x, y, "k-o", ms=3, lw=1.5, label="kNN-BA")
+    xc, yc = series(V, "val_conse_ba")
+    if xc:
+        ax[1, 1].plot(xc, yc, "b-s", ms=3, lw=1.5, label="ConSE text-cos")
     for s, (xs, ys) in sorted(dict_series(V, "val_ba_by_source").items()):
-        ax[1, 1].plot(xs, ys, lw=0.7, alpha=0.55)
-    ax[1, 1].set_title("val kNN-BA (bold=overall, thin=per source)")
+        ax[1, 1].plot(xs, ys, lw=0.7, alpha=0.4, color="gray")
+    ax[1, 1].set_title("val accuracy (bold=overall kNN & ConSE, thin gray=per-source kNN)")
     ax[1, 1].set_xlabel("step"); ax[1, 1].legend(fontsize=8)
 
     for s, (xs, ys) in sorted(dict_series(S, "a1_by_source").items()):
@@ -88,9 +91,11 @@ def render(log_path: Path, out_path: Path):
 
     ax[2, 1].axis("off")
     best = max((r["val_knn_ba"] for r in V), default=float("nan"))
+    best_c = max((r.get("val_conse_ba", float("nan")) for r in V), default=float("nan"))
     txt = (f"steps logged : {S[-1]['step'] if S else 0}\n"
            f"val points   : {len(V)}\n"
-           f"best val BA   : {best:.3f}\n"
+           f"best kNN-BA   : {best:.3f}\n"
+           f"best ConSE-BA : {best_c:.3f}\n"
            f"last total    : {series(S, 'total')[1][-1] if series(S, 'total')[1] else float('nan'):.3f}")
     ax[2, 1].text(0.03, 0.92, txt, va="top", family="monospace", fontsize=12)
 

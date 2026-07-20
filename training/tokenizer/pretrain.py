@@ -68,10 +68,11 @@ class PretrainConfig:
     num_heads: int = 8
     dim_feedforward: int = 1024
     dropout: float = 0.1
-    classes_per_batch: int = 32
-    samples_per_class: int = 8            # batch = 256
-    steps: int = 20_000
-    lr: float = 3e-4
+    classes_per_batch: int = 64           # 64x8 = batch 512 (profiled 2026-07-19: throughput knee on
+    samples_per_class: int = 8            # the 4090; 64 of 93 labels/step keeps SupCon negatives rich,
+                                          # positive-group size unchanged at 8; peak 9.5 GB, safe)
+    steps: int = 30_000                   # 50 epochs of the 305k corpus at batch 512 (596 steps/epoch)
+    lr: float = 4.2e-4                    # 3e-4 x sqrt(2): sqrt-scaling for the 256->512 batch doubling
     weight_decay: float = 0.05
     warmup_steps: int = 1_000
     grad_clip: float = 1.0
@@ -80,7 +81,8 @@ class PretrainConfig:
     val_every: int = 1_000
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
     knn_k: int = 5
-    num_workers: int = 4
+    num_workers: int = 12                 # profiled: nw=4 was data-bound (~35% GPU idle); 12 of 24
+                                          # cores makes the step compute-bound (2026-07-19)
     seed: int = 20260718
     max_per_stream: int | None = None     # None = use ALL windows; the sampler is source-balanced
     device: str = "cpu"
@@ -140,20 +142,63 @@ def knn_balanced_acc(train_z, train_y, test_z, test_y, k: int) -> float:
     # retrieves other-class neighbours — instead of being dropped from the metric. The old
     # `set(train_y) & set(test_y)` intersection silently omitted unsupported query classes,
     # inflating the number and making best.pt selection depend on which classes the random
-    # support cap happened to include.
+    # support cap happened to include. Vectorized (cdist+topk+mode) — was a per-query Python loop.
     labels = sorted(set(test_y.tolist()))
-    per_class = []
-    for label in labels:
-        idx = (test_y == label).nonzero().squeeze(1)
-        if not len(idx):
-            continue
-        hits = 0
-        for i in idx.tolist():
-            d = (train_z - test_z[i]).norm(dim=1)
-            nn_lab = train_y[d.argsort()[:k]]
-            hits += int(nn_lab.mode().values) == label
-        per_class.append(hits / len(idx))
+    if not labels:
+        return float("nan")
+    d = torch.cdist(test_z.float(), train_z.float())            # (Nq, Ns) euclidean
+    nn_lab = train_y[d.topk(min(k, d.shape[1]), largest=False).indices]   # (Nq, k)
+    pred = nn_lab.mode(dim=1).values                            # majority (ties -> smallest id)
+    per_class = [float((pred[test_y == label] == label).float().mean())
+                 for label in labels if (test_y == label).any()]
     return float(np.mean(per_class)) if per_class else float("nan")
+
+
+def balanced_acc(pred: torch.Tensor, true: torch.Tensor) -> float:
+    """Macro-averaged per-class recall (balanced accuracy) from hard predictions."""
+    per_class = []
+    for label in sorted(set(true.tolist())):
+        m = true == label
+        if m.any():
+            per_class.append(float((pred[m] == label).float().mean()))
+    return float(np.mean(per_class)) if per_class else float("nan")
+
+
+@torch.no_grad()
+def label_text_prototypes(model: PipelineAModel, label_ids: dict) -> torch.Tensor:
+    """(L, 384) L2-normalized frozen-LM embedding of each label's name, indexed BY label id.
+
+    Turns "brushing_teeth" -> "a person brushing teeth" -> mean-pooled MiniLM vector. These are
+    the class prototypes for the ConSE-style text-cosine probe: the same frozen text tower the
+    encoder already uses, so the probe measures whether the sensor representation aligns to label
+    SEMANTICS (the downstream zero-shot target), not just cluster purity like kNN."""
+    id2str = {i: s for s, i in label_ids.items()}
+    prompts = [f"a person {id2str[i].replace('_', ' ')}" for i in range(len(id2str))]
+    emb, mask = model.encoder.text_encoder.encode(prompts, device=torch.device("cpu"))  # (L,S,384)
+    m = mask.unsqueeze(-1).float()
+    proto = (emb * m).sum(1) / m.sum(1).clamp(min=1.0)
+    return torch.nn.functional.normalize(proto, dim=1)
+
+
+def _l2n(x: torch.Tensor) -> torch.Tensor:
+    return x / x.norm(dim=1, keepdim=True).clamp(min=1e-8)
+
+
+def conse_probe_predict(train_z, train_y, val_z, val_y, protos,
+                        ridge_lambda: float = 1.0) -> torch.Tensor:
+    """CRUDE-but-comparable zero-shot head: ridge-fit a linear map sensor_emb -> label-text space
+    on the TRAIN support (this IS ConSE's semantic projection), then cosine-match each val window
+    to the candidate labels' text prototypes (candidates = the val label set). Returns predicted
+    label ids (aligned to val_z rows). Fit fresh each val, no calibration — a live proxy for the
+    downstream ZS protocol."""
+    Zt, Zv = _l2n(train_z.float()), _l2n(val_z.float())
+    T = protos[train_y]                                         # (N, 384) target text vectors
+    d = Zt.shape[1]
+    W = torch.linalg.solve(Zt.t() @ Zt + ridge_lambda * torch.eye(d), Zt.t() @ T)   # (d, 384)
+    proj = _l2n(Zv @ W)                                          # val projected into text space
+    cand = torch.tensor(sorted(set(val_y.tolist())))
+    sims = proj @ _l2n(protos[cand]).t()                        # (Nval, Ncand) cosine
+    return cand[sims.argmax(dim=1)]
 
 
 @torch.no_grad()
@@ -242,6 +287,12 @@ def main() -> None:
             device=args.device,
         )
     device = torch.device(cfg.device)
+    if device.type == "cuda":
+        # TF32 for the fp32 regions autocast doesn't cover (filterbank einsum/proj, val ridge
+        # solve). Free + zero-risk on Ampere+; the transformer already runs fp16 under autocast.
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
     torch.manual_seed(cfg.seed)
     args.out.mkdir(parents=True, exist_ok=True)
     # F5: never silently append to / overwrite a prior run. A stale checkpoint or log in the out dir
@@ -270,14 +321,19 @@ def main() -> None:
         num_workers=cfg.num_workers, worker_init_fn=_seed_worker,
         persistent_workers=cfg.num_workers > 0, pin_memory=device.type == "cuda",
     )
-    # val: no aug, fixed 1.0 s patches, plain order
-    val_loader = DataLoader(val_ds, batch_size=256, shuffle=False,
-                            collate_fn=MultiScaleCollate(fixed_patch_seconds=1.0),
-                            num_workers=0)
+    # val: no aug, fixed 1.0 s patches, plain order. compute_targets=False skips the per-window
+    # A3 DSP (unused by embedding), and parallel persistent workers cut the collate time — together
+    # these take a val from ~9.5 min to seconds (the val-speed fix; val ran 5x the train cost).
+    val_workers = min(6, cfg.num_workers)
+    val_collate = MultiScaleCollate(fixed_patch_seconds=1.0, compute_targets=False)
+    val_loader = DataLoader(val_ds, batch_size=256, shuffle=False, collate_fn=val_collate,
+                            num_workers=val_workers, persistent_workers=val_workers > 0,
+                            pin_memory=device.type == "cuda")
     train_eval_loader = DataLoader(
         PretrainDataset(index, index.train, augment=False), batch_size=256,
-        shuffle=True, collate_fn=MultiScaleCollate(fixed_patch_seconds=1.0),
-        num_workers=0,
+        shuffle=True, collate_fn=val_collate,
+        num_workers=val_workers, persistent_workers=val_workers > 0,
+        pin_memory=device.type == "cuda", worker_init_fn=_seed_worker,
     )
 
     # ---------------------------------------------------- A1 target tokenizer
@@ -314,6 +370,9 @@ def main() -> None:
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"model: {n_params / 1e6:.2f}M trainable params · device={device}", flush=True)
+
+    # Label-text prototypes for the live ConSE-style zero-shot probe (built once, frozen LM).
+    label_protos = label_text_prototypes(model, index.label_ids)   # (L, 384) cpu, normalized
 
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
                             weight_decay=cfg.weight_decay)
@@ -373,7 +432,7 @@ def main() -> None:
 
     model.train()
     for step, batch in enumerate(train_loader, start=start_step + 1):
-        patches = batch["patches"].to(device, non_blocking=True)   # gravity-aligned in collate
+        patches = batch["patches"].to(device, non_blocking=True)   # NOT gravity-aligned (2026-07-19 design)
         rates = batch["rates"].to(device)
         patch_len = batch["patch_len"].to(device)
         positions = batch["positions"].to(device)
@@ -462,15 +521,22 @@ def main() -> None:
             train_z, train_y, _ = embed_stratified(model, train_eval_loader, device,
                                                    cfg.val_per_label, target_labels=set(val_y.tolist()))
             ba = knn_balanced_acc(train_z, train_y, val_z, val_y, cfg.knn_k)
-            # per-source val kNN-BA — which datasets the representation clusters well
+            # ConSE-style text-cosine probe: ridge-map sensor->label-text space on the train
+            # support, cosine-classify val against the label prototypes. A live proxy for the
+            # downstream zero-shot metric (comparable to the ConSE baselines), fit fresh each val.
+            conse_pred = conse_probe_predict(train_z, train_y, val_z, val_y, label_protos)
+            conse_ba = balanced_acc(conse_pred, val_y)
+            # per-source val BA — which datasets cluster (kNN) / align to text (conse) well
             vs = np.asarray(val_src)
-            ba_by_src = {}
+            ba_by_src, conse_by_src = {}, {}
             for s in sorted(set(val_src)):
                 mt = torch.from_numpy(vs == s)
                 if int(mt.sum()) >= cfg.knn_k:
                     ba_by_src[s] = round(knn_balanced_acc(train_z, train_y, val_z[mt], val_y[mt],
                                                           cfg.knn_k), 4)
-            rec = {"step": step, "val_knn_ba": ba, "val_ba_by_source": ba_by_src}
+                    conse_by_src[s] = round(balanced_acc(conse_pred[mt], val_y[mt]), 4)
+            rec = {"step": step, "val_knn_ba": ba, "val_conse_ba": round(conse_ba, 4),
+                   "val_ba_by_source": ba_by_src, "val_conse_by_source": conse_by_src}
             print(json.dumps(rec), flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")

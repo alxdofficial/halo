@@ -40,7 +40,6 @@ PRIMARY_TRAIN_DATASETS = (
 PRIMARY_EVAL_DATASETS = (
     "motionsense",
     "realworld",
-    "mobiact",
     "shoaib",
     "inclusivehar",
     "usc_had",
@@ -53,6 +52,8 @@ EXCLUDED_PRIMARY_DATASETS = {
     "harth": "lower-back and thigh accelerometers are retained only as a placement stress test",
     "opportunity": "back and upper/lower-arm IMUs are appendix-only, not phone/watch inputs",
     "recgym": "per-axis min-max normalization destroyed physical scale and gravity",
+    "mobiact": "raw download + grids never materialized (empty downloads/, no grids/); "
+               "was a phantom in the policy and never actually scored — dropped 2026-07-19",
 }
 
 

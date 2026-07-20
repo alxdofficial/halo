@@ -373,11 +373,15 @@ class MultiScaleCollate:
     def __init__(self, dft_size: int = DFT_SIZE,
                  patch_choices: Sequence[float] = PATCH_SECONDS_CHOICES,
                  fixed_patch_seconds: float | None = None, seed: int = SEED,
-                 align_gravity: bool = False):
+                 align_gravity: bool = False, compute_targets: bool = True):
         self.dft_size = dft_size
         self.patch_choices = tuple(patch_choices)
         self.fixed = fixed_patch_seconds
         self.align_gravity = align_gravity
+        # A3 grounding targets (cadence + eigen) cost an FFT + PCA per window. They are ONLY used
+        # by the training loss; validation/embedding never reads them, so val loaders pass
+        # compute_targets=False to skip that per-window DSP (the val-speed fix — 2026-07-19).
+        self.compute_targets = compute_targets
         self.seed = seed
 
     def _patch_seconds(self, batch: list[dict]) -> float:
@@ -413,13 +417,15 @@ class MultiScaleCollate:
             # Call cadence + eigen DIRECTLY on the accel triad (canonical slots 0:3) — the
             # full compute_primitives would also gravity-align internally and compute 4
             # unused families (grav-energy/coherence/shape/dc_tilt); that redundant work +
-            # the double align is the second-agent efficiency finding.
-            acc = data[:, :3].unsqueeze(0)                               # (1, T, 3)
-            cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
-            cadence_t[b] = cad.values[0, 0].nan_to_num(0.0)
-            cadence_v[b] = cad.valid[0]
-            eigen_t[b] = eig.values[0]
-            eigen_v[b] = eig.valid[0]
+            # the double align is the second-agent efficiency finding. Skipped entirely when
+            # compute_targets is False (val/embedding loaders don't use A3).
+            if self.compute_targets:
+                acc = data[:, :3].unsqueeze(0)                           # (1, T, 3)
+                cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
+                cadence_t[b] = cad.values[0, 0].nan_to_num(0.0)
+                cadence_v[b] = cad.valid[0]
+                eigen_t[b] = eig.values[0]
+                eigen_v[b] = eig.valid[0]
             # Gravity-align the whole window on its true length (one R per window). Pass the
             # AUTHORITATIVE gravity_state so gravity-removed streams skip alignment (F9).
             if self.align_gravity:

@@ -75,6 +75,9 @@ def main(argv=None):
     ap.add_argument("--augment", action="store_true",
                     help="apply upstream channel_aug (6x); off for smoke speed")
     ap.add_argument("--gpu", action="store_true")
+    ap.add_argument("--num-workers", type=int, default=4,
+                    help="DataLoader workers. 0 = single-process masking (robust to CPU contention: "
+                         "no worker-starvation stall on a shared box, degrades gracefully instead).")
     args = ap.parse_args(argv)
 
     if str(CROSSHAR_REPO) not in sys.path:
@@ -137,14 +140,13 @@ def main(argv=None):
     # item (two contrastive views) and is the dominant cost -- with GPU compute.
     # _seed_worker keeps each worker's mask RNG independent (see above). drop_last kept
     # (NT-Xent needs a fixed batch size). Pure-speed, faithful. Measured ~1.6x fp32.
+    nw = args.num_workers
+    dl_extra = dict(num_workers=nw, persistent_workers=True, prefetch_factor=4,
+                    worker_init_fn=_seed_worker) if nw > 0 else dict(num_workers=0)
     ld_train = DataLoader(ds_train, shuffle=True, batch_size=train_cfg.batch_size,
-                          drop_last=True, num_workers=4, pin_memory=True,
-                          persistent_workers=True, prefetch_factor=4,
-                          worker_init_fn=_seed_worker)
+                          drop_last=True, pin_memory=True, **dl_extra)
     ld_test = DataLoader(ds_test, shuffle=False, batch_size=train_cfg.batch_size,
-                         drop_last=True, num_workers=2, pin_memory=True,
-                         persistent_workers=True, prefetch_factor=4,
-                         worker_init_fn=_seed_worker)
+                         drop_last=True, pin_memory=True, **dl_extra)
     if len(ld_train) == 0 or len(ld_test) == 0:
         raise SystemExit(
             f"batch_size={train_cfg.batch_size} too large for train={len(d_train)}/"
