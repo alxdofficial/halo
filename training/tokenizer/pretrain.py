@@ -77,6 +77,8 @@ class PretrainConfig:
     dropout: float = 0.1
     arm: str = "fixed"                    # headline preset: fixed | learnable
     frontend: str = "fixed"               # independently switchable for attribution
+    # NB: the `pretrain` CLI defaults multiresolution=True (the diagnostic-confirmed winner); this
+    # dataclass default stays False so direct constructors (e.g. grad_check) get the single-res encoder.
     multiresolution: bool = False
     frontend_lr_scale: float = 0.1         # physical adaptation moves slower than the encoder
     frontend_reg_weight: float = 1e-3
@@ -313,18 +315,23 @@ def main() -> None:
                         help="warm-resume from a checkpoint (restore encoder/heads/opt/sched/scaler/"
                              "RNG + step and continue the remaining steps)")
     parser.add_argument("--arm", choices=("fixed", "learnable"), default="fixed",
-                        help="headline experiment preset (learnable enables constrained frontend + multiresolution)")
+                        help="frontend preset. DEFAULT 'fixed' = fixed physical filterbank + "
+                             "multiresolution (the winning Phase-A config; see "
+                             "docs/design/LEARNABLE_TOKENIZER_ARM.md). 'learnable' swaps in the "
+                             "constrained adaptive frontend — a documented negative result, kept opt-in.")
     parser.add_argument("--frontend", choices=("fixed", "learnable"), default=None,
                         help="override the arm's frontend for an attribution diagnostic")
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
-                        help="override simultaneous short+long tokenization for an attribution diagnostic")
+                        help="override multiresolution (default ON); --no-multiresolution is the "
+                             "single-resolution ablation")
     args = parser.parse_args()
 
     cfg = PretrainConfig(
         device=args.device,
         arm=args.arm,
         frontend="learnable" if args.arm == "learnable" else "fixed",
-        multiresolution=args.arm == "learnable",
+        multiresolution=True,          # new Phase-A default: multiresolution ON (diagnostic-confirmed
+                                       # winner, 0.835 held-out transfer); --no-multiresolution to ablate
     )
     if args.frontend is not None:
         cfg.frontend = args.frontend
