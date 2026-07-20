@@ -14,7 +14,9 @@ Probes (all on HELD-OUT eval datasets, subject-disjoint unless noted):
   6. SPACE HEALTH       effective rank of the embedding (collapse check)
 
 Run:  /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.eval_quality \
-        --checkpoint training/tokenizer/outputs/pretrain/best.pt
+        --checkpoint training/tokenizer/outputs/pretrain_native/best.pt
+      # NB: pretrain_native/best.pt is the real trained model (val_ba 0.659). The default
+      # outputs/pretrain/ dir holds only smoke/debug runs — do NOT evaluate that one.
 """
 
 from __future__ import annotations
@@ -35,7 +37,8 @@ from training.tokenizer.pretrain_data import (CHANNELS, DFT_SIZE, stream_channel
 RATE = 60.0
 PS = 1.0
 SEED = 20260718
-OUT = Path("training/tokenizer/outputs/pretrain")
+# Report is written next to the evaluated checkpoint (args.checkpoint.parent), NOT a hardcoded dir —
+# so evaluating pretrain_native/best.pt never drops its report into the smoke outputs/pretrain/ folder.
 
 
 # --------------------------------------------------------------------------- transforms
@@ -199,7 +202,7 @@ def main():
              for k in ("knn_ba", "linear_f1", "knn_accel_only", "knn_handcrafted")}
     report["means"] = means
     print(f"\nMEANS across held-out: {means}")
-    (OUT / "quality_report.json").write_text(json.dumps(report, indent=2))
+    (args.checkpoint.parent / "quality_report.json").write_text(json.dumps(report, indent=2))
     print(f"-> {OUT / 'quality_report.json'}")
 
 

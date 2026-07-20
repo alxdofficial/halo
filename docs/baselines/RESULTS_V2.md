@@ -50,6 +50,29 @@ entry — raw download + grids never materialized; see `deployment_policy.EXCLUD
   drop sharply on the wrist sets vs phone-in-pocket; HALO and (to a degree) unimts are the models
   that hold up across the placement shift.
 
+## Phase-A representation ceiling — the gap is the text bridge, not the encoder
+A supervised **linear probe** on *frozen* HALO features, fit on each eval dataset's own labels
+(subject-disjoint, in-distribution — an upper bound on what a linear head on these features can do),
+vs HALO's zero-shot ConSE number:
+
+| dataset | supervised-probe ceiling | zero-shot ConSE | gap |
+|---|---|---|---|
+| motionsense | 97.5 | 54.0 | +43.5 |
+| realworld | 83.9 | 43.0 | +40.9 |
+| shoaib | 95.7 | 44.8 | +50.9 |
+| inclusivehar | 64.9 | 26.7 | +38.2 |
+| usc_had | 75.3 | 17.0 | +58.3 |
+| ut_complex | 88.4 | 52.1 | +36.3 |
+| **mean** | **84.3** | **39.6** | **+44.7** |
+
+(`tnda_har` skipped — 1-subject sentinel, no subject-disjoint split.) The frozen representation
+**linearly separates the activities at 84% mean**; the entire ZS-XD shortfall (37–58 pts per set) lives
+in the **zero-shot text bridge**, not the encoder. Two consequences: (1) Phase A is *not* the bottleneck —
+more pretraining objectives would chase the wrong problem; (2) a better bridge (Phase B: learned retrieval
+metric + grounding + calibration) has ~45 pts of headroom, and since HALO's motionsense ceiling (97.5)
+exceeds harnet's *zero-shot* 82.2, a good bridge should let HALO pass harnet. Reproduce:
+`python -m training.tokenizer.probe_ceiling --checkpoint training/tokenizer/outputs/pretrain_native/best.pt`.
+
 ## Provenance
 - **HALO** — *ours*. Phase-A representation encoder (`training/tokenizer/outputs/pretrain_native/best.pt`;
   30k-step, d_model-256, val kNN-BA 0.659, git `532d19c`). Phase-A has **no trained label-text head**,

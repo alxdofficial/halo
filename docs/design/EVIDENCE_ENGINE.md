@@ -112,9 +112,13 @@ head, argmax). *This is more than a classifier precisely because a classifier is
 1. top-k neighbors of z in memory M={(z_i,label_i)} by a learned metric:  s_i = <g(z), g(z_i)>
 2. per-candidate evidence (the language bridge does the "unseen label" work):
        e_c = Σ_i softmax(s/τ)_i · relu(<t(label_i), t(c)>)      # neighbor votes ∝ query-sim × label-text-sim
-3. density gate ρ(z)=mean neighbor sim → ê_c = ρ·e_c            # DAEDL: far from memory → low evidence
-4. Dirichlet head: α_c = ê_c + 1;  belief b_c = α_c/Σα;  total S = Σê_c;  uncertainty u = C/Σα
-5. predict argmax b_c  if u < θ  else ABSTAIN
+3. density gate ρ(z)=φ(mean neighbor sim), φ: ℝ→[0,∞) (softplus of a calibrated affine — see FIX-B)
+       → ê_c = ρ·e_c                                            # far from memory → low evidence
+4. Dirichlet head: α_c = ê_c + 1;  S = Σα_c = C + Σê_c
+       expected prob p_c = α_c/S     # NOT belief — this is the mean of the Dirichlet
+       belief      b_c = ê_c/S       # EDL belief mass (evidence, not α); Σ_c b_c + u = 1  (see FIX-A)
+       vacuity     u   = C/S         # ⚠ scales with candidate count C — see FIX-C before thresholding
+5. predict argmax p_c  if (rejection score) < θ  else ABSTAIN   # rejection score = FIX-C, not raw u
 6. analysis = { e_c, b_c, top-k analogues (z_i,label_i,s_i), u }   # the "useful even when wrong" payload
 ```
 Learned = `g, t, τ, density-gate, head` (SMALL); **memory `z_i` are FIXED (non-parametric)** → cheap to
@@ -146,10 +150,34 @@ the voting kernel) vs **open-set novelty** (no candidate supported → vacuity �
 Text geometry is **load-bearing**: transfer is only as good as `t` places candidate labels vs seen labels
 → the M6 lever if weak = fine-tune the `t` adapter and/or add the sensor↔text alignment term (A2 ablation).
 
-**Abstain reads VACUITY, not entropy.** `u = C/Σα` measures *total* evidence, so it fires on "nothing
-matched" (density-gated to ~0). It does NOT fire on *conflict* (two known classes both strongly supported →
-belief looks split but `Σα` is high → confidently ambiguous → answers). Threshold the total (`u`), never the
-belief entropy.
+**Abstain reads total evidence, not entropy.** The rejection signal must measure *total* evidence, so it
+fires on "nothing matched" (density-gated to ~0) but NOT on *conflict* (two known classes both strongly
+supported → high `Σê` → confidently ambiguous → answers). Threshold total evidence, never belief entropy.
+
+**KNOWN FIXES (from the 2026-07-20 design review — apply before implementing the head).** The three below
+are correctness, not taste; the MVP must not ship the raw formulas:
+- **FIX-A — belief vs expected probability.** `α_c/Σα` is the Dirichlet *mean* (expected class probability),
+  **not** the EDL belief mass. Belief is `b_c = ê_c/Σα`; then `Σ_c b_c + u = 1` (Sensoy et al. 2018). Predict
+  the argmax of the expected probability; use belief/vacuity only for the reject decision. Do not call
+  `α_c/Σα` "belief."
+- **FIX-B — density must be non-negative.** Mean neighbor cosine ∈ [−1, 1] can be **negative**; multiplying
+  non-negative evidence `e_c` by a raw negative `ρ` breaks the Dirichlet (evidence must be ≥ 0). Map the raw
+  mean-sim through a guaranteed-non-negative monotonic `φ` (e.g. `softplus(a·sim + b)` with learned `a>0, b`),
+  so `ρ = φ(·) ≥ 0`. This is a **density surrogate**, not DAEDL itself — benchmark it against kNN-distance /
+  class-conditional density / energy before claiming it as the uncertainty source.
+- **FIX-C — vacuity depends on candidate-set size.** `u = C/Σα` scales with the number of candidates `C`
+  (10 candidates → u≈0.5, 100 → u≈0.9 at the same total evidence), so a fixed θ **accepts on a small vocab
+  and rejects on a large one for the identical window** — fatal for ZS-XD, where eval sets have different
+  vocab sizes. The reject score must be candidate-set-invariant: threshold **per-candidate** total evidence
+  `Σê/C`, or condition θ on `C`, or use a mean-evidence / max-belief score. Never threshold raw `u` across
+  datasets. Also: EDL vacuity is an **empirical** rejection score to be calibrated on val (OSCR/OpenAUC/AUGRC
+  + ECE), not a principled epistemic uncertainty (2024 EDL critiques) — prove calibration, don't assume it.
+
+**Deeper open item (not a one-line fix):** the class-holdout episode currently drives *all* evidence to
+uniform when `y` is removed — but that same episode is where language transfer should recognize an unseen
+*in-scope* label. Condition the abstention target on **semantic reachability** (abstain only when the held-out
+label is also unsupported by remaining memory + text geometry), so "held-out but climbing-stairs≈walking-
+upstairs" transfers while "held-out and nothing supports it" abstains — one mechanism, not two regimes.
 
 **Learnable vs frozen vs calibrated (the whole Phase-2 surface):**
 - **Learned (small):** `g` (query/metric projection), `t`-**adapter only** (base text LM FROZEN), `τ`

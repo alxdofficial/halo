@@ -11,7 +11,9 @@ NOT the baseline-table number (which is ConSE macro-F1) — it's a fast, honest 
 signal to decide whether Pipeline A cleared the bar before building Pipeline B.
 
 Run:  /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.eval_transfer \
-        --checkpoint training/tokenizer/outputs/pretrain/best.pt
+        --checkpoint training/tokenizer/outputs/pretrain_native/best.pt
+      # NB: pretrain_native/best.pt is the real trained model (val_ba 0.659). The default
+      # outputs/pretrain/ dir holds only smoke/debug runs — do NOT evaluate that one.
 """
 
 from __future__ import annotations
