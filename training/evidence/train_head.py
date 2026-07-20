@@ -28,6 +28,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from eval.scoring import get_sbert_encoder
 from model.evidence.head import EvidenceHead
 
 _DEFAULT_BANK = Path(__file__).resolve().parent / "outputs" / "memory_bank.pt"
@@ -40,8 +41,52 @@ def balanced_accuracy(pred: np.ndarray, true: np.ndarray) -> float:
     return float(np.mean(accs)) if accs else float("nan")
 
 
+def _global_label_paraphrases():
+    """Merge every per-dataset synonym table + template list into ONE dataset-agnostic pool.
+
+    `augment_label(label, dataset_name="")` falls into a generic fallback that ignores the
+    synonym tables entirely (only ~4 template wraps), so the vocab labels here — which no
+    single dataset owns — would collapse to near-duplicates. Merging the tables recovers real
+    lexical diversity (walking -> strolling/ambulating, cycling -> biking, ...).
+    """
+    from data.scripts.labels.label_augmentation import DATASET_CONFIGS
+    synonyms: dict[str, set] = {}
+    templates: set = set()
+    for cfg in DATASET_CONFIGS.values():
+        for lab, forms in cfg.get("synonyms", {}).items():
+            synonyms.setdefault(lab, set()).update(forms)
+        templates.update(cfg.get("templates", []))
+    return ({k: sorted(v) for k, v in synonyms.items()}, sorted(templates) or ["{}"])
+
+
+def build_label_variants(vocab, K: int, seed: int) -> torch.Tensor:
+    """(L, K, 384) SBERT embeddings of K paraphrase variants per label (variant 0 = canonical).
+
+    Trains the t-adapter for label-phrasing invariance — newly useful in Phase B because
+    `t(label)` is the trainable, load-bearing text path (it was computed-then-discarded in
+    Phase A, where A2 keyed on label IDs). Precomputed ONCE; the loop just samples an index,
+    so there is no live SBERT in training. Eval always uses the canonical text (variant 0).
+    """
+    import random as _random
+    sbert = get_sbert_encoder()
+    synonyms, templates = _global_label_paraphrases()
+    rng = _random.Random(seed)
+    rows = []
+    for k in range(K):
+        if k == 0:
+            rows.append([lab.replace("_", " ") for lab in vocab])   # canonical
+            continue
+        variant = []
+        for lab in vocab:
+            base = rng.choice(synonyms.get(lab, [lab.replace("_", " ")]))
+            variant.append(rng.choice(templates).format(base))
+        rows.append(variant)
+    embs = np.stack([sbert(r).astype(np.float32) for r in rows], axis=1)   # (L, K, 384)
+    return torch.from_numpy(embs)
+
+
 @torch.no_grad()
-def evaluate(head, Z, y, subj, q_idx, label_proj_fn, g_mem, t_lab, device, batch=1024):
+def evaluate(head, y, subj, q_idx, g_mem, t_lab, batch=1024):
     """Balanced accuracy of argmax-evidence for the given query indices (subject-disjoint)."""
     preds, trues = [], []
     for s in range(0, len(q_idx), batch):
@@ -65,6 +110,8 @@ def main() -> None:
     ap.add_argument("--proj", type=int, default=256)
     ap.add_argument("--val-frac", type=float, default=0.15, help="fraction of subjects held out")
     ap.add_argument("--val-every", type=int, default=200)
+    ap.add_argument("--label-aug", type=int, default=8,
+                    help="paraphrase variants per label for the t-kernel (0 = canonical only)")
     args = ap.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(SEED)
@@ -97,6 +144,12 @@ def main() -> None:
     inv = 1.0 / counts.clamp(min=1).sqrt()
     q_weights = inv[y[train_q]]
 
+    variants = None
+    if args.label_aug > 0:
+        variants = build_label_variants(vocab, args.label_aug, SEED).to(device)   # (L, K, 384)
+        print(f"[m4a] label augmentation: {args.label_aug} paraphrase variants/label", flush=True)
+    L_idx = torch.arange(len(vocab), device=device)
+
     head = EvidenceHead(d_model=d, proj=args.proj).to(device)
     opt = torch.optim.Adam(head.parameters(), lr=args.lr)
     crit = nn.CrossEntropyLoss()
@@ -105,7 +158,10 @@ def main() -> None:
     for step in range(1, args.steps + 1):
         head.train()
         g_mem = head.project_query(Z)                   # (N, proj) — recomputed (g learns)
-        t_lab = head.project_text(label_text)           # (L, proj) — recomputed (t learns)
+        # sample a paraphrase variant per label this step (phrasing-invariance for t)
+        lt = label_text if variants is None else variants[
+            L_idx, torch.randint(0, variants.shape[1], (len(vocab),), device=device)]
+        t_lab = head.project_text(lt)                   # (L, proj) — recomputed (t learns)
         sel = torch.multinomial(q_weights, args.batch, replacement=True)
         qi = train_q[sel]
         gq = g_mem[qi]
@@ -121,7 +177,7 @@ def main() -> None:
             with torch.no_grad():
                 g_mem = head.project_query(Z)
                 t_lab = head.project_text(label_text)
-                va = evaluate(head, Z, y, subj, val_q, None, g_mem, t_lab, device)
+                va = evaluate(head, y, subj, val_q, g_mem, t_lab)
             if va > best_val:
                 best_val = va
                 best_sd = {k: v.detach().cpu().clone() for k, v in head.state_dict().items()}
