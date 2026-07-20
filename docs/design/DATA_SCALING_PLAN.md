@@ -183,6 +183,28 @@ paused verbatim; HUNT4 by email; PAAWS; ExtraSensory HTTP-only). Extra verified 
   samples, non-monotonic/out-of-range timestamps, IMU absent from many components, ambiguous units.
   **Skip, or only after heavy QC.**
 
+### 7b. Additional verified detail + what was NOT surveyed
+
+- **SHL ships both conventions**: `Accelerometer` in m/s² (**gravity included**) *and* `Linear
+  acceleration` (**gravity removed**) as separate channels, 4 positions (hand/torso/hips/bag), 2,812 h
+  but only **3 subjects**. We dropped it for subject diversity — but the raw+linear pairing is a **free
+  gravity ablation** if we ever want one.
+- **Ego-Exo4D**: 740 wearers / 1,286 h, Aria 800 Hz + 1000 Hz IMUs. A prior **Ego4D licence does not
+  carry over** — it must be signed separately.
+- **Opportunity**: only 4 users, but 7 IMUs + 12 body-worn 3-D accelerometers, 4-level annotation.
+  An eval set for fine-grained gestures, not pretraining fuel.
+- **Useful index to close gaps cheaply**: [Awesome-IMU-Sensing](https://github.com/rh20624/Awesome-IMU-Sensing),
+  a maintained catalogue (it surfaced PAAWS and **OctoNet** — 41 subjects, 10+ modalities, 2025).
+
+⚠️ **This survey is NOT exhaustive.** The web-search budget was exhausted; the following were assigned
+but **never researched** — do not assume they were rejected: MESA/NSRR actigraphy (raw vs epoch is the
+key open question), All of Us Fitbit granularity, Whitehall II, Osteoarthritis Initiative, China
+Kadoorie, Netherlands Lifelines, Pelotas birth cohorts, Fenland/EPIC-Norfolk, ALSPAC, Canadian Health
+Measures Survey, DOMINO (2022), Wear-ME, DHARMA, Skoda, Daphnet, LARa, SisFall/MobiAct family, and
+HuggingFace-hosted IMU corpora. Prior expectation: most large cohort studies release **epoch/count
+summaries, not waveform**, which would disqualify them regardless of access friction — but that is a
+prior, not a finding. Worth one focused follow-up session; **do not block Step 1 on it.**
+
 ## 8. Uncertainty flags
 - UKB reopening date / incident cause are secondary sources; **the pause itself is confirmed verbatim**.
 - PAAWS licence unconfirmed (403); gravity convention for PAAWS, Nymeria/Aria, DOMINO is **inferred from
