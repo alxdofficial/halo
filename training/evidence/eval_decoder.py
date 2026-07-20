@@ -70,6 +70,10 @@ def main() -> None:
     ap.add_argument("--decoder", type=Path, default=_DIR / "evidence_decoder.pt")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--datasets", nargs="*", default=list(policy.PRIMARY_EVAL_DATASETS))
+    ap.add_argument("--untrained", action="store_true",
+                    help="CONTROL: skip loading the trained weights. Identity-at-init means this is "
+                         "EXACTLY the untrained mechanism at the SAME top-k/tau, isolating the "
+                         "decoder's contribution from the retrieval-config change.")
     args = ap.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
@@ -88,7 +92,9 @@ def main() -> None:
     dc = blob["cfg"]
     dec = EvidenceDecoder(DecoderConfig(d_model=dc["d_model"], n_layers=dc["n_layers"],
                                         n_heads=dc["n_heads"])).to(device)
-    dec.load_state_dict(blob["decoder"]); dec.eval()
+    if not args.untrained:
+        dec.load_state_dict(blob["decoder"])
+    dec.eval()
 
     Z = F.normalize(bank["Z"].float().to(device), dim=-1)
     mem_y = bank["y"].to(device)
@@ -111,8 +117,12 @@ def main() -> None:
                 print(f"  {ds}/{spec.stream_id:22} F1={f1:.1f}", flush=True)
     mean = round(float(np.mean(list(per_cell.values()))), 1)
     print(f"  MEAN = {mean}  (ConSE 42.7 · untrained 47.5 · harnet 47.3)", flush=True)
-    (_DIR / "eval_decoder.json").write_text(json.dumps({"per_cell": per_cell, "mean": mean}, indent=2))
-    print(f"-> {_DIR / 'eval_decoder.json'}", flush=True)
+    # separate artifacts so the identity CONTROL never clobbers the trained result
+    out = _DIR / ("eval_decoder_untrained.json" if args.untrained else "eval_decoder.json")
+    out.write_text(json.dumps({"per_cell": per_cell, "mean": mean,
+                               "untrained_control": bool(args.untrained),
+                               "topk": blob["topk"], "tau_retr": blob["tau_retr"]}, indent=2))
+    print(f"-> {out}", flush=True)
 
 
 if __name__ == "__main__":

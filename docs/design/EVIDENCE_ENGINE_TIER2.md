@@ -14,6 +14,17 @@ M4a is built and diagnosed. On the 7-cell ZS-XD gate (same frozen fixed+MR encod
 | **UNtrained retrieval + text-ensemble** (raw features, `g=t=identity`) | **47.5** |
 | harnet (external UK-Biobank baseline) | 47.3 |
 | M4a **trained** head (learned `g,t` on closed-vocab CE) | 40.9 |
+| untrained @ top-k=48 (identity CONTROL for the decoder) | 46.7 |
+| **T2.2+T2.3 trained evidence DECODER** (episodic class-disjoint loss) | **49.5** |
+
+**RESULT (2026-07-20): the decoder clears the gate.** 49.5 > 47.5 floor, > harnet 47.3. Against its own
+identity control at the same retrieval config (46.7 — top-k costs 0.8 vs full-soft), the decoder is worth
+**+2.8**, so the gain is attributable to the decoder, not the retrieval change. Per-cell vs control:
+motionsense 78.3→86.2, realworld 43.8→51.4, shoaib 49.2→55.7, tnda 52.2→55.6, inclusivehar 28.6→29.1,
+**usc_had 20.0→15.9 and ut_complex 55.1→52.3 REGRESS** (ut_complex was the untrained standout). Internal
+proxy: held-out-config × class-disjoint transfer bAcc 0.204→0.704. Training is cheap: 3000 steps ≈ 52 s
+on the cached bank. **This is the first time learning has HELPED** — M4a's trained head was net-negative
+(40.9), confirming the M4a diagnosis that the loss, not credit assignment, was the bug.
 
 Diagnostic verdict (`diagnose.py`): **credit assignment is healthy** (grad on `g`,`t` both flow; purity
 0.36→0.68) — the failure was the **loss**. Closed-vocab cross-entropy overfits the seen-label geometry
@@ -202,16 +213,17 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
 - **T2.1 — Fine-grained label descriptions.** Hook built: `training/evidence/labeltext.py` appends a
   `data/labels/label_descriptions.json` anchor to the ensemble when present (absent ⇒ no-op, still 47.5).
   *Remaining: author the descriptions. Gate: lifts the fine-grained cells without hurting the mean.*
-- **T2.2 — Loss redesign (frozen encoder).** ✅ BUILT + smoke-passing. `training/evidence/train_decoder.py`:
-  class-disjoint episodes (hold out a label SET; memory excludes it; candidates = it) + reg-to-identity
-  (Δ-norm + KL-to-retrieval-prior) + held-out-config × class-disjoint checkpoint selection on fixed val
-  episodes. Smoke: init transfer bAcc **0.204** (chance 0.043 — the untrained mechanism genuinely
-  transfers), rising to 0.235 in 40 steps with kl_pool≈0. *Gate (full run): beats 47.5 on ZS-XD.*
-- **T2.3 — Evidence decoder.** ✅ BUILT + tested. `model/evidence/decoder.py` implements the §2.2 spec
-  (pre-LN + LayerScale, window-relative Fourier time, role/text-config/label embeddings, same-window
-  bias, zero-init Δ + pooling-as-residual). 9 unit tests incl. **identity-at-init ≡ untrained mechanism**
-  and set-permutation invariance. Gate tooling: `training/evidence/eval_decoder.py` (top-k retrieve →
-  decoder → ZS-XD macro-F1). *Gate (full run): beats T2.2.*
+- **T2.2 — Loss redesign (frozen encoder).** ✅ **GATE PASSED (49.5 > 47.5).**
+  `training/evidence/train_decoder.py`: class-disjoint episodes (hold out a label SET; memory excludes
+  it; candidates = it) + reg-to-identity (Δ-norm + KL-to-retrieval-prior) + held-out-config ×
+  class-disjoint checkpoint selection on fixed val episodes. Internal transfer bAcc 0.204→0.704;
+  3000 steps ≈ 52 s. The transfer-aligned loss is what turned learning from net-negative to net-positive.
+- **T2.3 — Evidence decoder.** ✅ **GATE PASSED (+2.8 over its identity control).**
+  `model/evidence/decoder.py` implements the §2.2 spec (pre-LN + LayerScale, window-relative Fourier
+  time, role/text-config/label embeddings, same-window bias, zero-init Δ + pooling-as-residual). 9 unit
+  tests incl. **identity-at-init ≡ untrained mechanism** and set-permutation invariance — which is what
+  makes `--untrained` in `eval_decoder.py` an exact control. *Open: usc_had (−4.1) and ut_complex (−2.8)
+  regress; diagnose before T2.4 (both are the cells where untrained retrieval was strongest).*
 - **T2.4 — Per-patch evidence + attention accumulation (MIL).** Patch-level memory + patch retrieval;
   decoder attends over patches×evidence; soft accumulation (not majority vote). *Gate: beats T2.3, esp.
   on fine-grained/free-living cells. Open risk: per-patch encoder features may be weaker than pooled —
