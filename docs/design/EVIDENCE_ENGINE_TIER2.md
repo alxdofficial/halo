@@ -42,38 +42,81 @@ dropped ("do no harm").
    (IMU2CLIP, UniMTS, ZeroHAR all train contrastive-to-text, freeze the text encoder, augment label text)
    and by episodic-ZSL theory (metric overfits seen classes unless trained on held-out episodes).
 
-## 2. Target architecture
+## 2. Target architecture (locked decoder spec)
+
+One **set-transformer** over a heterogeneous token set of query + evidence patches (across all sensors),
+each token carrying: **config text** (which sensor/placement — text-keyed), **physical time** (RoPE),
+a **role** (QUERY | EVIDENCE), and for evidence tokens its **known label text**.
 
 ```
-session ─▶ frozen encoder ─▶ per-PATCH vectors {z_p}  (and pooled z)
+session ─▶ frozen encoder ─▶ per-PATCH vectors {z_p} per sensor  (encoder is already a text-keyed channel SET)
                                      │
-                    per-patch sensor→sensor retrieval over frozen memory bank
-                                     │  top-k neighbors per patch (each carries a known label)
+              per-sensor sensor→sensor retrieval over frozen memory ─▶ top-k evidence patches (each: label + config)
                                      ▼
-        EVIDENCE DECODER (transformer):
-          • self-attention MIXES information across the retrieved evidence set + across patches
-          • query-conditioned REFINEMENT of each neighbor's label text:
-                t'(label_i) = t(label_i) + Δ(t(label_i), z_query, evidence_set)      (residual, reg→0)
-          • vote:  e_c = Σ_i a_i · relu(⟨ t'(label_i), t_frozen(c) ⟩)                 (target text FROZEN)
-          • attention-weighted accumulation across patches (MIL: signature is sparse → weight, don't average)
-                                     ▼
-        EVIDENTIAL HEAD: density gate ρ (FIX-B) → Dirichlet α=ρ·e+1 → expected prob (predict)
-                          + belief/vacuity (FIX-A) → candidate-set-invariant reject score (FIX-C) → ABSTAIN
+   token set = { QUERY patches (all sensors) ; EVIDENCE patches (all sensors, each w/ label) }
+                                     │
+                    ▼  SELF-ATTENTION (L layers): everything attends to everything
+                    │     — mixes across sensors, patches, and evidence
+                    │
+   ┌────────────────┴────────────────┐
+   ▼ (a) REFINE evidence label text   ▼ (b) importance weight a_i per evidence token
+        (NOT just reweight — this is        (attention/MIL pooling weight)
+         what disambiguates fine-grained:
+         "walking" → "walking-upstairs")
+        t'_i = t(label_i) + Δ(context_i)     residual, reg→0, EVIDENCE side only
+   └────────────────┬────────────────┘
+                    ▼  VOTE (target text FROZEN):  s_{i,c} = relu( ⟨ t'_i , t_frozen(c) ⟩ )
+                    ▼  attention-pool over evidence: e_c = Σ_i a_i · s_{i,c}
+                    ▼  EVIDENTIAL HEAD: density gate ρ (FIX-B) → Dirichlet α=ρ·e+1 → expected prob (predict)
+                       + belief/vacuity (FIX-A) → candidate-set-invariant reject (FIX-C) → ABSTAIN
 ```
 
-Deltas from M4a: (a) **per-patch** retrieval + attention accumulation instead of one pooled query;
-(b) an **evidence decoder** (attention among evidence) replacing the independent weighted sum;
+**Roles (do not blur):** QUERY patches have no label → they don't vote; they are **context** that
+conditions the evidence refinement (a) and the pooling weights (b). **EVIDENCE** patches are the voters.
+**Target** label text is **frozen SBERT** (unseen/arbitrary — never fit). We pool the *evidence* then run
+the Dirichlet head — never pool argmax predictions (so calibration/abstention see accumulated evidence).
+
+**The precision that matters:** the self-attention output must **refine the evidence label semantics**
+(step a), not only reweight it (step b). If mixing only changes `a_i` and we vote with the raw label,
+fine-grained classes (stairs/ramp/elevator ≈ 0 F1) can't be disambiguated. Refine-then-vote is the fix.
+
+Deltas from M4a: (a) **per-patch/per-sensor** retrieval + attention accumulation instead of one pooled
+query; (b) an **evidence decoder** (attention among evidence) replacing the independent weighted sum;
 (c) **query-conditioned label-text refinement** (residual, evidence-side only); (d) the **Dirichlet/
-abstain** head (M5). The sensor→sensor + text→text skeleton is unchanged.
+abstain** head (M5). The sensor→sensor + (refined) text→text skeleton is unchanged. Full self-attention
+(query+evidence) is safe — under class-holdout the query's label isn't in the evidence, so no leak.
+
+### 2.1 Multi-sensor fusion (free, and a capability axis)
+
+Because the encoder is a text-keyed channel **set**, a multi-sensor session (phone + watch, or xrf_v2's
+6 placements incl. glasses/earbuds) is just a **bigger set** — nothing special. In the decoder it's the
+same token set with tokens from multiple sensors. Retrieval is done **per sensor / per config-group**
+(so a phone+watch query can pull phone-only *and* watch-only evidence from memory), then the union feeds
+one self-attention. **Graceful degradation** is automatic: a missing device just shrinks the set.
+
+This is a differentiator baselines structurally lack (harnet/UniMTS/ConSE are fixed-input): **inference-
+time multi-device fusion, no retraining.** Requires a **data-pipeline change** — currently each placement
+is a separate stream; build **joint sessions** from the paired datasets (SP-SW-HAR phone+watch, xrf_v2
+6-placement). Controlled experiment: does phone+watch fusion beat phone-alone and watch-alone? (See T2.4b.)
 
 ## 3. Loss / training recipe (the core fix)
 
 Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as residuals-from-identity:
 
-- **Episodic class-holdout.** Each step: sample a candidate label subset; with prob `p_holdout`, remove
-  the query's true label from the candidate set AND its exemplars from the retrieval memory → the query
-  must transfer to a *held-out* label via text (or, if truly unsupported, abstain). Trains the deployment
-  condition, not seen-label memorization. (Prototypical/Matching-Net episodic training; L2G; MetaZero.)
+- **Episodic class-holdout.** Two ingredients, both needed:
+  - **Varying candidate set per episode** — each step scores against a *different, restricted* label
+    subset, not the full 59-way vocab. This alone stops the fixed-boundary closed-vocab overfit (the
+    model must score against *whatever* set it's handed = the deployment condition).
+  - **Hold the query's true label out of the retrieval memory**, in two regimes:
+    - *keep it in the candidate set* → no same-label neighbors, correct answer still available → forces
+      **transfer** via semantically-related neighbors + text (retrieve "walking" → text-transfer to
+      "walking-upstairs").
+    - *drop it from the candidate set* → class isn't an option → forces **abstain** (the M5 novelty
+      signal). Which regime fires is the supervision for transfer-vs-abstain (semantic reachability).
+  - **Why this is the fix:** M4a training is subject-disjoint but **label-PRESENT** — a "walking" query
+    still retrieves "walking" from other subjects, so it only ever learns "retrieve same label" =
+    closed-vocab discrimination = the overfit. Class-holdout removes that crutch. (Prototypical/Matching
+    Nets; episodic ZSL [1]; L2G [11]; MetaZero [9].)
 - **Retrieval / contrastive objective, not closed-vocab CE.** Reward "right neighbors retrieved + right
   text-transfer to held-out label"; margin/InfoNCE over the episode's candidate set. Closed-vocab softmax
   CE is banned.
@@ -101,6 +144,10 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
   decoder attends over patches×evidence; soft accumulation (not majority vote). *Gate: beats T2.3, esp.
   on fine-grained/free-living cells. Open risk: per-patch encoder features may be weaker than pooled —
   test first.*
+- **T2.4b — Multi-sensor fusion (capability axis).** Build joint multi-sensor sessions from paired
+  datasets (SP-SW-HAR phone+watch; xrf_v2 6-placement); per-sensor retrieval → union → decoder. *Gate:
+  phone+watch fusion beats phone-alone and watch-alone on shared activities; graceful degradation when a
+  device is dropped. A capability harnet/ConSE structurally lack (fixed-input).*
 - **T2.5 — Evidential head + abstention (M5).** Density gate + Dirichlet + candidate-set-invariant reject
   + class-holdout novelty. *Gate: ECE/OSCR sane; macro-F1 ≥ T2.4; abstains on novelty, answers on conflict.*
 - **T2.6 — End-to-end tokenizer refinement (Lever B).** Unfreeze the tokenizer under the transfer-aligned
