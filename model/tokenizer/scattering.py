@@ -5,8 +5,9 @@ One flag chooses the frontend so ablations compare like-for-like
 
   fixed      — PhysicalFilterbankTokenizer, frozen physical-Hz constant-Q centers.
                THE DEFAULT until an ablation earns a switch.
-  sincnet    — the same filterbank with constrained-learnable centers (SincNet-style:
-               centers move inside (f_min, f_max) via a sigmoid map; nothing else learns).
+  learnable — the same physical filterbank with the bounded adaptive parameters documented
+              in docs/design/LEARNABLE_TOKENIZER_ARM.md.
+  sincnet   — backward-compatible alias for the learnable arm.
   scattering — fixed wavelet-scattering first order (deformation-stability north star).
                NOT YET IMPLEMENTED — deferred ablation.
   free_conv  — unconstrained conv frontend. Deliberately NOT implemented (M0/M1 design:
@@ -18,14 +19,14 @@ from __future__ import annotations
 
 from .filterbank import PhysicalFilterbankTokenizer
 
-FRONTENDS = ("fixed", "sincnet", "scattering", "free_conv")
+FRONTENDS = ("fixed", "learnable", "sincnet", "scattering", "free_conv")
 
 
 def build_frontend(kind: str = "fixed", **filterbank_kwargs) -> PhysicalFilterbankTokenizer:
     """Build the time->frequency frontend. Default: the fixed physical filterbank."""
     if kind == "fixed":
         return PhysicalFilterbankTokenizer(learnable=False, **filterbank_kwargs)
-    if kind == "sincnet":
+    if kind in ("learnable", "sincnet"):
         return PhysicalFilterbankTokenizer(learnable=True, **filterbank_kwargs)
     if kind == "scattering":
         raise NotImplementedError(

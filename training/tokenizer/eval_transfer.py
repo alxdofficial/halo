@@ -29,7 +29,8 @@ from data.scripts.eda.grid_io import discover_grids
 from model.tokenizer.encoder import SetTokenizerEncoder
 from model.tokenizer.preprocess import gravity_align
 from training.tokenizer.pretrain_data import (CHANNELS, DFT_SIZE, stream_channel_descriptions,
-                                              _stream_gravity_state)
+                                              _stream_gravity_state, MultiResolutionCollate,
+                                              MultiScaleCollate, VAL_RESOLUTION_PAIR)
 
 # Held-out eval datasets (never in TRAIN_DATASETS). tnda_har/ut_complex excluded
 # (degenerate subject ids -> can't do subject-disjoint kNN).
@@ -49,28 +50,56 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
     enc = SetTokenizerEncoder(
         d_model=c["d_model"], num_layers=c["num_layers"], num_heads=c["num_heads"],
         dim_feedforward=c["dim_feedforward"], dropout=0.0, dft_size=DFT_SIZE,
+        learnable=c.get("frontend", "fixed") == "learnable",
+        use_duration_embedding=c.get("multiresolution", False),
+        duration_min_seconds=min(c.get("short_patch_choices", (0.4,))),
+        duration_max_seconds=max(c.get("long_patch_choices", (1.5,))),
+        duration_gate_init=c.get("duration_gate_init", 0.1),
+        rope_min_period=0.4 if c.get("multiresolution", False) else 0.5,
+        center_shift_fraction=c.get("center_shift_fraction", 0.45),
+        bandwidth_factor_max=c.get("bandwidth_factor_max", 1.5),
+        compression_gain_max=c.get("compression_gain_max", 2.0),
+        filter_shape_min=c.get("filter_shape_min", 1.5),
+        filter_shape_max=c.get("filter_shape_max", 2.5),
+        adaptive_gate_init=c.get("adaptive_gate_init", 0.1),
     )
     enc.load_state_dict(ckpt["encoder"])
+    enc.eval_resolution_pair = tuple(c.get("val_resolution_pair", VAL_RESOLUTION_PAIR))
+    enc.min_resolution_ratio = float(c.get("min_resolution_ratio", 1.75))
     return enc.to(device).eval()
 
 
 @torch.no_grad()
-def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None) -> torch.Tensor:
+def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
+                   channel_mask=None) -> torch.Tensor:
     """(N, T, 6) raw windows at the stream's NATIVE rate -> (N, d) pooled embeddings."""
-    n = int(round(rate * PATCH_SECONDS))
-    P = max(1, data.shape[1] // n)
+    collate = (
+        MultiResolutionCollate(fixed_patch_seconds=enc.eval_resolution_pair,
+                               min_resolution_ratio=enc.min_resolution_ratio,
+                               compute_targets=False)
+        if enc.use_duration_embedding else
+        MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS, compute_targets=False)
+    )
+    cmask = (torch.ones(6, dtype=torch.bool) if channel_mask is None
+             else torch.as_tensor(channel_mask, dtype=torch.bool))
     embs = []
     for start in range(0, len(data), 256):
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
-        aligned = block   # NO gravity-align — matches training (HALO reads gravity via the DC feature)
-        B = aligned.shape[0]
-        patches = torch.zeros(B, P, DFT_SIZE, 6)
-        for p in range(P):
-            patches[:, p, :n] = aligned[:, p * n:(p + 1) * n]
-        positions = (torch.arange(P).float() * PATCH_SECONDS + PATCH_SECONDS / 2)
-        positions = positions.unsqueeze(0).expand(B, P).contiguous()
-        out = enc(patches.float().to(device), rate, torch.tensor([n] * B).to(device),
-                  [texts] * B, positions.to(device))
+        batch = collate([
+            {"data": window, "rate": rate, "texts": texts, "label_id": 0,
+             "channel_mask": cmask, "gravity_state": gravity_state, "source": "eval"}
+            for window in block
+        ])
+        out = enc(
+            batch["patches"].to(device), batch["rates"].to(device),
+            batch["patch_len"].to(device), batch["texts"], batch["positions"].to(device),
+            patch_durations=(batch["patch_durations"].to(device)
+                             if "patch_durations" in batch else None),
+            resolution_ids=(batch["resolution_ids"].to(device)
+                            if "resolution_ids" in batch else None),
+            channel_mask=batch["channel_mask"].to(device),
+            patch_padding_mask=batch["patch_padding_mask"].to(device),
+        )
         embs.append(out["pooled"].cpu())
     return torch.cat(embs)
 

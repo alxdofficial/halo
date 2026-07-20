@@ -6,8 +6,9 @@ evidence-engine Pipeline A front end — see docs/design/EVIDENCE_ENGINE_BUILD_P
 (M1). Key hyperparameters and the physics that pins each value are collected below
 so they are easy to find and hard to second-guess.
 
-`learnable=True` is the constrained-learnable arm (SincNet-style: band centers move
-inside (f_min, f_max), everything else fixed). Select frontends via
+`learnable=True` is the constrained-learnable arm: mildly adaptive ordered centers,
+bandwidths, compression knees, and a shared filter shape are mixed with the fixed
+physical bank through a learned residual gate. Select frontends via
 `model.tokenizer.scattering.build_frontend` — the fixed filterbank is the default
 until an ablation earns a switch.
 """
@@ -121,6 +122,12 @@ class PhysicalFilterbankTokenizer(nn.Module):
         use_resolution_mask: bool = True,      # low-freq mirror of the Nyquist mask
         resolution_min_cycles: float = FB_RESOLUTION_MIN_CYCLES,  # band "resolved" once ~this many cycles fit in D
         norm: str = "frozen",                  # 'frozen' | 'none' (per-band standardization)
+        center_shift_fraction: float = 0.45,   # fraction of adjacent log-spacing; <0.5 preserves order
+        bandwidth_factor_max: float = 1.5,
+        compression_gain_max: float = 2.0,
+        filter_shape_min: float = 1.5,
+        filter_shape_max: float = 2.5,
+        adaptive_gate_init: float = 0.1,
     ):
         super().__init__()
         self.d_model = d_model
@@ -137,18 +144,34 @@ class PhysicalFilterbankTokenizer(nn.Module):
         self.resolution_min_cycles = float(resolution_min_cycles)
         self.norm = norm
         self.learnable = bool(learnable)
+        self.center_shift_fraction = float(center_shift_fraction)
+        self.bandwidth_factor_max = float(bandwidth_factor_max)
+        self.compression_gain_max = float(compression_gain_max)
+        self.filter_shape_min = float(filter_shape_min)
+        self.filter_shape_max = float(filter_shape_max)
+        self.adaptive_gate_init = float(adaptive_gate_init)
+        if not 0.0 <= self.center_shift_fraction < 0.5:
+            raise ValueError("center_shift_fraction must be in [0, 0.5) to preserve center order")
+        if self.bandwidth_factor_max < 1.0 or self.compression_gain_max < 1.0:
+            raise ValueError("adaptive multiplicative bounds must be >= 1")
+        if not self.filter_shape_min < 2.0 < self.filter_shape_max:
+            raise ValueError("filter-shape bounds must strictly contain the Gaussian exponent 2")
+        if not 0.0 < adaptive_gate_init < 1.0:
+            raise ValueError("adaptive_gate_init must be in (0, 1)")
 
         # Log-spaced physical-Hz band centers f_1..f_K
         k = torch.arange(self.n_bands, dtype=torch.float32)
         centers = self.f_min * (self.f_max / self.f_min) ** (k / (self.n_bands - 1))
+        self.register_buffer("centers", centers)
         if self.learnable:
-            # Arm B: unconstrained logits -> centers in (f_min, f_max) via a sigmoid map,
-            # so every center is differentiable everywhere (no clamp wall to freeze at)
-            # and cannot overflow. Init matches Arm A's log-spaced centers (frac=k/(K-1)).
-            frac = (k / (self.n_bands - 1)).clamp(1e-4, 1 - 1e-4)
-            self._center_logits = nn.Parameter(torch.logit(frac))
-        else:
-            self.register_buffer("centers", centers)
+            # Endpoints stay physically pinned. Interior shifts are less than half an
+            # adjacent log-band spacing, so centers cannot cross even at their limits.
+            self._center_offsets = nn.Parameter(torch.zeros(max(self.n_bands - 2, 0)))
+            self._bandwidth_logits = nn.Parameter(torch.zeros(self.n_bands))
+            self._compression_logits = nn.Parameter(torch.zeros(self.n_bands))
+            self._shape_logit = nn.Parameter(torch.zeros(()))
+            gate_logit = math.log(adaptive_gate_init / (1.0 - adaptive_gate_init))
+            self._adaptive_gate_logit = nn.Parameter(torch.tensor(gate_logit))
 
         # Frozen per-band standardization buffers (identity until calibrated via
         # fit_norm_stats / the accumulate+finalize API over the augmented (r,D) mix).
@@ -187,12 +210,68 @@ class PhysicalFilterbankTokenizer(nn.Module):
 
     # ------------------------------------------------------------------ helpers
     def _band_centers(self) -> torch.Tensor:
-        if self.learnable:
-            # sigmoid(logits) in (0,1) -> centers in (f_min, f_max); nonzero gradient
-            # everywhere (no clamp wall), and exp-overflow is impossible.
-            frac = torch.sigmoid(self._center_logits)
-            return self.f_min * (self.f_max / self.f_min) ** frac
+        if self.learnable and self.n_bands > 2:
+            log_base = self.centers.log()
+            left = log_base[1:-1] - log_base[:-2]
+            right = log_base[2:] - log_base[1:-1]
+            limit = self.center_shift_fraction * torch.minimum(left, right)
+            shifted = (log_base[1:-1] + limit * torch.tanh(self._center_offsets)).exp()
+            return torch.cat((self.centers[:1], shifted, self.centers[-1:]))
         return self.centers
+
+    def _band_sigmas(self, centers: torch.Tensor, adaptive: bool) -> torch.Tensor:
+        sigma = centers / (2.0 * self.Q)
+        if adaptive and self.learnable:
+            log_bound = math.log(self.bandwidth_factor_max)
+            sigma = sigma * torch.exp(log_bound * torch.tanh(self._bandwidth_logits))
+        return sigma
+
+    def _filter_shape(self, adaptive: bool) -> torch.Tensor:
+        if not (adaptive and self.learnable):
+            return self.centers.new_tensor(2.0)
+        midpoint = 0.5 * (self.filter_shape_min + self.filter_shape_max)
+        radius = 0.5 * (self.filter_shape_max - self.filter_shape_min)
+        return midpoint + radius * torch.tanh(self._shape_logit)
+
+    def _compression_gains(self) -> torch.Tensor:
+        if not self.learnable:
+            return torch.ones_like(self.centers)
+        return torch.exp(math.log(self.compression_gain_max) * torch.tanh(self._compression_logits))
+
+    def adaptive_gate(self) -> torch.Tensor:
+        return (torch.sigmoid(self._adaptive_gate_logit) if self.learnable
+                else self.centers.new_zeros(()))
+
+    def adaptation_regularization(self) -> torch.Tensor:
+        """Dimensionless pull toward the fixed physical initialization."""
+        if not self.learnable:
+            return self.centers.new_zeros(())
+        terms = []
+        if self._center_offsets.numel():
+            terms.append(torch.tanh(self._center_offsets).square().mean())
+        terms.extend((
+            torch.tanh(self._bandwidth_logits).square().mean(),
+            torch.tanh(self._compression_logits).square().mean(),
+            torch.tanh(self._shape_logit).square(),
+        ))
+        return torch.stack(terms).mean()
+
+    @torch.no_grad()
+    def adaptation_summary(self) -> dict[str, float]:
+        """Compact telemetry for detecting saturation or a collapsed residual gate."""
+        centers = self._band_centers()
+        center_oct = torch.log2(centers / self.centers).abs()
+        bw = self._band_sigmas(centers, adaptive=True) / (centers / (2.0 * self.Q))
+        gain = self._compression_gains()
+        return {
+            "frontend/gate": float(self.adaptive_gate()),
+            "frontend/center_shift_oct_max": float(center_oct.max()),
+            "frontend/bandwidth_factor_min": float(bw.min()),
+            "frontend/bandwidth_factor_max": float(bw.max()),
+            "frontend/compression_gain_min": float(gain.min()),
+            "frontend/compression_gain_max": float(gain.max()),
+            "frontend/filter_shape": float(self._filter_shape(adaptive=True)),
+        }
 
     def get_output_dim(self) -> int:
         return self.d_model
@@ -224,11 +303,16 @@ class PhysicalFilterbankTokenizer(nn.Module):
             "learnable": self.learnable, "use_amplitude": self.use_amplitude,
             "use_dc": self.use_dc,
             "use_resolution_mask": self.use_resolution_mask, "norm": self.norm,
+            "center_shift_fraction": self.center_shift_fraction,
+            "bandwidth_factor_max": self.bandwidth_factor_max,
+            "compression_gain_max": self.compression_gain_max,
+            "filter_shape_min": self.filter_shape_min, "filter_shape_max": self.filter_shape_max,
+            "adaptive_gate_init": self.adaptive_gate_init,
         }
 
-    def _prep_rate_len(self, sampling_rate_hz, patch_len_samples, B, device, dtype
+    def _prep_rate_len(self, sampling_rate_hz, patch_len_samples, B, device, dtype, P=None
                        ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Normalize (rate, N) inputs to (B,) float rate and (B,) long length."""
+        """Normalize rate to (B,) and length to (B,) or, when P is given, (B,P)."""
         if not torch.is_tensor(sampling_rate_hz):
             sampling_rate_hz = torch.as_tensor(sampling_rate_hz)
         r = sampling_rate_hz.to(device=device, dtype=dtype).reshape(-1)
@@ -237,14 +321,28 @@ class PhysicalFilterbankTokenizer(nn.Module):
         assert r.numel() == B, f"sampling_rate_hz must be scalar or length B={B}, got {r.numel()}"
 
         if patch_len_samples is None:
-            N = torch.full((B,), self.S, dtype=torch.long, device=device)
+            shape = (B, P) if P is not None else (B,)
+            N = torch.full(shape, self.S, dtype=torch.long, device=device)
         else:
             if not torch.is_tensor(patch_len_samples):
                 patch_len_samples = torch.as_tensor(patch_len_samples)
-            N = patch_len_samples.to(device=device).reshape(-1).long()
-            if N.numel() == 1:
-                N = N.expand(B)
-        assert N.numel() == B, f"patch_len_samples must be scalar or length B={B}"
+            N = patch_len_samples.to(device=device).long()
+            if P is None:
+                N = N.reshape(-1)
+                if N.numel() == 1:
+                    N = N.expand(B)
+                assert N.numel() == B, f"patch_len_samples must be scalar or length B={B}"
+            else:
+                if N.numel() == 1:
+                    N = N.reshape(1, 1).expand(B, P)
+                elif N.numel() == B:
+                    N = N.reshape(B, 1).expand(B, P)
+                elif N.numel() == B * P:
+                    N = N.reshape(B, P)
+                else:
+                    raise AssertionError(
+                        f"patch_len_samples must be scalar, (B,), or (B,P)=({B},{P})"
+                    )
         # Guardrail: native samples must fit the DFT window, else the zero-pad
         # silently becomes a truncation that destroys low-frequency resolution.
         n_max = int(N.max())
@@ -256,14 +354,37 @@ class PhysicalFilterbankTokenizer(nn.Module):
         return r, N
 
     def _hann_and_valid(self, N, device, dtype) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Per-sample Hann window (B,S) placed in [0,N) and a (B,S) validity mask."""
-        B = N.numel()
-        idx = torch.arange(self.S, device=device).unsqueeze(0)     # (1, S)
-        valid = (idx < N.unsqueeze(1)).to(dtype)                   # (B, S)
-        Nf = N.to(dtype).clamp(min=2).unsqueeze(1)                 # (B, 1); guard N<2
+        """Per-token Hann window (...,S) placed in [0,N) plus a validity mask."""
+        idx = torch.arange(self.S, device=device).view(*([1] * N.ndim), self.S)
+        valid = (idx < N.unsqueeze(-1)).to(dtype)
+        Nf = N.to(dtype).clamp(min=2).unsqueeze(-1)
         hann = 0.5 * (1.0 - torch.cos(2 * math.pi * idx / (Nf - 1.0)))
         window = hann * valid                                      # zero outside [0, N)
         return window, valid
+
+    def _spectral_power(self, patches, N):
+        """Compute one shared spectrum so fixed/adaptive banks do not duplicate the FFT."""
+        B, P, S, _ = patches.shape
+        window, valid = self._hann_and_valid(N, patches.device, patches.dtype)  # (B,P,S)
+        vm = valid.unsqueeze(-1)
+        Nf = N.to(patches.dtype).clamp(min=1).view(B, P, 1, 1)
+        mean = (patches * vm).sum(dim=2, keepdim=True) / Nf
+        dc = mean.squeeze(2)
+        x_win = (patches - mean) * vm * window.unsqueeze(-1)
+        X = torch.fft.rfft(x_win, n=S, dim=2)
+        power = X.real.square() + X.imag.square()
+        win_energy = window.square().sum(dim=2).clamp(min=1e-8)
+        return power / win_energy.view(B, P, 1, 1), dc
+
+    def _apply_filterbank(self, power, r, centers, sigma, shape):
+        m = torch.arange(self.M + 1, device=power.device, dtype=power.dtype)
+        phi = m.unsqueeze(0) * r.unsqueeze(1) / self.S
+        diff = (phi.unsqueeze(1) - centers.view(1, -1, 1)).abs()
+        # clamp avoids the undefined shape-gradient 0**p * log(0) when a center lands
+        # exactly on an FFT bin; the value remains numerically indistinguishable from 0.
+        ratio = (diff / sigma.view(1, -1, 1)).clamp_min(1e-12)
+        H = torch.exp(-0.5 * ratio.pow(shape))
+        return torch.einsum("bkm,bpmc->bpck", H, power)
 
     def _band_energy(self, patches, r, N):
         """
@@ -273,34 +394,13 @@ class PhysicalFilterbankTokenizer(nn.Module):
         """
         B, P, S, C = patches.shape
         device, dtype = patches.device, patches.dtype
-        window, valid = self._hann_and_valid(N, device, dtype)     # (B,S),(B,S)
-
-        # DC removal over the *real* samples only, then apply the Hann window.
-        vm = valid.view(B, 1, S, 1)
-        Nf = N.to(dtype).clamp(min=1).view(B, 1, 1, 1)
-        mean = (patches * vm).sum(dim=2, keepdim=True) / Nf        # (B,P,1,C)
-        dc = mean.squeeze(2)                                        # (B,P,C) signed DC
-        x_win = (patches - mean) * vm * window.view(B, 1, S, 1)    # (B,P,S,C)
-
-        # Native-rate zero-padded rDFT over the time axis; keep power (drop phase).
-        X = torch.fft.rfft(x_win, n=S, dim=2)                      # (B,P,M+1,C) complex
-        power = X.real ** 2 + X.imag ** 2                          # (B,P,M+1,C)
-
-        # Normalize by window energy so band energy is a power estimate independent of
-        # N=r*D. By Parseval, sum_m|X|^2 = S*sum_n(w*x)^2 which scales with sum_n w^2 ~ N;
-        # without this, E (and the amplitude scalar) would scale with r*D and silently
-        # encode the sampling rate into a feature that is supposed to be rate-invariant.
-        win_energy = (window ** 2).sum(dim=1).clamp(min=1e-8)      # (B,)
-        power = power / win_energy.view(B, 1, 1, 1)
-
-        # Physical-Hz constant-Q Gaussian filterbank. phi depends on r -> per sample.
-        centers = self._band_centers().to(device=device, dtype=dtype)   # (K,)
-        sigma = centers / (2.0 * self.Q)                                 # (K,)
-        m = torch.arange(self.M + 1, device=device, dtype=dtype)         # (M+1,)
-        phi = m.unsqueeze(0) * r.unsqueeze(1) / self.S                   # (B, M+1) Hz
-        diff = phi.unsqueeze(1) - centers.view(1, -1, 1)                 # (B,K,M+1)
-        H = torch.exp(-0.5 * (diff / sigma.view(1, -1, 1)) ** 2)         # (B,K,M+1)
-        E = torch.einsum("bkm,bpmc->bpck", H, power)                     # (B,P,C,K)
+        if N.ndim == 1:
+            N = N.view(B, 1).expand(B, P)
+        power, dc = self._spectral_power(patches, N)
+        centers = self._band_centers().to(device=device, dtype=dtype)
+        sigma = self._band_sigmas(centers, adaptive=True).to(dtype)
+        E = self._apply_filterbank(power, r, centers, sigma,
+                                   self._filter_shape(adaptive=True).to(dtype))
         return E, centers, sigma, dc
 
     def _observability_masks(self, r, N, centers, sigma
@@ -310,9 +410,14 @@ class PhysicalFilterbankTokenizer(nn.Module):
         nyq = self.nyquist_margin * (r * 0.5)                            # (B,)
         o = (centers.view(1, -1) + 2.0 * sigma.view(1, -1)
              <= nyq.view(-1, 1)).to(dtype)                              # (B,K)
-        D = (N.to(dtype) / r).clamp(min=1e-6)                           # (B,) window seconds
-        res = (centers.view(1, -1) * D.view(-1, 1)
-               / self.resolution_min_cycles).clamp(0.0, 1.0)           # (B,K)
+        if N.ndim == 1:
+            D = (N.to(dtype) / r).clamp(min=1e-6)
+            res = (centers.view(1, -1) * D.view(-1, 1)
+                   / self.resolution_min_cycles).clamp(0.0, 1.0)
+        else:
+            D = (N.to(dtype) / r.view(-1, 1)).clamp(min=1e-6)
+            res = (centers.view(1, 1, -1) * D.unsqueeze(-1)
+                   / self.resolution_min_cycles).clamp(0.0, 1.0)
         return o, res
 
     def masks(self, sampling_rate_hz, patch_len_samples=None
@@ -320,8 +425,10 @@ class PhysicalFilterbankTokenizer(nn.Module):
         """Public: (nyquist observability o, resolution flag res), each (B, K)."""
         device, dtype = self.norm_mu.device, self.norm_mu.dtype
         B = torch.as_tensor(sampling_rate_hz).reshape(-1).numel()
-        r, N = self._prep_rate_len(sampling_rate_hz, patch_len_samples, B, device, dtype)
-        centers = self._band_centers().to(device=device, dtype=dtype)
+        p_tensor = torch.as_tensor(patch_len_samples) if patch_len_samples is not None else None
+        P = p_tensor.shape[1] if p_tensor is not None and p_tensor.ndim == 2 else None
+        r, N = self._prep_rate_len(sampling_rate_hz, patch_len_samples, B, device, dtype, P=P)
+        centers = self.centers.to(device=device, dtype=dtype)
         sigma = centers / (2.0 * self.Q)
         return self._observability_masks(r, N, centers, sigma)
 
@@ -351,8 +458,11 @@ class PhysicalFilterbankTokenizer(nn.Module):
         """
         B, P, S, C = patches.shape
         r, N = self._prep_rate_len(sampling_rate_hz, patch_len_samples, B,
-                                   patches.device, patches.dtype)
-        E, centers, sigma, dc = self._band_energy(patches, r, N)         # (B,P,C,K), dc (B,P,C)
+                                   patches.device, patches.dtype, P=P)
+        power, dc = self._spectral_power(patches, N)
+        centers = self.centers.to(device=patches.device, dtype=patches.dtype)
+        sigma = centers / (2.0 * self.Q)
+        E = self._apply_filterbank(power, r, centers, sigma, centers.new_tensor(2.0))
         o, _ = self._observability_masks(r, N, centers, sigma)          # (B,K)
         e = torch.log1p(E).to(torch.float64)                           # (B,P,C,K)
         w = o.view(B, 1, 1, self.n_bands).expand_as(e).to(torch.float64)
@@ -427,16 +537,30 @@ class PhysicalFilterbankTokenizer(nn.Module):
             f"patch time dim {S} != dft_size {self.S}; zero-pad patches to S before the tokenizer"
         )
         device, dtype = patches.device, patches.dtype
-        r, N = self._prep_rate_len(sampling_rate_hz, patch_len_samples, B, device, dtype)
+        r, N = self._prep_rate_len(sampling_rate_hz, patch_len_samples, B, device, dtype, P=P)
+        power, dc = self._spectral_power(patches, N)
+        fixed_centers = self.centers.to(device=device, dtype=dtype)
+        fixed_sigma = fixed_centers / (2.0 * self.Q)
+        E_fixed = self._apply_filterbank(power, r, fixed_centers, fixed_sigma,
+                                         fixed_centers.new_tensor(2.0))
 
-        E, centers, sigma, dc = self._band_energy(patches, r, N)    # (B,P,C,K), dc (B,P,C)
-
-        # Compression + frozen per-band standardization.
-        e = torch.log1p(E)
+        # Arm B remains anchored to the calibrated fixed log-energy feature. Only the
+        # compressed adaptive residual is mixed in; amplitude/DC/metadata stay physical.
+        e_fixed = torch.log1p(E_fixed)
+        if self.learnable:
+            centers = self._band_centers().to(device=device, dtype=dtype)
+            sigma = self._band_sigmas(centers, adaptive=True).to(dtype)
+            E_adapt = self._apply_filterbank(power, r, centers, sigma,
+                                             self._filter_shape(adaptive=True).to(dtype))
+            gains = self._compression_gains().to(device=device, dtype=dtype)
+            e_adapt = torch.log1p(E_adapt * gains.view(1, 1, 1, -1))
+            e = e_fixed + self.adaptive_gate().to(dtype) * (e_adapt - e_fixed)
+        else:
+            e = e_fixed
         e_hat = (e - self.norm_mu) / self.norm_sd if self.norm == "frozen" else e
 
         # Amplitude scalar: total log-energy, preserves absolute magnitude.
-        amp = torch.log1p(E.sum(dim=-1, keepdim=True))              # (B,P,C,1)
+        amp = torch.log1p(E_fixed.sum(dim=-1, keepdim=True))        # (B,P,C,1)
 
         # Signed DC (gravity/tilt) feature: the per-channel patch mean the band path
         # removed. Frozen-standardized (scalar mu/sd) so the m/s^2-vs-g device scale is
@@ -449,13 +573,15 @@ class PhysicalFilterbankTokenizer(nn.Module):
         # since e_hat is standardized). Resolution flag (res) is the low-freq mirror:
         # a band at f_k needs ~resolution_min_cycles cycles within D=N/r to be resolved;
         # below that the value is present-but-blurry, so we *flag* it rather than zero it.
-        o, res = self._observability_masks(r, N, centers, sigma)   # (B,K),(B,K)
+        o, res = self._observability_masks(r, N, fixed_centers, fixed_sigma)
         o_bpck = o.view(B, 1, 1, self.n_bands).expand(B, P, C, self.n_bands)
         e_hat = e_hat * o_bpck
 
         feats = [e_hat, o_bpck]
         if self.use_resolution_mask:
-            feats.append(res.view(B, 1, 1, self.n_bands).expand(B, P, C, self.n_bands))
+            if res.ndim == 2:
+                res = res.view(B, 1, self.n_bands).expand(B, P, self.n_bands)
+            feats.append(res.unsqueeze(2).expand(B, P, C, self.n_bands))
 
         if self.use_amplitude:
             feats.append(amp)

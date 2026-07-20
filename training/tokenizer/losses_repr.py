@@ -133,11 +133,82 @@ def make_mask_plan(
     return MaskPlan(token_mask=mask, kind="mixed")
 
 
+def make_multiresolution_mask_plan(
+    patch_starts: torch.Tensor,
+    patch_ends: torch.Tensor,
+    resolution_ids: torch.Tensor,
+    C: int,
+    gyro_channels: Optional[list[int]],
+    generator: Optional[torch.Generator] = None,
+    time_ratio: float = MASK_RATIO_TIME,
+    channel_event_p: float = MASK_RATIO_CHANNEL,
+    gyro_bias: float = GYRO_DROP_BIAS,
+    causal_p: float = CAUSAL_FRACTION,
+    channel_mask: Optional[torch.Tensor] = None,
+    valid_patches: Optional[torch.Tensor] = None,
+) -> MaskPlan:
+    """Mask one physical interval and every scale token whose support overlaps it.
+
+    This is the non-leaking counterpart of ``make_mask_plan`` for simultaneous temporal
+    resolutions. A masked short patch cannot be reconstructed by reading an overlapping long
+    patch, and channel events apply to every resolution of that channel.
+    """
+    device = patch_starts.device
+    B, T = patch_starts.shape
+    rnd = lambda *s: torch.rand(*s, generator=generator, device=device)  # noqa: E731
+    valid = resolution_ids.ge(0)
+    if valid_patches is not None:
+        valid &= valid_patches
+    observed_end = patch_ends.masked_fill(~valid, 0.0).amax(dim=1)
+    interval_len = observed_end * float(time_ratio)
+    causal = rnd(B) < causal_p
+    random_start = rnd(B) * (observed_end - interval_len).clamp(min=0.0)
+    interval_start = torch.where(causal, observed_end - interval_len, random_start)
+    interval_end = interval_start + interval_len
+    temporal = valid & (patch_starts < interval_end.unsqueeze(1)) \
+        & (patch_ends > interval_start.unsqueeze(1))
+
+    # If every real token overlaps (possible for a very short recording), there is no
+    # honest visible/masked split. Skip temporal A1 for that sample rather than exposing
+    # the same raw interval through one resolution to predict the other.
+    all_masked = valid.any(dim=1) & ((temporal & valid).sum(dim=1) == valid.sum(dim=1))
+    temporal[all_masked] = False
+
+    mask = temporal.unsqueeze(2).expand(B, T, C).clone()
+
+    # Whole-channel events mirror the single-resolution objective, but naturally span
+    # every token from both grids.
+    event = rnd(B) < channel_event_p
+    coin = rnd(B)
+    if gyro_channels:
+        gyro_real = (channel_mask[:, gyro_channels].all(dim=1) if channel_mask is not None
+                     else torch.ones(B, dtype=torch.bool, device=device))
+        drop_gyro = event & (coin < gyro_bias) & gyro_real
+        for c in gyro_channels:
+            mask[drop_gyro, :, c] = True
+        single = event & ~((coin < gyro_bias) & gyro_real)
+    else:
+        single = event
+    scores = rnd(B, C)
+    if channel_mask is not None:
+        scores = scores.masked_fill(~channel_mask, -1.0)
+    chan = scores.argmax(dim=1)
+    rows = torch.nonzero(single).squeeze(1)
+    if rows.numel():
+        mask[rows, :, chan[rows]] = True
+
+    mask &= valid.unsqueeze(2)
+    if channel_mask is not None:
+        mask &= channel_mask.unsqueeze(1)
+    return MaskPlan(token_mask=mask, kind="mixed_multiresolution")
+
+
 def masked_latent_loss(
     predicted: torch.Tensor,
     target: torch.Tensor,
     token_mask: torch.Tensor,
     feature_valid: Optional[torch.Tensor] = None,
+    token_groups: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """A1: regression in LATENT space on masked tokens only.
 
@@ -159,9 +230,20 @@ def masked_latent_loss(
     predicted = F.normalize(predicted, dim=-1)
     per_token = 2.0 - 2.0 * (predicted * target).sum(dim=-1)            # cosine loss
     masked = token_mask & torch.isfinite(per_token)
-    if not bool(masked.any()):
-        return predicted.new_zeros(())
-    return per_token[masked].mean()
+    if token_groups is None:
+        if not bool(masked.any()):
+            return predicted.new_zeros(())
+        return per_token[masked].mean()
+
+    # Reduce within each resolution before reducing across resolutions. Otherwise a
+    # 12-token short grid contributes three times the weight of a 4-token long grid.
+    group_losses = []
+    for group in (0, 1):
+        group_mask = masked & token_groups.eq(group).unsqueeze(2)
+        if bool(group_mask.any()):
+            group_losses.append(per_token[group_mask].mean())
+    return (torch.stack(group_losses).mean() if group_losses
+            else predicted.new_zeros(()))
 
 
 def masked_latent_per_window(predicted, target, token_mask, feature_valid=None) -> torch.Tensor:
@@ -295,9 +377,11 @@ def elite3_loss(
     a3_targets: GroundingTargets,
     weights: EliteLossWeights = EliteLossWeights(),
     a1_feature_valid: Optional[torch.Tensor] = None,
+    a1_token_groups: Optional[torch.Tensor] = None,
 ) -> EliteLossOutput:
     """Weighted sum of the elite 3. Exactly these; additions go through an ablation."""
-    l1 = masked_latent_loss(a1_pred, a1_target, a1_mask, feature_valid=a1_feature_valid)
+    l1 = masked_latent_loss(a1_pred, a1_target, a1_mask, feature_valid=a1_feature_valid,
+                            token_groups=a1_token_groups)
     l2 = supcon_config_conditional(a2_embeddings, a2_labels)
     l3 = grounding_loss(a3_cadence_pred, a3_eigen_pred, a3_targets)
     total = weights.a1_masked * l1 + weights.a2_supcon * l2 + weights.a3_grounding * l3

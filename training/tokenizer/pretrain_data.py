@@ -65,6 +65,10 @@ MIN_WINDOWS_TO_ANCHOR = 8        # labels below this can't form real SupCon posi
 # too coarse for masked prediction, and it's where native-short windows (uci_har 2.56s,
 # unimib falls) collapse to a single un-maskable patch (objective-health audit 2026-07-18).
 PATCH_SECONDS_CHOICES = (0.5, 0.75, 1.0, 1.5)
+SHORT_PATCH_SECONDS_CHOICES = (0.4, 0.5, 0.6, 0.7, 0.8)
+LONG_PATCH_SECONDS_CHOICES = (1.0, 1.1, 1.2, 1.3, 1.4, 1.5)
+MIN_RESOLUTION_RATIO = 1.75
+VAL_RESOLUTION_PAIR = (0.5, 1.5)
 DFT_SIZE = 256                   # must cover max NATIVE rate (100 Hz) x max patch (1.5 s) = 150;
                                  # the rate aug caps at 100 Hz too, so 256 keeps ample headroom
 CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
@@ -467,6 +471,146 @@ class MultiScaleCollate:
             "labels": torch.tensor([item["label_id"] for item in batch]),
             "sources": [item.get("source", "?") for item in batch],   # per-window dataset (telemetry)
             "channel_mask": torch.stack([item["channel_mask"] for item in batch]),
+            "patch_padding_mask": patch_pad,
+            "cadence_target": cadence_t,
+            "cadence_valid": cadence_v,
+            "eigen_target": eigen_t,
+            "eigen_valid": eigen_v,
+        }
+
+
+class MultiResolutionCollate:
+    """Present one randomly drawn short and long patch grid in the same token sequence.
+
+    Unlike ``MultiScaleCollate``, this collate retains partial tail patches and emits a true
+    length for every token. Tokens are sorted by physical center time, with ``resolution_ids``
+    distinguishing short (0) from long (1) supports. Signal augmentation has already happened
+    once in ``PretrainDataset``; both grids therefore describe exactly the same augmented view.
+    """
+
+    def __init__(
+        self,
+        dft_size: int = DFT_SIZE,
+        short_choices: Sequence[float] = SHORT_PATCH_SECONDS_CHOICES,
+        long_choices: Sequence[float] = LONG_PATCH_SECONDS_CHOICES,
+        fixed_patch_seconds: tuple[float, float] | None = None,
+        min_resolution_ratio: float = MIN_RESOLUTION_RATIO,
+        seed: int = SEED,
+        align_gravity: bool = False,
+        compute_targets: bool = True,
+    ):
+        self.dft_size = int(dft_size)
+        self.short_choices = tuple(float(x) for x in short_choices)
+        self.long_choices = tuple(float(x) for x in long_choices)
+        self.fixed = fixed_patch_seconds
+        self.min_resolution_ratio = float(min_resolution_ratio)
+        self.seed = int(seed)
+        self.align_gravity = bool(align_gravity)
+        self.compute_targets = bool(compute_targets)
+        self._valid_pairs = tuple(
+            (short, long)
+            for short in self.short_choices
+            for long in self.long_choices
+            if long >= self.min_resolution_ratio * short
+        )
+        if self.fixed is not None:
+            short, long = map(float, self.fixed)
+            if long < self.min_resolution_ratio * short:
+                raise ValueError("fixed resolution pair does not satisfy min_resolution_ratio")
+            self.fixed = (short, long)
+        elif not self._valid_pairs:
+            raise ValueError("no short/long duration pair satisfies min_resolution_ratio")
+
+    def _patch_seconds(self, batch: list[dict]) -> tuple[float, float]:
+        if self.fixed is not None:
+            return self.fixed
+        key = hash(tuple(item["label_id"] for item in batch)) ^ self.seed
+        rng = np.random.default_rng(key & 0xFFFFFFFF)
+        return self._valid_pairs[int(rng.integers(len(self._valid_pairs)))]
+
+    def __call__(self, batch: list[dict]) -> dict:
+        pair = self._patch_seconds(batch)
+        B = len(batch)
+        rates = torch.zeros(B)
+        channel_mask = torch.stack([item["channel_mask"] for item in batch])
+        cadence_t = torch.zeros(B)
+        cadence_v = torch.zeros(B, dtype=torch.bool)
+        eigen_t = torch.full((B, 4, 3), float("nan"))
+        eigen_v = torch.zeros(B, dtype=torch.bool)
+        all_entries: list[list[tuple]] = []
+
+        for b, item in enumerate(batch):
+            data, rate = item["data"], float(item["rate"])
+            rates[b] = rate
+            if self.compute_targets:
+                acc = data[:, :3].unsqueeze(0)
+                cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
+                cadence_t[b] = cad.values[0, 0].nan_to_num(0.0)
+                cadence_v[b] = cad.valid[0]
+                eigen_t[b] = eig.values[0]
+                eigen_v[b] = eig.valid[0]
+            if self.align_gravity:
+                data, _, _ = gravity_align(data.unsqueeze(0), list(CHANNELS), rate,
+                                           gravity_state=item.get("gravity_state"))
+                data = data[0]
+
+            entries = []
+            for resolution_id, duration in enumerate(pair):
+                nominal_n = max(1, int(round(rate * duration)))
+                if nominal_n > self.dft_size:
+                    raise ValueError(
+                        f"patch length {nominal_n} exceeds dft_size {self.dft_size}"
+                    )
+                for start in range(0, data.shape[0], nominal_n):
+                    end = min(start + nominal_n, data.shape[0])
+                    n = end - start
+                    if n <= 0:
+                        continue
+                    start_s, end_s = start / rate, end / rate
+                    entries.append((
+                        0.5 * (start_s + end_s), resolution_id, start_s, end_s,
+                        n / rate, n, data[start:end],
+                    ))
+            # Physical-time order keeps causal/windowed attention meaningful. Short tokens
+            # precede long tokens only when their centers are exactly equal.
+            entries.sort(key=lambda x: (x[0], x[1]))
+            all_entries.append(entries)
+
+        P = max((len(entries) for entries in all_entries), default=1)
+        patches = torch.zeros(B, P, self.dft_size, len(CHANNELS))
+        patch_len = torch.zeros(B, P, dtype=torch.long)
+        patch_pad = torch.zeros(B, P, dtype=torch.bool)
+        positions = torch.zeros(B, P)
+        patch_durations = torch.zeros(B, P)
+        patch_starts = torch.zeros(B, P)
+        patch_ends = torch.zeros(B, P)
+        resolution_ids = torch.full((B, P), -1, dtype=torch.long)
+
+        for b, entries in enumerate(all_entries):
+            for p, (center, rid, start, end, duration, n, values) in enumerate(entries):
+                patches[b, p, :n] = values
+                patch_len[b, p] = n
+                patch_pad[b, p] = True
+                positions[b, p] = center
+                patch_durations[b, p] = duration
+                patch_starts[b, p] = start
+                patch_ends[b, p] = end
+                resolution_ids[b, p] = rid
+
+        return {
+            "patches": patches,
+            "patch_len": patch_len,
+            "rates": rates,
+            "positions": positions,
+            "patch_durations": patch_durations,
+            "patch_starts": patch_starts,
+            "patch_ends": patch_ends,
+            "resolution_ids": resolution_ids,
+            "patch_seconds": pair,
+            "texts": [item["texts"] for item in batch],
+            "labels": torch.tensor([item["label_id"] for item in batch]),
+            "sources": [item.get("source", "?") for item in batch],
+            "channel_mask": channel_mask,
             "patch_padding_mask": patch_pad,
             "cadence_target": cadence_t,
             "cadence_valid": cadence_v,

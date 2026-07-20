@@ -281,21 +281,47 @@ def test_param_count_matches_spec():
 
 
 def test_learnable_arm_b_trains():
-    """Arm B: learnable centers receive gradient EVERYWHERE, including the top band.
-
-    Regression for the hard-clamp bug where exp(log(f_max)) overshot the clamp wall and
-    froze the top band from step 0 (and could produce 0*inf=NaN on overflow).
-    """
+    """Every adaptive filter parameter receives finite gradients from the signal path."""
     t = PhysicalFilterbankTokenizer(d_model=64, n_bands=16, dft_size=256, learnable=True)
     patches = torch.randn(2, 2, 256, 3)
     out = t(patches, 50.0, 100)
     out.sum().backward()
-    g = t._center_logits.grad
-    assert g is not None and torch.isfinite(g).all()
-    assert g[-1].abs() > 0, "top band frozen (regression of the Arm B clamp bug)"
-    # centers stay strictly inside (f_min, f_max)
+    for name in ("_center_offsets", "_bandwidth_logits", "_compression_logits", "_shape_logit"):
+        g = getattr(t, name).grad
+        assert g is not None and torch.isfinite(g).all(), name
+        assert g.abs().sum() > 0, name
+    # Endpoints are pinned and interior centers remain ordered.
     c = t._band_centers()
-    assert (c > t.f_min - 1e-3).all() and (c < t.f_max + 1e-3).all()
+    assert torch.allclose(c[[0, -1]], torch.tensor([t.f_min, t.f_max]))
+    assert (c[1:] > c[:-1]).all()
+
+
+def test_learnable_arm_b_bounds_survive_extreme_logits():
+    t = PhysicalFilterbankTokenizer(d_model=16, n_bands=16, learnable=True)
+    with torch.no_grad():
+        t._center_offsets.copy_(torch.linspace(-1e6, 1e6, 14))
+        t._bandwidth_logits.copy_(torch.linspace(-1e6, 1e6, 16))
+        t._compression_logits.copy_(torch.linspace(1e6, -1e6, 16))
+        t._shape_logit.fill_(1e6)
+    centers = t._band_centers()
+    bw = t._band_sigmas(centers, adaptive=True) / (centers / (2 * t.Q))
+    gains = t._compression_gains()
+    assert (centers[1:] > centers[:-1]).all()
+    assert bw.min() >= 1 / t.bandwidth_factor_max - 1e-6
+    assert bw.max() <= t.bandwidth_factor_max + 1e-6
+    assert gains.min() >= 1 / t.compression_gain_max - 1e-6
+    assert gains.max() <= t.compression_gain_max + 1e-6
+    assert t.filter_shape_min <= t._filter_shape(True) <= t.filter_shape_max
+
+
+def test_per_token_patch_lengths_are_supported():
+    t = PhysicalFilterbankTokenizer(d_model=32, n_bands=16, dft_size=256)
+    patches = torch.randn(2, 4, 256, 3)
+    lengths = torch.tensor([[20, 50, 75, 10], [40, 60, 100, 25]])
+    out = t(patches, torch.tensor([50.0, 100.0]), lengths)
+    o, res = t.masks(torch.tensor([50.0, 100.0]), lengths)
+    assert out.shape == (2, 4, 3, 32) and torch.isfinite(out).all()
+    assert o.shape == (2, 16) and res.shape == (2, 4, 16)
 
 
 def test_amplitude_rate_invariant(tok):

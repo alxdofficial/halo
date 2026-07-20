@@ -14,6 +14,7 @@ from training.tokenizer.losses_repr import (
     elite3_loss,
     grounding_loss,
     make_mask_plan,
+    make_multiresolution_mask_plan,
     masked_latent_loss,
     supcon_config_conditional,
     transform_cadence_for_timewarp,
@@ -26,6 +27,36 @@ def gen(seed: int = 0) -> torch.Generator:
     g = torch.Generator()
     g.manual_seed(seed)
     return g
+
+
+def test_multiresolution_mask_hides_every_overlapping_support():
+    # Four 0.5-second tokens and two 1-second tokens over the same two seconds.
+    starts = torch.tensor([[0.0, 0.0, 0.5, 1.0, 1.0, 1.5]])
+    ends = torch.tensor([[0.5, 1.0, 1.0, 1.5, 2.0, 2.0]])
+    groups = torch.tensor([[0, 1, 0, 0, 1, 0]])
+    plan = make_multiresolution_mask_plan(
+        starts, ends, groups, C=1, gyro_channels=None, generator=gen(4),
+        channel_event_p=0.0, causal_p=1.0,
+        valid_patches=torch.ones_like(groups, dtype=torch.bool),
+        channel_mask=torch.ones(1, 1, dtype=torch.bool),
+    )
+    masked = plan.token_mask[0, :, 0]
+    masked_start = starts[0, masked].min()
+    masked_end = ends[0, masked].max()
+    overlap = (starts[0] < masked_end) & (ends[0] > masked_start)
+    assert torch.equal(masked, overlap), "an overlapping scale token leaked the masked interval"
+
+
+def test_masked_loss_weights_resolutions_equally():
+    # Three short tokens have loss 0; one opposite long token has cosine loss 4.
+    # Equal-scale reduction is 2.0, whereas a token-weighted reduction would be 1.0.
+    target = torch.tensor([[[[1.0, 0.0]], [[1.0, 0.0]], [[1.0, 0.0]], [[1.0, 0.0]]]])
+    pred = target.clone()
+    pred[:, 3] = torch.tensor([-1.0, 0.0])
+    mask = torch.ones(1, 4, 1, dtype=torch.bool)
+    groups = torch.tensor([[0, 0, 0, 1]])
+    loss = masked_latent_loss(pred, target, mask, token_groups=groups)
+    assert torch.allclose(loss, torch.tensor(2.0), atol=1e-6)
 
 
 # ------------------------------------------------------------------------- mask plan

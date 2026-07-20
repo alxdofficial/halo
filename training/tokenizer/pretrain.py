@@ -5,7 +5,8 @@ Everything the gates taught is baked in:
     filterbank); clean -> A2 SupCon + A3 grounding.        (M2 lesson 1)
   * Config conditioning is channel TEXT; the text-dropout/paraphrase augs supply the
     "unseen description" robustness.                        (M2 lesson 2, upgraded by M3)
-  * Gravity-align is part of the front end, ALWAYS.         (M2 lesson 3)
+  * Gravity alignment is disabled by default; signed DC preserves posture while SO(3)
+    augmentation supplies orientation robustness.           (2026-07-19 decision)
   * The encoder's inner filterbank norm is CALIBRATED before training (copied from
     the target tokenizer's fitted stats).                    (M3 lesson)
   * A3 stays a rail (weight 0.1), targets validity-masked, computed on augmented views.
@@ -39,13 +40,19 @@ from training.tokenizer.losses_repr import (
     GroundingTargets,
     elite3_loss,
     make_mask_plan,
+    make_multiresolution_mask_plan,
     masked_latent_per_window,
 )
 from training.tokenizer.pretrain_data import (
     CHANNELS,
     DFT_SIZE,
+    LONG_PATCH_SECONDS_CHOICES,
+    MIN_RESOLUTION_RATIO,
+    SHORT_PATCH_SECONDS_CHOICES,
+    VAL_RESOLUTION_PAIR,
     BalancedBatchSampler,
     CorpusIndex,
+    MultiResolutionCollate,
     MultiScaleCollate,
     PretrainDataset,
     _seed_worker,
@@ -68,6 +75,22 @@ class PretrainConfig:
     num_heads: int = 8
     dim_feedforward: int = 1024
     dropout: float = 0.1
+    arm: str = "fixed"                    # headline preset: fixed | learnable
+    frontend: str = "fixed"               # independently switchable for attribution
+    multiresolution: bool = False
+    frontend_lr_scale: float = 0.1         # physical adaptation moves slower than the encoder
+    frontend_reg_weight: float = 1e-3
+    center_shift_fraction: float = 0.45
+    bandwidth_factor_max: float = 1.5
+    compression_gain_max: float = 2.0
+    filter_shape_min: float = 1.5
+    filter_shape_max: float = 2.5
+    adaptive_gate_init: float = 0.1
+    duration_gate_init: float = 0.1
+    short_patch_choices: tuple[float, ...] = SHORT_PATCH_SECONDS_CHOICES
+    long_patch_choices: tuple[float, ...] = LONG_PATCH_SECONDS_CHOICES
+    min_resolution_ratio: float = MIN_RESOLUTION_RATIO
+    val_resolution_pair: tuple[float, float] = VAL_RESOLUTION_PAIR
     classes_per_batch: int = 64           # 64x8 = batch 512 (profiled 2026-07-19: throughput knee on
     samples_per_class: int = 8            # the 4090; 64 of 93 labels/step keeps SupCon negatives rich,
                                           # positive-group size unchanged at 8; peak 9.5 GB, safe)
@@ -94,6 +117,18 @@ class PipelineAModel(nn.Module):
         self.encoder = SetTokenizerEncoder(
             d_model=cfg.d_model, num_layers=cfg.num_layers, num_heads=cfg.num_heads,
             dim_feedforward=cfg.dim_feedforward, dropout=cfg.dropout, dft_size=DFT_SIZE,
+            learnable=cfg.frontend == "learnable",
+            use_duration_embedding=cfg.multiresolution,
+            duration_min_seconds=min(cfg.short_patch_choices),
+            duration_max_seconds=max(cfg.long_patch_choices),
+            duration_gate_init=cfg.duration_gate_init,
+            rope_min_period=0.4 if cfg.multiresolution else 0.5,
+            center_shift_fraction=cfg.center_shift_fraction,
+            bandwidth_factor_max=cfg.bandwidth_factor_max,
+            compression_gain_max=cfg.compression_gain_max,
+            filter_shape_min=cfg.filter_shape_min,
+            filter_shape_max=cfg.filter_shape_max,
+            adaptive_gate_init=cfg.adaptive_gate_init,
         )
         self.a1_head = nn.Linear(cfg.d_model, a1_target_dim)
         self.a2_proj = nn.Sequential(
@@ -222,6 +257,10 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
                 batch["patches"].to(device), batch["rates"].to(device),
                 batch["patch_len"].to(device), batch["texts"],
                 batch["positions"].to(device),
+                patch_durations=(batch["patch_durations"].to(device)
+                                 if "patch_durations" in batch else None),
+                resolution_ids=(batch["resolution_ids"].to(device)
+                                if "resolution_ids" in batch else None),
                 channel_mask=batch["channel_mask"].to(device),
                 patch_padding_mask=batch["patch_padding_mask"].to(device),
             )
@@ -273,9 +312,24 @@ def main() -> None:
     parser.add_argument("--resume", type=Path, default=None,
                         help="warm-resume from a checkpoint (restore encoder/heads/opt/sched/scaler/"
                              "RNG + step and continue the remaining steps)")
+    parser.add_argument("--arm", choices=("fixed", "learnable"), default="fixed",
+                        help="headline experiment preset (learnable enables constrained frontend + multiresolution)")
+    parser.add_argument("--frontend", choices=("fixed", "learnable"), default=None,
+                        help="override the arm's frontend for an attribution diagnostic")
+    parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
+                        help="override simultaneous short+long tokenization for an attribution diagnostic")
     args = parser.parse_args()
 
-    cfg = PretrainConfig(device=args.device)
+    cfg = PretrainConfig(
+        device=args.device,
+        arm=args.arm,
+        frontend="learnable" if args.arm == "learnable" else "fixed",
+        multiresolution=args.arm == "learnable",
+    )
+    if args.frontend is not None:
+        cfg.frontend = args.frontend
+    if args.multiresolution is not None:
+        cfg.multiresolution = args.multiresolution
     if args.steps:
         cfg.steps = args.steps
     if args.smoke:
@@ -284,7 +338,8 @@ def main() -> None:
             classes_per_batch=8, samples_per_class=4, steps=args.steps or 10,
             warmup_steps=2, calib_batches=3, val_every=max(args.steps or 10, 5),
             val_per_label=10, num_workers=0, max_per_stream=200,
-            device=args.device,
+            device=args.device, arm=cfg.arm, frontend=cfg.frontend,
+            multiresolution=cfg.multiresolution,
         )
     device = torch.device(cfg.device)
     if device.type == "cuda":
@@ -306,18 +361,25 @@ def main() -> None:
         else:
             raise SystemExit(f"output dir {args.out} already contains {[p.name for p in stale]}; "
                              f"choose a fresh --out or pass --force to overwrite (or --resume).")
+    (args.out / "run_config.json").write_text(json.dumps(asdict(cfg), indent=2))
+    print(f"arm={cfg.arm} frontend={cfg.frontend} multiresolution={cfg.multiresolution}", flush=True)
 
     # ------------------------------------------------------------------ data
     index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.seed)
     print(f"corpus: {index.summary()}", flush=True)
     train_ds = PretrainDataset(index, index.train, augment=True)
     val_ds = PretrainDataset(index, index.val, augment=False)
+    train_collate = (MultiResolutionCollate(
+        short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
+        min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
+    ) if cfg.multiresolution
+                     else MultiScaleCollate(seed=cfg.seed))
     train_loader = DataLoader(
         train_ds,
         batch_sampler=BalancedBatchSampler(index.train, cfg.classes_per_batch,
                                            cfg.samples_per_class, cfg.steps, cfg.seed,
                                            stream_datasets=index.stream_datasets),
-        collate_fn=MultiScaleCollate(seed=cfg.seed),
+        collate_fn=train_collate,
         num_workers=cfg.num_workers, worker_init_fn=_seed_worker,
         persistent_workers=cfg.num_workers > 0, pin_memory=device.type == "cuda",
     )
@@ -325,7 +387,13 @@ def main() -> None:
     # A3 DSP (unused by embedding), and parallel persistent workers cut the collate time — together
     # these take a val from ~9.5 min to seconds (the val-speed fix; val ran 5x the train cost).
     val_workers = min(6, cfg.num_workers)
-    val_collate = MultiScaleCollate(fixed_patch_seconds=1.0, compute_targets=False)
+    val_collate = (
+        MultiResolutionCollate(fixed_patch_seconds=cfg.val_resolution_pair,
+                               min_resolution_ratio=cfg.min_resolution_ratio,
+                               compute_targets=False)
+        if cfg.multiresolution else
+        MultiScaleCollate(fixed_patch_seconds=1.0, compute_targets=False)
+    )
     val_loader = DataLoader(val_ds, batch_size=256, shuffle=False, collate_fn=val_collate,
                             num_workers=val_workers, persistent_workers=val_workers > 0,
                             pin_memory=device.type == "cuda")
@@ -374,8 +442,21 @@ def main() -> None:
     # Label-text prototypes for the live ConSE-style zero-shot probe (built once, frozen LM).
     label_protos = label_text_prototypes(model, index.label_ids)   # (L, 384) cpu, normalized
 
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr,
-                            weight_decay=cfg.weight_decay)
+    adaptive_names = {
+        "encoder.filterbank._center_offsets", "encoder.filterbank._bandwidth_logits",
+        "encoder.filterbank._compression_logits", "encoder.filterbank._shape_logit",
+        "encoder.filterbank._adaptive_gate_logit",
+    }
+    adaptive_params, base_params = [], []
+    for name, parameter in model.named_parameters():
+        (adaptive_params if name in adaptive_names else base_params).append(parameter)
+    param_groups = [{"params": base_params, "lr": cfg.lr, "weight_decay": cfg.weight_decay}]
+    if adaptive_params:
+        # Explicit physical regularization replaces AdamW's logit-space decay. In particular,
+        # weight decay would pull the residual gate logit toward zero, i.e. gate=0.5, not fixed=0.
+        param_groups.append({"params": adaptive_params, "lr": cfg.lr * cfg.frontend_lr_scale,
+                             "weight_decay": 0.0})
+    opt = torch.optim.AdamW(param_groups)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min((s + 1) / max(cfg.warmup_steps, 1), 1.0)
         * 0.5 * (1 + np.cos(np.pi * min(s / cfg.steps, 1.0))),
@@ -414,6 +495,13 @@ def main() -> None:
     start_step = 0
     if args.resume:
         rk = torch.load(args.resume, map_location=device, weights_only=False)
+        saved_cfg = rk.get("config", {})
+        for key in ("frontend", "multiresolution"):
+            if saved_cfg.get(key, getattr(cfg, key)) != getattr(cfg, key):
+                raise ValueError(
+                    f"resume configuration mismatch for {key}: checkpoint="
+                    f"{saved_cfg.get(key)!r}, requested={getattr(cfg, key)!r}"
+                )
         model.encoder.load_state_dict(rk["encoder"])
         for k, head in (("a1", model.a1_head), ("a2", model.a2_proj),
                         ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen)):
@@ -436,6 +524,10 @@ def main() -> None:
         rates = batch["rates"].to(device)
         patch_len = batch["patch_len"].to(device)
         positions = batch["positions"].to(device)
+        patch_durations = (batch["patch_durations"].to(device)
+                           if "patch_durations" in batch else None)
+        resolution_ids = (batch["resolution_ids"].to(device)
+                          if "resolution_ids" in batch else None)
         channel_mask = batch["channel_mask"].to(device)
         patch_pad = batch["patch_padding_mask"].to(device)
         labels = batch["labels"].to(device)
@@ -443,8 +535,15 @@ def main() -> None:
 
         # validity-aware: temporal block lands on real patches, drops hit real channels,
         # so A1 supervision is non-empty for every window with >=2 real patches
-        plan = make_mask_plan(B, P, C, GYRO_IDX, device=device,
-                              valid_patches=patch_pad, channel_mask=channel_mask)
+        if cfg.multiresolution:
+            plan = make_multiresolution_mask_plan(
+                batch["patch_starts"].to(device), batch["patch_ends"].to(device),
+                resolution_ids, C, GYRO_IDX, channel_mask=channel_mask,
+                valid_patches=patch_pad,
+            )
+        else:
+            plan = make_mask_plan(B, P, C, GYRO_IDX, device=device,
+                                  valid_patches=patch_pad, channel_mask=channel_mask)
         targets = GroundingTargets(
             cadence_log2hz=batch["cadence_target"].to(device),
             cadence_valid=batch["cadence_valid"].to(device),
@@ -473,10 +572,15 @@ def main() -> None:
                 sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len)
             text_embs, text_masks = model.encoder.encode_texts(batch["texts"], device)
             masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
+                                          patch_durations=patch_durations,
+                                          resolution_ids=resolution_ids,
+                                          cross_resolution_attention=not cfg.multiresolution,
                                           token_mask=plan.token_mask,
                                           channel_mask=channel_mask,
                                           patch_padding_mask=patch_pad)
             clean = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
+                                         patch_durations=patch_durations,
+                                         resolution_ids=resolution_ids,
                                          channel_mask=channel_mask,
                                          patch_padding_mask=patch_pad)
             z = model.a2_proj(clean["pooled"])
@@ -489,7 +593,13 @@ def main() -> None:
                 a3_eigen_pred=model.a3_eigen(clean["pooled"]).view(B, 4, 3),
                 a3_targets=targets, weights=weights,
                 a1_feature_valid=a1_feature_valid,
+                a1_token_groups=resolution_ids,
             )
+            frontend_reg = model.encoder.filterbank.adaptation_regularization()
+            out.total = out.total + cfg.frontend_reg_weight * frontend_reg
+            out.parts["frontend_reg"] = float(frontend_reg.detach())
+            out.parts["frontend_reg_weighted"] = float(
+                (cfg.frontend_reg_weight * frontend_reg).detach())
 
         do_log = step % 50 == 0 or step == 1
         opt.zero_grad(set_to_none=True)
@@ -505,11 +615,19 @@ def main() -> None:
             with torch.no_grad():                               # per-source A1 (diagnostic, off-graph)
                 a1_pw = masked_latent_per_window(a1_pred.float(), a1_target, a1_loss_mask,
                                                  feature_valid=a1_feature_valid)
-            rec = {"step": step, "lr": sched.get_last_lr()[0],
+            lrs = sched.get_last_lr()
+            rec = {"step": step, "lr": lrs[0],
                    "elapsed_s": round(time.time() - t0, 1),
                    "patch_seconds": batch["patch_seconds"],
                    "total": round(float(out.total.detach()), 4), **out.parts, **gnorms,
                    "a1_by_source": per_source_mean(a1_pw, batch["sources"])}
+            if len(lrs) > 1:
+                rec["lr_frontend"] = lrs[1]
+            if model.encoder.filterbank.learnable:
+                rec.update(model.encoder.filterbank.adaptation_summary())
+            if model.encoder.use_duration_embedding:
+                rec["duration/gate"] = float(torch.sigmoid(
+                    model.encoder.duration_gate_logit.detach()))
             print(json.dumps(rec), flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")

@@ -8,12 +8,18 @@ Covers: time-domain **preprocessing** (gravity-align), **cross-channel relationa
 filterbank + constrained-learnable scattering/SincNet), and the **primitives**.
 
 - **Design / plan:** [`docs/design/EVIDENCE_ENGINE.md`](../../docs/design/EVIDENCE_ENGINE.md) ·
-  [`docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md`](../../docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md).
+  [`docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md`](../../docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md) ·
+  [`docs/design/LEARNABLE_TOKENIZER_ARM.md`](../../docs/design/LEARNABLE_TOKENIZER_ARM.md).
 - **Phase 1 training:** masked-channel SSL + config-conditional salient-contrastive +
   analysis-consistency (M0–M3). Validated by the robustness probe *before* Pipeline B exists.
 - **Model components:** `model/tokenizer/`.
 - **Seam to Pipeline B:** emits `{query representation + structured primitives + per-channel text id}`.
 
-Status: M0 probe (`probe_robustness.py` + `outputs/m0_probe/`) and the M1 front end
-(`model/tokenizer/`: filterbank port, gravity-align, primitives, frontend flag) are built
-and gate-tested (`tests/test_tokenizer_m1.py`, `tests/test_filterbank.py`). Next: M2 losses.
+The fixed and constrained-learnable Phase-A arms are both wired end to end. The learnable preset
+enables simultaneous short/long token grids; `--frontend` and `--[no-]multiresolution` expose the
+two attribution diagnostics. Examples:
+
+```bash
+python -m training.tokenizer.pretrain --arm fixed --out training/tokenizer/outputs/fixed_run
+python -m training.tokenizer.pretrain --arm learnable --out training/tokenizer/outputs/learnable_run
+```

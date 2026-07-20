@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn as nn
 
 from model.tokenizer.encoder import SetTokenizerEncoder
 from model.tokenizer.transformer import build_temporal_mask
@@ -14,6 +15,16 @@ from model.tokenizer.transformer import build_temporal_mask
 RATE = 60.0
 N = 60          # 1 s patches at 60 Hz
 S = 256
+
+
+class _PassFusion(nn.Module):
+    def forward(self, sensor_tokens, text_tokens, text_mask):
+        return sensor_tokens
+
+
+class _PassTransformer(nn.Module):
+    def forward(self, x, **kwargs):
+        return x
 
 
 @pytest.fixture(scope="module")
@@ -35,6 +46,63 @@ def make_batch(b=2, p=6, c=6, seed=1):
     ][0][:c]
     positions = (torch.arange(p).float() * 1.0 + 0.5).unsqueeze(0).expand(b, p)
     return patches, [list(texts)] * b, positions
+
+
+def test_duration_metadata_is_bounded_continuous_and_changes_tokens():
+    torch.manual_seed(3)
+    model = SetTokenizerEncoder(
+        d_model=16, num_layers=1, num_heads=4, dim_feedforward=32, dropout=0.0,
+        dft_size=S, use_duration_embedding=True,
+    )
+    model.fusion = _PassFusion()
+    model.transformer = _PassTransformer()
+    sensor = torch.zeros(1, 2, 1, 16)
+    text = torch.zeros(1, 1, 1, 384)
+    text_mask = torch.ones(1, 1, 1, dtype=torch.bool)
+    positions = torch.tensor([[1.0, 1.0]])
+    durations = torch.tensor([[0.4, 1.5]])
+    out = model.encode(sensor, text, text_mask, positions, patch_durations=durations)
+    assert torch.isfinite(out["tokens"]).all()
+    assert not torch.allclose(out["tokens"][:, 0], out["tokens"][:, 1])
+
+
+def test_multiresolution_pooling_weights_scales_not_tokens():
+    model = SetTokenizerEncoder(
+        d_model=4, num_layers=1, num_heads=1, dim_feedforward=8, dropout=0.0,
+        dft_size=S,
+    )
+    model.fusion = _PassFusion()
+    model.transformer = _PassTransformer()
+    sensor = torch.tensor([0.0, 0.0, 0.0, 10.0]).view(1, 4, 1, 1).expand(1, 4, 1, 4)
+    text = torch.zeros(1, 1, 1, 384)
+    text_mask = torch.ones(1, 1, 1, dtype=torch.bool)
+    out = model.encode(
+        sensor, text, text_mask, torch.arange(4).view(1, 4).float(),
+        resolution_ids=torch.tensor([[0, 0, 0, 1]]),
+        patch_padding_mask=torch.ones(1, 4, dtype=torch.bool),
+    )
+    assert torch.allclose(out["pooled"], torch.full((1, 4), 5.0))
+
+
+def test_masked_path_can_isolate_resolution_attention():
+    torch.manual_seed(7)
+    model = SetTokenizerEncoder(
+        d_model=16, num_layers=1, num_heads=4, dim_feedforward=32, dropout=0.0,
+        dft_size=S,
+    ).eval()
+    model.fusion = _PassFusion()
+    sensor = torch.randn(1, 4, 1, 16)
+    changed = sensor.clone()
+    changed[:, 2:] += 100.0                       # perturb only resolution 1
+    text = torch.zeros(1, 1, 1, 384)
+    text_mask = torch.ones(1, 1, 1, dtype=torch.bool)
+    positions = torch.tensor([[0.25, 0.75, 0.5, 1.5]])
+    groups = torch.tensor([[0, 0, 1, 1]])
+    a = model.encode(sensor, text, text_mask, positions, resolution_ids=groups,
+                     cross_resolution_attention=False)
+    b = model.encode(changed, text, text_mask, positions, resolution_ids=groups,
+                     cross_resolution_attention=False)
+    assert torch.allclose(a["tokens"][:, :2], b["tokens"][:, :2], atol=1e-5)
 
 
 # ------------------------------------------------------------- variable channel counts

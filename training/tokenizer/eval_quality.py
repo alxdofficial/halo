@@ -30,7 +30,8 @@ import torch
 
 from data.scripts.eda.grid_io import discover_grids
 from model.tokenizer.preprocess import gravity_align
-from training.tokenizer.eval_transfer import EVAL_STREAMS, build_encoder, knn_balanced_acc
+from training.tokenizer.eval_transfer import (EVAL_STREAMS, build_encoder, encode_dataset,
+                                              knn_balanced_acc)
 from training.tokenizer.pretrain_data import (CHANNELS, DFT_SIZE, stream_channel_descriptions,
                                               _stream_gravity_state)
 
@@ -69,25 +70,12 @@ def transform_windows(data, kind, rng, base_rate):
 @torch.no_grad()
 def encode(enc, data, texts, device, rate=RATE, accel_only=False, gravity_state=None):
     x = data if torch.is_tensor(data) else torch.tensor(np.asarray(data), dtype=torch.float32)
-    n = max(1, int(round(rate * PS)))
-    P = max(1, x.shape[1] // n)
     cmask = torch.tensor([True]*3 + [not accel_only]*3)
-    embs = []
-    for s in range(0, len(x), 256):
-        block = x[s:s+256].clone().float()
-        if accel_only:
-            block[:, :, 3:] = 0.0
-        aligned = block   # NO gravity-align — matches training (HALO reads gravity via the DC feature)
-        B = aligned.shape[0]
-        patches = torch.zeros(B, P, DFT_SIZE, 6)
-        for p in range(P):
-            patches[:, p, :n] = aligned[:, p*n:(p+1)*n]
-        pos = (torch.arange(P).float()*PS + PS/2).unsqueeze(0).expand(B, P).contiguous()
-        out = enc(patches.to(device), rate, torch.tensor([n]*B).to(device),
-                  [texts]*B, pos.to(device),
-                  channel_mask=cmask.unsqueeze(0).expand(B, 6).to(device))
-        embs.append(out["pooled"].cpu())
-    return torch.cat(embs)
+    x = x.clone().float()
+    if accel_only:
+        x[:, :, 3:] = 0.0
+    return encode_dataset(enc, x, texts, device, rate, gravity_state,
+                          channel_mask=cmask)
 
 
 def subj_split(subjects, rng):
@@ -202,8 +190,9 @@ def main():
              for k in ("knn_ba", "linear_f1", "knn_accel_only", "knn_handcrafted")}
     report["means"] = means
     print(f"\nMEANS across held-out: {means}")
-    (args.checkpoint.parent / "quality_report.json").write_text(json.dumps(report, indent=2))
-    print(f"-> {OUT / 'quality_report.json'}")
+    out = args.checkpoint.parent / "quality_report.json"
+    out.write_text(json.dumps(report, indent=2))
+    print(f"-> {out}")
 
 
 if __name__ == "__main__":

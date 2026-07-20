@@ -18,6 +18,7 @@ from training.tokenizer.pretrain_data import (  # noqa: E402
     PATCH_SECONDS_CHOICES,
     BalancedBatchSampler,
     CorpusIndex,
+    MultiResolutionCollate,
     MultiScaleCollate,
     PretrainDataset,
     WindowKey,
@@ -112,6 +113,32 @@ def test_collate_handles_per_sample_rates(index):
         assert len(set(out["patch_len"].tolist())) > 1, \
             "per-sample rates must yield per-sample patch lengths"
     assert (out["patch_len"].float() - out["rates"] * 1.0).abs().max() < 1.0
+
+
+def test_multiresolution_collate_covers_signal_and_retains_partial_tails():
+    item = {
+        "data": torch.randn(300, 6), "rate": 50.0, "texts": ["x"] * 6,
+        "label_id": 0, "channel_mask": torch.ones(6, dtype=torch.bool),
+        "gravity_state": "present", "source": "synthetic",
+    }
+    out = MultiResolutionCollate(
+        fixed_patch_seconds=(0.4, 1.4), compute_targets=False,
+    )([item])
+    real = out["patch_padding_mask"][0]
+    assert out["patch_len"].shape == out["positions"].shape
+    assert set(out["resolution_ids"][0, real].tolist()) == {0, 1}
+    assert torch.all(out["positions"][0, real][1:] >= out["positions"][0, real][:-1])
+    for rid in (0, 1):
+        m = real & out["resolution_ids"][0].eq(rid)
+        assert out["patch_starts"][0, m].min() == 0
+        assert abs(float(out["patch_ends"][0, m].max()) - 6.0) < 1e-6
+    # 1.4 seconds at 50 Hz leaves an honest 0.4-second final patch.
+    long = real & out["resolution_ids"][0].eq(1)
+    assert out["patch_len"][0, long].tolist()[-1] == 20
+    assert torch.allclose(
+        out["patch_durations"][0, real],
+        out["patch_len"][0, real].float() / out["rates"][0],
+    )
 
 
 def test_stream_text_parses_placement():
