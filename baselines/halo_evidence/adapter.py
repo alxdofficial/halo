@@ -72,6 +72,8 @@ class HALOEvidenceAdapter(BaselineAdapter):
                 "python -m training.evidence.build_memory --device cuda")
 
         bank = torch.load(str(_BANK), map_location="cpu", weights_only=True)
+        from training.evidence.bank_guard import assert_bank_current   # lazy
+        assert_bank_current(bank, context="halo_evidence adapter")
         fp = hashlib.sha256(_BACKBONE_CKPT.read_bytes()).hexdigest()
         bank_fp = bank["backbone"].get("fingerprint")
         if bank_fp and fp != bank_fp:

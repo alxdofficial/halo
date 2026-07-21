@@ -38,6 +38,7 @@ import torch.nn.functional as F
 
 from eval.scoring import get_sbert_encoder
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
+from training.evidence.bank_guard import assert_bank_current
 from training.evidence.labeltext import build_label_variants, ensemble_text
 
 _DIR = Path(__file__).resolve().parent / "outputs"
@@ -133,6 +134,7 @@ def main() -> None:
     rng = np.random.default_rng(SEED)
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
+    assert_bank_current(bank, context="train_decoder")
     Z = F.normalize(bank["Z"].float(), dim=-1).to(device)
     y = bank["y"].to(device)
     subj = bank["subj"].to(device)

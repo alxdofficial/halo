@@ -148,10 +148,11 @@ def main() -> None:
           flush=True)
     print(f"[memory] size: Z={Z.numel() * 2 / 1e6:.0f} MB (fp16)", flush=True)
 
+    from training.evidence.bank_guard import vocab_fingerprint
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "Z": Z, "y": y, "subj": subj, "cfg": cfg,
-        "vocab": vocab, "label_text": label_text,
+        "vocab": vocab, "vocab_fp": vocab_fingerprint(vocab), "label_text": label_text,
         "subj_names": {v: k for k, v in subj_names.items()},
         "cfg_names": {v: k for k, v in cfg_names.items()},
         "d_model": d_model,

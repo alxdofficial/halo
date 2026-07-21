@@ -32,6 +32,7 @@ from data.scripts.curate import deployment_policy as policy
 from eval.data import load_eval_stream
 from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_encoder
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
+from training.evidence.bank_guard import assert_bank_current
 from training.evidence.labeltext import ensemble_text
 from training.tokenizer.eval_transfer import build_encoder, encode_dataset
 from training.tokenizer.pretrain_data import _stream_gravity_state, stream_channel_descriptions
@@ -85,6 +86,7 @@ def main() -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
+    assert_bank_current(bank, context="eval_decoder")
     blob = torch.load(str(args.decoder), map_location="cpu", weights_only=True)
     fp = hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()
     if bank["backbone"].get("fingerprint") and fp != bank["backbone"]["fingerprint"]:
