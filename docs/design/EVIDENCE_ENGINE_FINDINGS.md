@@ -8,15 +8,20 @@
 > everything below was **re-measured at true baseline parity** — bare eval label strings, exactly
 > what `eval/scoring.py` hands every ConSE baseline.
 >
-> | configuration (post-fix, baseline parity) | mean macro-F1 |
+> **The two HALO rows that matter** (post-fix, baseline parity — bare eval label strings):
+>
+> | row | mean macro-F1 |
 > |---|---|
-> | ConSE bridge — parametric, fitted head, same frozen encoder | **42.7** |
-> | **retrieval bridge — untrained, full-soft, raw labels both sides** | **45.9** |
-> | retrieval bridge, honestly-selected config (F2 fix) | 45.7 |
-> | retrieval bridge @ top-k=48 (decoder's identity control) | 45.1 |
-> | trained decoder, no label augmentation | 46.1 |
-> | trained decoder, 16-variant label augmentation | 43.5 |
-> | harnet (legacy corpus) | **47.3** |
+> | **HALO — ConSE** (crude fitted closed-vocab classifier + bridge) | **42.7** |
+> | **HALO — evidence engine** (retrieval + trained decoder) | **46.1** |
+> | harnet — reference | **47.3** |
+>
+> So the evidence engine is **+3.4 over our own ConSE baseline** on the identical frozen encoder,
+> and **1.2 below harnet**. Attribution, from the identity control at the same retrieval config:
+> untrained retrieval alone = 45.1, so the **trained decoder contributes +1.0** and the retrieval
+> *mechanism* contributes the other +2.4. (Diagnostic variants that will all be re-measured:
+> untrained full-soft 45.9 · honestly-selected config 45.7 · decoder with 16-variant label
+> augmentation 43.5.)
 >
 > **We do not beat harnet.** What survives is internally controlled and parameter-free: on one
 > frozen encoder and corpus, a **non-parametric retrieval bridge beats the ConSE parametric
