@@ -198,6 +198,40 @@ def score(gt_names, pred_names, subjects, extra: Optional[dict] = None) -> dict:
     return m
 
 
+def fit_fingerprint(**parts) -> str:
+    """Hash of everything that changes what a fitted ConSE head IS (Phase 1.6 / audit H6).
+
+    The old caches validated only `labels` (and later corpus mode), so they silently survived
+    changes to the subject split, the seed, the probe architecture, the backbone checkpoint, the
+    per-stream cap and the optimizer settings — an audit demonstrated a fabricated cache with
+    ``n_windows=1`` being accepted. Any change to a part here invalidates the cache and forces a
+    refit, which is the safe default: a wrong cache produces a silently wrong number.
+    """
+    import hashlib
+    import json
+    blob = json.dumps({k: parts[k] for k in sorted(parts)}, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def make_probe(feat_dim: int, n_classes: int, hidden: int = 512):
+    """The ONE probe architecture every ConSE-tier baseline fits on its frozen features.
+
+    Phase 1.4. Previously harnet used the official 2-layer ``EvaClassifier``
+    (feat→512→n, ~300k params) while halo, crosshar and limubert used a single
+    ``nn.Linear(feat→n)`` (~24k) — so harnet was given **strictly more probe capacity than
+    everyone else, including us**. That is not a "same probe" comparison.
+
+    Unifying on the 2-layer form: leaves harnet exactly at its paper's head, and *strengthens*
+    the other three (it also moves LiMU-BERT toward its paper's non-linear downstream classifier,
+    where a linear probe understates it). Strengthening the baselines is the honest direction —
+    if our numbers survive it they are better earned.
+
+    Shape matches ssl-wearables ``EvaClassifier``: Linear(feat, hidden) → ReLU → Linear(hidden, n).
+    """
+    import torch.nn as nn
+    return nn.Sequential(nn.Linear(feat_dim, hidden), nn.ReLU(), nn.Linear(hidden, n_classes))
+
+
 def global_labels() -> List[str]:
     """The global ConSE training-label vocabulary."""
     return eval_data.load_global_labels()

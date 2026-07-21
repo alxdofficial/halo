@@ -54,7 +54,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.signal import resample_poly
 
-from baselines.base import ConSEAdapter, InputContract, global_labels, register
+from baselines.base import ConSEAdapter, InputContract, fit_fingerprint, global_labels, register
 from data.scripts.labels.canonical_labels import canonicalize
 from eval import data as eval_data
 from eval import scoring
@@ -340,6 +340,8 @@ class HarnetAdapter(ConSEAdapter):
         # subjects. Folds are now identical across models regardless of stream coverage.
         from eval.splits import split_indices, manifest_fingerprint   # lazy
         ti, vi, tei = split_indices(S)
+        _fit_fp = fit_fingerprint(model='harnet', vocab=list(vocab), split=manifest_fingerprint(),
+                                  hp=[FIT_EPOCHS, FIT_BATCH, FIT_LR, FIT_SEED], probe='2layer-512', backbone=HARNET_NAME + SSL_HUB_TAG)
         Xt = torch.from_numpy(X[ti]).float()
         Yt = torch.from_numpy(Y[ti]).long()
         Xv = torch.from_numpy(X[vi]).float().to(fit_device)
@@ -391,7 +393,7 @@ class HarnetAdapter(ConSEAdapter):
         print(f"[harnet] fitted head: val_acc={best_acc:.3f}, T={temperature:.3f} "
               f"over {n_val_subj} held-out subjects")
         torch.save({"head": {k: v.cpu() for k, v in head.state_dict().items()},
-                    "labels": list(vocab), "temperature": float(temperature),
+                    "labels": list(vocab), "temperature": float(temperature), "fit_fp": _fit_fp,
                     "corpus_mode": CORPUS_MODE, "datasets": datasets,
                     "streams_used": used, "streams_excluded_gravity": skipped,
                     "max_per_stream": (MATCHED_MAX_PER_STREAM if CORPUS_MODE == "matched" else None),

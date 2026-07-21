@@ -34,7 +34,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from baselines.base import ConSEAdapter, InputContract, global_labels, register
+from baselines.base import (ConSEAdapter, InputContract, fit_fingerprint, global_labels, make_probe,
+                            register)
 from data.scripts.eda.grid_io import discover_grids
 from data.scripts.labels.canonical_labels import canonicalize
 from eval import scoring
@@ -86,7 +87,8 @@ class HALOAdapter(ConSEAdapter):
         vocab = global_labels()
         enc, feat_dim = self._load_encoder(device)
 
-        head = nn.Linear(feat_dim, len(vocab)).to(device)
+        # Phase 1.4: identical 2-layer probe for every ConSE-tier model (see base.make_probe)
+        head = make_probe(feat_dim, len(vocab)).to(device)
         cached = self._load_cached_head(vocab, feat_dim, device)
         if cached is not None:
             head_sd, temperature = cached
@@ -161,6 +163,8 @@ class HALOAdapter(ConSEAdapter):
         # subjects. Folds are now identical across models regardless of stream coverage.
         from eval.splits import split_indices, manifest_fingerprint   # lazy
         ti, vi, tei = split_indices(S)
+        _fit_fp = fit_fingerprint(model='halo', vocab=list(vocab), split=manifest_fingerprint(),
+                                  hp=[FIT_EPOCHS, FIT_BATCH, FIT_LR, FIT_SEED], probe='2layer-512', backbone=_backbone_fp())
         Xt = torch.from_numpy(X[ti]).float()
         Yt = torch.from_numpy(Y[ti]).long()
         Xv = torch.from_numpy(X[vi]).float().to(fit_device)

@@ -42,7 +42,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from baselines.base import ConSEAdapter, InputContract, global_labels, register
+from baselines.base import (ConSEAdapter, InputContract, fit_fingerprint, global_labels, make_probe,
+                            register)
 from baselines.crosshar import prep
 from data.scripts.labels.canonical_labels import canonicalize
 from eval import data as eval_data
@@ -221,7 +222,8 @@ class CrossHARAdapter(ConSEAdapter):
         vocab = global_labels()
         backbone = self._load_backbone(device)
 
-        head = nn.Linear(FEAT_DIM, len(vocab)).to(device)
+        # Phase 1.4: identical 2-layer probe for every ConSE-tier model (see base.make_probe)
+        head = make_probe(FEAT_DIM, len(vocab)).to(device)
         cached = self._load_cached_head(vocab, device)
         if cached is not None:
             head_sd, temperature = cached
@@ -289,6 +291,8 @@ class CrossHARAdapter(ConSEAdapter):
         # subjects. Folds are now identical across models regardless of stream coverage.
         from eval.splits import split_indices, manifest_fingerprint   # lazy
         ti, vi, tei = split_indices(S)
+        _fit_fp = fit_fingerprint(model='crosshar', vocab=list(vocab), split=manifest_fingerprint(),
+                                  hp=[FIT_EPOCHS, FIT_BATCH, FIT_LR, FIT_SEED], probe='2layer-512', backbone='crosshar-selfpretrained')
         Xt = torch.from_numpy(X[ti]).float()
         Yt = torch.from_numpy(Y[ti]).long()
         Xv = torch.from_numpy(X[vi]).float().to(fit_device)
