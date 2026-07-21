@@ -264,7 +264,12 @@ class HarnetAdapter(ConSEAdapter):
             return None   # global vocab changed -> re-fit
         if "temperature" not in blob:
             return None   # pre-calibration cache -> re-fit (#82)
-        if blob.get("corpus_mode") != CORPUS_MODE:
+        # Back-compat: the published legacy cache predates corpus stamping and has no
+        # `corpus_mode`. Treat an unstamped cache as legacy, otherwise adding matched mode would
+        # silently RE-FIT (and overwrite) the published legacy head — destroying the artifact the
+        # 47.3 number came from. Matched mode still refuses it, so the two never mix.
+        blob_mode = blob.get("corpus_mode", "legacy")
+        if blob_mode != CORPUS_MODE:
             return None   # head fit on the OTHER corpus -> re-fit (never mix legacy/matched)
         if CORPUS_MODE == "matched" and list(blob.get("datasets", [])) != _corpus_datasets():
             return None   # the matched corpus changed -> re-fit
