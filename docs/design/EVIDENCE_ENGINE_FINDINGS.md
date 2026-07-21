@@ -64,6 +64,40 @@
 > elevator windows is negligible for a 93-way softmax but ample for kNN), so the retrieval rows may
 > gain more than the ConSE rows.
 >
+> ## ⚠️ UPDATE (Phase 2 complete for the evidence engine) — the vocabulary fix made ZS-XD WORSE
+>
+> Bank rebuilt at 93 labels: **203,929 windows** (was 164,516; +39,413 recovered) and **93/93 labels
+> present** (was 57/59), elevator classes included. Decoder retrained on it. At raw-label parity:
+>
+> | | 59-label bank | **93-label bank** |
+> |---|---|---|
+> | trained decoder | 46.1 | **43.5** |
+> | untrained identity control | 45.1 | **44.1** |
+> | internal transfer proxy | 0.694 | **0.835** |
+>
+> **Both rows dropped, and the decoder is net-NEGATIVE again (−0.6 vs its control).** My
+> pre-registered prediction (retrieval would gain from the recovered rare classes) is **only partly
+> borne out** and the net is negative.
+>
+> Per-cell, the split is informative: **inclusivehar 29.2 → 33.8 (+4.6)** and **shoaib 42.1 → 44.8
+> (+2.7)** — cells with fine-grained/unseen labels, which is where the recovered `escalator_*` /
+> `elevator_*` exemplars help exactly as predicted. But **motionsense 77.0 → 68.5 (−8.5)**, a cell
+> whose 6 labels are all simple and all seen.
+>
+> **Most likely mechanism: added distractor mass.** The text-voting stage now scores against 93
+> label types instead of 57, so semantically-adjacent ADLs (`making_tea`, `pouring_water`,
+> `taking_medicine`) can steal votes from the correct answer on easy cells. More data helped where
+> coverage was the bottleneck; more *label types* hurt where discrimination was already fine.
+> This is a hypothesis from one run — it needs the per-class confusion check before being asserted.
+>
+> **The proxy/target anti-correlation is now stark:** the internal metric rose 0.694 → **0.835**
+> while ZS-XD fell 46.1 → 43.5. Our selection metric is actively misleading, which retires it as a
+> decision tool until Phase 5.2 replaces it with an open-vocab slice.
+>
+> **Consequence:** the 42.7-vs-46.1 pair in the table above is now SUPERSEDED on the retrieval side
+> and not yet re-measured on the ConSE side (heads still awaiting refit). Treat every absolute
+> number here as pre-Phase-2 until the four heads are refit and the whole table is regenerated.
+>
 > **3. Do not mix protocols.** Any table must be entirely pre-fix or entirely post-fix. The repo is
 > currently mid-transition: `global_labels.json` says 93 while the bank still says 59, so a naive
 > re-run would silently blend the two.
