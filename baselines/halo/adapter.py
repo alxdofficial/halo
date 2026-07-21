@@ -155,11 +155,18 @@ class HALOAdapter(ConSEAdapter):
         Y = np.concatenate(labs, 0)
         S = np.concatenate(subjs, 0)
 
-        ti, vi, _ = scoring.subject_disjoint_split(S, seed=FIT_SEED)
+        # Phase 1.1 (H7/H8): SHARED, per-dataset-stratified subject manifest. Previously each
+        # model reshuffled its own aggregate subject pool, so excluding a stream moved 16.5% of
+        # shared subjects into different folds than other models, and 3 datasets got ZERO val
+        # subjects. Folds are now identical across models regardless of stream coverage.
+        from eval.splits import split_indices, manifest_fingerprint   # lazy
+        ti, vi, tei = split_indices(S)
         Xt = torch.from_numpy(X[ti]).float()
         Yt = torch.from_numpy(Y[ti]).long()
         Xv = torch.from_numpy(X[vi]).float().to(fit_device)
         Yv = Y[vi]
+        Xte = torch.from_numpy(X[tei]).float().to(fit_device) if len(tei) else Xv
+        Yte = Y[tei] if len(tei) else Yv
 
         head.to(fit_device)
         opt = torch.optim.Adam(head.parameters(), lr=FIT_LR)
@@ -177,7 +184,10 @@ class HALOAdapter(ConSEAdapter):
                 opt.step()
             head.eval()
             with torch.no_grad():
-                va = float((head(Xv).argmax(1).cpu().numpy() == Yv).mean())
+                # Phase 1.2 (H7b): select on BALANCED accuracy, not window accuracy — we
+                # report macro-F1 and the corpus has ~530x class imbalance.
+                _p = head(Xv).argmax(1).cpu().numpy()
+                va = float(np.mean([(_p[Yv == c] == c).mean() for c in np.unique(Yv)]))
             if va > best_acc:
                 best_acc = va
                 best_sd = {k: v.detach().cpu().clone() for k, v in head.state_dict().items()}
@@ -188,7 +198,10 @@ class HALOAdapter(ConSEAdapter):
         # calibrated confidences, not raw over-confident softmax (#82).
         head.eval()
         with torch.no_grad():
-            temperature = scoring.fit_temperature(head(Xv).cpu().numpy(), Yv)
+            # Phase 1.3 (#12): calibrate on the THIRD fold, which was previously computed and
+            # discarded. Reusing the selection fold made the temperature mildly optimistic.
+            _cal_X, _cal_Y = (Xte, Yte) if len(tei) else (Xv, Yv)
+            temperature = scoring.fit_temperature(head(_cal_X).cpu().numpy(), _cal_Y)
         n_val_subj = len(set(S[vi]))
         print(f"[halo] fitted head: val_acc={best_acc:.3f}, T={temperature:.3f} over "
               f"{n_val_subj} held-out subjects ({n} train / {len(Xv)} val windows)", flush=True)
