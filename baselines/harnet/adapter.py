@@ -43,6 +43,7 @@ re-fits automatically if the global vocabulary changes.
 from __future__ import annotations
 
 import json
+import os
 from fractions import Fraction
 from pathlib import Path
 from typing import List, Tuple
@@ -69,10 +70,41 @@ ACC_CHANNELS = ("acc_x", "acc_y", "acc_z")
 SSL_HUB_REPO = "OxWearables/ssl-wearables"
 SSL_HUB_TAG = "v1.0.0"
 
-# Training corpus = the global-vocab train datasets (data.scripts.labels.build_global_label_mapping).
-TRAIN_DATASETS = [
+# --- head-fit CORPUS selection (F3, docs/design/EVIDENCE_ENGINE_FINDINGS.md §6) ---------------
+# Two legitimate and DIFFERENT comparisons. Report both; neither replaces the other.
+#   "legacy"  (default) — the 9-dataset corpus this baseline has always used. This is the
+#             OFF-THE-SHELF / deployment row: what a practitioner gets by downloading harnet
+#             today. Leaving it untouched keeps the previously published number valid.
+#   "matched" — HALO's exact 12-dataset / 20-stream training corpus with HALO's same per-stream
+#             cap. This is the SCIENTIFIC CONTROL: it removes the confound that HALO's memory bank
+#             saw wrist streams (sp_sw_har, nfi_fared, harmes, xrf_v2) that harnet's head-fit never
+#             did — and the wrist cells are exactly where HALO beat harnet.
+# Note the corpora can never be byte-identical: harnet REQUIRES gravity, so the gravity-removed
+# streams (kuhar/phone_waist, xrf_v2/airpods_ear) are excluded by the guard below. That is an
+# inherent capability difference to disclose, not a bug to fix.
+CORPUS_MODE = os.environ.get("HARNET_CORPUS", "legacy").strip().lower()
+if CORPUS_MODE not in ("legacy", "matched"):
+    raise ValueError(f"HARNET_CORPUS must be 'legacy' or 'matched', got {CORPUS_MODE!r}")
+
+LEGACY_TRAIN_DATASETS = [
     "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar", "hapt", "mhealth", "capture24",
 ]
+# Parity with baselines/halo/adapter.py HEAD_FIT_MAX_PER_STREAM. Applied in matched mode only, so
+# the legacy row's published number is not perturbed.
+MATCHED_MAX_PER_STREAM = 20_000
+
+
+def _corpus_datasets() -> List[str]:
+    """Dataset list for the active corpus mode.
+
+    The matched list is imported LAZILY: ``training.tokenizer.pretrain_data`` pulls HALO's ``model``
+    package into ``sys.modules``, which would shadow other baselines' repo-local ``model`` module
+    (UniMTS does ``from model import ST_GCN_18``). Same rule as baselines/halo/adapter.py.
+    """
+    if CORPUS_MODE == "legacy":
+        return list(LEGACY_TRAIN_DATASETS)
+    from training.tokenizer.pretrain_data import TRAIN_DATASETS as HALO_TRAIN   # lazy
+    return sorted(HALO_TRAIN)
 
 # Gravity guard: a gravity-retaining accel window has |mean vector| ~ 1 g; a
 # gravity-removed (linear-accel) one ~ 0 g. Below this threshold => incompatible.
@@ -86,7 +118,8 @@ FIT_SEED = 3431
 EMBED_BATCH = 512
 
 _HERE = Path(__file__).resolve().parent
-_HEAD_CACHE = _HERE / "harnet5_conse_head.pt"
+_HEAD_CACHE = _HERE / ("harnet5_conse_head.pt" if CORPUS_MODE == "legacy"
+                       else "harnet5_conse_head_matched.pt")
 
 
 # =============================================================================
@@ -231,6 +264,10 @@ class HarnetAdapter(ConSEAdapter):
             return None   # global vocab changed -> re-fit
         if "temperature" not in blob:
             return None   # pre-calibration cache -> re-fit (#82)
+        if blob.get("corpus_mode") != CORPUS_MODE:
+            return None   # head fit on the OTHER corpus -> re-fit (never mix legacy/matched)
+        if CORPUS_MODE == "matched" and list(blob.get("datasets", [])) != _corpus_datasets():
+            return None   # the matched corpus changed -> re-fit
         return blob["head"], float(blob["temperature"])
 
     def _fit_head(self, model, vocab, device):
@@ -242,8 +279,12 @@ class HarnetAdapter(ConSEAdapter):
         fit_device = device if isinstance(device, torch.device) else torch.device(device)
         model.to(fit_device)
 
+        datasets = _corpus_datasets()
+        cap_rng = np.random.RandomState(FIT_SEED)
+        print(f"[harnet] corpus mode={CORPUS_MODE} ({len(datasets)} datasets): {datasets}")
+
         feats, labs, subjs, used, skipped = [], [], [], [], []
-        for ds in TRAIN_DATASETS:
+        for ds in datasets:
             for stream in eval_data.list_streams(ds):
                 windows, raw_labels, subjects, channels, rate = _load_grid(ds, stream)
                 dc = _gravity_dc(windows, channels)
@@ -251,14 +292,19 @@ class HarnetAdapter(ConSEAdapter):
                     skipped.append(f"{ds}/{stream} (|DC|={dc:.3f}g)")
                     continue
                 gl = np.array([label_to_idx.get(canonicalize(l), -1) for l in raw_labels])
-                keep = gl >= 0                       # drop labels outside the global vocab
-                if not keep.any():
+                keep_idx = np.where(gl >= 0)[0]      # drop labels outside the global vocab
+                if keep_idx.size == 0:
                     continue
-                x = _to_30hz_150(_select_accel(windows[keep], channels), rate)
+                # matched mode: same per-stream cap HALO's head-fit uses, so neither model gets
+                # more windows per stream than the other.
+                if CORPUS_MODE == "matched" and keep_idx.size > MATCHED_MAX_PER_STREAM:
+                    keep_idx = np.sort(cap_rng.choice(keep_idx, MATCHED_MAX_PER_STREAM,
+                                                      replace=False))
+                x = _to_30hz_150(_select_accel(windows[keep_idx], channels), rate)
                 feats.append(_extract_feats(model, x, fit_device))
-                labs.append(gl[keep])
-                subjs.append(np.array([f"{ds}:{s}" for s in np.asarray(subjects)[keep]]))
-                used.append(f"{ds}/{stream}")
+                labs.append(gl[keep_idx])
+                subjs.append(np.array([f"{ds}:{s}" for s in np.asarray(subjects)[keep_idx]]))
+                used.append(f"{ds}/{stream}({keep_idx.size})")
         print(f"[harnet] head-fit corpus: {used}")
         if skipped:
             print(f"[harnet] EXCLUDED (gravity-removed): {skipped}")
@@ -313,7 +359,11 @@ class HarnetAdapter(ConSEAdapter):
         print(f"[harnet] fitted head: val_acc={best_acc:.3f}, T={temperature:.3f} "
               f"over {n_val_subj} held-out subjects")
         torch.save({"head": {k: v.cpu() for k, v in head.state_dict().items()},
-                    "labels": list(vocab), "temperature": float(temperature)}, str(_HEAD_CACHE))
+                    "labels": list(vocab), "temperature": float(temperature),
+                    "corpus_mode": CORPUS_MODE, "datasets": datasets,
+                    "streams_used": used, "streams_excluded_gravity": skipped,
+                    "max_per_stream": (MATCHED_MAX_PER_STREAM if CORPUS_MODE == "matched" else None),
+                    "n_windows": int(len(X))}, str(_HEAD_CACHE))
         model.to(device)
         return float(temperature)
 
