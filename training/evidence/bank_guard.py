@@ -27,6 +27,33 @@ def vocab_fingerprint(labels: Sequence[str]) -> str:
     return hashlib.sha256(json.dumps(list(labels)).encode()).hexdigest()[:16]
 
 
+def _assert_build_params_recorded(bank: dict, context: str) -> None:
+    """A matching vocabulary is NOT sufficient to call a bank 'current'.
+
+    The guard originally compared vocabularies only, while its own name and docstring promised
+    protection against "mixed protocols". Two banks can share a vocabulary and still be
+    incomparable — different backbone checkpoint, different ``--max-per-label`` cap, different
+    frontend. Those change every retrieval number the bank produces.
+
+    We cannot retro-validate a bank that never recorded its build parameters, so the minimum
+    enforceable guarantee is that they ARE recorded; consumers that know the expected backbone
+    (eval_decoder, halo_evidence) additionally compare the checkpoint hash themselves.
+    """
+    missing = [k for k in ("vocab_fp", "backbone") if k not in bank]
+    if "backbone" in bank and not bank["backbone"].get("fingerprint"):
+        missing.append("backbone.fingerprint")
+    if not missing:
+        return
+    where = f" ({context})" if context else ""
+    raise SystemExit(
+        f"\n[bank_guard] BANK LACKS PROVENANCE{where}: missing {missing}.\n"
+        f"  Its vocabulary matches, but without a backbone fingerprint there is no way to tell\n"
+        f"  which encoder produced these vectors, so a retrieval number from it is unattributable.\n"
+        f"  Rebuild with the current build_memory (which records them):\n\n"
+        f"      HALO_CKPT=training/tokenizer/outputs/pretrain_fixed_mr/best.pt \\\n"
+        f"        python -m training.evidence.build_memory --device cuda\n")
+
+
 def assert_bank_current(bank: dict, *, context: str = "") -> None:
     """Raise if the bank's vocabulary differs from the CURRENT global vocabulary.
 
@@ -37,6 +64,7 @@ def assert_bank_current(bank: dict, *, context: str = "") -> None:
     current = list(load_global_labels())
     stored = list(bank.get("vocab", []))
     if stored == current:
+        _assert_build_params_recorded(bank, context)
         return
 
     cur_fp, old_fp = vocab_fingerprint(current), vocab_fingerprint(stored)

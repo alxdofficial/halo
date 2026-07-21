@@ -59,6 +59,8 @@ def main() -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
+    from training.evidence.bank_guard import assert_bank_current
+    assert_bank_current(bank, context="eval_gate")
     head_blob = torch.load(str(args.head), map_location="cpu", weights_only=True)
 
     # PROVENANCE GUARD: the eval encoder MUST be the exact checkpoint the bank was built from,

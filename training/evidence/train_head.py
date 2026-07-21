@@ -126,6 +126,8 @@ def main() -> None:
     torch.manual_seed(SEED)
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
+    from training.evidence.bank_guard import assert_bank_current
+    assert_bank_current(bank, context="train_head")
     Z = bank["Z"].float().to(device)                    # (N, d)
     y = bank["y"].to(device)                            # (N,)
     subj = bank["subj"].to(device)                      # (N,)

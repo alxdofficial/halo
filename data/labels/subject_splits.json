@@ -1,4 +1,11 @@
 {
+  "aliased": {
+    "hapt": [
+      "uci_har",
+      "user",
+      "subject"
+    ]
+  },
   "assignment": {
     "capture24:P001": "train",
     "capture24:P002": "val",
@@ -151,6 +158,36 @@
     "capture24:P149": "train",
     "capture24:P150": "train",
     "capture24:P151": "train",
+    "hapt:user01": "test",
+    "hapt:user02": "train",
+    "hapt:user03": "train",
+    "hapt:user04": "train",
+    "hapt:user05": "val",
+    "hapt:user06": "train",
+    "hapt:user07": "train",
+    "hapt:user08": "val",
+    "hapt:user09": "train",
+    "hapt:user10": "train",
+    "hapt:user11": "train",
+    "hapt:user12": "test",
+    "hapt:user13": "train",
+    "hapt:user14": "train",
+    "hapt:user15": "train",
+    "hapt:user16": "train",
+    "hapt:user17": "train",
+    "hapt:user18": "train",
+    "hapt:user19": "train",
+    "hapt:user20": "test",
+    "hapt:user21": "train",
+    "hapt:user22": "train",
+    "hapt:user23": "train",
+    "hapt:user24": "train",
+    "hapt:user25": "train",
+    "hapt:user26": "train",
+    "hapt:user27": "train",
+    "hapt:user28": "train",
+    "hapt:user29": "val",
+    "hapt:user30": "train",
     "harmes:01": "train",
     "harmes:02": "train",
     "harmes:03": "train",
@@ -459,12 +496,17 @@
     0.1,
     0.1
   ],
-  "n_subjects": 452,
+  "n_subjects": 482,
   "per_dataset": {
     "capture24": {
       "test": 15,
       "train": 121,
       "val": 15
+    },
+    "hapt": {
+      "test": 3,
+      "train": 24,
+      "val": 3
     },
     "harmes": {
       "test": 2,

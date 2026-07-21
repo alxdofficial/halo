@@ -65,17 +65,52 @@ def _split_one_dataset(subjects: Sequence[str], seed: int) -> Dict[str, str]:
     return out
 
 
+# Datasets that are NOT in HALO's TRAIN_DATASETS but ARE in some baseline's head-fit corpus.
+# They must still be in the manifest, or their subjects fall through to the train fold and the
+# model's val/test folds are silently built from a different population than everyone else's.
+EXTRA_MANIFEST_DATASETS = ("hapt",)
+
+# Cohorts that are THE SAME PEOPLE under different dataset names. Both members must land in the
+# same fold or a subject's data appears on both sides of the split.
+#
+# hapt is the extended re-release of UCI-HAR: identical 30-participant cohort, `user01..user30`
+# against `subject01..subject30`, and `baselines/crosshar/prep.py` measures per-window NCC 0.98
+# between them. harnet's DEFAULT (legacy) corpus includes hapt while the manifest covered only
+# uci_har, so all 30 hapt subjects fell through to train while their uci_har counterparts were
+# harnet's val (epoch selection) and test (temperature calibration) folds -- an optimistic bias on
+# the strongest baseline in the table.
+ALIASED_COHORTS: Dict[str, Tuple[str, str, str]] = {
+    # alias_dataset: (canonical_dataset, alias_subject_prefix, canonical_subject_prefix)
+    "hapt": ("uci_har", "user", "subject"),
+}
+
+
+def _canonical_key(dataset: str, subject: str) -> str:
+    """Map an aliased cohort member onto the canonical subject it duplicates."""
+    alias = ALIASED_COHORTS.get(dataset)
+    if alias is None:
+        return f"{dataset}:{subject}"
+    canon_ds, a_pre, c_pre = alias
+    if subject.startswith(a_pre):
+        return f"{canon_ds}:{c_pre}{subject[len(a_pre):]}"
+    return f"{dataset}:{subject}"
+
+
 def build_manifest(seed: int = SPLIT_SEED) -> dict:
     """Per-dataset stratified subject assignment over the whole training corpus."""
     from data.scripts.eda.grid_io import discover_grids
     from training.tokenizer.pretrain_data import TRAIN_DATASETS
 
+    wanted = set(TRAIN_DATASETS) | set(EXTRA_MANIFEST_DATASETS)
     per_dataset: Dict[str, List[str]] = {}
+    aliased: Dict[str, List[str]] = {}
     for ref in discover_grids("native"):
-        if ref.dataset not in TRAIN_DATASETS:
+        if ref.dataset not in wanted:
             continue
-        per_dataset.setdefault(ref.dataset, [])
-        per_dataset[ref.dataset].extend(str(s) for s in ref.subjects)
+        # An aliased dataset does not get its own split -- it inherits the canonical cohort's.
+        bucket = aliased if ref.dataset in ALIASED_COHORTS else per_dataset
+        bucket.setdefault(ref.dataset, [])
+        bucket[ref.dataset].extend(str(s) for s in ref.subjects)
 
     assignment: Dict[str, str] = {}
     summary: Dict[str, Dict[str, int]] = {}
@@ -91,8 +126,27 @@ def build_manifest(seed: int = SPLIT_SEED) -> dict:
         summary[ds] = counts
         if counts["val"] == 0:
             tiny.append(ds)
+
+    # Aliased cohorts inherit their canonical twin's fold, so the same person is never split.
+    alias_summary: Dict[str, Dict[str, int]] = {}
+    for ds in sorted(aliased):
+        counts = {"train": 0, "val": 0, "test": 0}
+        for subj in sorted(set(aliased[ds])):
+            canon = _canonical_key(ds, subj)
+            fold = assignment.get(canon)
+            if fold is None:
+                raise RuntimeError(
+                    f"{ds}:{subj} aliases {canon}, which is not in the manifest. Either the "
+                    f"canonical dataset is missing from TRAIN_DATASETS or the subject-prefix "
+                    f"mapping in ALIASED_COHORTS is wrong.")
+            assignment[f"{ds}:{subj}"] = fold
+            counts[fold] += 1
+        alias_summary[ds] = counts
+        summary[ds] = counts
+
     return {"seed": seed, "fracs": list(FRACS), "assignment": assignment,
             "per_dataset": summary, "datasets_without_val": tiny,
+            "aliased": {k: list(ALIASED_COHORTS[k]) for k in alias_summary},
             "n_subjects": len(assignment)}
 
 
@@ -110,17 +164,49 @@ def manifest_fingerprint(manifest: dict | None = None) -> str:
 
 
 def split_indices(subject_ids: Sequence[str],
-                  manifest: dict | None = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+                  manifest: dict | None = None,
+                  allow_unknown: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Map an array of ``"dataset:subject"`` ids to (train_idx, val_idx, test_idx).
 
-    Unknown subjects (e.g. a dataset outside the manifest) are assigned to TRAIN and reported by
-    the caller if it cares — never silently placed in val/test, which would leak.
+    **Unknown subjects raise.** The previous behaviour — silently assigning them to TRAIN — was
+    documented as "reported by the caller if it cares", and no caller ever did. Two real failures
+    came out of that silence:
+
+      * harnet's default corpus contains ``hapt``, which was absent from the manifest, so 30
+        subjects got fabricated fold membership (now fixed by ``EXTRA_MANIFEST_DATASETS``);
+      * a *total* miss (e.g. a subject-id format change upstream) degrades with no error at all:
+        empty val fold -> ``np.mean([])`` = nan -> ``nan > best_acc`` is never True -> ``best_sd``
+        stays None -> the adapters' ``if best_sd is not None`` guard keeps the LAST epoch, and
+        Phase 1.3 then calibrates temperature on an empty tensor. Nothing raises anywhere.
+
+    ``allow_unknown=True`` restores the old lenient behaviour for callers that genuinely score
+    data outside the training corpus; it still routes unknowns to TRAIN, never to val/test.
     """
     m = manifest or load_manifest()
     a = m["assignment"]
-    folds = np.array([a.get(str(s), "train") for s in subject_ids])
-    return (np.where(folds == "train")[0], np.where(folds == "val")[0],
-            np.where(folds == "test")[0])
+    ids = [str(s) for s in subject_ids]
+    missing = sorted({s for s in ids if s not in a})
+    if missing and not allow_unknown:
+        by_ds: Dict[str, int] = {}
+        for s in missing:
+            by_ds[s.split(":", 1)[0]] = by_ds.get(s.split(":", 1)[0], 0) + 1
+        raise KeyError(
+            f"{len(missing)} of {len(ids)} subject ids are absent from the split manifest "
+            f"{MANIFEST_PATH.name}: " + ", ".join(f"{d} x{n}" for d, n in sorted(by_ds.items()))
+            + f" (e.g. {missing[:3]}). These would silently land in the TRAIN fold, so val/test "
+            f"would be built from a different population than every other model's. Fix: add the "
+            f"dataset to TRAIN_DATASETS or EXTRA_MANIFEST_DATASETS in eval/splits.py and rebuild "
+            f"with `python -m eval.splits`, or pass allow_unknown=True if that is truly intended.")
+    folds = np.array([a.get(s, "train") for s in ids])
+    tr, va, te = (np.where(folds == "train")[0], np.where(folds == "val")[0],
+                  np.where(folds == "test")[0])
+    if len(va) == 0 or len(te) == 0:
+        raise ValueError(
+            f"split produced an empty fold (train={len(tr)}, val={len(va)}, test={len(te)}) over "
+            f"{len(set(ids))} unique subjects. Epoch selection and temperature calibration both "
+            f"need a non-empty fold; continuing would silently keep the last epoch and calibrate "
+            f"on nothing.")
+    return tr, va, te
 
 
 def main() -> None:

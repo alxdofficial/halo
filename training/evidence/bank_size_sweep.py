@@ -65,6 +65,8 @@ def main() -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
+    from training.evidence.bank_guard import assert_bank_current
+    assert_bank_current(bank, context="bank_size_sweep")
     Z_all = F.normalize(bank["Z"].float(), dim=-1).to(device)
     y_all = bank["y"].to(device)
     vocab = list(bank["vocab"])

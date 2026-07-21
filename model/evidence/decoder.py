@@ -86,6 +86,11 @@ class _Block(nn.Module):
     def forward(self, x, key_padding_mask, attn_bias):
         # attn_bias: (B*n_heads, T, T) additive float (same-window bias), or None.
         h = self.ln1(x)
+        # torch deprecates mixing a bool key_padding_mask with a float attn_mask, so when an
+        # additive bias is present convert the padding mask to the same float additive form.
+        if attn_bias is not None and key_padding_mask is not None and key_padding_mask.dtype == torch.bool:
+            key_padding_mask = torch.zeros_like(key_padding_mask, dtype=attn_bias.dtype).masked_fill(
+                key_padding_mask, float("-inf"))
         a, _ = self.attn(h, h, h, key_padding_mask=key_padding_mask,
                          attn_mask=attn_bias, need_weights=False)
         x = x + self.ls1 * a
@@ -188,7 +193,12 @@ class EvidenceDecoder(nn.Module):
         phi = self.pool_phi(ev_state).squeeze(-1)                                # (B, k) — 0 @ init
         a_logit = torch.log(w_retr.clamp_min(1e-12)) + phi
         a_logit = a_logit.masked_fill(~ev_mask, float("-inf"))
+        # A row with NO valid evidence would be all -inf -> softmax = NaN -> one bad row silently
+        # NaNs the whole batch's CE. Keep such rows finite and let them pool to zero evidence.
+        dead = ~ev_mask.any(dim=1, keepdim=True)                                 # (B, 1)
+        a_logit = a_logit.masked_fill(dead, 0.0)
         a = torch.softmax(a_logit, dim=1)                                        # (B, k) == w_retr @ init
+        a = a.masked_fill(dead, 0.0)                                             # dead rows: no evidence
         e = torch.einsum("bk,bkc->bc", a, votes)                                 # (B, C) evidence
         logits = self.log_out_scale.exp() * e
         if return_aux:
@@ -198,7 +208,12 @@ class EvidenceDecoder(nn.Module):
 
     def _same_window_bias(self, window_id, T, B, key_pad, dev):
         """Additive (B*n_heads, T, T) bias: +γ where two tokens share a window; permutation-safe."""
-        if window_id is None or float(self.same_window_bias) == 0.0:
+        # Do NOT gate on the parameter's VALUE. It is initialised to exactly 0.0, so a value test
+        # short-circuits on every forward, the bias never enters the autograd graph, and the
+        # parameter is frozen at zero for all time (verified: .grad stays None). Gate on whether
+        # the caller supplied window ids. (float(param) also forced a CUDA->CPU sync per forward
+        # and emitted a requires_grad-to-scalar warning.)
+        if window_id is None:
             return None
         same = (window_id.unsqueeze(1) == window_id.unsqueeze(2)).float()        # (B, T, T)
         bias = self.same_window_bias * same                                      # (B, T, T)

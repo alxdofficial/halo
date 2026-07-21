@@ -75,6 +75,20 @@ def _encode(enc, data: np.ndarray, texts, rate: float, gravity_state, device) ->
     return z.numpy().astype(np.float32)
 
 
+def _fit_fp(vocab) -> str:
+    """The cache-validity fingerprint. Called by BOTH the loader and the writer.
+
+    Phase 1.6 originally computed this inside `_fit_head` only, so it was never compared against
+    anything -- four writers, zero readers. A cached head therefore survived changes to the subject
+    split, the seed, the probe width and the per-stream cap, silently reporting pre-fix numbers.
+    """
+    from baselines.base import PROBE_SPEC
+    from eval.splits import manifest_fingerprint
+    return fit_fingerprint(model='halo', vocab=list(vocab), split=manifest_fingerprint(),
+                           hp=[FIT_EPOCHS, FIT_BATCH, FIT_LR, FIT_SEED], probe=PROBE_SPEC,
+                           cap=HEAD_FIT_MAX_PER_STREAM, backbone=_backbone_fp())
+
+
 class HALOAdapter(ConSEAdapter):
     """HALO Phase-A frozen representation + fitted ConSE head. Native input contract."""
 
@@ -88,6 +102,11 @@ class HALOAdapter(ConSEAdapter):
         enc, feat_dim = self._load_encoder(device)
 
         # Phase 1.4: identical 2-layer probe for every ConSE-tier model (see base.make_probe)
+        # H4: make_probe draws from the GLOBAL torch RNG. Unseeded, two runs get different
+        # heads (measured max init-weight delta 0.971) -- and Phase 1.4 grew the probe from
+        # ~24k params to ~180k, so init variance now moves the reported number. harnet has
+        # seeded since the H4 audit; these three never did.
+        torch.manual_seed(FIT_SEED)
         head = make_probe(feat_dim, len(vocab)).to(device)
         cached = self._load_cached_head(vocab, feat_dim, device)
         if cached is not None:
@@ -119,6 +138,8 @@ class HALOAdapter(ConSEAdapter):
         blob = torch.load(str(_HEAD_CACHE), map_location=device, weights_only=True)
         if list(blob.get("labels", [])) != list(vocab):
             return None
+        if blob.get("fit_fp") != _fit_fp(vocab):
+            return None                       # split/probe/seed/cap/backbone changed -> refit
         if blob.get("backbone_fp") != _backbone_fp():
             return None                       # re-trained checkpoint -> old head is invalid
         if "temperature" not in blob:
@@ -163,8 +184,6 @@ class HALOAdapter(ConSEAdapter):
         # subjects. Folds are now identical across models regardless of stream coverage.
         from eval.splits import split_indices, manifest_fingerprint   # lazy
         ti, vi, tei = split_indices(S)
-        _fit_fp = fit_fingerprint(model='halo', vocab=list(vocab), split=manifest_fingerprint(),
-                                  hp=[FIT_EPOCHS, FIT_BATCH, FIT_LR, FIT_SEED], probe='2layer-512', backbone=_backbone_fp())
         Xt = torch.from_numpy(X[ti]).float()
         Yt = torch.from_numpy(Y[ti]).long()
         Xv = torch.from_numpy(X[vi]).float().to(fit_device)
@@ -210,7 +229,7 @@ class HALOAdapter(ConSEAdapter):
         print(f"[halo] fitted head: val_acc={best_acc:.3f}, T={temperature:.3f} over "
               f"{n_val_subj} held-out subjects ({n} train / {len(Xv)} val windows)", flush=True)
         torch.save({"head": {k: v.cpu() for k, v in head.state_dict().items()},
-                    "labels": list(vocab), "backbone_fp": _backbone_fp(),
+                    "labels": list(vocab), "fit_fp": _fit_fp(vocab), "backbone_fp": _backbone_fp(),
                     "temperature": float(temperature)}, str(_HEAD_CACHE))
         head.to(device)
         return float(temperature)

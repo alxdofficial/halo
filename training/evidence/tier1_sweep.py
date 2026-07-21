@@ -92,6 +92,8 @@ def main() -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
+    from training.evidence.bank_guard import assert_bank_current
+    assert_bank_current(bank, context="tier1_sweep")
     fp = hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()
     if bank["backbone"].get("fingerprint") and fp != bank["backbone"]["fingerprint"]:
         raise SystemExit("[tier1] checkpoint != bank backbone")

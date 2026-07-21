@@ -5,8 +5,9 @@ from data.scripts.labels.canonical_labels import canonicalize
 
 
 def test_global_vocab_is_canonical_sorted_and_deduped():
-    vocab = global_label_vocabulary()
-    assert vocab == sorted(vocab)
+    vocab, counts = global_label_vocabulary()   # returns (vocabulary, per-label window counts)
+    assert list(vocab) == sorted(vocab)
+    assert set(counts) <= set(vocab), "counts key on labels outside the vocabulary"
     assert len(vocab) == len(set(vocab))
     # synonyms collapsed to their canonical form
     assert "lying" in vocab and "laying" not in vocab

@@ -98,6 +98,20 @@ def _merge_last(x, n_dims):
     return x.view(*s[:-n_dims], -1)
 
 
+def _fit_fp(vocab) -> str:
+    """The cache-validity fingerprint. Called by BOTH the loader and the writer.
+
+    Phase 1.6 originally computed this inside `_fit_head` only, so it was never compared against
+    anything -- four writers, zero readers. A cached head therefore survived changes to the subject
+    split, the seed, the probe width and the per-stream cap, silently reporting pre-fix numbers.
+    """
+    from baselines.base import PROBE_SPEC
+    from eval.splits import manifest_fingerprint
+    return fit_fingerprint(model='crosshar', vocab=list(vocab), split=manifest_fingerprint(),
+                           hp=[FIT_EPOCHS, FIT_BATCH, FIT_LR, FIT_SEED], probe=PROBE_SPEC,
+                           cap=HEAD_FIT_MAX_PER_STREAM, backbone='crosshar-selfpretrained')
+
+
 class _LayerNorm(nn.Module):
     def __init__(self, hidden, eps=1e-12):
         super().__init__()
@@ -223,6 +237,11 @@ class CrossHARAdapter(ConSEAdapter):
         backbone = self._load_backbone(device)
 
         # Phase 1.4: identical 2-layer probe for every ConSE-tier model (see base.make_probe)
+        # H4: make_probe draws from the GLOBAL torch RNG. Unseeded, two runs get different
+        # heads (measured max init-weight delta 0.971) -- and Phase 1.4 grew the probe from
+        # ~24k params to ~180k, so init variance now moves the reported number. harnet has
+        # seeded since the H4 audit; these three never did.
+        torch.manual_seed(FIT_SEED)
         head = make_probe(FEAT_DIM, len(vocab)).to(device)
         cached = self._load_cached_head(vocab, device)
         if cached is not None:
@@ -253,6 +272,8 @@ class CrossHARAdapter(ConSEAdapter):
         blob = torch.load(str(_HEAD_CACHE), map_location=device, weights_only=True)
         if list(blob.get("labels", [])) != list(vocab):
             return None
+        if blob.get("fit_fp") != _fit_fp(vocab):
+            return None                       # split/probe/seed/cap/backbone changed -> refit
         # Re-fit if the backbone changed (e.g. after the deferred full pretrain overwrites it):
         # a head fit on the old backbone's feature space is invalid for new features.
         if blob.get("backbone_fp") != _backbone_fp():
@@ -291,8 +312,6 @@ class CrossHARAdapter(ConSEAdapter):
         # subjects. Folds are now identical across models regardless of stream coverage.
         from eval.splits import split_indices, manifest_fingerprint   # lazy
         ti, vi, tei = split_indices(S)
-        _fit_fp = fit_fingerprint(model='crosshar', vocab=list(vocab), split=manifest_fingerprint(),
-                                  hp=[FIT_EPOCHS, FIT_BATCH, FIT_LR, FIT_SEED], probe='2layer-512', backbone='crosshar-selfpretrained')
         Xt = torch.from_numpy(X[ti]).float()
         Yt = torch.from_numpy(Y[ti]).long()
         Xv = torch.from_numpy(X[vi]).float().to(fit_device)
@@ -340,7 +359,7 @@ class CrossHARAdapter(ConSEAdapter):
         print(f"[crosshar] fitted head: val_acc={best_acc:.3f}, T={temperature:.3f} "
               f"over {n_val_subj} held-out subjects")
         torch.save({"head": {k: v.cpu() for k, v in head.state_dict().items()},
-                    "labels": list(vocab), "backbone_fp": _backbone_fp(),
+                    "labels": list(vocab), "fit_fp": _fit_fp(vocab), "backbone_fp": _backbone_fp(),
                     "temperature": float(temperature)}, str(_HEAD_CACHE))
         backbone.to(device)
         head.to(device)

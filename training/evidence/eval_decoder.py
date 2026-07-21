@@ -7,8 +7,12 @@ through the trained decoder before voting (docs/design/EVIDENCE_ENGINE_TIER2.md 
   decoder refines evidence + pools -> argmax over the stream's candidate labels.
 
 Provenance-guarded: the encoder checkpoint hash must match the bank + the decoder's recorded
-backbone. Prints per-cell macro-F1 and the mean, next to ConSE 42.7 / untrained 47.5 / harnet 47.3.
-The gate: BEAT 47.5 on the primary cells (else the decoder is dropped and we ship untrained).
+backbone. Prints per-cell macro-F1 and the mean.
+
+**The gate is `--untrained` at the SAME top-k/tau, not a remembered constant.** The historical
+"beat 47.5" framing was unsound: 47.5 was measured at top_k=0/tau=0.03 with ensembled candidate
+text, while this script runs top_k=48/tau=0.05, so the two were never comparable. Output defaults
+to baseline parity (bare eval label strings).
 
 Run:
     PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
@@ -74,10 +78,15 @@ def main() -> None:
     ap.add_argument("--decoder", type=Path, default=_DIR / "evidence_decoder.pt")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--datasets", nargs="*", default=list(policy.PRIMARY_EVAL_DATASETS))
-    ap.add_argument("--raw-labels", action="store_true",
-                    help="BASELINE PARITY: embed the bare eval label string (what eval/scoring.py "
-                         "gives every ConSE baseline) instead of the paraphrase ensemble. Any "
-                         "HALO-vs-baseline number must use this, or ensemble every model.")
+    # Parity is the DEFAULT. It used to be opt-in, so the default run gave HALO an 8-way
+    # training-derived paraphrase ensemble over the eval candidate labels while every ConSE
+    # baseline got a bare `label.replace("_", " ")` -- worth ~2.6 F1 (46.7 vs 44.1). A non-parity
+    # number must now be asked for explicitly, and is labelled as such in the output.
+    ap.add_argument("--ensemble-candidates", dest="raw_labels", action="store_false", default=True,
+                    help="NON-PARITY DIAGNOSTIC: embed the paraphrase ensemble over the eval "
+                         "candidate labels. No ConSE baseline gets this, so the result is NOT "
+                         "comparable to the baseline table. Default is bare eval label strings, "
+                         "exactly what eval/scoring.py hands every baseline.")
     ap.add_argument("--untrained", action="store_true",
                     help="CONTROL: skip loading the trained weights. Identity-at-init means this is "
                          "EXACTLY the untrained mechanism at the SAME top-k/tau, isolating the "
@@ -126,13 +135,20 @@ def main() -> None:
                 per_cell[f"{ds}/{spec.stream_id}"] = round(f1, 1)
                 print(f"  {ds}/{spec.stream_id:22} F1={f1:.1f}", flush=True)
     mean = round(float(np.mean(list(per_cell.values()))), 1)
-    print(f"  MEAN = {mean}  (ConSE 42.7 · untrained 47.5 · harnet 47.3)", flush=True)
+    # Do NOT print a hardcoded comparison here. The old line quoted "untrained 47.5", which was
+    # measured at a DIFFERENT retrieval config (top_k=0, tau=0.03) and a different label-text
+    # protocol from anything this script produces -- so a run could print 47.6 and read as
+    # "beat the floor" when its like-for-like control was 46.7. Run --untrained to get the control.
+    parity = "baseline-parity (bare eval labels)" if args.raw_labels else "NON-PARITY (ensembled candidates)"
+    print(f"  MEAN = {mean}   [{parity}, top_k={blob['topk']}, tau={blob['tau_retr']}]", flush=True)
+    print(f"  compare ONLY against `--untrained` at these same settings.", flush=True)
     # Separate artifacts so no run can clobber another's PER-CELL breakdown. The arm tags alone
     # were not enough: rebuilding the bank at a new vocabulary reuses the same filenames, and the
     # Phase-2 93-label rerun destroyed the 59-label per-cell numbers that way (only the mean
     # survived, in prose). The bank vocabulary is therefore part of the filename.
     vocab_fp = bank.get("vocab_fp") or vocab_fingerprint(list(bank["vocab"]))
-    tag = ("_untrained" if args.untrained else "") + ("_rawlabels" if args.raw_labels else "")
+    # Parity is the default, so it is the UNmarked case; a non-parity diagnostic is marked.
+    tag = ("_untrained" if args.untrained else "") + ("" if args.raw_labels else "_enscand")
     out = _DIR / f"eval_decoder{tag}__v{len(bank['vocab'])}_{vocab_fp[:8]}.json"
     out.write_text(json.dumps({"per_cell": per_cell, "mean": mean,
                                "untrained_control": bool(args.untrained),

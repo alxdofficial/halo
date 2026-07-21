@@ -213,7 +213,11 @@ def fit_fingerprint(**parts) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
-def make_probe(feat_dim: int, n_classes: int, hidden: int = 512):
+PROBE_HIDDEN = 512          # the ONE hidden width; fingerprints derive from this, never a literal
+PROBE_SPEC = f"2layer-{PROBE_HIDDEN}"
+
+
+def make_probe(feat_dim: int, n_classes: int, hidden: int = PROBE_HIDDEN):
     """The ONE probe architecture every ConSE-tier baseline fits on its frozen features.
 
     Phase 1.4. Previously harnet used the official 2-layer ``EvaClassifier``
