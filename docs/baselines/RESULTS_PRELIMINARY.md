@@ -1,5 +1,12 @@
 # Baseline zero-shot results — PRELIMINARY (2026-07-14)
 
+> ⛔ **SUPERSEDED (2026-07-21).** Older 6-cell protocol. The current 7-cell table is
+> `docs/baselines/RESULTS_V2.md`; the single source of truth for all numbers is
+> `docs/RESULTS_CANONICAL.md`. NOTE: harnet's **49.5** here is its 6-cell mean and is NOT related to
+> the (retracted) 49.5 that the evidence decoder briefly showed — a pure coincidence that will
+> otherwise cause confusion.
+
+
 > ⚠️ **PRELIMINARY — not final.** Real numbers, but several audit P1 fixes are NOT yet applied
 > (see caveats). Do not cite. Establishes the *bar HALO must beat*; HALO itself is not built yet.
 

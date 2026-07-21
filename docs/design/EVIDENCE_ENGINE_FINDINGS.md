@@ -1,8 +1,17 @@
 # Evidence engine — critical findings (2026-07-20)
 
-Analysis run after the Tier-2 decoder cleared its gate (49.5 mean macro-F1 vs the 47.5 untrained floor).
-Everything here is measured, with the scripts named. **The headline result survives, but its
-interpretation changes substantially.** Read §2 first — it is the one that matters.
+> ⚠️ **STATUS (updated 2026-07-21). The headline did NOT survive.** This document was written when the
+> decoder appeared to score 49.5 vs a 47.5 floor. §6 then found that number rested on eval-dataset text
+> contamination; §7 reports the corrected figures. **At baseline parity HALO scores ~45.7–46.1 vs harnet
+> 47.3 — we do not beat harnet.** See `docs/RESULTS_CANONICAL.md`, which is the single source of truth
+> for numbers.
+>
+> **Numbers in §2 and §4 below were computed on the contaminated-text scale** (the 47.5/49.5 era). Their
+> *directions and shapes* hold — the seen-vs-unseen correlation and the bank-size inverted U — but their
+> absolute values do not. They have not been recomputed.
+
+Analysis run after the Tier-2 decoder appeared to clear its gate. Everything here is measured, with the
+scripts named. Read §2 first — it is the finding that most changes what we can claim.
 
 ---
 

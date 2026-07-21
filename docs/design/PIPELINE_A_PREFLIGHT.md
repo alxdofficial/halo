@@ -145,7 +145,7 @@ A1 signal-only target). 20k steps, **86 ms/step**, ~35 min, 5.6 GB VRAM. Checkpo
 - **CAVEAT — not the baseline number.** This kNN-BA is a *representation-clustering / few-shot-retrieval*
   probe (uses each eval set's own windows as the bank), NOT the ConSE **zero-shot macro-F1** the
   baseline table reports. It validates that same-activity windows cluster on unseen configs — exactly
-  what Pipeline B's retrieval needs — but it is NOT a head-to-head "beats harnet 49.5" claim. That comes
+  what Pipeline B's retrieval needs — but it is NOT a head-to-head "beats harnet 47.3" claim. That comes
   at M6 (ConSE adapter into the eval harness).
 - **Verdict: Pipeline A cleared its bar** (a config-transferable, retrieval-ready representation) →
   GREEN to build Pipeline B (M4 memory + M5 evidence head on this frozen checkpoint).
