@@ -1,52 +1,132 @@
 #!/usr/bin/env python3
 """Global (canonical) training-label vocabulary for the closed-vocab ConSE baselines.
 
-The ConSE baselines (CrossHAR, LiMU-BERT, ssl/harnet) each train ONE closed classifier whose output
-vocabulary is the set of every training dataset's activities. We build that vocabulary from the
-**canonical** labels (`data.scripts.labels.canonical_labels`), so a synonym never occupies two output
-classes (this is the harmonised label vocabulary the ConSE bridge maps into SBERT text space).
+The ConSE baselines (CrossHAR, LiMU-BERT, ssl/harnet) and HALO's memory bank each key on ONE closed
+vocabulary: the set of every training dataset's activities. We build it from the **canonical** labels
+(`data.scripts.labels.canonical_labels`) so a synonym never occupies two output classes.
 
-Regenerate whenever the training datasets or their `activities` change — the vocabulary defines label
-indices, so any cached ConSE head must be re-fit afterwards.
+SOURCE OF TRUTH = THE GRIDS, NOT metadata.json.
+Earlier versions read ``metadata.json["activities"]`` over a hardcoded 9-dataset list. That was wrong
+twice over: the list was stale (it still contained `hapt` and predated sp_sw_har / nfi_fared / harmes /
+xrf_v2), and **4 of the 12 current training datasets do not declare `activities` at all**. The result
+was a 59-label vocabulary while the grids actually contain 93 canonical labels — so **11.5% of all
+training windows (39,413 / 343,235) were silently dropped** as "out of vocabulary" by every consumer
+(the memory bank, and every ConSE head-fit), concentrated in the fine-grained ADLs from the newer
+datasets. Notably `elevator_up` / `elevator_down` existed in the corpus but were discarded, while
+usc_had's elevator classes were being reported as ~0 F1.
 
-    python -m data.scripts.labels.build_global_label_mapping   # writes data/labels/global_labels.json
+Deriving from the grid labels cannot drift from what the models actually see. metadata.json is still
+cross-checked and any disagreement is reported, but it is never the source.
+
+Regenerate whenever the training datasets or their grids change — the vocabulary defines label
+indices, so **every cached ConSE head and the memory bank must be rebuilt afterwards**. The adapters
+compare their cached `labels` against this file and refit automatically on mismatch.
+
+    python -m data.scripts.labels.build_global_label_mapping           # writes data/labels/global_labels.json
+    python -m data.scripts.labels.build_global_label_mapping --dry-run # show the diff, write nothing
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+from collections import Counter
 from pathlib import Path
 from typing import List, Optional
 
 from data.scripts.labels.canonical_labels import canonicalize
 
 REPO = Path(__file__).resolve().parents[3]
-TRAIN_DATASETS = [
-    "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar", "hapt", "mhealth", "capture24",
-]
 OUT_PATH = REPO / "data" / "labels" / "global_labels.json"
 
 
-def global_label_vocabulary(train_datasets: Optional[List[str]] = None) -> List[str]:
-    """Sorted list of canonical activity labels across the training datasets (the ConSE vocabulary)."""
-    labels = set()
-    for ds in train_datasets or TRAIN_DATASETS:
-        meta = json.loads((REPO / "data" / "datasets" / ds / "metadata.json").read_text())
-        labels.update(canonicalize(a) for a in meta.get("activities", []))
-    return sorted(labels)
+def _train_datasets() -> List[str]:
+    """The canonical training-dataset list, imported lazily from the training pipeline so this
+    script can never drift from what actually gets trained on."""
+    from training.tokenizer.pretrain_data import TRAIN_DATASETS
+    return sorted(TRAIN_DATASETS)
+
+
+def global_label_vocabulary(train_datasets: Optional[List[str]] = None,
+                            alignment: str = "native"):
+    """(sorted canonical vocabulary, per-label window counts) taken from the GRIDS."""
+    from data.scripts.eda.grid_io import discover_grids
+    datasets = set(train_datasets or _train_datasets())
+    counts: Counter = Counter()
+    for ref in discover_grids(alignment):
+        if ref.dataset not in datasets:
+            continue
+        for raw in ref.labels:
+            counts[canonicalize(raw)] += 1
+    return sorted(counts), counts
+
+
+def _metadata_declared(datasets: List[str]):
+    """Canonical labels declared in metadata.json, plus the datasets that declare none."""
+    declared, missing = set(), []
+    for ds in datasets:
+        p = REPO / "data" / "datasets" / ds / "metadata.json"
+        acts = json.loads(p.read_text()).get("activities") if p.exists() else None
+        if not acts:
+            missing.append(ds)
+            continue
+        declared.update(canonicalize(a) for a in acts)
+    return declared, missing
 
 
 def main() -> None:
-    vocab = global_label_vocabulary()
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dry-run", action="store_true", help="print the diff, write nothing")
+    ap.add_argument("--alignment", default="native")
+    args = ap.parse_args()
+
+    datasets = _train_datasets()
+    vocab, counts = global_label_vocabulary(datasets, args.alignment)
+    total = sum(counts.values())
+    print(f"[vocab] {len(datasets)} training datasets: {datasets}")
+    print(f"[vocab] {len(vocab)} canonical labels over {total} windows ({args.alignment} grids)")
+
+    # cross-check against metadata.json (informational only — grids win)
+    declared, missing = _metadata_declared(datasets)
+    if missing:
+        print(f"[vocab] NOTE: no 'activities' declared in metadata.json for: {missing} "
+              f"(harmless — the vocabulary comes from the grids)")
+    only_meta = sorted(declared - set(vocab))
+    if only_meta:
+        print(f"[vocab] NOTE: declared in metadata but absent from grids: {only_meta}")
+
+    prev = json.loads(OUT_PATH.read_text())["labels"] if OUT_PATH.exists() else []
+    added, removed = sorted(set(vocab) - set(prev)), sorted(set(prev) - set(vocab))
+    if prev:
+        unlocked = sum(counts[l] for l in added)
+        print(f"[vocab] previous vocabulary: {len(prev)} labels")
+        print(f"[vocab]   + {len(added)} ADDED   (windows they unlock: {unlocked} = "
+              f"{100 * unlocked / max(1, total):.2f}%)")
+        for l in added:
+            print(f"[vocab]        + {l:34} {counts[l]:>7} windows")
+        print(f"[vocab]   - {len(removed)} REMOVED (not present in any grid): {removed}")
+
+    if args.dry_run:
+        print("[vocab] --dry-run: nothing written")
+        return
+
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUT_PATH.write_text(json.dumps({
-        "description": ("Canonical training-label vocabulary (ConSE closed-vocab). Sorted union of "
-                        f"canonicalized activities across {len(TRAIN_DATASETS)} training datasets. "
-                        "Generated by data.scripts.labels.build_global_label_mapping — do not hand-edit."),
+        "description": ("Canonical training-label vocabulary (ConSE closed-vocab + HALO memory bank). "
+                        f"Sorted union of canonicalized labels observed in the {args.alignment} GRIDS "
+                        f"of {len(datasets)} training datasets — derived from the data, never from "
+                        "metadata.json. Generated by data.scripts.labels.build_global_label_mapping "
+                        "— do not hand-edit. Regenerating INVALIDATES every cached ConSE head and the "
+                        "memory bank; they must be rebuilt."),
         "labels": vocab,
         "num_labels": len(vocab),
+        "train_datasets": datasets,
+        "alignment": args.alignment,
+        "window_counts": {l: counts[l] for l in vocab},
     }, indent=2) + "\n")
-    print(f"wrote {OUT_PATH} — {len(vocab)} canonical labels")
+    print(f"[vocab] wrote {OUT_PATH} — {len(vocab)} canonical labels")
+    print("[vocab] !! every cached ConSE head and the memory bank is now STALE and must be rebuilt")
 
 
 if __name__ == "__main__":

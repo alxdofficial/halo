@@ -135,13 +135,24 @@ def _hub_dir() -> Path:
 
 
 def _load_harnet(num_classes: int, device) -> nn.Module:
-    """Pretrained harnet5 (frozen trunk + fresh EvaClassifier head of `num_classes`)."""
+    """Pretrained harnet5 (frozen trunk + fresh EvaClassifier head of `num_classes`).
+
+    H4: the classifier head is freshly constructed here, so torch's global RNG determines its init.
+    Seed BEFORE construction or two runs get different heads (measured max init weight delta 0.971)
+    and the head-fit is not reproducible. FIT_SEED previously only seeded NumPy.
+    """
+    torch.manual_seed(FIT_SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(FIT_SEED)
     hubdir = _hub_dir()
     if hubdir.exists():
         model = torch.hub.load(str(hubdir), HARNET_NAME, class_num=num_classes,
                                pretrained=True, source="local")
     else:  # offline cache miss -> fetch once from GitHub
-        model = torch.hub.load(SSL_HUB_REPO, HARNET_NAME, class_num=num_classes,
+        # H5: pin the TAG on the cache-miss path too. Using the bare repo here fetched the
+        # default branch on a fresh pod, so a remote run could silently use different code/weights
+        # than the local v1.0.0 cache.
+        model = torch.hub.load(_hub_ref(), HARNET_NAME, class_num=num_classes,
                                pretrained=True, source="github", trust_repo=True)
     model.to(device)
     for p in model.feature_extractor.parameters():
@@ -221,7 +232,10 @@ def _gravity_dc(windows: np.ndarray, channels: List[str]) -> float:
 class HarnetAdapter(ConSEAdapter):
     """ssl-wearables / harnet5, ConSE tier (accel-only, 30 Hz, g with gravity)."""
 
-    name = "harnet"
+    # B1: the two corpus modes must have DISTINCT experiment identities. Results are written to
+    # `{name}__{dataset}__{stream}.json`, so sharing the name meant a matched run silently
+    # overwrote the legacy results and the table could never show both rows.
+    name = "harnet" if CORPUS_MODE == "legacy" else "harnet_matched"
     contract = InputContract(channels=list(ACC_CHANNELS), rate_hz=TARGET_HZ,
                              window_sec=TARGET_LEN / TARGET_HZ)
 
