@@ -32,7 +32,7 @@ from data.scripts.curate import deployment_policy as policy
 from eval.data import load_eval_stream
 from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_encoder
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
-from training.evidence.bank_guard import assert_bank_current
+from training.evidence.bank_guard import assert_bank_current, vocab_fingerprint
 from training.evidence.labeltext import ensemble_text
 from training.tokenizer.eval_transfer import build_encoder, encode_dataset
 from training.tokenizer.pretrain_data import _stream_gravity_state, stream_channel_descriptions
@@ -127,13 +127,22 @@ def main() -> None:
                 print(f"  {ds}/{spec.stream_id:22} F1={f1:.1f}", flush=True)
     mean = round(float(np.mean(list(per_cell.values()))), 1)
     print(f"  MEAN = {mean}  (ConSE 42.7 · untrained 47.5 · harnet 47.3)", flush=True)
-    # separate artifacts so the identity CONTROL never clobbers the trained result
+    # Separate artifacts so no run can clobber another's PER-CELL breakdown. The arm tags alone
+    # were not enough: rebuilding the bank at a new vocabulary reuses the same filenames, and the
+    # Phase-2 93-label rerun destroyed the 59-label per-cell numbers that way (only the mean
+    # survived, in prose). The bank vocabulary is therefore part of the filename.
+    vocab_fp = bank.get("vocab_fp") or vocab_fingerprint(list(bank["vocab"]))
     tag = ("_untrained" if args.untrained else "") + ("_rawlabels" if args.raw_labels else "")
-    out = _DIR / f"eval_decoder{tag}.json"
+    out = _DIR / f"eval_decoder{tag}__v{len(bank['vocab'])}_{vocab_fp[:8]}.json"
     out.write_text(json.dumps({"per_cell": per_cell, "mean": mean,
                                "untrained_control": bool(args.untrained),
                                "raw_labels_parity": bool(args.raw_labels),
-                               "topk": blob["topk"], "tau_retr": blob["tau_retr"]}, indent=2))
+                               "topk": blob["topk"], "tau_retr": blob["tau_retr"],
+                               "bank": {"n_windows": int(bank["Z"].shape[0]),
+                                        "n_labels": len(bank["vocab"]),
+                                        "vocab_fp": vocab_fp,
+                                        "backbone_fp": bank["backbone"].get("fingerprint")}},
+                              indent=2))
     print(f"-> {out}", flush=True)
 
 

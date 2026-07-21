@@ -79,16 +79,47 @@
 > pre-registered prediction (retrieval would gain from the recovered rare classes) is **only partly
 > borne out** and the net is negative.
 >
-> Per-cell, the split is informative: **inclusivehar 29.2 → 33.8 (+4.6)** and **shoaib 42.1 → 44.8
-> (+2.7)** — cells with fine-grained/unseen labels, which is where the recovered `escalator_*` /
-> `elevator_*` exemplars help exactly as predicted. But **motionsense 77.0 → 68.5 (−8.5)**, a cell
-> whose 6 labels are all simple and all seen.
+> **Full per-cell breakdown, 93-label bank, raw-label parity** (all 7 cells, both arms):
 >
-> **Most likely mechanism: added distractor mass.** The text-voting stage now scores against 93
-> label types instead of 57, so semantically-adjacent ADLs (`making_tea`, `pouring_water`,
-> `taking_medicine`) can steal votes from the correct answer on easy cells. More data helped where
-> coverage was the bottleneck; more *label types* hurt where discrimination was already fine.
-> This is a hypothesis from one run — it needs the per-class confusion check before being asserted.
+> | eval cell | unseen-label % | control (untrained) | trained decoder | gain |
+> |---|---|---|---|---|
+> | motionsense/phone_front_pocket | 0% | 71.0 | 68.5 | −2.5 |
+> | realworld/phone_waist | 0% | 42.2 | 44.4 | +2.2 |
+> | shoaib/phone_right_pocket | 0% | 39.1 | 44.8 | **+5.7** |
+> | tnda_har/watch_wrist | 25% | 52.1 | 48.9 | −3.2 |
+> | inclusivehar/phone_waist | 33% | 33.9 | 33.8 | −0.1 |
+> | ut_complex/watch_wrist | 38% | 53.2 | 45.3 | **−7.9** |
+> | usc_had/phone_hip | 58% | 17.5 | 19.1 | +1.6 |
+> | **mean** | | **44.1** | **43.5** | **−0.6** |
+>
+> **This table supersedes §2 below, and it does NOT reproduce §2's headline.** The
+> REMEDIATION_PLAN pre-registered that "§2's r = −0.973 must be recomputed, not assumed — usc_had is
+> its extreme anchor and is exactly the cell that gains elevator exemplars." Recomputed on these
+> numbers:
+>
+> **Pearson r = −0.328 (p = 0.47); Spearman ρ = −0.408 (p = 0.36), n = 7 — not significant.**
+> 0%-unseen cells mean **+1.8**; ≥25%-unseen cells mean **−2.4**. The direction survives; the
+> near-perfect relationship does not. **usc_had, the 58%-unseen anchor that drove the original
+> correlation, flips from −4.1 to +1.6** — precisely the cell the vocabulary fix supplied with
+> `elevator_*` exemplars. §2's "r = −0.973" should be read as a pre-vocab-fix artifact whose
+> strongest data point was an artifact of the missing labels.
+>
+> The regression is now carried mostly by **ut_complex (−7.9)**, one cell, which is not enough to
+> support a general "gains are confined to seen labels" claim.
+>
+> **Candidate mechanism (unverified): added distractor mass.** The text-voting stage now scores
+> against 93 label types instead of 57, so semantically-adjacent ADLs (`making_tea`,
+> `pouring_water`, `taking_medicine`) can steal votes on easy cells. Consistent with motionsense and
+> tnda_har; inconsistent with shoaib (+5.7, also 0% unseen). **One run, no confusion analysis — this
+> is not established.**
+>
+> **Reporting failure, recorded.** The first version of this entry gave 3 of these 7 cells in prose,
+> and the 3 chosen were the ones consistent with the distractor-mass hypothesis. The other 4 were in
+> the output JSON the whole time. The full table is now mandatory for every future entry here.
+>
+> **Not recoverable:** the 59-label per-cell breakdown, because `eval_decoder.py` writes to a fixed
+> filename and the Phase-2 rerun overwrote it. Only its mean (46.1 / 45.1) and three cells quoted in
+> prose survive. Fixed going forward by stamping run outputs (see task).
 >
 > **The proxy/target anti-correlation is now stark:** the internal metric rose 0.694 → **0.835**
 > while ZS-XD fell 46.1 → 43.5. Our selection metric is actively misleading, which retires it as a
@@ -145,6 +176,11 @@ claims both axes; this eval set stresses the config axis far more than the label
 ---
 
 ## 2. ⚠️ The decoder's gain is concentrated on SEEN labels — and it *hurts* on unseen ones
+
+> **SUPERSEDED (2026-07-21).** Recomputed on the 93-label bank this correlation drops to
+> **r = −0.328, p = 0.47 (not significant)**, and its extreme anchor usc_had flips sign. The
+> numbers below are pre-vocab-fix and are retained only as a record of what the missing-label bug
+> made us believe. See the Phase-2 banner at the top of this document for the current table.
 
 Cross-referencing per-cell unseen-label fraction against the decoder's gain over its own identity
 control produces a near-perfect inverse relationship:
