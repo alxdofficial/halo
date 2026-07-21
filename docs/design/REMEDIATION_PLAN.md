@@ -136,3 +136,50 @@ the paper *is*, so it should not wait behind the polish items.
 highest-leverage single item on this list and is independent of everything above.
 
 **Deferred until after a clean rebuild:** Phase 5.
+
+---
+
+## Debug sweep 2026-07-21 — three adversarial reviews of the Phase 0–2 surface
+
+Three parallel reviewers over (a) the subject-split manifest, (b) the unified probe + cache
+fingerprints, (c) the evidence-engine core. Everything below was confirmed by reading the exact
+code or running it, not inferred.
+
+### Fixed and pushed (`c3581ba`, `a02da17`, and follow-up)
+
+| severity | finding | fix |
+|---|---|---|
+| CRITICAL | `fit_fingerprint()` had **4 writers and 0 readers**; 3 of 4 adapters did not even persist it. Phase 1.6's "real cache fingerprints" was never implemented — only the unrelated 59→93 vocab change was forcing refits. | shared `_fit_fp(vocab)` per adapter, called by loader **and** writer; covers split hash, cap, corpus mode, dataset list; probe width derives from `base.PROBE_HIDDEN` |
+| CRITICAL | `EVIDENCE_ENGINE_TIER2.md` still asserted "the decoder clears the gate, 49.5 > 47.5" and marked T2.2/T2.3 GATE PASSED, below its own retraction banner | both gates marked **FAILED on re-measurement**; result paragraph struck through + banner-flagged |
+| HIGH | **Leakage into harnet's selection and calibration folds.** harnet's default corpus includes `hapt`, absent from the manifest ⇒ 30 subjects fell through to train. `hapt` is the extended re-release of UCI-HAR — same 30 people, per-window NCC 0.98. | `EXTRA_MANIFEST_DATASETS` + `ALIASED_COHORTS`; aliased cohorts inherit the canonical twin's fold. 0/30 mismatches. Manifest 452 → **482** subjects |
+| HIGH | `split_indices` failed **silently**: a total miss gave empty val → `np.mean([])` = nan → `nan > best_acc` never true → `best_sd` stays None → adapters keep the LAST epoch and calibrate on an empty tensor. Nothing raised. | raises on unknown ids and on an empty fold; `allow_unknown=True` for the genuine case |
+| HIGH | `eval_decoder`'s **default was not baseline parity** — HALO got an 8-way paraphrase ensemble the ConSE baselines never get (worth ~2.6 F1) | parity is the default; `--ensemble-candidates` for the diagnostic; removed the hardcoded "untrained 47.5" print (different retrieval config) |
+| HIGH | decoder selection split was **config-only** — 30/59 val subjects also in train queries | config **AND** subject holdout; boundary windows dropped; asserted disjoint |
+| MEDIUM | probe init **unseeded** in halo/crosshar/limubert (H4 fix only ever landed in harnet), now ~180k params | `torch.manual_seed(FIT_SEED)` in all four |
+| MEDIUM | fully-masked evidence row → all `-inf` → softmax NaN → NaNs the batch loss | dead rows pool to zero evidence |
+| MEDIUM | `same_window_bias` gated on `float(param) == 0.0` and is initialised to 0.0 ⇒ branch always short-circuited, parameter **frozen at zero forever** (`grad` stayed None) | gate on whether window ids were supplied |
+| MEDIUM | `bank_guard` called by only **3 of 9** consumers — missing `tier1_sweep` and `select_retrieval_config`, the two scripts that PRODUCE the 47.5 floor and the frozen retrieval config | all 9 guarded; guard also requires a recorded backbone fingerprint |
+| MEDIUM | `use_descriptions` was a contamination path `train_only` did not gate | refuses the combination |
+| LOW | `sample_text_tables` claimed a match "can never" be made on identical strings — collides at 1/K ≈ 1 label/episode | docstring corrected |
+| — | `eval_decoder` output tagged by ARM but not BANK, so the 93-label rerun overwrote the 59-label per-cell breakdown | filenames carry vocab size + fingerprint; JSON records bank provenance |
+| — | 3 tautological split tests + 2 tautological decoder tests; the H8 test's fixture used ids that don't exist (`kuhar:1` vs the real `kuhar:s1001`), so 29/68 entries silently exercised the train-fallback | rewritten to be falsifiable; added the test that would have caught the `hapt` bug |
+
+### Still open
+
+| # | finding | why it's not done |
+|---|---|---|
+| S1 | **Selection metric is 78% seen-label** (45/58 val labels also in train). This is the mechanical explanation for the proxy rising while ZS-XD falls. | needs the open-vocab-only slice — this IS remediation 5.2, a design change not a bug fix. The trainer now prints the number every run. |
+| S2 | Trained on **single-paraphrase** text, evaluated on **8-way ensembled** text — the refiner learns a residual near individual-paraphrase vectors and is applied to ensemble centroids | needs a decision: ensemble during training, or evaluate on single variants. Not obviously a bug. |
+| S3 | ~106k decoder params (`proj_cfg`, `proj_time`, `same_window_bias`) receive **no input** from any real caller — `ev_mask`, config text, time and window ids are never passed by `run_episode` or `score_cell` | either wire them (T2.4/T2.5) or delete them; deleting changes the checkpoint format |
+| S4 | `clamp_min(1e-12)` collapses distinct tiny retrieval weights, so identity is exact only when `min(w_retr) ≥ 1e-12` | cannot flip an argmax at realistic magnitudes; documented |
+| S5 | `log_out_scale` is a free CE sink — argmax is invariant to it, so training loss can fall with no effect on any reported metric | muddies the loss curve as a health signal; harmless to results |
+| S6 | harnet legacy applies **no per-stream cap** while the other three cap at 20 000 | deliberate (preserves the published row); now printed loudly. Resolve via the `harnet_matched` row. |
+| S7 | Result JSONs carry no fit provenance (no split fingerprint / vocab hash / `fit_fp`) | means you cannot tell from `eval/results/` alone whether a cell used a stale head |
+
+### Consequence for the refits
+
+The split manifest changed (452 → 482 subjects, `hapt` aliased), the probe is now seeded, and the
+fingerprint is now enforced. **Every cached ConSE head is stale and all four must be refit together.**
+The four pre-change heads are preserved in `baselines/_pre_vocabfix_2026-07-21/` — they were
+untracked, gitignored, single-copy, and the next harnet run would have overwritten the one that
+produced 47.3.
