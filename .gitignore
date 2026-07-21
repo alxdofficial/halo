@@ -60,3 +60,6 @@ training/tokenizer/outputs/**/*.pt
 # Keep one-time analysis deliverables (m0_probe/, m2_gate/, corpus_audit/, objective_health/).
 training/tokenizer/outputs/pretrain*/
 training/tokenizer/outputs/**/*.log
+
+# agent worktrees / session scratch
+.claude/
