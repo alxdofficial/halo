@@ -1,5 +1,65 @@
 # Evidence engine — critical findings (2026-07-20)
 
+> ## STATUS — READ FIRST (updated 2026-07-21)
+>
+> **1. The hard correctness + fairness bugs were found, fixed, AND the scores re-run.**
+> The headline "49.5, beats harnet" is **RETRACTED**. It depended on eval-label text
+> contamination (F1) plus hyperparameters selected on the eval cells (F2). Both are fixed and
+> everything below was **re-measured at true baseline parity** — bare eval label strings, exactly
+> what `eval/scoring.py` hands every ConSE baseline.
+>
+> | configuration (post-fix, baseline parity) | mean macro-F1 |
+> |---|---|
+> | ConSE bridge — parametric, fitted head, same frozen encoder | **42.7** |
+> | **retrieval bridge — untrained, full-soft, raw labels both sides** | **45.9** |
+> | retrieval bridge, honestly-selected config (F2 fix) | 45.7 |
+> | retrieval bridge @ top-k=48 (decoder's identity control) | 45.1 |
+> | trained decoder, no label augmentation | 46.1 |
+> | trained decoder, 16-variant label augmentation | 43.5 |
+> | harnet (legacy corpus) | **47.3** |
+>
+> **We do not beat harnet.** What survives is internally controlled and parameter-free: on one
+> frozen encoder and corpus, a **non-parametric retrieval bridge beats the ConSE parametric
+> bridge (42.7 → 45.9) with zero fitted parameters**, reaching near-parity with a model trained on
+> ~10⁴× more data at ~2× its parameters. Measured F2 optimism was only 0.2–0.3.
+>
+> **2. ONE BUG REMAINS OPEN — the training vocabulary (59 → 93).**
+> The global vocabulary was derived from a stale, structurally-broken source: a hardcoded
+> 9-dataset list read from `metadata.json["activities"]`, which 4 of our 12 training datasets do
+> not even declare. The grids contain **93** canonical labels; the vocabulary had **59**. Every
+> consumer therefore discarded **39,413 / 343,235 windows (11.48%)**, concentrated in the
+> fine-grained ADLs of the newer datasets — including `elevator_up`/`elevator_down`, which existed
+> in our corpus while we were reporting usc_had's elevator classes as ~0 F1 and blaming the encoder.
+>
+> The **builder is fixed and the vocabulary regenerated to 93**, but **nothing has been rebuilt or
+> refit yet**. So every number in this document — including the post-fix re-runs above — still
+> rests on the 11.5%-truncated corpus. The memory bank and all four ConSE heads are stale.
+>
+> **What this does and does not change.** It does **not** overturn the conclusions here, because the
+> bug hit both sides of every comparison equally: all ConSE models lost the same 11.48% of
+> head-fit data, so the contrasts (retrieval vs ConSE; trained vs untrained decoder; bank-size
+> sweep; label-augmentation result) are internally consistent, and the retraction stands regardless
+> — it was caused by text contamination and eval-set selection, not by the vocabulary. The
+> **scale/efficiency analysis (§0.1) is entirely unaffected**, as is the **Phase-A encoder**, which
+> trained on all 93 labels and never read this file. **UniMTS and NormWear are also unaffected**
+> (own text towers, no fitted head).
+>
+> **Absolute values will move, and one finding is genuinely exposed:** §2's unseen-label
+> correlation (r = −0.973) uses **usc_had as its most extreme anchor**, and usc_had is precisely
+> the cell that gains the recovered `elevator` exemplars. Its per-cell numbers will change, so the
+> correlation must be re-computed rather than assumed. Prediction, stated *before* measuring:
+> retrieval should benefit **more** from these rare classes than a parametric head does (~120
+> elevator windows is negligible for a 93-way softmax but ample for kNN), so the retrieval rows may
+> gain more than the ConSE rows.
+>
+> **3. Do not mix protocols.** Any table must be entirely pre-fix or entirely post-fix. The repo is
+> currently mid-transition: `global_labels.json` says 93 while the bank still says 59, so a naive
+> re-run would silently blend the two.
+>
+> **Next:** shared stratified subject split + macro-F1 selection → rebuild bank → refit all four
+> ConSE heads → re-run → report a clean before/after.
+
+
 Analysis run after the Tier-2 decoder cleared its gate (49.5 mean macro-F1 vs the 47.5 untrained floor).
 Everything here is measured, with the scripts named. **The headline result survives, but its
 interpretation changes substantially.** Read §2 first — it is the one that matters.
