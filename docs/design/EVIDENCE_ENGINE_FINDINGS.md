@@ -236,6 +236,31 @@ Also flagged and worth fixing: `BASELINE_FAIRNESS_POLICY.md` claims crosshar/lim
 
 ---
 
+## 6b. F2 FIXED — optimism bias measured at only ~0.2–0.3 F1
+
+`training/evidence/select_retrieval_config.py` re-does the retrieval-config selection honestly: each
+**held-out training config** is treated as a pseudo-eval-dataset (queries = that config's windows;
+memory = the *other* configs, so the query config is absent exactly as a real eval dataset is;
+candidates = that config's own label set). Same config split/seed as `train_decoder.py`. Runs on
+cached bank vectors in seconds. Held out: harmes/watch_wrist, nfi_fared/back, pamap2/watch_wrist,
+xrf_v2/glasses.
+
+Honest winner **(top_k=200, τ=0.08, no CSLS, ensemble)** = 82.87. The **eval-selected**
+(top_k=0, τ=0.03, ensemble) config scores 82.77 and ranks **3rd of 36** — i.e. it was already
+near-optimal by honest selection; the top-10 span is only ~0.5.
+
+Applying each to the eval cells **once**:
+
+| retrieval config | raw labels (parity) | train-only ensemble |
+|---|---|---|
+| eval-selected (top_k=0, τ=0.03) | 45.9 | 46.2 |
+| honest-selected (top_k=200, τ=0.08) | 45.7 | 45.9 |
+| **optimism bias** | **0.2** | **0.3** |
+
+**Verdict: F2 is real but small (~0.2–0.3).** It does not rescue the harnet comparison — the honest
+number moves *down*, not up. Note 45.9 (vs 46.1 in §7) uses bare strings on BOTH the memory and
+candidate sides, the strictest parity definition.
+
 ## 7. CORRECTED RESULTS after fixing F1 — and a negative result on label augmentation
 
 Two fixes applied: (i) `global_label_paraphrases(train_only=True)` is now the default, so paraphrases
