@@ -12,7 +12,9 @@ on the untrained mechanism (docs/design/EVIDENCE_ENGINE_TIER2.md §3):
     This is genuine zero-shot per episode (Matching/Prototypical-net style), the faithful analog
     of the ZS-XD eval, and it removes M4a's "retrieve the same label" crutch (M4a was label-present).
   * **Reg-to-identity.** The refinement Δ and the pooling residual (KL to the retrieval prior) are
-    penalized, so the decoder can only improve on the untrained 47.5 mechanism, never destroy it.
+    penalized. NOTE: this is a soft prior, NOT a guarantee. Zero-init makes the decoder start AT the
+    untrained mechanism, but nothing bounds test-time degradation, and it has in fact degraded it
+    (46.7 -> 44.2 on the 93-label bank). Do not describe this as 'can only improve'.
   * **Checkpoint selection = held-out-CONFIG × class-disjoint transfer** on FIXED val episodes
     (never closed-vocab val — the M4a trap).
 

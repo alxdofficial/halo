@@ -16,6 +16,30 @@
 > | **HALO — evidence engine** (retrieval + trained decoder) | **46.1** |
 > | harnet — reference | **47.3** |
 >
+> **Per-cell** (macro-F1; from the Phase-0.1 archive `eval/results_archive/2026-07-20_pre-vocab-fix/`,
+> which is the shared-harness output with subject-stratified bootstrap CIs):
+>
+> | row | motionsense | realworld | shoaib | inclusivehar | usc_had | tnda_har | ut_complex | mean |
+> |---|---|---|---|---|---|---|---|---|
+> | **HALO — ConSE** | 69.9 | 41.3 | 41.8 | 31.7 | 17.8 | 42.5 | 53.7 | **42.7** |
+> | **HALO — evidence engine (UNtrained)** | 80.8 | 44.2 | 51.5 | 29.0 | 19.0 | 53.4 | 54.9 | **47.5** |
+> | harnet — reference | 82.2 | 32.2 | 71.3 | 23.1 | 34.5 | 55.3 | 32.6 | **47.3** |
+>
+> CIs for the untrained evidence row: motionsense 80.8 [76.7, 84.5] · realworld 44.2 [41.1, 47.6] ·
+> shoaib 51.5 [44.9, 58.1] · inclusivehar 29.0 [25.4, 32.5] · usc_had 19.0 [17.3, 20.5] ·
+> ut_complex 54.9 [52.8, 57.1] · tnda_har [degen, unknown-subject sentinel].
+>
+> ⚠️ **The 47.5 row above is the pre-fix, non-parity configuration** — it exceeds harnet only under
+> the F1/F2 confounds. At bare-eval-label parity the same mechanism scores **44.1**. Do not quote
+> 47.5 as a win.
+>
+> ⚠️ **The trained decoder (46.1) has NO per-cell row and NO CIs here**, because it is the one HALO
+> variant that is not a registered adapter: `training/evidence/{train,eval}_decoder.py` are
+> standalone scripts that emit a single summary file, so they bypass `eval.run_baselines` and its
+> bootstrap CIs. That is remediation item 3.3 (F5) and it is also why the Phase-2 rerun was able to
+> overwrite the 59-label per-cell breakdown. Wiring the decoder in as an adapter fixes all three at
+> once.
+>
 > ⚠️ **Which HALO-ConSE number is which.** The 42.7 above is ConSE on the **`pretrain_fixed_mr`**
 > encoder — the SAME backbone the evidence engine uses, which is what makes it an apples-to-apples
 > contrast. `docs/baselines/RESULTS_V2.md` reports HALO-ConSE as **40.4**, because
