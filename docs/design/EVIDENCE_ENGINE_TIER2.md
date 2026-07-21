@@ -17,17 +17,20 @@ M4a is built and diagnosed. On the 7-cell ZS-XD gate (same frozen fixed+MR encod
 | untrained @ top-k=48 (identity CONTROL for the decoder) | 46.7 |
 | **T2.2+T2.3 trained evidence DECODER** (episodic class-disjoint loss) | **49.5** |
 
-> ⚠️ **CORRECTION (2026-07-20, same day):** the "> harnet 47.3" reading below is **RETRACTED**. A
-> fairness audit (see `EVIDENCE_ENGINE_FINDINGS.md` §6, all points code-verified) found the +2.2 margin
-> is the size of a text-ensemble advantage no baseline was given — and which is partly built from
-> hand-authored synonyms for **eval-dataset** labels (70% of eval candidates) — selected using
-> hyperparameters tuned **on the eval cells**, against a harnet head fit on a corpus missing the wrist
-> streams where we win, with no CIs. What survives is the **internally-controlled** claim: on the same
-> frozen encoder + corpus, a retrieval bridge beats the ConSE bridge 42.7 → 47.5 → 49.5, reaching
-> *parity* with harnet at ~10⁴× less pretraining data. Also see §2 of FINDINGS: the decoder's gain is
-> confined to seen-label cells (r = −0.973) and it *regresses* on the most open-vocabulary ones.
+> ⛔ **EVERY NUMBER IN THE TABLE ABOVE IS ON THE RETRACTED CONTAMINATED-TEXT SCALE** (see
+> `EVIDENCE_ENGINE_FINDINGS.md` §6 F1). Corrected, at baseline parity: ConSE **42.7**, untrained
+> retrieval **45.7–45.9**, trained decoder **46.1**, harnet **47.3**. **We do not beat harnet.**
+> `docs/RESULTS_CANONICAL.md` is the single source of truth.
 
-**RESULT (2026-07-20): the decoder clears the gate.** 49.5 > 47.5 floor, > harnet 47.3. Against its own
+> **Why:** the +2.2 margin was the size of a text-ensemble advantage no baseline was given — partly built
+> from hand-authored synonyms for **eval-dataset** labels (70% of eval candidates) — under hyperparameters
+> tuned **on the eval cells**, against a harnet head fit on a corpus missing the wrist streams where we
+> win, with no CIs. What survives is the **internally-controlled** claim: on the same frozen encoder +
+> corpus, the retrieval bridge beats the ConSE bridge (42.7 → 45.9 at parity) at ~10⁴× less pretraining
+> data. Also see FINDINGS §2: the decoder's gain was confined to seen-label cells (r = −0.973) and it
+> *regressed* on the most open-vocabulary ones.
+
+**RESULT (2026-07-20), ON THE RETRACTED CONTAMINATED-TEXT SCALE:** the decoder scored 49.5 vs a 47.5 floor. ~~> harnet 47.3~~ — that comparison is **withdrawn**; at parity it is 46.1 vs 47.3. Against its own
 identity control at the same retrieval config (46.7 — top-k costs 0.8 vs full-soft), the decoder is worth
 **+2.8**, so the gain is attributable to the decoder, not the retrieval change. Per-cell vs control:
 motionsense 78.3→86.2, realworld 43.8→51.4, shoaib 49.2→55.7, tnda 52.2→55.6, inclusivehar 28.6→29.1,
@@ -42,8 +45,8 @@ and *destroys* open-vocab transfer, so the untrained mechanism wins. Retrieval t
 ~0.68 across k (encoder ceiling), effective-k ~2200 (diffuse), hubness Gini 0.81. Worst classes
 (stairs/ramp/elevator/smoking ≈ 0 F1) are fine-grained locomotion the *encoder* can't separate.
 
-**The floor to beat is 47.5**, not 42.7. Every Tier-2 change must clear it on held-out configs or be
-dropped ("do no harm").
+**The floor to beat is the untrained mechanism, not ConSE** — 47.5 on the retracted scale, **45.7–45.9
+at parity**. Every Tier-2 change must clear it on held-out configs or be dropped ("do no harm").
 
 ### 0.1 Scale context — are we sized adequately? (measured 2026-07-20)
 
@@ -63,13 +66,13 @@ Parameter counts measured directly from the checkpoints on disk; pretraining sca
 
 **Read:** we are **not under-parameterized — we are under-*data*'d.**
 
-1. *vs the model we actually beat.* HALO totals ~2.4× harnet's parameters, but harnet was pretrained on
+1. *vs harnet.* HALO totals ~2.4× harnet's parameters, but harnet was pretrained on
    roughly **four orders of magnitude** more sensor data (700 k person-days ≈ 1.7×10⁷ h; ours is a
    **measured 547 h materialised / 290 h actually reachable** after `MAX_PER_STREAM` — a ~58,000×
    ratio. See `DATA_SCALING_PLAN.md` §0, which supersedes the earlier "≈10³ h" estimate here).
-   So the 49.5-vs-47.3 win is a **data-efficiency** result, not a scale win, and it is a *narrow* margin
-   against a model with an enormous data advantage.
-2. *vs the largest frozen SOTA.* We beat UniMTS and NormWear while being **7×–14× smaller** on the
+   At parity we do NOT beat harnet (46.1 vs 47.3); the defensible framing is **data-efficiency** —
+   near-parity against a model with an enormous data advantage.
+2. *vs the largest frozen SOTA.* We beat UniMTS and NormWear (both well below harnet) while being **7×–14× smaller** on the
    backbone (~130× counting NormWear's text tower). That efficiency gap is the more defensible claim.
 3. *Is the ENCODER undersized?* It is the documented bottleneck (retrieval purity flat at 0.68;
    stairs/ramp/elevator ≈ 0 F1). But with only 305 k windows, that ceiling is far more likely
@@ -92,7 +95,7 @@ is higher-leverage than scaling *parameters*.
    nearest *sensor* neighbors (`⟨g(z), g(z_i)⟩`); transfer to unseen labels *label-text→target-text*
    (`⟨t(label_i), t(c)⟩`). This IS a sensor↔text alignment — an indirect, retrieval-mediated one
    (kNN-LM/RETRO) — and it is the *safe* one: the sensor geometry stays frozen-encoder-owned and
-   non-parametric, so it can't collapse the way a direct CLIP projection can. It already beats harnet.
+   non-parametric, so it can't collapse the way a direct CLIP projection can. It beats the ConSE bridge on the same encoder (42.7 -> 45.9 at parity), though it does NOT beat harnet (47.3).
 2. **Frozen-target asymmetry.** Learn transforms on the **evidence side** (our known training labels —
    safe) but keep the **target-set** label text **frozen SBERT** (unseen/arbitrary — must stay
    open-vocab). Never fit anything on the candidate labels.
@@ -264,12 +267,12 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
 - **T2.1 — Fine-grained label descriptions.** Hook built: `training/evidence/labeltext.py` appends a
   `data/labels/label_descriptions.json` anchor to the ensemble when present (absent ⇒ no-op, still 47.5).
   *Remaining: author the descriptions. Gate: lifts the fine-grained cells without hurting the mean.*
-- **T2.2 — Loss redesign (frozen encoder).** ✅ **GATE PASSED (49.5 > 47.5).**
+- **T2.2 — Loss redesign (frozen encoder).** ⚠️ **GATE PASSED ONLY ON THE RETRACTED SCALE (49.5 > 47.5).** At parity the trained decoder is 46.1 vs a 45.1 identity control (+1.0) and below harnet 47.3.
   `training/evidence/train_decoder.py`: class-disjoint episodes (hold out a label SET; memory excludes
   it; candidates = it) + reg-to-identity (Δ-norm + KL-to-retrieval-prior) + held-out-config ×
   class-disjoint checkpoint selection on fixed val episodes. Internal transfer bAcc 0.204→0.704;
   3000 steps ≈ 52 s. The transfer-aligned loss is what turned learning from net-negative to net-positive.
-- **T2.3 — Evidence decoder.** ✅ **GATE PASSED (+2.8 over its identity control).**
+- **T2.3 — Evidence decoder.** ⚠️ **+2.8 was on the retracted scale; at parity it is +1.0** (46.1 vs 45.1 control), and label augmentation made it worse (43.5).
   `model/evidence/decoder.py` implements the §2.2 spec (pre-LN + LayerScale, window-relative Fourier
   time, role/text-config/label embeddings, same-window bias, zero-init Δ + pooling-as-residual). 9 unit
   tests incl. **identity-at-init ≡ untrained mechanism** and set-permutation invariance — which is what
@@ -299,7 +302,7 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
 - **Per-patch features too weak** (encoder pooled for session) → fall back to pooled query; keep the
   decoder/refinement (they don't depend on patch granularity).
 - **End-to-end (T2.6) drift/collapse** → momentum memory + low encoder LR + warm start; if unstable, keep
-  encoder frozen — Tier-2 already beats harnet without it.
+  encoder frozen. (Written when Tier-2 appeared to beat harnet; at parity it does not — 46.1 vs 47.3 — which makes the encoder ceiling MORE important, not less.)
 - **Strict zero-shot ceiling is the encoder** (purity 0.68). If T2.2–T2.5 plateau below a decisive harnet
   win, that's expected — the decisive win needs T2.6 and/or more Phase-A data; report honestly and lean on
   the capability axis (T2.7).

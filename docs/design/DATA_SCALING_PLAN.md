@@ -1,5 +1,8 @@
 # Data scaling plan (2026-07-20)
 
+> Numbers here are corpus/scale measurements. For model *results*, `docs/RESULTS_CANONICAL.md` is the
+> single source of truth.
+
 Written because the measured evidence says HALO is **data-limited, not parameter-limited**: a 7.17 M
 encoder, ~50 epochs, retrieval purity plateaued at 0.68 with fine-grained classes at ~0 F1.
 

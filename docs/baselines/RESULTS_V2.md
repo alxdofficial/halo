@@ -1,5 +1,12 @@
 # Zero-shot results — HALO vs baselines, full 7-dataset table (2026-07-20)
 
+> **This table covers the ConSE/cosine baselines only.** It does NOT include the evidence-engine
+> (retrieval) results. For those, and for the single source of truth on every number, see
+> `docs/RESULTS_CANONICAL.md`. Quick orientation: the HALO row below (40.4) uses the
+> `pretrain_native` backbone; the evidence engine uses `pretrain_fixed_mr`, whose ConSE score is
+> 42.7. Both are 'HALO + ConSE' — they differ only in backbone.
+
+
 **Supersedes** `RESULTS_PRELIMINARY.md` (2026-07-14) and the earlier corpus-matched-baselines-only
 draft of this file. This is the current, valid comparison table:
 
