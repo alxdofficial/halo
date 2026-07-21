@@ -1,3 +1,5 @@
+> ⚠️ **SUPERSEDED SNAPSHOT — pre-vocabulary-fix protocol.** Every number below was produced under the stale **59-label** global vocabulary, which silently discarded 11.48% of training windows. The vocabulary is now **93** labels and all ConSE heads + the memory bank are stale and awaiting refit. Do NOT mix these numbers with post-fix ones. See `docs/design/EVIDENCE_ENGINE_FINDINGS.md` (STATUS block) for the current position.
+
 # Baseline zero-shot results — PRELIMINARY (2026-07-14)
 
 > ⚠️ **PRELIMINARY — not final.** Real numbers, but several audit P1 fixes are NOT yet applied

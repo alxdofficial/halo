@@ -16,6 +16,13 @@
 > | **HALO — evidence engine** (retrieval + trained decoder) | **46.1** |
 > | harnet — reference | **47.3** |
 >
+> ⚠️ **Which HALO-ConSE number is which.** The 42.7 above is ConSE on the **`pretrain_fixed_mr`**
+> encoder — the SAME backbone the evidence engine uses, which is what makes it an apples-to-apples
+> contrast. `docs/baselines/RESULTS_V2.md` reports HALO-ConSE as **40.4**, because
+> `baselines/halo/adapter.py` defaults to a DIFFERENT, earlier backbone (`pretrain_native`).
+> Both are real; they are different encoders. Never put 40.4 and 46.1 in the same table without
+> saying so — the honest same-encoder pair is **42.7 → 46.1**.
+>
 > So the evidence engine is **+3.4 over our own ConSE baseline** on the identical frozen encoder,
 > and **1.2 below harnet**. Attribution, from the identity control at the same retrieval config:
 > untrained retrieval alone = 45.1, so the **trained decoder contributes +1.0** and the retrieval

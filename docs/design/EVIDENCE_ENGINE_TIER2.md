@@ -231,7 +231,7 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
 
 - **Episodic class-holdout.** Two ingredients, both needed:
   - **Varying candidate set per episode** — each step scores against a *different, restricted* label
-    subset, not the full 59-way vocab. This alone stops the fixed-boundary closed-vocab overfit (the
+    subset, not the full vocabulary (59-way at the time of these runs; the vocabulary is now 93 — see FINDINGS STATUS). This alone stops the fixed-boundary closed-vocab overfit (the
     model must score against *whatever* set it's handed = the deployment condition).
   - **Hold the query's true label out of the retrieval memory**, in two regimes:
     - *keep it in the candidate set* → no same-label neighbors, correct answer still available → forces

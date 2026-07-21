@@ -41,8 +41,8 @@ conditioning + T3 label alignment), which is what `MOTIVATION.md` argues no base
 
 | Model | T0 weights | T1 Rate | T2 Channels/placement | T3 Labels |
 |---|---|---|---|---|
-| **CrossHAR** | we pretrain (SSL) | fixed → **60 Hz** | fixed 6-ch, zero-pad+mask; placement-blind | closed → **ConSE** |
-| **LiMU-BERT** | we pretrain (SSL) | fixed → **60 Hz** | fixed 6-ch, zero-pad+mask; placement-blind | closed → **ConSE** |
+| **CrossHAR** | we pretrain (SSL) | fixed → **20 Hz** (code: prep.py TARGET_HZ=20, seq_len 120) | fixed 6-ch, zero-pad+mask; placement-blind | closed → **ConSE** |
+| **LiMU-BERT** | we pretrain (SSL) | fixed → **20 Hz** (code: prep.py TARGET_HZ=20, seq_len 120) | fixed 6-ch, zero-pad+mask; placement-blind | closed → **ConSE** |
 | **ssl / harnet5** | **frozen released** | fixed **30 Hz** | fixed **3-ch acc-only**; wrist-implied | closed → **ConSE** |
 | **UniMTS** | **frozen released** | resample to its rate | **native placement** (SMPL joint), acc-only 3-ch | **native text** (CLIP, cosine) |
 | **NormWear** | **frozen released** | fixed **65 Hz** | **native** variable real channels + mask; no placement | **native text** (TinyLlama, L1) |
@@ -66,7 +66,7 @@ documented transform. Decided 2026-07-11.
   `accel_units.to_g`; the only gravity-removed set is kuhar, physically unrecoverable), **acc+gyro**,
   **phone/watch placements only** (pocket / waist / thigh for phone; wrist / arm for watch — see the
   corpus-curation policy). No magnetometer / ECG / orientation / temperature / heart-rate.
-- **T1 — rate.** Models we pretrain (CrossHAR, LiMU-BERT) unify at **60 Hz**. Frozen
+- **T1 — rate.** Models we pretrain (CrossHAR, LiMU-BERT) unify at **20 Hz / seq_len 120** (verified in `baselines/*/prep.py`; an earlier version of this doc claimed 60 Hz / seq_len 360 — that was wrong). Frozen
   models are resampled **from the source to their required native rate** (harnet 30 Hz, NormWear
   65 Hz, UniMTS its 200-sample format) by **one** anti-aliased resampler — per-model *target*, one
   code path. HALO consumes native rate (no resample). *Faithfulness note:* CrossHAR/LiMU-BERT are
@@ -230,7 +230,7 @@ Exactly what we do to each model, and why it passes Section 3.
   placement-blind. T3 closed→ConSE. *Modification:* removed the eval-time GT sub-window filter
   (target-label leakage) — a *fairness restoration* (3b.3), not a capability change.
 
-- **ssl / harnet5** *(frozen released — OxWearables, Capture-24 pretrain)* — T0 1D-ResNet, **frozen**.
+- **ssl / harnet5** *(frozen released — OxWearables, **UK-Biobank ~700k person-days** pretrain; NOT Capture-24)* — T0 1D-ResNet, **frozen**.
   T1 fixed **30 Hz** (source resampled to 30, center-cropped to 5 s / 150). T2 fixed **3-ch
   acc-only**, wrist-implied, no gyro. T3 closed→ConSE head fit on our train sets. *Faithful:* no
   backbone change; only data adaptation (3a.1–3) + ConSE (3a.5).
