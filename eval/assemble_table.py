@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from data.scripts.curate import deployment_policy as policy
+from eval.protocol import protocol_fingerprint, protocol_mismatch
 from eval.run_baselines import RESULTS_DIR, resolve_eval_cells, result_path
 
 KNOWN_STATUS = {"complete", "na", "failed"}
@@ -40,6 +41,9 @@ def _load_cell(path: Path) -> Optional[dict]:
     return json.loads(path.read_text())
 
 
+_CURRENT_PROTOCOL = None      # resolved lazily in collect(); see eval/protocol.py
+
+
 def collect(
     baselines: Sequence[str],
     datasets: Sequence[str],
@@ -48,6 +52,11 @@ def collect(
     """Read every expected cell. Returns ``(cells, table, rejected)`` where
     ``table[baseline][cell]`` is the parsed JSON of a complete/na cell and
     ``rejected`` is a list of human-readable reasons a cell was rejected."""
+    global _CURRENT_PROTOCOL
+    _CURRENT_PROTOCOL = protocol_fingerprint()
+    print(f"[assemble] protocol v{_CURRENT_PROTOCOL['version']} · "
+          f"{_CURRENT_PROTOCOL['n_labels']} labels · vocab {_CURRENT_PROTOCOL['vocab_fp']} · "
+          f"split {_CURRENT_PROTOCOL['split_fp']}")
     cells = resolve_eval_cells(datasets)
     table: Dict[str, Dict[Tuple[str, str], dict]] = {b: {} for b in baselines}
     rejected: List[str] = []
@@ -56,6 +65,13 @@ def collect(
         for ds, stream in cells:
             path = result_path(results_dir, b, ds, stream)
             data = _load_cell(path)
+            if data is not None:
+                # A cell from a different protocol is worse than a missing cell: it looks valid
+                # and silently mixes 59-label and 93-label numbers in one table.
+                why = protocol_mismatch(data.get("_protocol"), _CURRENT_PROTOCOL)
+                if why:
+                    rejected.append(f"STALE    {b}/{ds}/{stream} — {why}")
+                    continue
             if data is None:
                 rejected.append(f"MISSING  {b}/{ds}/{stream} (no {path.name})")
                 continue

@@ -1,7 +1,7 @@
 """harnet / ssl-wearables adapter (ConSE tier).
 
 A FROZEN OxWearables ``harnet5`` ResNet trunk (30 Hz, 3-ch accelerometer, g-units
-WITH gravity, no other normalization) + a linear-softmax head fit on OUR 59-way
+WITH gravity, no other normalization) + the shared 2-layer probe fit on OUR 93-way
 global training vocabulary (``data/labels/global_labels.json``). The base bridges
 that softmax to the target dataset's labels with ConSE, so harnet — which has no
 text tower — is scored zero-shot exactly like the other closed-vocab baselines.
@@ -421,7 +421,7 @@ class HarnetAdapter(ConSEAdapter):
         model.to(device)
         return float(temperature)
 
-    # ---- window_probs: (N, 59) softmax over the global vocab -------------------
+    # ---- window_probs: (N, |vocab|) softmax over the global vocab (93 as of 2026-07) ----
     def window_probs(self, stream, state, device) -> np.ndarray:
         model = state["model"]
         T = float(state.get("temperature", 1.0))    # calibrated temperature (#82)

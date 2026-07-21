@@ -101,8 +101,12 @@ def run_cell(
     if out_path.exists():
         out_path.unlink()
 
+    # Stamp the protocol into EVERY cell (including failures and n/a), so the assembler can tell
+    # a 59-label result from a 93-label one. Without this, stale results are indistinguishable
+    # from current ones and a table silently mixes protocols.
+    from eval.protocol import protocol_fingerprint
     base = {"_baseline": baseline, "_dataset": dataset, "_stream": stream,
-            "_alignment": alignment}
+            "_alignment": alignment, "_protocol": protocol_fingerprint()}
     adapter = B.REGISTRY[baseline]
     try:
         result = adapter.evaluate(dataset, stream, alignment=alignment,
