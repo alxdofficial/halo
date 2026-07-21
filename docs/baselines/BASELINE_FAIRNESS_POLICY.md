@@ -81,7 +81,19 @@ documented transform. Decided 2026-07-11.
   acc-only models (harnet, UniMTS) slice the 3 accel channels; HALO takes the variable real set.
   **Zero-pad + mask only — never random/fabricated fill.** Gravity is uniform in the source; any
   gravity removal is the model's *own* internal step (CrossHAR InstanceNorm, NormWear z-score).
-  - **Invariant (the reviewer-facing guarantee).** Every fixed-layout baseline we train receives the
+  - ⚠️ **CORRECTION (2026-07-21): the "60 Hz harmonised tensor" invariant below describes the
+    *design*, not what is executed.** `eval/run_baselines.py:147` defaults `alignment` to
+    **`non_harmonised`**, and all 56 archived result cells carry `"_alignment": "non_harmonised"`.
+    Each adapter then does its OWN rate conversion from the native grid (harnet resamples to 30 Hz;
+    CrossHAR/LiMU-BERT to 20 Hz / seq_len 120 — see the T1 note above, which already corrects an
+    earlier 60 Hz claim in this same document). So the byte-for-byte-identical-input guarantee as
+    worded is **not** what produced any reported number. The *substance* of the fairness claim —
+    that no fixed baseline sees more channels or more data than another — still holds, but it holds
+    per-adapter over native grids, not via one shared 60 Hz tensor. Rewrite this paragraph to
+    describe the executed path before it goes in a paper.
+
+  - **Invariant (the reviewer-facing guarantee) — AS DESIGNED, see correction above.** Every
+    fixed-layout baseline we train receives the
     **identical** 6-channel `[acc_x,y,z, gyro_x,y,z]` tensor at **60 Hz**; where a device lacks a
     sensor the missing channels are zero-padded and masked. So **no fixed baseline ever sees more
     channels, a higher rate, or more data than another** — they are byte-for-byte the same input

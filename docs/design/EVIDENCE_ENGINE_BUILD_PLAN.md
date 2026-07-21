@@ -1,7 +1,15 @@
 # Evidence Engine — Build Plan
 
 > Implementation roadmap for the design in [`EVIDENCE_ENGINE.md`](./EVIDENCE_ENGINE.md).
-> This doc is the **how + order + gates**, not the rationale. Status: proposed; not started.
+> This doc is the **how + order + gates**, not the rationale.
+>
+> ⚠️ **Status (2026-07-21): NOT "proposed; not started" — largely BUILT, and several gates have since
+> been FAILED on re-measurement.** `model/evidence/` and `training/evidence/` implement M0–M4a and
+> Tier-2. Milestone status here is stale; the authoritative current position is
+> `EVIDENCE_ENGINE_FINDINGS.md` (STATUS block). In particular the M4a head path
+> (`model/evidence/head.py`, `train_head.py`, `eval_gate.py`, `diagnose.py`) is **superseded** by the
+> Tier-2 decoder (`model/evidence/decoder.py`) and is retained only for the diagnostics that
+> produced the tier-1 sweep.
 > `model/` and `training/` are empty in this repo — this is greenfield, but the **legacy tree
 > (`/home/alex/code/HALO/legacy_code`) has reusable pieces** to port (noted per milestone).
 

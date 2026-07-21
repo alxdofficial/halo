@@ -18,10 +18,15 @@ Split the question, because the two halves have opposite answers.
 
 **As a product claim: no.**
 
+> ⚠️ **Encoder provenance.** The 84.3 / 39.6 pair is both-`pretrain_native` — that is what makes it
+> a valid same-encoder comparison. The evidence-engine numbers (42.7 ConSE / 45.1 untrained / 46.1
+> trained) are `pretrain_fixed_mr`. **Do not pair 84.3 with 42.7** — different encoders, and we have
+> never measured a supervised probe ceiling on `pretrain_fixed_mr`.
+
 | | macro-F1 |
 |---|---|
-| our supervised linear probe (same frozen encoder) | **84.3** |
-| our zero-shot ConSE | **39.6** |
+| our supervised linear probe (`pretrain_native`, frozen) | **84.3** |
+| our zero-shot ConSE (`pretrain_native`, same encoder) | **39.6** |
 | UniMTS zero-shot → its own full-shot, same paper, same 18 datasets | 34.3 → 87.5 (**53.2-point gap**) |
 | IMU2CLIP zero-shot → linear probe, same encoder, adjacent table rows | 18.46 → 62.52 (**44.1-point gap**) |
 | Google SensorLM (59.7M hours, 103k people), 20-class zero-shot | **0.29 F1** |

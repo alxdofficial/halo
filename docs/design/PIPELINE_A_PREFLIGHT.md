@@ -1,3 +1,9 @@
+> ⚠️ **SUPERSEDED for corpus facts (2026-07-21).** This audit describes the OLD corpus:
+> **8 datasets / 57 labels / 60 Hz harmonised**. The corpus is now **12 datasets / 93 labels /
+> native-rate**, and the encoder here (peak @ 11k steps) is not one we still use. Superseded by
+> `NATIVE_PRETRAIN_PREFLIGHT.md` for corpus and provenance; the *methodology* (what we audit before
+> a pretrain, and the bugs found) remains useful. Any number below is pre-vocabulary-fix.
+
 # Pipeline A — Phase-1 pre-flight audit & decisions
 
 > Consolidated record of the pre-training audit (2026-07-18) so we can reason about the

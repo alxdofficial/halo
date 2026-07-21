@@ -3,7 +3,8 @@
 # Zero-shot results — HALO vs baselines, full 7-dataset table (2026-07-20)
 
 **Supersedes** `RESULTS_PRELIMINARY.md` (2026-07-14) and the earlier corpus-matched-baselines-only
-draft of this file. This is the current, valid comparison table:
+draft of this file. It **was** the current comparison table when written; per the banner
+above it is now a SUPERSEDED pre-vocabulary-fix snapshot. Kept for the before/after.
 
 - **HALO's own row is now in the table** — scored through the *identical* ConSE ZS-XD path as the
   baselines (Pipeline B; see Provenance). This is the bar HALO's Phase-A representation clears.

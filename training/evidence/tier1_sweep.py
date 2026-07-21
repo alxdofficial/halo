@@ -32,7 +32,9 @@ import torch.nn.functional as F
 from data.scripts.curate import deployment_policy as policy
 from eval.data import load_eval_stream
 from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_encoder
-from training.evidence.train_head import _global_label_paraphrases
+# F1 fix: use the train_only-gated implementation, NOT train_head's, which merges the
+# eval datasets' hand-authored synonym tables (motionsense/realworld/shoaib).
+from training.evidence.labeltext import global_label_paraphrases
 from training.tokenizer.eval_transfer import build_encoder, encode_dataset
 from training.tokenizer.pretrain_data import _stream_gravity_state, stream_channel_descriptions
 
@@ -49,7 +51,7 @@ ENS_E = 8                      # paraphrase variants per label when text_ens=Tru
 def ensemble_text(labels, sbert, E, seed=0):
     """(L, 384) L2-normalized: mean SBERT over E template/synonym variants per label."""
     import random as _random
-    syn, templates = _global_label_paraphrases()
+    syn, templates = global_label_paraphrases(train_only=True)
     rng = _random.Random(seed)
     acc = np.zeros((len(labels), 384), dtype=np.float32)
     for e in range(E):

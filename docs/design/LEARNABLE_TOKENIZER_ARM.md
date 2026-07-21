@@ -1,6 +1,18 @@
 # HALO Learnable Tokenizer Arm
 
-Status: implementation plan, accepted 2026-07-20.
+> ## ⚠️ RESULT (2026-07-20): the arm helps, but NOT for the reason this plan proposes.
+>
+> Held-out transfer improved **0.801 → 0.824** (best on free-living), so the arm was kept and is
+> available opt-in. **But attribution showed the gain is MULTIRESOLUTION, not the learnable
+> filterbank — the learnable component measured as inert.** The question this document asks
+> ("does a mildly adaptive frontend improve representations?") is therefore answered **no** on its
+> own terms; what improved things was processing at several timescales, which needs no learning.
+>
+> Read the plan below as the design of an experiment whose headline hypothesis was falsified.
+> Do not cite the learnable filterbank as a contribution. The multiresolution finding IS reusable
+> and is one of the few positive representation-side results we have.
+
+Status: implementation plan accepted 2026-07-20; **hypothesis falsified 2026-07-20** (see banner).
 
 ## Question
 

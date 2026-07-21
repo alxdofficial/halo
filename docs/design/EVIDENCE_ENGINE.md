@@ -7,6 +7,12 @@
 >
 > Captured from a design discussion (2026-07-13/14). Prose is deliberately about *why*, not
 > code; nothing here is committed as final.
+>
+> ⚠️ **2026-07-21:** this is the ORIGINAL design rationale and is preserved as such. Much of it is
+> now built, and the empirical picture has moved a long way — most importantly, every attempt to
+> LEARN on top of the retrieval mechanism has been net-negative so far, which this design did not
+> anticipate. For what is actually true today read `EVIDENCE_ENGINE_FINDINGS.md` (STATUS block)
+> first, then `POSITIONING.md` for what the whole thing is for.
 
 ## 0. The shift
 From an **activity classifier** (emit one label) to a **human-activity foundation model**

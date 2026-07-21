@@ -41,22 +41,22 @@ def balanced_accuracy(pred: np.ndarray, true: np.ndarray) -> float:
     return float(np.mean(accs)) if accs else float("nan")
 
 
-def _global_label_paraphrases():
-    """Merge every per-dataset synonym table + template list into ONE dataset-agnostic pool.
+def _global_label_paraphrases(train_only: bool = True):
+    """DEPRECATED — use ``training.evidence.labeltext.global_label_paraphrases`` instead.
 
-    `augment_label(label, dataset_name="")` falls into a generic fallback that ignores the
-    synonym tables entirely (only ~4 template wraps), so the vocab labels here — which no
-    single dataset owns — would collapse to near-duplicates. Merging the tables recovers real
-    lexical diversity (walking -> strolling/ambulating, cycling -> biking, ...).
+    ⚠️ This is the PRE-F1-FIX implementation. With ``train_only=False`` it merges the hand-authored
+    synonym/template tables of the HELD-OUT EVAL datasets (motionsense, realworld, shoaib) into the
+    label text, which gave HALO target-label phrasing no baseline received (measured +1.4 macro-F1)
+    and was one of the two confounds behind the retracted 49.5 headline. It now delegates, and
+    defaults to the safe behaviour; the parameter exists only so the contaminated variant can be
+    reproduced deliberately for the ablation that quantified the leak.
+
+    Merges every per-dataset synonym table + template list into one dataset-agnostic pool, because
+    `augment_label(label, dataset_name="")` ignores the synonym tables entirely and the vocab labels
+    would otherwise collapse to near-duplicates.
     """
-    from data.scripts.labels.label_augmentation import DATASET_CONFIGS
-    synonyms: dict[str, set] = {}
-    templates: set = set()
-    for cfg in DATASET_CONFIGS.values():
-        for lab, forms in cfg.get("synonyms", {}).items():
-            synonyms.setdefault(lab, set()).update(forms)
-        templates.update(cfg.get("templates", []))
-    return ({k: sorted(v) for k, v in synonyms.items()}, sorted(templates) or ["{}"])
+    from training.evidence.labeltext import global_label_paraphrases
+    return global_label_paraphrases(train_only=train_only)
 
 
 def build_label_variants(vocab, K: int, seed: int) -> torch.Tensor:

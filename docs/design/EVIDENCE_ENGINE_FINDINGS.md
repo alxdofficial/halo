@@ -1,6 +1,48 @@
 # Evidence engine — critical findings (2026-07-20)
 
-> ## STATUS — READ FIRST (updated 2026-07-21)
+> ## STATUS — READ FIRST (rewritten 2026-07-21, end of day)
+>
+> ### ⛔ There are currently NO valid results. `eval/results/` is empty.
+>
+> The subject-split manifest changed (452 → **482** subjects, `hapt` cohort-aliased to `uci_har`),
+> the probe is now seeded, and cache fingerprints are now enforced — so **all four ConSE heads are
+> stale and must be refit together** before any table exists. Pre-fix cells are preserved
+> byte-identical in `eval/results_archive/2026-07-20_pre-vocab-fix/` (tag `results-pre-vocab-fix`).
+> Every number in this document is therefore **provisional and pre-refit**.
+>
+> ### The current best estimate, at baseline parity on the corrected 93-label bank
+>
+> | row | mean macro-F1 |
+> |---|---|
+> | HALO — ConSE (`pretrain_fixed_mr`) | 42.7 *(pre-refit)* |
+> | HALO — evidence engine, **untrained** retrieval | **44.1** |
+> | HALO — evidence engine, **trained** decoder | **43.5** *(net −0.6 vs its own control)* |
+> | harnet — reference | 47.3 *(pre-refit)* |
+>
+> **Learning is net-negative.** That is the honest state of Phase B. See the Phase-2 update below
+> for the per-cell breakdown.
+>
+> ### What is retracted — do not cite
+>
+> 1. **"49.5, beats harnet"** — retracted **twice**. First for eval-label text contamination (F1)
+>    plus hyperparameters selected on the eval cells (F2); then again on the corrected 93-label
+>    bank, where the trained decoder is net-negative against its own identity control.
+> 2. **`r = −0.973`** (§2, gains confined to seen labels) — **does not replicate**: −0.328,
+>    p = 0.47. Its extreme anchor usc_had *flips sign* once the recovered `elevator_*` exemplars
+>    are present.
+> 3. **46.1 / 45.1** — the 59-label-bank figures below. Superseded by 43.5 / 44.1.
+> 4. **47.5** — the untrained mechanism's pre-fix, **non-parity** number. It exceeds harnet only
+>    under the F1/F2 confounds. Its like-for-like value is 44.1.
+>
+> ### The vocabulary bug (59 → 93) is FIXED
+>
+> §2's "ONE BUG REMAINS OPEN" text below is **stale**. The bank was rebuilt: 203,929 windows
+> (+39,413 recovered), 93/93 labels present. The surprise is that it made ZS-XD **worse**, not
+> better — see the Phase-2 update.
+>
+> ---
+>
+> <details><summary>Superseded status text, kept for the record (click to expand)</summary>
 >
 > **1. The hard correctness + fairness bugs were found, fixed, AND the scores re-run.**
 > The headline "49.5, beats harnet" is **RETRACTED**. It depended on eval-label text
@@ -88,6 +130,8 @@
 > elevator windows is negligible for a 93-way softmax but ample for kNN), so the retrieval rows may
 > gain more than the ConSE rows.
 >
+> </details>
+>
 > ## ⚠️ UPDATE (Phase 2 complete for the evidence engine) — the vocabulary fix made ZS-XD WORSE
 >
 > Bank rebuilt at 93 labels: **203,929 windows** (was 164,516; +39,413 recovered) and **93/93 labels
@@ -161,9 +205,13 @@
 > ConSE heads → re-run → report a clean before/after.
 
 
-Analysis run after the Tier-2 decoder cleared its gate (49.5 mean macro-F1 vs the 47.5 untrained floor).
-Everything here is measured, with the scripts named. **The headline result survives, but its
-interpretation changes substantially.** Read §2 first — it is the one that matters.
+Analysis run after the Tier-2 decoder appeared to clear its gate (49.5 vs the 47.5 untrained floor).
+Everything here is measured, with the scripts named — but ⚠️ **the gate did NOT hold and "the headline
+result survives" is FALSE.** 49.5 is retracted twice over (eval-label text contamination +
+eval-tuned hyperparameters; then again on the corrected 93-label bank, where the trained decoder is
+net-NEGATIVE against its own control). §2's r = −0.973 also fails to replicate (−0.328, p = 0.47).
+Read the STATUS block at the top of this file for the current position; treat everything below as a
+record of what we measured and believed at the time.
 
 ---
 

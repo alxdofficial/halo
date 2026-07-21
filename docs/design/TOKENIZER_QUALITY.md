@@ -1,3 +1,9 @@
+> ⚠️ **STALE ENCODER (2026-07-21).** This battery was run on an **11k-step** checkpoint from the
+> OLD 8-dataset / 57-label / 60 Hz corpus. Current encoders are `pretrain_native` and
+> `pretrain_fixed_mr` on the 12-dataset / 93-label native-rate corpus. The probe *methods* are still
+> the ones we use (`training/tokenizer/eval_quality.py`); the *numbers* describe a model that no
+> reported result depends on.
+
 # Phase-1 tokenizer quality report (2026-07-18)
 
 Comprehensive quality battery on the frozen Phase-1 encoder (`best.pt`, d256/6L, step 11k).

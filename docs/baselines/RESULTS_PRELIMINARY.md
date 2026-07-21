@@ -24,6 +24,9 @@ Cells: macro-F1 (%). CIs in the per-cell JSONs; `tnda_har` CIs are **degenerate*
 sentinel); `ut_complex` CIs are **suspect** (fabricated 10-subject split) — point estimates OK.
 
 ## Observations
+- ⚠️ **Note the number collision:** this **49.5 is harnet's 6-cell mean** here. The *retracted*
+  evidence-decoder headline was also **49.5** (a coincidence). They are unrelated; harnet's
+  7-cell mean in `RESULTS_V2.md` is **47.3**.
 - **harnet is the strongest baseline by a clear margin** (mean 49.5) — a frozen UK-Biobank harnet5 via
   ConSE. Big lead on phone datasets (motionsense 82.2, shoaib 71.3). The bar HALO must beat.
 - **crosshar (35.7) ≈ unimts (35.6)** in the middle tier — and **crosshar now clearly beats limubert

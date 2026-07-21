@@ -118,7 +118,9 @@ is higher-leverage than scaling *parameters*.
    nearest *sensor* neighbors (`⟨g(z), g(z_i)⟩`); transfer to unseen labels *label-text→target-text*
    (`⟨t(label_i), t(c)⟩`). This IS a sensor↔text alignment — an indirect, retrieval-mediated one
    (kNN-LM/RETRO) — and it is the *safe* one: the sensor geometry stays frozen-encoder-owned and
-   non-parametric, so it can't collapse the way a direct CLIP projection can. It already beats harnet.
+   non-parametric, so it can't collapse the way a direct CLIP projection can. ~~It already beats
+   harnet.~~ **FALSE — retracted; see the banner in §0.** At baseline parity on the corrected
+   93-label bank the mechanism scores 44.1 untrained / 43.5 trained against harnet's 47.3.
 2. **Frozen-target asymmetry.** Learn transforms on the **evidence side** (our known training labels —
    safe) but keep the **target-set** label text **frozen SBERT** (unseen/arbitrary — must stay
    open-vocab). Never fit anything on the candidate labels.
@@ -328,7 +330,7 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
 - **Per-patch features too weak** (encoder pooled for session) → fall back to pooled query; keep the
   decoder/refinement (they don't depend on patch granularity).
 - **End-to-end (T2.6) drift/collapse** → momentum memory + low encoder LR + warm start; if unstable, keep
-  encoder frozen — Tier-2 already beats harnet without it.
+  encoder frozen. (~~Tier-2 already beats harnet without it.~~ **FALSE — retracted.**)
 - **Strict zero-shot ceiling is the encoder** (purity 0.68). If T2.2–T2.5 plateau below a decisive harnet
   win, that's expected — the decisive win needs T2.6 and/or more Phase-A data; report honestly and lean on
   the capability axis (T2.7).
