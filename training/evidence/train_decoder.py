@@ -96,6 +96,10 @@ def sample_text_tables(variants, gen):
     drawing the evidence side and the candidate side *independently* means a correct match can never
     be made on identical surface strings — only on meaning. Variant 0 is the canonical name, so the
     canonical phrasing stays in the mix.
+
+    Precisely: the two draws are independent, so they COLLIDE with probability 1/K per label
+    (1/16 at the default), i.e. about 1 label per ~18-label episode still gets an identical
+    evidence/candidate string. The shortcut is suppressed, not eliminated — do not write "never".
     """
     L, K, _ = variants.shape
     ev = variants[torch.arange(L, device=variants.device),
@@ -156,17 +160,45 @@ def main() -> None:
     print(f"[dec] bank {Z.shape[0]} windows d={d} · {n_vocab} vocab · {int(cfg.max()) + 1} configs "
           f"· backbone {bank['backbone']['git']} (val_ba {bank['backbone']['val_ba']:.3f})", flush=True)
 
-    # held-out-CONFIG split for selection
+    # Held-out-CONFIG **and** held-out-SUBJECT split for selection.
+    #
+    # This used to split on `cfg` ALONE, which is not a transfer measurement: with only the config
+    # held out, 30 of 59 val subjects also appeared among the train queries. For pamap2 that meant
+    # the watch_wrist stream was "held out" while the chest and hand streams of the SAME subjects
+    # in the SAME sessions were trained on -- so the selection metric partly rewarded memorising
+    # those people. A subject is now on exactly one side, whatever config it appears under.
     cfg_ids = np.arange(int(cfg.max()) + 1); rng.shuffle(cfg_ids)
     n_val = max(1, int(len(cfg_ids) * args.val_frac_cfg))
-    is_val = torch.isin(cfg, torch.tensor(cfg_ids[:n_val], device=device))
-    train_q = torch.nonzero(~is_val, as_tuple=True)[0]
-    val_q = torch.nonzero(is_val, as_tuple=True)[0]
+    is_val_cfg = torch.isin(cfg, torch.tensor(cfg_ids[:n_val], device=device))
+
+    subj_ids = torch.unique(subj).cpu().numpy()
+    perm = rng.permutation(subj_ids)
+    n_val_subj = max(1, int(len(perm) * args.val_frac_cfg))
+    val_subj = torch.tensor(perm[:n_val_subj], device=device)
+    is_val_subj = torch.isin(subj, val_subj)
+
+    # val = held-out config AND held-out subject; train = neither. Windows that are one but not the
+    # other are DROPPED -- they would leak a val subject into training or vice versa.
+    val_q = torch.nonzero(is_val_cfg & is_val_subj, as_tuple=True)[0]
+    train_q = torch.nonzero(~is_val_cfg & ~is_val_subj, as_tuple=True)[0]
+    n_dropped = len(Z) - len(val_q) - len(train_q)
+    if len(val_q) == 0:
+        raise SystemExit(
+            "[dec] the config x subject holdout is empty -- no window has both a held-out config "
+            "and a held-out subject. Raise --val-frac-cfg or check the bank's cfg/subj fields.")
+
     train_present = torch.unique(y[train_q])
     val_present = torch.unique(y[val_q])
-    print(f"[dec] queries: {len(train_q)} train / {len(val_q)} val · labels present "
-          f"{len(train_present)} train / {len(val_present)} val · {n_val}/{len(cfg_ids)} configs held out",
-          flush=True)
+    overlap = len(set(val_present.tolist()) & set(train_present.tolist()))
+    assert not (set(subj[train_q].tolist()) & set(subj[val_q].tolist())), \
+        "subject appears in both folds -- the holdout is not subject-disjoint"
+    print(f"[dec] queries: {len(train_q)} train / {len(val_q)} val ({n_dropped} dropped at the "
+          f"config x subject boundary) · {n_val}/{len(cfg_ids)} configs and "
+          f"{n_val_subj}/{len(perm)} subjects held out", flush=True)
+    print(f"[dec] labels present: {len(train_present)} train / {len(val_present)} val · "
+          f"{overlap}/{len(val_present)} val labels ALSO seen in train "
+          f"({100 * overlap / max(1, len(val_present)):.0f}%) -- the selection metric is only as "
+          f"open-vocabulary as this number is low (REMEDIATION_PLAN 5.2)", flush=True)
 
     lo, hi = args.episode_labels
 
@@ -244,7 +276,7 @@ def main() -> None:
                 best_val = va
                 best_sd = {k_: v.detach().cpu().clone() for k_, v in dec.state_dict().items()}
             eff_k = float((1.0 / a.detach().pow(2).sum(1).clamp(min=1e-12)).mean())
-            print(json.dumps({"step": step, "loss": round(float(loss), 4), "ce": round(float(ce), 4),
+            print(json.dumps({"step": step, "loss": round(float(loss.detach()), 4), "ce": round(float(ce.detach()), 4),
                               "reg": round(float(reg), 5), "kl_pool": round(float(kl_pool), 5),
                               "val_transfer_ba": round(va, 4), "best": round(best_val, 4),
                               "n_cand": len(H), "delta_norm": round(aux["delta_norm"], 4),

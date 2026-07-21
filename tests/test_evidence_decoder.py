@@ -173,17 +173,84 @@ def test_fourier_time_zero_is_constant():
     assert torch.allclose(f[:, 8:], torch.ones(3, 8))           # cos(0)=1
 
 
-def test_same_window_bias_is_permutation_safe_and_off_at_init():
-    """same_window_bias starts at 0 (returns None). With it on, co-membership is by id, not order."""
+def test_fourier_time_is_injective_over_a_window_and_not_aliased():
+    """The above cannot fail for any sin/cos implementation. This one can.
+
+    The features must actually DISTINGUISH positions inside a window. `freqs` spans up to 30 Hz
+    against t in seconds, so the top bands complete many cycles over a 6 s window; if the encoding
+    were dominated by those it would alias and two distinct times could collide.
+    """
+    t_s = torch.linspace(0.0, 6.0, 64)
+    f = _fourier_time(t_s, n_freqs=8, time_max=30.0)
+    d = torch.cdist(f, f) + torch.eye(len(t_s)) * 1e3
+    assert d.min() > 1e-3, f"two distinct in-window times collide (min distance {d.min():.2e})"
+    # nearby times must be closer than far-apart times -- i.e. the encoding is locally monotone
+    assert torch.norm(f[0] - f[1]) < torch.norm(f[0] - f[-1])
+
+
+def test_fourier_time_is_window_RELATIVE_not_absolute():
+    """Shifting a whole window's absolute timestamps must not change the encoding.
+
+    The decoder subtracts no origin internally, so window-relativity is a CALLER contract. This
+    pins the contract: callers must pass offsets from the window start, and the check below is
+    what fails if someone starts passing session-absolute time.
+    """
+    rel = torch.tensor([0.0, 1.5, 3.0])
+    a = _fourier_time(rel, n_freqs=8, time_max=30.0)
+    b = _fourier_time(rel + 3600.0, n_freqs=8, time_max=30.0)   # same window, an hour into a session
+    assert not torch.allclose(a, b, atol=1e-3), (
+        "_fourier_time is shift-invariant, so absolute vs relative time would be indistinguishable "
+        "and the caller contract could not be violated -- if that ever becomes true, this test "
+        "should be replaced by an assertion inside the decoder instead.")
+
+
+def test_same_window_bias_is_permutation_safe_and_trainable():
+    """The previous version never turned the feature on, so the active path had ZERO coverage.
+
+    It also masked a real bug: the code gated on ``float(self.same_window_bias) == 0.0`` and the
+    parameter is initialised to exactly 0.0, so the branch short-circuited on every forward and the
+    parameter could never receive gradient. Now gated on whether window ids were supplied.
+    """
     torch.manual_seed(6)
     dec = EvidenceDecoder(DecoderConfig()).eval()
     x = _inputs(seed=6)
     B, k = x["zev"].shape[:2]
     wid = torch.arange(k + 1).unsqueeze(0).expand(B, -1)       # every token its own window
+
+    # value is 0 at init, so the output is still the untrained mechanism ...
     with torch.no_grad():
-        off = dec(**x, window_id=wid)
+        out = dec(**x, window_id=wid)
     ref = _untrained_reference(x["ev_label_text"], x["w_retr"], x["cand_text"])
-    assert torch.allclose(off, ref, atol=1e-4)                 # bias 0 at init -> still identity
+    assert torch.allclose(out, ref, atol=1e-4)
+
+    # ... but the parameter must be REACHABLE, or it is frozen at zero forever.
+    dec.zero_grad()
+    dec.refiner[-1].weight.data.normal_(0, 0.02)               # open the gate so grad can flow
+    dec(**x, window_id=wid).sum().backward()
+    assert dec.same_window_bias.grad is not None, "same_window_bias never enters the graph"
+    assert float(dec.same_window_bias.grad.abs()) > 0, "same_window_bias gets exactly zero gradient"
+
+    # co-membership is by id, not by position: permuting evidence permutes the output identically
+    perm = torch.randperm(k)
+    xp = {**x, "zev": x["zev"][:, perm], "ev_label_text": x["ev_label_text"][:, perm],
+          "w_retr": x["w_retr"][:, perm]}
+    wid_p = torch.cat([wid[:, :1], wid[:, 1:][:, perm]], dim=1)
+    with torch.no_grad():
+        assert torch.allclose(dec(**x, window_id=wid), dec(**xp, window_id=wid_p), atol=1e-5)
+
+
+def test_fully_masked_evidence_row_does_not_produce_nan():
+    """A row with no valid evidence used to be all -inf -> softmax NaN -> NaNs the batch loss."""
+    torch.manual_seed(11)
+    dec = EvidenceDecoder(DecoderConfig()).eval()
+    x = _inputs(B=3, k=5, seed=11)
+    mask = torch.ones(3, 5, dtype=torch.bool)
+    mask[1] = False                                            # row 1 has NOTHING
+    with torch.no_grad():
+        logits = dec(**x, ev_mask=mask)
+    assert torch.isfinite(logits).all(), f"non-finite logits: {logits}"
+    assert torch.allclose(logits[1], torch.zeros_like(logits[1]), atol=1e-6), \
+        "a row with no evidence should contribute no evidence"
 
 
 if __name__ == "__main__":

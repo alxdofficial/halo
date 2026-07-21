@@ -78,7 +78,17 @@ def label_variant_rows(labels, E: int, seed: int = 0, use_descriptions: bool = T
     sampled deterministically. A trailing description row is appended for any label that has one.
     """
     syn, templates = global_label_paraphrases(train_only)
-    descs = load_descriptions() if use_descriptions else {}
+    # `train_only` gates the SYNONYM tables but not this file. label_descriptions.json is
+    # hand-authored and unscoped, so if it is ever written for eval labels it would put
+    # human-written descriptions of the eval vocabulary into the target-label text -- the exact
+    # F1 contamination train_only exists to prevent, through a different door. Refuse to apply
+    # descriptions when the caller asked for training-only text.
+    descs = load_descriptions() if (use_descriptions and not train_only) else {}
+    if use_descriptions and train_only and load_descriptions():
+        raise ValueError(
+            "use_descriptions=True with train_only=True: label_descriptions.json is not scoped to "
+            "training datasets, so applying it would reintroduce eval-label text. Either scope the "
+            "file and relax this guard, or pass use_descriptions=False.")
     rng = random.Random(seed)
     rows = []
     for e in range(max(1, E)):

@@ -317,6 +317,12 @@ class HarnetAdapter(ConSEAdapter):
         datasets = _corpus_datasets()
         cap_rng = np.random.RandomState(FIT_SEED)
         print(f"[harnet] corpus mode={CORPUS_MODE} ({len(datasets)} datasets): {datasets}")
+        if CORPUS_MODE == "legacy":
+            print("[harnet] NOTE: legacy mode applies NO per-stream cap, while halo/crosshar/"
+                  f"limubert all cap at 20000. This row therefore sees strictly more data per "
+                  f"stream than every other ConSE baseline. Deliberate (it preserves the published "
+                  f"number) but it means 'identical probe on frozen features' is true of the PROBE, "
+                  f"not of the corpus -- state the corpus caveat alongside it.", flush=True)
 
         feats, labs, subjs, used, skipped = [], [], [], [], []
         for ds in datasets:
