@@ -1,0 +1,46 @@
+{
+  "_baseline": "halo_evidence",
+  "_dataset": "usc_had",
+  "_stream": "phone_hip",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 18.966175632614643,
+    "balanced_accuracy": 25.015590974316986,
+    "accuracy": 26.689655172413794,
+    "f1_weighted": 17.159144008734817,
+    "n_samples": 4350,
+    "n_gt_classes": 12,
+    "n_scored_classes": 12,
+    "f1_macro_ci_lo": 17.275219407257495,
+    "f1_macro_ci_hi": 20.47714511914518,
+    "bootstrap_B": 1000,
+    "n_subjects": 14,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "elevator_down": 0.0,
+      "elevator_up": 0.0,
+      "jumping_up": 58.490566037735846,
+      "running_forward": 87.70226537216828,
+      "sitting": 15.505090054815977,
+      "sleeping": 0.3289473684210526,
+      "standing": 18.427835051546392,
+      "walking_downstairs": 0.0,
+      "walking_forward": 47.13940370668816,
+      "walking_left": 0.0,
+      "walking_right": 0.0,
+      "walking_upstairs": 0.0
+    },
+    "predicted_classes": [
+      "jumping_up",
+      "running_forward",
+      "sitting",
+      "sleeping",
+      "standing",
+      "walking_downstairs",
+      "walking_forward"
+    ],
+    "mechanism": "untrained-retrieval+text-ensemble"
+  }
+}

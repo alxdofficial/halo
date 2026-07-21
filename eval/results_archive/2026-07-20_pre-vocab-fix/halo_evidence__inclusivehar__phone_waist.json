@@ -1,0 +1,37 @@
+{
+  "_baseline": "halo_evidence",
+  "_dataset": "inclusivehar",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 28.990560425118872,
+    "balanced_accuracy": 37.96811342303371,
+    "accuracy": 38.57142857142858,
+    "f1_weighted": 29.15558694336105,
+    "n_samples": 1260,
+    "n_gt_classes": 6,
+    "n_scored_classes": 6,
+    "f1_macro_ci_lo": 25.385153910917015,
+    "f1_macro_ci_hi": 32.50644677272779,
+    "bootstrap_B": 1000,
+    "n_subjects": 20,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "jogging": 6.829268292682928,
+      "ramp_ascent": 0.0,
+      "ramp_descent": 0.0,
+      "sitting": 65.07177033492823,
+      "standing": 61.92660550458715,
+      "walking": 40.115718418514945
+    },
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "mechanism": "untrained-retrieval+text-ensemble"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "_baseline": "normwear",
+  "_dataset": "motionsense",
+  "_stream": "phone_front_pocket",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 7.152918637779471,
+    "balanced_accuracy": 16.960586460409136,
+    "accuracy": 24.768416409351566,
+    "f1_weighted": 10.395029848456096,
+    "n_samples": 4534,
+    "n_gt_classes": 6,
+    "n_scored_classes": 6,
+    "f1_macro_ci_lo": 6.431555422490842,
+    "f1_macro_ci_hi": 8.12860740283863,
+    "bootstrap_B": 1000,
+    "n_subjects": 24,
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "jogging": 0.4618937644341801,
+      "sitting": 39.478385137549125,
+      "standing": 0.0,
+      "walking": 2.9772329246935203,
+      "walking_downstairs": 0.0,
+      "walking_upstairs": 0.0
+    },
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "walking",
+      "walking_downstairs"
+    ],
+    "n_channels_used": 6,
+    "match_metric": "l1_argmin"
+  }
+}

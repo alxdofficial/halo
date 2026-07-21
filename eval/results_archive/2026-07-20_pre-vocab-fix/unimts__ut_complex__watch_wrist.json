@@ -1,0 +1,51 @@
+{
+  "_baseline": "unimts",
+  "_dataset": "ut_complex",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 29.135911278538767,
+    "balanced_accuracy": 33.205128205128204,
+    "accuracy": 33.205128205128204,
+    "f1_weighted": 29.135911278538767,
+    "n_samples": 3900,
+    "n_gt_classes": 13,
+    "n_scored_classes": 13,
+    "f1_macro_ci_lo": 27.57592354300002,
+    "f1_macro_ci_hi": 30.592611472307972,
+    "bootstrap_B": 1000,
+    "n_subjects": 10,
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "biking": 48.87983706720978,
+      "drinking_coffee": 18.034265103697024,
+      "eating": 17.599999999999998,
+      "jogging": 98.52216748768473,
+      "sitting": 39.368895567242674,
+      "smoking": 24.164524421593832,
+      "standing": 1.1406844106463878,
+      "talking": 1.9543973941368076,
+      "typing": 0.4464285714285714,
+      "walking": 57.668711656441715,
+      "walking_downstairs": 45.08393285371702,
+      "walking_upstairs": 20.16348773841962,
+      "writing": 5.739514348785872
+    },
+    "predicted_classes": [
+      "biking",
+      "drinking_coffee",
+      "eating",
+      "jogging",
+      "sitting",
+      "smoking",
+      "standing",
+      "talking",
+      "typing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs",
+      "writing"
+    ]
+  }
+}

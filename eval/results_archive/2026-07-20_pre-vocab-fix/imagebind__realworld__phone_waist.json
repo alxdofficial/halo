@@ -1,0 +1,41 @@
+{
+  "_baseline": "imagebind",
+  "_dataset": "realworld",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 12.725595638055399,
+    "balanced_accuracy": 20.730837717893095,
+    "accuracy": 17.148705170419152,
+    "f1_weighted": 11.565257997498641,
+    "n_samples": 11237,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": 9.442355564764455,
+    "f1_macro_ci_hi": 15.678540286315268,
+    "bootstrap_B": 1000,
+    "n_subjects": 15,
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "climbingdown": 0.4662004662004662,
+      "climbingup": 27.078891257995735,
+      "jumping": 23.32695984703633,
+      "lying": 0.0,
+      "running": 3.876288659793815,
+      "sitting": 9.630878770845044,
+      "standing": 37.2225004172926,
+      "walking": 0.20304568527918782
+    },
+    "predicted_classes": [
+      "climbingdown",
+      "climbingup",
+      "jumping",
+      "lying",
+      "running",
+      "sitting",
+      "standing",
+      "walking"
+    ]
+  }
+}

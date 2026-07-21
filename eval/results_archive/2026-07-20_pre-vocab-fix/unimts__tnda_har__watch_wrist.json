@@ -1,0 +1,41 @@
+{
+  "_baseline": "unimts",
+  "_dataset": "tnda_har",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 48.944414969249635,
+    "balanced_accuracy": 54.02481135438262,
+    "accuracy": 55.77095138681778,
+    "f1_weighted": 49.57217701528496,
+    "n_samples": 3353,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": NaN,
+    "f1_macro_ci_hi": NaN,
+    "bootstrap_B": 0,
+    "n_subjects": 1,
+    "ci_degenerate": true,
+    "per_class_f1": {
+      "ascending_stairs": 29.8932384341637,
+      "descending_stairs": 60.746003552397866,
+      "jogging": 97.87234042553192,
+      "lying_down": 0.45045045045045046,
+      "riding": 79.53667953667953,
+      "sitting": 50.598290598290596,
+      "standing": 4.651162790697675,
+      "walking": 67.80715396578539
+    },
+    "predicted_classes": [
+      "ascending_stairs",
+      "descending_stairs",
+      "jogging",
+      "lying_down",
+      "riding",
+      "sitting",
+      "standing",
+      "walking"
+    ]
+  }
+}

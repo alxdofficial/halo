@@ -1,0 +1,52 @@
+{
+  "_baseline": "crosshar",
+  "_dataset": "shoaib",
+  "_stream": "phone_right_pocket",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 33.3249150759409,
+    "balanced_accuracy": 40.761904761904766,
+    "accuracy": 40.76190476190476,
+    "f1_weighted": 33.3249150759409,
+    "n_samples": 2100,
+    "n_gt_classes": 7,
+    "n_scored_classes": 7,
+    "f1_macro_ci_lo": 28.17260225727268,
+    "f1_macro_ci_hi": 38.47722789460912,
+    "n_subjects": 10,
+    "n_folds": 10,
+    "ci_method": "subject_groupkfold_loso",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "cycling": 33.482142857142854,
+      "jogging": 0.6578947368421052,
+      "sitting": 82.94930875576037,
+      "standing": 79.20433996383363,
+      "walking": 36.40929064657878,
+      "walking_downstairs": 0.0,
+      "walking_upstairs": 0.5714285714285714
+    },
+    "reachable_nn_lb": [
+      "cycling",
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "cycling",
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ],
+    "n_predicted_classes": 7,
+    "top_T": 10
+  }
+}

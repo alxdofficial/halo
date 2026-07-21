@@ -1,0 +1,47 @@
+{
+  "_baseline": "halo",
+  "_dataset": "inclusivehar",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 31.665366425178476,
+    "balanced_accuracy": 38.912540282798666,
+    "accuracy": 39.285714285714285,
+    "f1_weighted": 31.6948702455906,
+    "n_samples": 1260,
+    "n_gt_classes": 6,
+    "n_scored_classes": 6,
+    "f1_macro_ci_lo": 27.35934573276013,
+    "f1_macro_ci_hi": 35.49844505819941,
+    "bootstrap_B": 1000,
+    "n_subjects": 20,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "jogging": 17.16171617161716,
+      "ramp_ascent": 0.0,
+      "ramp_descent": 0.0,
+      "sitting": 64.343163538874,
+      "standing": 68.69565217391305,
+      "walking": 39.791666666666664
+    },
+    "reachable_nn_lb": [
+      "jogging",
+      "ramp_ascent",
+      "ramp_descent",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "n_predicted_classes": 4,
+    "top_T": 10
+  }
+}

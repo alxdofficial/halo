@@ -1,0 +1,36 @@
+{
+  "_baseline": "normwear",
+  "_dataset": "inclusivehar",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 8.60148632912761,
+    "balanced_accuracy": 18.82996632996633,
+    "accuracy": 19.20634920634921,
+    "f1_weighted": 8.78254409879395,
+    "n_samples": 1260,
+    "n_gt_classes": 6,
+    "n_scored_classes": 6,
+    "f1_macro_ci_lo": 6.785536760348498,
+    "f1_macro_ci_hi": 10.606969417237872,
+    "bootstrap_B": 1000,
+    "n_subjects": 20,
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "jogging": 4.739336492890995,
+      "ramp_ascent": 0.0,
+      "ramp_descent": 0.0,
+      "sitting": 30.61516452074392,
+      "standing": 0.0,
+      "walking": 16.25441696113074
+    },
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "walking"
+    ],
+    "n_channels_used": 6,
+    "match_metric": "l1_argmin"
+  }
+}

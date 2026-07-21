@@ -1,0 +1,52 @@
+{
+  "_baseline": "halo",
+  "_dataset": "realworld",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 41.29692332288918,
+    "balanced_accuracy": 48.457890753708604,
+    "accuracy": 50.565097445937525,
+    "f1_weighted": 40.550442404946246,
+    "n_samples": 11237,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": 38.89998292440716,
+    "f1_macro_ci_hi": 43.75260052256533,
+    "bootstrap_B": 1000,
+    "n_subjects": 15,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "climbingdown": 0.0,
+      "climbingup": 0.0,
+      "jumping": 64.36781609195403,
+      "lying": 2.5878003696857674,
+      "running": 82.16393442622952,
+      "sitting": 60.87149844375278,
+      "standing": 70.0446311367813,
+      "walking": 50.33970611471007
+    },
+    "reachable_nn_lb": [
+      "climbingup",
+      "jumping",
+      "lying",
+      "running",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "reachability_lb": 0.875,
+    "predicted_classes": [
+      "jumping",
+      "lying",
+      "running",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "n_predicted_classes": 6,
+    "top_T": 10
+  }
+}

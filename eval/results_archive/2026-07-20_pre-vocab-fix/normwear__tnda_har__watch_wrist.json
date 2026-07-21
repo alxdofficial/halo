@@ -1,0 +1,40 @@
+{
+  "_baseline": "normwear",
+  "_dataset": "tnda_har",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 5.110034821087931,
+    "balanced_accuracy": 11.89015139946799,
+    "accuracy": 13.033104682373994,
+    "f1_weighted": 5.549242772216082,
+    "n_samples": 3353,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": NaN,
+    "f1_macro_ci_hi": NaN,
+    "bootstrap_B": 0,
+    "n_subjects": 1,
+    "ci_degenerate": true,
+    "per_class_f1": {
+      "ascending_stairs": 0.0,
+      "descending_stairs": 0.0,
+      "jogging": 7.57238307349666,
+      "lying_down": 0.852099817407182,
+      "riding": 0.0,
+      "sitting": 32.45579567779961,
+      "standing": 0.0,
+      "walking": 0.0
+    },
+    "predicted_classes": [
+      "descending_stairs",
+      "jogging",
+      "lying_down",
+      "sitting",
+      "walking"
+    ],
+    "n_channels_used": 6,
+    "match_metric": "l1_argmin"
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "_baseline": "limubert",
+  "_dataset": "motionsense",
+  "_stream": "phone_front_pocket",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 44.143427160441824,
+    "balanced_accuracy": 47.775614975823196,
+    "accuracy": 57.96206440229378,
+    "f1_weighted": 51.5061047642972,
+    "n_samples": 4534,
+    "n_gt_classes": 6,
+    "n_scored_classes": 6,
+    "f1_macro_ci_lo": 40.51565984555187,
+    "f1_macro_ci_hi": 47.42672116470285,
+    "bootstrap_B": 1000,
+    "n_subjects": 24,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "jogging": 72.1728081321474,
+      "sitting": 57.07070707070707,
+      "standing": 61.68392615938766,
+      "walking": 68.13602015113351,
+      "walking_downstairs": 5.797101449275362,
+      "walking_upstairs": 0.0
+    },
+    "reachable_nn_lb": [
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs"
+    ],
+    "n_predicted_classes": 5,
+    "top_T": 10
+  }
+}

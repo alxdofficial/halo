@@ -1,0 +1,44 @@
+{
+  "_baseline": "normwear",
+  "_dataset": "ut_complex",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 1.7985186790234147,
+    "balanced_accuracy": 8.076923076923077,
+    "accuracy": 8.076923076923077,
+    "f1_weighted": 1.7985186790234147,
+    "n_samples": 3900,
+    "n_gt_classes": 13,
+    "n_scored_classes": 13,
+    "f1_macro_ci_lo": 1.2439396333457087,
+    "f1_macro_ci_hi": 2.657290920141113,
+    "bootstrap_B": 1000,
+    "n_subjects": 10,
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "biking": 0.0,
+      "drinking_coffee": 0.0,
+      "eating": 0.0,
+      "jogging": 3.9215686274509802,
+      "sitting": 14.659174199853409,
+      "smoking": 0.0,
+      "standing": 0.0,
+      "talking": 0.0,
+      "typing": 0.0,
+      "walking": 0.0,
+      "walking_downstairs": 4.8,
+      "walking_upstairs": 0.0,
+      "writing": 0.0
+    },
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "walking",
+      "walking_downstairs"
+    ],
+    "n_channels_used": 6,
+    "match_metric": "l1_argmin"
+  }
+}

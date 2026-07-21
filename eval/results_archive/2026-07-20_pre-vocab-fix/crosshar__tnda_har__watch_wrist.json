@@ -1,0 +1,53 @@
+{
+  "_baseline": "crosshar",
+  "_dataset": "tnda_har",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 41.46353165066351,
+    "balanced_accuracy": 45.75649436682595,
+    "accuracy": 48.13599761407695,
+    "f1_weighted": 43.38786894044428,
+    "n_samples": 3353,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": NaN,
+    "f1_macro_ci_hi": NaN,
+    "n_subjects": 1,
+    "n_folds": 0,
+    "ci_method": "subject_groupkfold_loso",
+    "ci_degenerate": true,
+    "per_class_f1": {
+      "ascending_stairs": 0.0,
+      "descending_stairs": 0.0,
+      "jogging": 59.84732824427481,
+      "lying_down": 21.15085536547434,
+      "riding": 77.51937984496125,
+      "sitting": 44.38502673796791,
+      "standing": 83.46820809248555,
+      "walking": 45.33745492014425
+    },
+    "reachable_nn_lb": [
+      "ascending_stairs",
+      "descending_stairs",
+      "jogging",
+      "lying_down",
+      "riding",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "jogging",
+      "lying_down",
+      "riding",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "n_predicted_classes": 6,
+    "top_T": 10
+  }
+}

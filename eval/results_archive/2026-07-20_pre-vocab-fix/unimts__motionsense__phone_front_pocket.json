@@ -1,0 +1,37 @@
+{
+  "_baseline": "unimts",
+  "_dataset": "motionsense",
+  "_stream": "phone_front_pocket",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 41.26867944008203,
+    "balanced_accuracy": 46.74347473870546,
+    "accuracy": 54.741949713277464,
+    "f1_weighted": 46.21444470804893,
+    "n_samples": 4534,
+    "n_gt_classes": 6,
+    "n_scored_classes": 6,
+    "f1_macro_ci_lo": 38.82356100496239,
+    "f1_macro_ci_hi": 43.6362942890209,
+    "bootstrap_B": 1000,
+    "n_subjects": 24,
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "jogging": 89.52380952380953,
+      "sitting": 60.38829324833381,
+      "standing": 29.797191887675506,
+      "walking": 67.0,
+      "walking_downstairs": 0.49627791563275436,
+      "walking_upstairs": 0.40650406504065045
+    },
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ]
+  }
+}

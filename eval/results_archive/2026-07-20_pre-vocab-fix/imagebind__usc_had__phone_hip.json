@@ -1,0 +1,48 @@
+{
+  "_baseline": "imagebind",
+  "_dataset": "usc_had",
+  "_stream": "phone_hip",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 1.5095242583932003,
+    "balanced_accuracy": 7.636649841109011,
+    "accuracy": 3.5402298850574714,
+    "f1_weighted": 1.2121049974145284,
+    "n_samples": 4350,
+    "n_gt_classes": 12,
+    "n_scored_classes": 12,
+    "f1_macro_ci_lo": 1.0019133649861014,
+    "f1_macro_ci_hi": 2.0370359549705177,
+    "bootstrap_B": 1000,
+    "n_subjects": 14,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "elevator_down": 0.7751937984496124,
+      "elevator_up": 0.53475935828877,
+      "jumping_up": 7.114624505928854,
+      "running_forward": 0.0,
+      "sitting": 1.7582417582417582,
+      "sleeping": 0.6644518272425249,
+      "standing": 0.0,
+      "walking_downstairs": 1.3348164627363739,
+      "walking_forward": 0.0,
+      "walking_left": 5.932203389830509,
+      "walking_right": 0.0,
+      "walking_upstairs": 0.0
+    },
+    "predicted_classes": [
+      "elevator_down",
+      "elevator_up",
+      "jumping_up",
+      "running_forward",
+      "sitting",
+      "sleeping",
+      "walking_downstairs",
+      "walking_left",
+      "walking_right",
+      "walking_upstairs"
+    ]
+  }
+}

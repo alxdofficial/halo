@@ -1,0 +1,43 @@
+{
+  "_baseline": "normwear",
+  "_dataset": "usc_had",
+  "_stream": "phone_hip",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 4.8192382252337405,
+    "balanced_accuracy": 11.296403934593767,
+    "accuracy": 14.505747126436782,
+    "f1_weighted": 7.201553090010594,
+    "n_samples": 4350,
+    "n_gt_classes": 12,
+    "n_scored_classes": 12,
+    "f1_macro_ci_lo": 3.795590218981032,
+    "f1_macro_ci_hi": 5.96597053674615,
+    "bootstrap_B": 1000,
+    "n_subjects": 14,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "elevator_down": 0.0,
+      "elevator_up": 0.0,
+      "jumping_up": 0.0,
+      "running_forward": 0.0,
+      "sitting": 19.52392402019716,
+      "sleeping": 0.964630225080386,
+      "standing": 0.0,
+      "walking_downstairs": 0.0,
+      "walking_forward": 37.342304457527334,
+      "walking_left": 0.0,
+      "walking_right": 0.0,
+      "walking_upstairs": 0.0
+    },
+    "predicted_classes": [
+      "sitting",
+      "sleeping",
+      "walking_forward"
+    ],
+    "n_channels_used": 6,
+    "match_metric": "l1_argmin"
+  }
+}

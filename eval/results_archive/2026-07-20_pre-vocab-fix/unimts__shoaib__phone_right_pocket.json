@@ -1,0 +1,39 @@
+{
+  "_baseline": "unimts",
+  "_dataset": "shoaib",
+  "_stream": "phone_right_pocket",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 35.1009014946106,
+    "balanced_accuracy": 41.80952380952382,
+    "accuracy": 41.80952380952381,
+    "f1_weighted": 35.10090149461061,
+    "n_samples": 2100,
+    "n_gt_classes": 7,
+    "n_scored_classes": 7,
+    "f1_macro_ci_lo": 32.22939602771526,
+    "f1_macro_ci_hi": 37.81490808609343,
+    "bootstrap_B": 1000,
+    "n_subjects": 10,
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "cycling": 30.451127819548873,
+      "jogging": 91.92100538599641,
+      "sitting": 55.56594948550047,
+      "standing": 23.42857142857143,
+      "walking": 43.01075268817204,
+      "walking_downstairs": 0.6644518272425249,
+      "walking_upstairs": 0.6644518272425249
+    },
+    "predicted_classes": [
+      "cycling",
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ]
+  }
+}

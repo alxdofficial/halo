@@ -1,0 +1,52 @@
+{
+  "_baseline": "limubert",
+  "_dataset": "realworld",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 24.59512499198683,
+    "balanced_accuracy": 32.61817401695517,
+    "accuracy": 35.19622675091216,
+    "f1_weighted": 24.652197017494604,
+    "n_samples": 11237,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": 20.17262920894297,
+    "f1_macro_ci_hi": 28.30584053033074,
+    "bootstrap_B": 1000,
+    "n_subjects": 15,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "climbingdown": 0.0,
+      "climbingup": 0.0,
+      "jumping": 32.16783216783217,
+      "lying": 0.0,
+      "running": 32.84639220894201,
+      "sitting": 51.68273296127177,
+      "standing": 36.41816623821765,
+      "walking": 43.64587635963101
+    },
+    "reachable_nn_lb": [
+      "climbingup",
+      "jumping",
+      "lying",
+      "running",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "reachability_lb": 0.875,
+    "predicted_classes": [
+      "climbingup",
+      "jumping",
+      "running",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "n_predicted_classes": 6,
+    "top_T": 10
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "_baseline": "normwear",
+  "_dataset": "shoaib",
+  "_stream": "phone_right_pocket",
+  "_alignment": "non_harmonised",
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 3.575898444484177,
+    "balanced_accuracy": 14.285714285714285,
+    "accuracy": 14.285714285714285,
+    "f1_weighted": 3.575898444484177,
+    "n_samples": 2100,
+    "n_gt_classes": 7,
+    "n_scored_classes": 7,
+    "f1_macro_ci_lo": 3.571428571428571,
+    "f1_macro_ci_hi": 3.58487184083169,
+    "bootstrap_B": 1000,
+    "n_subjects": 10,
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "cycling": 0.0,
+      "jogging": 0.0,
+      "sitting": 25.03128911138924,
+      "standing": 0.0,
+      "walking": 0.0,
+      "walking_downstairs": 0.0,
+      "walking_upstairs": 0.0
+    },
+    "predicted_classes": [
+      "cycling",
+      "sitting"
+    ],
+    "n_channels_used": 6,
+    "match_metric": "l1_argmin"
+  }
+}
