@@ -138,7 +138,7 @@ def test_encoder_mamba_frontend_end_to_end():
               patch_padding_mask=torch.ones(B, P, dtype=torch.bool))
     assert out["pooled"].shape == (B, 32) and torch.isfinite(out["pooled"]).all()
     out["pooled"].square().mean().backward()
-    assert enc.filterbank.A_log.grad is not None and torch.isfinite(enc.filterbank.A_log.grad).all()
+    assert enc.filterbank.blocks[0].A_log.grad is not None and torch.isfinite(enc.filterbank.blocks[0].A_log.grad).all()
 
 
 if __name__ == "__main__":

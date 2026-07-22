@@ -59,8 +59,8 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
         rope_min_period=0.4 if c.get("multiresolution", False) else 0.5,
     )
     if frontend == "mamba":
-        kw.update(d_state=c.get("mamba_d_state", 16), d_conv=c.get("mamba_d_conv", 4),
-                  scan_chunk=c.get("mamba_scan_chunk", 32))
+        kw.update(n_layers=c.get("mamba_n_layers", 3), d_state=c.get("mamba_d_state", 16),
+                  d_conv=c.get("mamba_d_conv", 4), scan_chunk=c.get("mamba_scan_chunk", 32))
         if c.get("mamba_d_inner", 0):
             kw["d_inner"] = c["mamba_d_inner"]
     else:                                                   # fixed / learnable filterbank hyperparams

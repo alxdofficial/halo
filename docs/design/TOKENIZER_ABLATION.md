@@ -29,7 +29,7 @@
 
 | | Arm A — `frontend="fixed"` | Arm B — `frontend="mamba"` |
 |---|---|---|
-| method | multi-scale physical-Hz constant-Q filterbank | per-channel selective SSM on raw native-rate signal |
+| method | multi-scale physical-Hz constant-Q filterbank | per-channel **3-layer stacked** selective SSM on raw native-rate signal |
 | rate handling | rate-invariant by construction (bands fixed in Hz) | **Δ = (1/rate)·softplus(·)** — physical step at *init*; a learned bias, NOT a guarantee |
 | prior | strong handcrafted spectral prior | learned dynamics, minimal prior |
 | observability | explicit Nyquist mask + resolution flag | implicit (model must infer from Δ) |
@@ -54,6 +54,13 @@ sinusoid, `tests/test_mamba_frontend.py`).
 > not a structural guarantee. If we want it structural we must make the conv physical-time-aware
 > (or drop it) and bound/monitor the multiplier — and if we don't, the comparison must say so and
 > track the multiplier distribution by source/rate.
+
+**Depth (Arm B):** the tokenizer is now a **stack of 3 residual Mamba blocks** per channel
+(`mamba_n_layers`, default 3) — a single block is a weak extractor (~one adaptive filter + gate); the
+stack gives hierarchical nonlinear *intra-patch* feature extraction (local oscillation → cycle →
+segment) before pooling to one token. Inter-patch temporal modelling stays in the shared transformer.
+A deep Mamba that *owns* the temporal modelling (over the full sequence) is a larger, separate
+experiment — flagged, not built.
 
 **Per channel, shared weights** (both arms): one tokenizer applied independently per channel, so
 count/order stay free and identity comes from text downstream. Per-**sensor** SSM (cross-channel at

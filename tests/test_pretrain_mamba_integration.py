@@ -58,7 +58,7 @@ def test_checkpoint_roundtrip_reconstructs_mamba():
     assert isinstance(enc.filterbank, SelectiveSSMChannelTokenizer)
     # state actually loaded (params equal)
     a = dict(model.encoder.named_parameters()); b = dict(enc.named_parameters())
-    assert torch.allclose(a["filterbank.A_log"], b["filterbank.A_log"])
+    assert torch.allclose(a["filterbank.blocks.0.A_log"], b["filterbank.blocks.0.A_log"])
 
 
 def test_mamba_config_is_stamped_in_checkpoint():

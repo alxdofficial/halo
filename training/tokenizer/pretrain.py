@@ -107,6 +107,7 @@ class PretrainConfig:
     # a1_weight=0 -> train on A2 (SupCon) + A3 (grounding) only, both frontend-agnostic.
     a1_weight: float = 1.0
     # --- mamba frontend (only used when frontend=="mamba"); stamped in the checkpoint for repro ---
+    mamba_n_layers: int = 3               # stacked Mamba blocks (intra-patch depth)
     mamba_d_state: int = 16
     mamba_d_inner: int = 0                 # 0 -> 2*d_model
     mamba_d_conv: int = 4
@@ -131,8 +132,8 @@ class PipelineAModel(nn.Module):
         # frontend interface); its hyperparameters are stamped in PretrainConfig for reproducibility.
         fe_kwargs = {}
         if cfg.frontend == "mamba":
-            fe_kwargs = dict(d_state=cfg.mamba_d_state, d_conv=cfg.mamba_d_conv,
-                             scan_chunk=cfg.mamba_scan_chunk)
+            fe_kwargs = dict(n_layers=cfg.mamba_n_layers, d_state=cfg.mamba_d_state,
+                             d_conv=cfg.mamba_d_conv, scan_chunk=cfg.mamba_scan_chunk)
             if cfg.mamba_d_inner:
                 fe_kwargs["d_inner"] = cfg.mamba_d_inner
         self.encoder = SetTokenizerEncoder(
