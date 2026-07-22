@@ -78,6 +78,13 @@ class SetTokenizerEncoder(nn.Module):
         if text_conditioning not in ("per_channel", "factored"):
             raise ValueError("text_conditioning must be 'per_channel' or 'factored'")
         self.text_conditioning = text_conditioning
+        # Back-compat: callers (training/tokenizer/pretrain.py, older checkpoints) select the arm
+        # via a legacy `learnable=bool` kwarg. Translate it into `frontend` and DROP it, so
+        # build_frontend -- which sets `learnable` itself for the fixed/learnable arms -- does not
+        # receive it twice (that collision broke the default fixed path; regression 2026-07-22).
+        legacy_learnable = filterbank_kwargs.pop("learnable", None)
+        if legacy_learnable is not None and frontend == "fixed":
+            frontend = "learnable" if legacy_learnable else "fixed"
         self.frontend_kind = frontend
         # The tokenizer front end is swappable (fixed filterbank | mamba | ...) but every option
         # honours the same (B,P,S,C)+rate+N -> (B,P,C,d) contract, so the encoder body is identical

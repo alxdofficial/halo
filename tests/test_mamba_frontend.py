@@ -145,3 +145,18 @@ if __name__ == "__main__":
     import sys
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_legacy_learnable_kwarg_still_builds_all_arms():
+    """Regression (2026-07-22): routing the encoder through build_frontend made `learnable` get
+    passed twice, breaking the DEFAULT fixed path used by pretrain.py / eval_transfer. The unit
+    tests missed it because none passed `learnable=`. Pin all three construction paths."""
+    from model.tokenizer.filterbank import PhysicalFilterbankTokenizer
+    from model.tokenizer.mamba_frontend import SelectiveSSMChannelTokenizer
+    k = dict(d_model=16, num_layers=1, num_heads=2, dim_feedforward=32, dft_size=256)
+    fixed = SetTokenizerEncoder(learnable=False, **k)          # pretrain.py's fixed arm
+    learn = SetTokenizerEncoder(learnable=True, **k)           # pretrain.py's learnable arm
+    mamba = SetTokenizerEncoder(frontend="mamba", **k)
+    assert isinstance(fixed.filterbank, PhysicalFilterbankTokenizer) and not fixed.filterbank.learnable
+    assert isinstance(learn.filterbank, PhysicalFilterbankTokenizer) and learn.filterbank.learnable
+    assert isinstance(mamba.filterbank, SelectiveSSMChannelTokenizer)
