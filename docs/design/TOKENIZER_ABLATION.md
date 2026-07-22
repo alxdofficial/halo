@@ -1,17 +1,23 @@
 # Tokenizer ablation — spectral filterbank vs learned rate-aware SSM
 
-> **Status: Arm B is a standalone PROTOTYPE — NOT GO for training the comparison (2026-07-22).**
-> An independent audit (verified here) found the prototype is not yet reachable from the training
-> harness, cannot fit the intended batch in autograd, and had over-claimed its rate-invariance.
-> Blockers before any comparison run — see §"Audit blockers" below:
-> 1. **Not harness-integrated** — the CLI, the A1 calibration path, checkpoint save/resume/eval, and
->    the regularization hooks all assume a filterbank; Mamba needs its own path (`#2`).
-> 2. **Backward graph too large** — the sequential scan retains the recurrent graph over all S steps
->    (~137 MiB saved tensors at a *tiny* config); infeasible at the real batch/`d_model` without a
->    fused/parallel scan (`#3`).
-> 3. **Objective confound** — the A1 target is the *filterbank's* features, so Arm B is partly trained
->    to reproduce Arm A (`#7`).
-> 4. **Rate-invariance was over-claimed** — see the corrected physics note below.
+> **Status: Arm B is now HARNESS-INTEGRATED (2026-07-22 pm). One perf caveat remains before a
+> full-scale run; the comparison scaffolding (subset + metrics) is live.** Two independent audits
+> flagged a set of blockers; all are fixed or addressed except scan throughput — see §"Audit
+> blockers":
+> - ✅ **Harness integration (#2)** — `--frontend mamba` builds the SSM (was silently the filterbank);
+>   frontend-agnostic calibration, `adaptation_regularization`/`adaptation_summary` hooks, checkpoint
+>   config, and `eval_transfer` reconstruction all done; 5 integration tests + 11 unit tests.
+> - ✅ **Backward memory (#3)** — chunked **gradient checkpointing** bounds the scan's backward graph to
+>   O(chunk·M·E·N); numerically identical to the unchunked scan. **Remaining caveat:** the scan is
+>   still a *Python loop* (throughput, not memory) — slow at batch 512; a parallel scan / CUDA kernel
+>   is the speed fix (not correctness). *A full-scale training smoke has not yet been run.*
+> - ✅ **Objective neutrality (#7)** — `--a1-weight 0` runs the comparison on A2 (SupCon) + A3
+>   (grounding), both frontend-agnostic, so Arm B is no longer trained to reproduce the filterbank.
+> - ✅ **Δ-multiplier (#5)** — soft reg pulls the baseline toward the physical clock; monitored in
+>   `adaptation_summary`. **Rate-invariance remains a learned bias, not structural** (conv/skip caveat
+>   in the physics note below).
+> - ⚠️ **Channel order (#6)** — Arm B requires the canonical 6-channel layout (the corpus always
+>   provides it); documented constraint, not arbitrary-order like the filterbank.
 >
 > The decisive head-to-head for the feature-extraction question (`POSITIONING.md` §10): is our
 > physical-Hz filterbank leaving performance on the table versus a learned front end? Both arms share
@@ -141,17 +147,18 @@ Recorded so the "NO-GO for training" status is concrete and actionable. Numbers 
 | # | severity | issue | status |
 |---|---|---|---|
 | 1 | blocker | `learnable=` passed twice via `build_frontend` broke the **default fixed path** (pretrain/eval). | ✅ **fixed** + regression test (`test_legacy_learnable_kwarg_still_builds_all_arms`). |
-| 1b | blocker | **Silent substitution** (2nd audit): `pretrain.py` never passed `frontend=cfg.frontend`, so `cfg.frontend="mamba"` built the FIXED filterbank and stamped the checkpoint `"mamba"` — a falsely-labelled ablation. | ✅ **fixed** — routes `frontend=cfg.frontend`; the mamba path now **fails loud** (`NotImplementedError`) at model construction until its lifecycle lands, so no mislabeled run is possible (CLI or programmatic). |
-| 2 | blocker | Mamba **not harness-integrated**: A1 calibration copies filterbank stats / calls `dc_mu`; the loop calls `adaptation_regularization`/`learnable`/`adaptation_summary`; `eval_transfer.build_encoder` always builds a filterbank. | ❌ open — needs a common frontend interface (calibration, regularization, save/resume/eval round-trip). CLI now accepts `mamba` but it raises until this lands. |
-| 3 | blocker | **Backward graph too large** (see perf caveat). | ❌ open — needs parallel scan / kernel. |
-| 4 | high | **Rate-invariance over-claimed** ("by construction", 5.6×). Real-window advantage ~1.0×; conv/skip are rate-dependent. | ✅ **claim corrected** (physics note above). Open *design* choice: make conv physical-time-aware / bound Δ, or keep the weaker "learned bias" claim. |
-| 5 | high | **Δ multiplier unbounded** at train time (`mult_min/max` bound only init). | ⚠️ documented; bound-or-monitor is a design decision tied to #4. |
-| 6 | high | **Per-modality norm assumes canonical channel order** (0:3 accel, 3:6 gyro); a permuted or 3-channel input misassigns/raises. Corpus always pads to canonical 6-ch so training is protected, but the "arbitrary channel count/order" contract is **false for this arm**. | ⚠️ documented; general fix = carry a modality id per channel, or require canonical layout explicitly. |
-| 7 | medium | **A1 objective target is the filterbank's features**, so Arm B is partly trained to reproduce Arm A. | ❌ open — add an objective-neutral comparison (e.g. A1 off, or a frontend-agnostic target) and report A1/A2 magnitudes. |
-| 8 | medium | Protocol not reproducible: subset TBD, seed count unspecified, Mamba settings absent from `PretrainConfig`/checkpoints. Params: frontend **25.3k (fixed) vs 194.3k (Mamba), 7.67×**; full encoder **+2.35%**. | ❌ open — stamp `d_state/d_inner/d_conv/Δ-bounds/pool/norm-groups/scan`, use matched multi-seed runs, disclose param gap. |
+| 1b | blocker | **Silent substitution**: `pretrain.py` never passed `frontend=cfg.frontend`, so `cfg.frontend="mamba"` built the FIXED filterbank and stamped the checkpoint `"mamba"`. | ✅ **fixed** — routes `frontend=cfg.frontend`. |
+| 2 | blocker | Mamba **not harness-integrated** (calibration, regularization/logging hooks, checkpoint config, eval reconstruction all assumed a filterbank). | ✅ **fixed** — frontend-agnostic calibration (each frontend runs its own `accumulate/finalize`); `learnable`/`adaptation_regularization`/`adaptation_summary` on the SSM; `eval_transfer.build_encoder` reconstructs the actual frontend; CLI accepts `mamba`. 5 integration tests (`test_pretrain_mamba_integration.py`). |
+| 3 | blocker | **Backward graph too large** (retains all S scan steps). | ✅ **addressed** — chunked **gradient checkpointing** (`scan_chunk`), backward memory O(chunk·M·E·N), numerically identical. ⚠️ **remaining:** scan is a Python loop → slow at batch 512 (throughput). Parallel scan / CUDA kernel is the speed fix. Full-scale smoke not yet run. |
+| 4 | high | **Rate-invariance over-claimed** ("by construction", 5.6×). Real-window advantage ~1.0×; conv/skip rate-dependent. | ✅ **claim corrected** (physics note). Making it structural (physical-time conv / bounded Δ) is an open design choice. |
+| 5 | high | **Δ multiplier unbounded** at train time. | ✅ **addressed** — `adaptation_regularization` softly pulls the multiplier baseline toward the physical clock (1/rate); `adaptation_summary` monitors its distribution. |
+| 6 | high | **Per-modality norm assumes canonical channel order** (0:3 accel, 3:6 gyro); a permuted/3-channel input misassigns/raises. | ⚠️ **documented constraint** — Arm B requires the canonical 6-channel layout, which the corpus always provides (pad+mask). General fix (modality id per channel) deferred; not needed for this corpus. |
+| 7 | medium | **A1 objective target is the filterbank's features** → Arm B trained to reproduce Arm A. | ✅ **addressed** — `--a1-weight 0` runs an objective-neutral comparison on A2 (SupCon) + A3 (grounding), both frontend-agnostic. Report with A1 off (and optionally on, disclosed). |
+| 8 | medium | Protocol repro: Mamba settings absent from `PretrainConfig`/checkpoints. Params: frontend **25.3k vs 194.3k (7.67×)**; full encoder **+2.35%**. | ✅ **config stamped** (`mamba_d_state/d_inner/d_conv/scan_chunk`). Remaining: matched multi-seed runs + disclose the param gap when reporting. |
 
-**Verdict: NO-GO for training the comparison.** The standalone prototype is sound in structure and
-worth continuing (per-modality calibration correct, padding handling correct, grad flow verified), but
-it is unreachable from the harness, cannot fit the intended batch in autograd, and its central
-rate-invariance claim did not hold on real data. Clear #2, #3, #7 (and decide #4/#5/#6) before any
-run. No trained Mamba checkpoint exists, so representation quality is still unmeasured.
+**Verdict: reachable and integrated; one perf caveat before a full-scale run.** Arm B now trains
+through the harness with objective-neutral option, bounded backward memory, monitored physical clock,
+and a reproducible checkpoint. The remaining gate is **scan throughput** (Python loop) at batch 512 —
+a parallel scan / kernel, or a reduced-batch run, is needed to make the comparison fast; a full-scale
+training smoke has not yet been run, so no trained Mamba checkpoint exists and representation quality
+is still unmeasured. The subset + metric suite (above) are live and the Arm A baseline is measured.

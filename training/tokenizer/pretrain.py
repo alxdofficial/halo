@@ -102,7 +102,16 @@ class PretrainConfig:
     warmup_steps: int = 1_000
     grad_clip: float = 1.0
     a3_weight: float = 0.1
-    calib_batches: int = 50               # filterbank norm calibration pass
+    # A1 (masked-latent recon) weight. A1's target is the FIXED filterbank's features, so it is
+    # home-field for the filterbank arm (audit #7). For an objective-NEUTRAL tokenizer comparison set
+    # a1_weight=0 -> train on A2 (SupCon) + A3 (grounding) only, both frontend-agnostic.
+    a1_weight: float = 1.0
+    # --- mamba frontend (only used when frontend=="mamba"); stamped in the checkpoint for repro ---
+    mamba_d_state: int = 16
+    mamba_d_inner: int = 0                 # 0 -> 2*d_model
+    mamba_d_conv: int = 4
+    mamba_scan_chunk: int = 32             # gradient-checkpointed scan chunk (backward memory)
+    calib_batches: int = 50               # frontend norm calibration pass
     val_every: int = 1_000
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
     knn_k: int = 5
@@ -116,22 +125,20 @@ class PretrainConfig:
 class PipelineAModel(nn.Module):
     def __init__(self, cfg: PretrainConfig, a1_target_dim: int):
         super().__init__()
-        # Fail loud rather than silently substitute: the mamba frontend is not yet integrated into
-        # the training LIFECYCLE (A1 calibration, regularization/logging hooks, checkpoint config,
-        # eval reconstruction — see docs/design/TOKENIZER_ABLATION.md "Audit blockers" #2/#3). Passing
-        # frontend=cfg.frontend below WOULD build it, but the loop would then mishandle it; worse, the
-        # old code never passed frontend at all, so cfg.frontend="mamba" silently built the FIXED
-        # filterbank and stamped the checkpoint "mamba" — a falsely-labelled ablation. Refuse it here.
-        if cfg.frontend not in ("fixed", "learnable"):
-            raise NotImplementedError(
-                f"frontend={cfg.frontend!r} is not wired into the training loop yet (calibration / "
-                f"regularization / checkpoint / eval hooks assume the filterbank). See "
-                f"docs/design/TOKENIZER_ABLATION.md. Prototype is reachable via "
-                f"SetTokenizerEncoder(frontend=...) for standalone use only.")
+        # Frontend-specific kwargs (only the selected arm's; build_frontend forwards these to the
+        # chosen tokenizer). The mamba arm is now integrated into the loop (calibration /
+        # regularization / logging / checkpoint / eval reconstruction all go through the shared
+        # frontend interface); its hyperparameters are stamped in PretrainConfig for reproducibility.
+        fe_kwargs = {}
+        if cfg.frontend == "mamba":
+            fe_kwargs = dict(d_state=cfg.mamba_d_state, d_conv=cfg.mamba_d_conv,
+                             scan_chunk=cfg.mamba_scan_chunk)
+            if cfg.mamba_d_inner:
+                fe_kwargs["d_inner"] = cfg.mamba_d_inner
         self.encoder = SetTokenizerEncoder(
             d_model=cfg.d_model, num_layers=cfg.num_layers, num_heads=cfg.num_heads,
             dim_feedforward=cfg.dim_feedforward, dropout=cfg.dropout, dft_size=DFT_SIZE,
-            frontend=cfg.frontend,          # route the ARM's frontend (was: silently ignored -> fixed)
+            frontend=cfg.frontend, **fe_kwargs,   # route the ARM's frontend (was: silently ignored -> fixed)
             use_duration_embedding=cfg.multiresolution,
             duration_min_seconds=min(cfg.short_patch_choices),
             duration_max_seconds=max(cfg.long_patch_choices),
@@ -338,6 +345,10 @@ def main() -> None:
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
                         help="override multiresolution (default ON); --no-multiresolution is the "
                              "single-resolution ablation")
+    parser.add_argument("--a1-weight", type=float, default=None,
+                        help="scale the A1 masked-recon loss. Set 0 for an objective-NEUTRAL tokenizer "
+                             "comparison (A1's target is the filterbank — home-field; see "
+                             "docs/design/TOKENIZER_ABLATION.md #7).")
     args = parser.parse_args()
 
     cfg = PretrainConfig(
@@ -351,6 +362,8 @@ def main() -> None:
         cfg.frontend = args.frontend
     if args.multiresolution is not None:
         cfg.multiresolution = args.multiresolution
+    if args.a1_weight is not None:
+        cfg.a1_weight = args.a1_weight
     if args.steps:
         cfg.steps = args.steps
     if args.smoke:
@@ -450,11 +463,20 @@ def main() -> None:
     # norm and turned A1 into 'echo the rate' — second-agent audit 2026-07-18).
     signal_idx = torch.tensor(target_tok.signal_feature_indices(), device=device)
     model = PipelineAModel(cfg, a1_target_dim=len(signal_idx)).to(device)
-    # M3 lesson: copy the calibrated norm into the encoder's inner filterbank.
-    model.encoder.filterbank.norm_mu.copy_(target_tok.norm_mu.to(device))
-    model.encoder.filterbank.norm_sd.copy_(target_tok.norm_sd.to(device))
-    model.encoder.filterbank.dc_mu.copy_(target_tok.dc_mu.to(device))
-    model.encoder.filterbank.dc_sd.copy_(target_tok.dc_sd.to(device))
+    # Calibrate the ENCODER's frontend with its OWN accumulate/finalize (frontend-agnostic). The
+    # filterbank computes per-band + signed-DC stats; the mamba SSM computes per-modality stats. This
+    # replaces copying filterbank-specific buffers (norm_mu/dc_mu), which assumed the encoder frontend
+    # WAS a filterbank and broke for mamba (different buffer shapes / no dc_mu). Same data as the A1
+    # target, so the filterbank arm's stats are unchanged.
+    fe = model.encoder.filterbank
+    fe.reset_norm_accumulator()
+    fe_iter = _cycle(train_loader)
+    for _ in range(cfg.calib_batches):
+        b = next(fe_iter)
+        fe.accumulate_norm_stats(
+            b["patches"].to(device), b["rates"].to(device), b["patch_len"].to(device),
+            patch_mask=b["patch_padding_mask"].to(device), channel_mask=b["channel_mask"].to(device))
+    fe.finalize_norm_stats()
     target_tok = target_tok.to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -483,7 +505,7 @@ def main() -> None:
         * 0.5 * (1 + np.cos(np.pi * min(s / cfg.steps, 1.0))),
     )
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
-    weights = EliteLossWeights(a3_grounding=cfg.a3_weight)
+    weights = EliteLossWeights(a1_masked=cfg.a1_weight, a3_grounding=cfg.a3_weight)
     log_path = args.out / "log.jsonl"
     best_ba = -1.0
     t0 = time.time()

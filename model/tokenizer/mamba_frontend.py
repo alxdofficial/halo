@@ -48,10 +48,13 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         standardize: bool = True,       # frozen PER-MODALITY (mu,sd); preserves gravity DC
         channel_groups: tuple = (0, 0, 0, 1, 1, 1),  # channel -> modality group (accel=0, gyro=1)
         pool: str = "mean",            # 'mean' over valid steps | 'last' valid state
+        scan_chunk: int = 32,           # timesteps per gradient-checkpointed scan chunk (backward memory)
         dft_size: int | None = None,    # accepted+ignored: drop-in kwarg parity with the filterbank
         **_ignored,                     # tolerate filterbank-only kwargs so build_frontend can pass through
     ):
         super().__init__()
+        self.scan_chunk = int(scan_chunk)
+        self.learnable = True           # frontend-interface parity with the filterbank arm (fully learned)
         self.d_model = d_model
         self.d_state = int(d_state)
         self.d_inner = int(d_inner or 2 * d_model)
@@ -104,6 +107,47 @@ class SelectiveSSMChannelTokenizer(nn.Module):
 
     def get_output_dim(self) -> int:
         return self.d_model
+
+    # ---------------------------------------------------------------- selective scan (one chunk)
+    def _scan_chunk(self, h, x_c, dtlr_c, Bm_c, Cm_c, dt_phys, valid_c, A):
+        """Run the selective recurrence over one chunk of timesteps. Carry `h` in, (h_out, y_chunk)
+        out. Isolated so it can be gradient-checkpointed (recomputed in backward)."""
+        L = x_c.shape[1]
+        ys = []
+        for t in range(L):
+            dt_t = (F.softplus(self.dt_proj(dtlr_c[:, t])) * dt_phys).unsqueeze(-1)   # (M,E,1) physical Δ
+            Abar_t = torch.exp(dt_t * A.unsqueeze(0))                                 # (M,E,N)
+            Bx_t = dt_t * Bm_c[:, t].unsqueeze(1) * x_c[:, t].unsqueeze(-1)           # (M,E,N)
+            h = Abar_t * h + Bx_t
+            y_t = (h * Cm_c[:, t].unsqueeze(1)).sum(-1) + self.D * x_c[:, t]          # (M,E)
+            ys.append(y_t * valid_c[:, t:t + 1])
+        return h, torch.stack(ys, dim=1)
+
+    # ------------------------------------------------ frontend interface (parity with the filterbank)
+    def adaptation_regularization(self) -> torch.Tensor:
+        """Soft pull of the Δ-multiplier BASELINE toward 1, i.e. toward the physical step 1/rate.
+
+        Addresses audit #5 (the multiplier is otherwise unbounded at train time and could distort the
+        physical clock). Penalises the softplus of the dt_proj BIAS deviating from 1 in log-space —
+        the input-dependent selective part is left free, so selectivity survives while the clock's
+        baseline stays near-physical. Dimensionless; scaled by cfg.frontend_reg_weight in the loop."""
+        base_mult = F.softplus(self.dt_proj.bias)            # (E,) the per-feature multiplier baseline
+        return base_mult.clamp_min(1e-6).log().square().mean()
+
+    @torch.no_grad()
+    def adaptation_summary(self) -> dict[str, float]:
+        """Telemetry incl. the Δ-multiplier distribution (audit #5: monitor the physical clock)."""
+        base_mult = F.softplus(self.dt_proj.bias).detach()
+        A = torch.exp(self.A_log).detach()                   # timescales (-A)
+        return {
+            "frontend/delta_mult_baseline_min": float(base_mult.min()),
+            "frontend/delta_mult_baseline_max": float(base_mult.max()),
+            "frontend/delta_mult_baseline_mean": float(base_mult.mean()),
+            "frontend/A_timescale_min": float(A.min()),
+            "frontend/A_timescale_max": float(A.max()),
+            "frontend/norm_sd_accel": float(self.norm_sd[0]) if self.norm_sd.numel() else 1.0,
+            "frontend/norm_sd_gyro": float(self.norm_sd[-1]) if self.norm_sd.numel() > 1 else 1.0,
+        }
 
     # ------------------------------------------------------------------ calibration (like filterbank)
     def reset_norm_accumulator(self):
@@ -218,21 +262,27 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         dt_lr, Bm, Cm = torch.split(proj, [self.dt_rank, self.d_state, self.d_state], dim=-1)
         A = -torch.exp(self.A_log)                                          # (E, N)
 
-        # Sequential selective scan, computing the discretised (M,E,N) terms PER STEP. An earlier
-        # version pre-materialised Abar/Bbar/Bx as (M,S,E,N) — ~39 GB at d_model=256 / batch 64, an
-        # instant OOM. Per-step keeps the forward footprint at O(M·E·N). (Full-corpus pretraining
-        # still wants a parallel scan / CUDA kernel for the backward graph; see the module docstring.)
+        # Per-step discretised scan (never materialises (M,S,E,N)). To bound the BACKWARD graph —
+        # which otherwise retains all S steps' activations (audit blocker #3) — the scan runs in
+        # CHUNKS, each wrapped in gradient checkpointing during training, so peak memory is
+        # O(chunk·M·E·N) not O(S·M·E·N), traded for one chunk recompute in backward.
         E, Nst = self.d_inner, self.d_state
         h = x.new_zeros(M, E, Nst)
-        ys = []
-        for t in range(S):
-            dt_t = (F.softplus(self.dt_proj(dt_lr[:, t])) * dt_phys).unsqueeze(-1)   # (M,E,1) physical Δ
-            Abar_t = torch.exp(dt_t * A.unsqueeze(0))                                # (M,E,N)
-            Bx_t = dt_t * Bm[:, t].unsqueeze(1) * x[:, t].unsqueeze(-1)              # (M,E,N)
-            h = Abar_t * h + Bx_t
-            y_t = (h * Cm[:, t].unsqueeze(1)).sum(-1) + self.D * x[:, t]             # (M,E)
-            ys.append(y_t * valid[:, t:t + 1])
-        y = torch.stack(ys, dim=1)                                                   # (M,S,E)
+        chunk = self.scan_chunk
+        do_ckpt = self.training and torch.is_grad_enabled() and any(
+            t.requires_grad for t in (x, dt_lr, Bm, Cm))
+        y_chunks = []
+        for s0 in range(0, S, chunk):
+            s1 = min(s0 + chunk, S)
+            args = (h, x[:, s0:s1], dt_lr[:, s0:s1], Bm[:, s0:s1], Cm[:, s0:s1],
+                    dt_phys, valid[:, s0:s1], A)
+            if do_ckpt:
+                h, yc = torch.utils.checkpoint.checkpoint(self._scan_chunk, *args,
+                                                          use_reentrant=False)
+            else:
+                h, yc = self._scan_chunk(*args)
+            y_chunks.append(yc)
+        y = torch.cat(y_chunks, dim=1)                                               # (M,S,E)
         y = y * F.silu(z)                                                   # gate
 
         # pool over valid timesteps -> one token per (channel, patch)

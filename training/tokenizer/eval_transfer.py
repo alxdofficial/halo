@@ -47,22 +47,32 @@ SEED = 20260718
 
 def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
     c = ckpt["config"]
-    enc = SetTokenizerEncoder(
+    frontend = c.get("frontend", "fixed")
+    kw = dict(
         d_model=c["d_model"], num_layers=c["num_layers"], num_heads=c["num_heads"],
         dim_feedforward=c["dim_feedforward"], dropout=0.0, dft_size=DFT_SIZE,
-        learnable=c.get("frontend", "fixed") == "learnable",
+        frontend=frontend,                                  # reconstruct the ACTUAL arm (was: always filterbank)
         use_duration_embedding=c.get("multiresolution", False),
         duration_min_seconds=min(c.get("short_patch_choices", (0.4,))),
         duration_max_seconds=max(c.get("long_patch_choices", (1.5,))),
         duration_gate_init=c.get("duration_gate_init", 0.1),
         rope_min_period=0.4 if c.get("multiresolution", False) else 0.5,
-        center_shift_fraction=c.get("center_shift_fraction", 0.45),
-        bandwidth_factor_max=c.get("bandwidth_factor_max", 1.5),
-        compression_gain_max=c.get("compression_gain_max", 2.0),
-        filter_shape_min=c.get("filter_shape_min", 1.5),
-        filter_shape_max=c.get("filter_shape_max", 2.5),
-        adaptive_gate_init=c.get("adaptive_gate_init", 0.1),
     )
+    if frontend == "mamba":
+        kw.update(d_state=c.get("mamba_d_state", 16), d_conv=c.get("mamba_d_conv", 4),
+                  scan_chunk=c.get("mamba_scan_chunk", 32))
+        if c.get("mamba_d_inner", 0):
+            kw["d_inner"] = c["mamba_d_inner"]
+    else:                                                   # fixed / learnable filterbank hyperparams
+        kw.update(
+            center_shift_fraction=c.get("center_shift_fraction", 0.45),
+            bandwidth_factor_max=c.get("bandwidth_factor_max", 1.5),
+            compression_gain_max=c.get("compression_gain_max", 2.0),
+            filter_shape_min=c.get("filter_shape_min", 1.5),
+            filter_shape_max=c.get("filter_shape_max", 2.5),
+            adaptive_gate_init=c.get("adaptive_gate_init", 0.1),
+        )
+    enc = SetTokenizerEncoder(**kw)
     enc.load_state_dict(ckpt["encoder"])
     enc.eval_resolution_pair = tuple(c.get("val_resolution_pair", VAL_RESOLUTION_PAIR))
     enc.min_resolution_ratio = float(c.get("min_resolution_ratio", 1.75))
