@@ -117,18 +117,21 @@ cross-config retrieval (rate & placement), alignment/uniformity, effective rank,
 decodability, linear-probe/transfer BA — pure functions + `collect_embeddings`/`run_suite`.
 Deliberately excludes A1/filterbank-similarity (confound #7).
 
-**Arm A baseline** (fixed filterbank, `pretrain_fixed_mr`, on this subset — the bar Arm B must beat):
-
-| | kNN purity | cross-rate retr. | cross-place retr. | rate-decode | place-decode | eff. rank | frontend params |
-|---|---|---|---|---|---|---|---|
-| val (in-dist) | **0.869** | **0.925** | 0.794 | **1.00** | **0.997** | 133.6/256 | **25.3k** |
-| held-out xrf_v2 | 0.849 | — | 0.842 | — | — | — | (Mamba 194k, 7.67×) |
-
-**Already-interesting:** the filterbank fully **leaks** rate & placement (decode 1.00 / 0.997 —
-expected: Nyquist mask exposes rate, gravity survives) **yet cross-rate retrieval is 0.925** — so
-config leakage is *not* harmful here; the activity signal dominates. That gives Arm B a concrete
-target: *lower leakage at equal-or-better retrieval* is the win; *lower leakage that also hurts
-retrieval* is not.
+> ⚠️ **The earlier "Arm A baseline" numbers are RETRACTED as a control** (2nd tokenizer audit). They
+> were run on `pretrain_fixed_mr`, which trained on the **FULL corpus INCLUDING xrf_v2** (xrf is in
+> `TRAIN_DATASETS`). So its "held-out xrf" figures were only *subject*-held-out, not
+> dataset/config-held-out — invalid as a transfer control. And `pretrain_fixed_mr` used A1 on / full
+> corpus / 25k steps, i.e. a different protocol than the intended subset + `a1_weight=0` Arm B. **A
+> valid comparison needs FRESH matched runs of BOTH arms** on the subset (xrf genuinely held out),
+> same seed(s), same budget, same objective. The retracted numbers (kNN purity 0.869 val; rate/place
+> decode 1.00/0.997) are kept only as a rough sanity signal that the suite runs and that the
+> filterbank *does* leak config — not as the bar.
+>
+> Also note the metric confounds (2nd audit #7), disclosed in `eval/tokenizer_metrics.py`:
+> **rate/placement decodability is confounded with dataset identity** (each rate maps to specific
+> datasets, so "rate decode 1.00" may be reading dataset, not rate); purity/retrieval are now
+> **macro-averaged** by label; xrf cross-placement retrieval is **paired same-session** evidence, not
+> independent cross-dataset generalization. Interpret decodability alongside transfer, never alone.
 
 ## Decision criterion (pre-registered)
 
@@ -137,16 +140,17 @@ wall-clock. **If Arm B does not beat Arm A on held-out configs by more than seed
 stands** (with the Ravì-2016 rate-invariance-in-the-spectral-domain justification). If Arm B wins,
 switch, then test per-sensor Arm B. Either outcome is publishable as a measured tokenizer choice.
 
-## Perf caveat (Arm B)
+## Perf (Arm B) — resolved
 
-The selective scan is currently **sequential** (exact, portable, kernel-free). The forward footprint
-was fixed (per-step `(M,E,N)`, not the old `(M,S,E,N)` ~39 GB pre-materialisation), **but the backward
-graph still retains the recurrence over all S steps** — measured ~137 MiB saved tensors at a *tiny*
-config (B=2,P=4,S=64,C=6,d=64) vs 0.1 MiB for the filterbank. This does **not** scale to the real
-batch / `d_model`, and shrinking the batch would change the SupCon objective. A fused/parallel
-selective scan or the `mamba_ssm` CUDA kernel (not installed; a build step) with a memory-efficient
-backward is **required before even a representative smoke run** — Mamba's efficiency claims depend on
-its hardware-aware scan, not a Python recurrence.
+The selective scan now runs on the **official `mamba_ssm` CUDA kernel** (`selective_scan_fn`), built
+from source (`causal-conv1d` 1.6.2, `mamba-ssm` 2.3.2). Measured **9.7× faster** than the reference
+path and **bit-identical** to it (max abs diff 3e-8 single-block, 3.6e-7 across the 3-block stack).
+The kernel carries its own memory-efficient backward, so the old backward-recurrence blow-up is gone.
+
+For CPU / no-kernel environments there is a pure-PyTorch fallback: a **chunked, gradient-checkpointed**
+scan (`scan_chunk=32`) so the backward graph never materialises all S steps at once. `pretrain.py`
+**fails loud** (`RuntimeError`) if `frontend="mamba"` is requested on CUDA without the kernel, or on CPU
+outside a smoke run — no silent fallback to the slow path in a real run.
 
 ## Audit blockers (independent review, 2026-07-22 — verified here)
 
@@ -163,10 +167,28 @@ Recorded so the "NO-GO for training" status is concrete and actionable. Numbers 
 | 6 | high | **Per-modality norm assumes canonical channel order** (0:3 accel, 3:6 gyro); a permuted/3-channel input misassigns/raises. | ⚠️ **documented constraint** — Arm B requires the canonical 6-channel layout, which the corpus always provides (pad+mask). General fix (modality id per channel) deferred; not needed for this corpus. |
 | 7 | medium | **A1 objective target is the filterbank's features** → Arm B trained to reproduce Arm A. | ✅ **addressed** — `--a1-weight 0` runs an objective-neutral comparison on A2 (SupCon) + A3 (grounding), both frontend-agnostic. Report with A1 off (and optionally on, disclosed). |
 | 8 | medium | Protocol repro: Mamba settings absent from `PretrainConfig`/checkpoints. Params: frontend **25.3k vs 194.3k (7.67×)**; full encoder **+2.35%**. | ✅ **config stamped** (`mamba_d_state/d_inner/d_conv/scan_chunk`). Remaining: matched multi-seed runs + disclose the param gap when reporting. |
+| 9 | blocker | **Calibration device mismatch** (found in the 2026-07-22 readiness sweep): `accumulate_norm_stats` built its weight tensor on CPU while patches/buffers were on CUDA → `RuntimeError` on the *first* real GPU run. CPU-only unit tests could not catch it. | ✅ **fixed** — every calibration factor now follows `patches.device`; caught only by an actual `--device cuda` run. |
+| 10 | blocker | **Eval OOM** (readiness sweep): the per-channel scan runs `M=B·P·C` sequences at once; the val embedder's `B=256` block → `M≈24.6k`, `S=256` → multi-GB kernel intermediates → 21 GiB / OOM on a 24 GB card. Training (`B=32`) fit, so it only surfaced at validation. | ✅ **fixed** — `forward_chunk` (default 4096) processes M in chunks (each sequence is independent → **bit-exact**, verified 0.0 diff), with per-chunk gradient checkpointing under autograd so training memory is bounded too. |
+| 11 | low | Corpus fingerprint (audit #10) ignored cap/seed/selected-window counts → two subset runs could collide. | ✅ **fixed** — `corpus_fingerprint` folds in `max_per_stream`, `seed`, and realised train/val sizes. |
 
-**Verdict: reachable and integrated; one perf caveat before a full-scale run.** Arm B now trains
-through the harness with objective-neutral option, bounded backward memory, monitored physical clock,
-and a reproducible checkpoint. The remaining gate is **scan throughput** (Python loop) at batch 512 —
-a parallel scan / kernel, or a reduced-batch run, is needed to make the comparison fast; a full-scale
-training smoke has not yet been run, so no trained Mamba checkpoint exists and representation quality
-is still unmeasured. The subset + metric suite (above) are live and the Arm A baseline is measured.
+**Verdict (2026-07-22 readiness sweep): GO — the comparison is launchable.** Both arms were run
+**end-to-end on the subset** with `--a1-weight 0` on CUDA (fused kernel), through training *and* the
+B=256 validation embedding, then through the full metric harness (`eval.tokenizer_metrics.main`) —
+every metric computes, the checkpoint `_meta.frontend` correctly reads `fixed` vs `mamba` (no silent
+substitution), and the corrected transfer probe (train subset-val, test held-out xrf) fires. The two
+GPU-only bugs above (#9, #10) were found *because* this sweep ran the real pipeline rather than the
+CPU tests. What remains is the **experiment itself**, not plumbing: pick the subset cap + a matched
+budget (steps/LR/warmup) for both arms, run ≥2 matched seeds each, and report with the param gap
+(frontend 7.67×, encoder +2.35%) and the metric confounds (§ retraction block) disclosed.
+
+**Verified launch recipe** (smoke → real; drop `--smoke` and set `--steps`/`--out` for the real run):
+
+```bash
+PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
+# Arm A (fixed filterbank) and Arm B (mamba), objective-neutral, subset (xrf held out), matched seed
+$PY -m training.tokenizer.pretrain --frontend fixed --subset --a1-weight 0 --seed 0 --device cuda --out outputs/abl_fixed_s0
+$PY -m training.tokenizer.pretrain --frontend mamba --subset --a1-weight 0 --seed 0 --device cuda --out outputs/abl_mamba_s0
+# Head-free + config-axis + transfer metrics on each trained checkpoint
+$PY -m eval.tokenizer_metrics --checkpoint outputs/abl_fixed_s0/best.pt --out outputs/abl_fixed_s0/metrics.json
+$PY -m eval.tokenizer_metrics --checkpoint outputs/abl_mamba_s0/best.pt --out outputs/abl_mamba_s0/metrics.json
+```

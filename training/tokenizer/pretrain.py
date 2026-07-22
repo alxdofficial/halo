@@ -55,6 +55,7 @@ from training.tokenizer.pretrain_data import (
     MultiResolutionCollate,
     MultiScaleCollate,
     PretrainDataset,
+    TRAIN_DATASETS,
     _seed_worker,
 )
 
@@ -119,6 +120,7 @@ class PretrainConfig:
     num_workers: int = 12                 # profiled: nw=4 was data-bound (~35% GPU idle); 12 of 24
                                           # cores makes the step compute-bound (2026-07-19)
     seed: int = 20260718
+    train_datasets: tuple | None = None   # None = full TRAIN_DATASETS; set for the ablation subset
     max_per_stream: int | None = None     # None = use ALL windows; the sampler is source-balanced
     device: str = "cpu"
 
@@ -177,12 +179,16 @@ def git_commit() -> str:
 
 def corpus_fingerprint(index) -> str:
     """Stable 16-hex signature of the assembled TRAINING corpus (per-stream dataset/rate/shape +
-    label vocab), stored in the checkpoint so it records WHICH corpus produced the weights (F5 —
-    grid meta.json carries no raw fingerprint; this captures the corpus identity a checkpoint needs)."""
+    label vocab + the cap/seed/selected-window counts that determine WHICH windows were drawn),
+    stored in the checkpoint so it records the exact corpus that produced the weights (F5 — grid
+    meta.json carries no raw fingerprint; audit #10: two subset runs with different cap/seed must
+    NOT collide, so the sampling knobs and realised split sizes are part of the identity)."""
     import hashlib
     sig = [f"{r.dataset}/{r.stream}:{r.rate_hz}:{tuple(r.shape)}:{len(set(r.labels))}"
            for r in sorted(index.refs, key=lambda r: (r.dataset, r.stream))]
     sig.append("labels=" + ",".join(sorted(index.label_ids)))
+    sig.append(f"cap={getattr(index, 'max_per_stream', None)}:seed={getattr(index, 'seed', None)}"
+               f":ntrain={len(index.train)}:nval={len(index.val)}")
     return hashlib.sha256("|".join(sig).encode()).hexdigest()[:16]
 
 
@@ -340,9 +346,9 @@ def main() -> None:
                              "docs/design/LEARNABLE_TOKENIZER_ARM.md). 'learnable' swaps in the "
                              "constrained adaptive frontend — a documented negative result, kept opt-in.")
     parser.add_argument("--frontend", choices=("fixed", "learnable", "mamba"), default=None,
-                        help="override the arm's frontend for an attribution diagnostic. 'mamba' is a "
-                             "standalone prototype and raises NotImplementedError here until its "
-                             "training lifecycle is integrated (docs/design/TOKENIZER_ABLATION.md).")
+                        help="override the arm's frontend for the tokenizer ablation. 'mamba' = the "
+                             "selective-SSM tokenizer (Arm B), fully harness-integrated; requires the "
+                             "fused mamba_ssm kernel on CUDA (docs/design/TOKENIZER_ABLATION.md).")
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
                         help="override multiresolution (default ON); --no-multiresolution is the "
                              "single-resolution ablation")
@@ -350,6 +356,12 @@ def main() -> None:
                         help="scale the A1 masked-recon loss. Set 0 for an objective-NEUTRAL tokenizer "
                              "comparison (A1's target is the filterbank — home-field; see "
                              "docs/design/TOKENIZER_ABLATION.md #7).")
+    parser.add_argument("--subset", action="store_true",
+                        help="train on the tokenizer-ablation 3-rate-core subset (5 datasets, xrf_v2 "
+                             "held out) instead of the full corpus. See ablation_subset.py.")
+    parser.add_argument("--datasets", nargs="+", default=None,
+                        help="explicit train dataset list (overrides --subset and the full corpus).")
+    parser.add_argument("--seed", type=int, default=None, help="override the run seed (matched multi-seed).")
     args = parser.parse_args()
 
     cfg = PretrainConfig(
@@ -365,6 +377,13 @@ def main() -> None:
         cfg.multiresolution = args.multiresolution
     if args.a1_weight is not None:
         cfg.a1_weight = args.a1_weight
+    if args.seed is not None:
+        cfg.seed = args.seed
+    if args.datasets is not None:
+        cfg.train_datasets = tuple(args.datasets)
+    elif args.subset:
+        from training.tokenizer.ablation_subset import SUBSET_TRAIN_DATASETS
+        cfg.train_datasets = SUBSET_TRAIN_DATASETS
     if args.steps:
         cfg.steps = args.steps
     if args.smoke:
@@ -375,8 +394,25 @@ def main() -> None:
             val_per_label=10, num_workers=0, max_per_stream=200,
             device=args.device, arm=cfg.arm, frontend=cfg.frontend,
             multiresolution=cfg.multiresolution,
+            # carry the fine-grained overrides the smoke reconstruction used to DROP (audit #6):
+            a1_weight=cfg.a1_weight, seed=cfg.seed, train_datasets=cfg.train_datasets,
         )
     device = torch.device(cfg.device)
+    if cfg.frontend == "mamba":
+        # Fail LOUD rather than silently falling back to the ~50x-slower Python scan on a real run.
+        from model.tokenizer.mamba_frontend import _HAS_KERNEL
+        use_kernel = _HAS_KERNEL and device.type == "cuda"
+        print(f"[mamba] scan backend: {'fused CUDA kernel' if use_kernel else 'pure-PyTorch reference'}",
+              flush=True)
+        if device.type == "cuda" and not _HAS_KERNEL:
+            raise RuntimeError(
+                "frontend=mamba on CUDA but the fused mamba_ssm kernel is NOT importable — the "
+                "pure-PyTorch scan is ~50x slower and will not finish a real run. Install "
+                "causal-conv1d + mamba-ssm, or use --frontend fixed.")
+        if device.type != "cuda" and not args.smoke:
+            raise RuntimeError(
+                "frontend=mamba without CUDA uses the pure-PyTorch scan (fine for --smoke, far too "
+                "slow for a real run). Use --device cuda, or --smoke for a tiny CPU sanity run.")
     if device.type == "cuda":
         # TF32 for the fp32 regions autocast doesn't cover (filterbank einsum/proj, val ridge
         # solve). Free + zero-risk on Ampere+; the transformer already runs fp16 under autocast.
@@ -400,8 +436,10 @@ def main() -> None:
     print(f"arm={cfg.arm} frontend={cfg.frontend} multiresolution={cfg.multiresolution}", flush=True)
 
     # ------------------------------------------------------------------ data
-    index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.seed)
-    print(f"corpus: {index.summary()}", flush=True)
+    index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.seed,
+                        datasets=cfg.train_datasets or TRAIN_DATASETS)
+    print(f"corpus: {index.summary()}  (datasets={sorted(cfg.train_datasets or TRAIN_DATASETS)})",
+          flush=True)
     train_ds = PretrainDataset(index, index.train, augment=True)
     val_ds = PretrainDataset(index, index.val, augment=False)
     train_collate = (MultiResolutionCollate(

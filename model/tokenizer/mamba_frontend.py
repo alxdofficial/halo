@@ -79,7 +79,7 @@ class _MambaBlock(nn.Module):
             ys.append(y_t * valid_c[:, t:t + 1])
         return h, torch.stack(ys, dim=1)
 
-    def forward(self, u, dt_phys, valid, use_kernel):
+    def forward(self, u, dt_phys, valid, use_kernel, allow_inner_ckpt=True):
         # u (M,S,d_model) residual stream; dt_phys (M,1); valid (M,S)
         M, S, _ = u.shape
         residual = u
@@ -103,7 +103,8 @@ class _MambaBlock(nn.Module):
             # Portable chunked, gradient-checkpointed reference scan (CPU/tests). Backward stays
             # O(chunk·M·E·N); numerically matches the kernel.
             h = x.new_zeros(M, self.d_inner, self.d_state)
-            do_ckpt = self.training and torch.is_grad_enabled() and x.requires_grad
+            do_ckpt = (allow_inner_ckpt and self.training
+                       and torch.is_grad_enabled() and x.requires_grad)
             y_chunks = []
             for s0 in range(0, S, self.scan_chunk):
                 s1 = min(s0 + self.scan_chunk, S)
@@ -136,6 +137,8 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         channel_groups: tuple = (0, 0, 0, 1, 1, 1),  # channel -> modality group (accel=0, gyro=1)
         pool: str = "mean",            # 'mean' over valid steps | 'last' valid state
         scan_chunk: int = 32,           # timesteps per gradient-checkpointed scan chunk (ref path only)
+        forward_chunk: int = 4096,      # max per-channel sequences (M=B*P*C) processed at once; bounds
+                                        # peak memory independent of caller batch (eval uses B=256 blocks)
         use_kernel: bool = True,        # use the fused CUDA kernel when available (else the ref scan)
         dft_size: int | None = None,    # accepted+ignored: drop-in kwarg parity with the filterbank
         **_ignored,                     # tolerate filterbank-only kwargs so build_frontend can pass through
@@ -148,6 +151,7 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         self.d_conv = int(d_conv)
         self.dt_rank = int(dt_rank or math.ceil(self.d_inner / 16))
         self.pool = pool
+        self.forward_chunk = int(forward_chunk)
         self.use_kernel = bool(use_kernel)
         self.S = int(dft_size) if dft_size is not None else None   # for the drop-in length assert only
 
@@ -203,19 +207,20 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         B, P, S, C = patches.shape
         if C != self.channel_group.numel():
             raise ValueError(f"channel_groups has {self.channel_group.numel()} entries but C={C}")
-        w = torch.ones(B, P, S, C, dtype=torch.float64)
+        dev = patches.device                                  # keep every factor on the patch device
+        w = torch.ones(B, P, S, C, dtype=torch.float64, device=dev)  # was CPU -> mismatch on a CUDA run
         if patch_len_samples is not None:
-            N = torch.as_tensor(patch_len_samples).to(patches.device)
+            N = torch.as_tensor(patch_len_samples).to(dev)
             if N.ndim == 0:
                 N = N.view(1, 1).expand(B, P)
             elif N.ndim == 1:
                 N = N.view(B, 1).expand(B, P)
-            idx = torch.arange(S, device=patches.device).view(1, 1, S)
+            idx = torch.arange(S, device=dev).view(1, 1, S)
             w = w * (idx < N.unsqueeze(-1)).view(B, P, S, 1).to(torch.float64)
         if patch_mask is not None:
-            w = w * patch_mask.view(B, P, 1, 1).to(torch.float64)
+            w = w * patch_mask.to(dev).view(B, P, 1, 1).to(torch.float64)
         if channel_mask is not None:
-            w = w * channel_mask.view(B, 1, 1, C).to(torch.float64)
+            w = w * channel_mask.to(dev).view(B, 1, 1, C).to(torch.float64)
         x = patches.to(torch.float64)
         for gi in range(self.n_groups):
             sel = (self.channel_group == gi)
@@ -287,15 +292,39 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         valid = (idx < Nm).to(dtype)                                        # (M, S)
         dt_phys = (1.0 / r).view(B, 1, 1, 1).expand(B, P, 1, C).reshape(M, 1)  # (M,1) physical step
 
-        h = self.stem(seq) * valid.unsqueeze(-1)                            # (M,S,d_model)
-        for blk in self.blocks:
-            h = blk(h, dt_phys, valid, self.use_kernel)
-        h = self.final_norm(h) * valid.unsqueeze(-1)
+        import os as _os
+        if _os.environ.get("MAMBA_DEBUG_SHAPES"):
+            print(f"[mamba-shape] B={B} P={P} S={S} C={C} M={M} d_model={self.d_model} "
+                  f"d_inner={self.blocks[0].d_inner} n_blocks={len(self.blocks)}", flush=True)
+        # Each of the M=B*P*C sequences is INDEPENDENT, so process M in chunks: peak memory is bounded
+        # by forward_chunk regardless of the caller's batch (eval embeds B=256 blocks -> M~24k, which
+        # would otherwise materialise multi-GB kernel intermediates and OOM). Math is chunk-invariant.
+        chunk = self.forward_chunk or M
+        do_ckpt = self.training and torch.is_grad_enabled() and seq.requires_grad
+        toks = []
+        for s0 in range(0, M, chunk):
+            s1 = min(s0 + chunk, M)
+            sc, dc, vc = seq[s0:s1], dt_phys[s0:s1], valid[s0:s1]
+            if do_ckpt:                        # bound TRAIN memory too: one chunk's activations live
+                tok_c = torch.utils.checkpoint.checkpoint(
+                    self._encode_chunk, sc, dc, vc, use_reentrant=False)
+            else:                              # eval/no-grad: chunking alone bounds the forward working set
+                tok_c = self._encode_chunk(sc, dc, vc)
+            toks.append(tok_c)
+        tok = torch.cat(toks, dim=0)                                        # (M,d_model)
+        return tok.reshape(B, P, C, self.d_model)
 
+    def _encode_chunk(self, seq, dt_phys, valid) -> torch.Tensor:
+        """stem -> blocks -> final_norm -> pool over one chunk of M sequences. Returns (m, d_model).
+        Blocks skip their own inner scan-checkpoint here (allow_inner_ckpt=False): when this whole
+        chunk is wrapped in a checkpoint, the outer recompute already provides the memory bound, and
+        nesting would double the recompute on the ref path."""
+        h = self.stem(seq) * valid.unsqueeze(-1)                            # (m,S,d_model)
+        for blk in self.blocks:
+            h = blk(h, dt_phys, valid, self.use_kernel, allow_inner_ckpt=False)
+        h = self.final_norm(h) * valid.unsqueeze(-1)
         if self.pool == "last":
             last = (valid.sum(1).clamp(min=1) - 1).long()
-            tok = h[torch.arange(M, device=device), last]
-        else:
-            denom = valid.sum(1, keepdim=True).clamp(min=1.0)
-            tok = (h * valid.unsqueeze(-1)).sum(1) / denom                  # (M,d_model)
-        return tok.reshape(B, P, C, self.d_model)
+            return h[torch.arange(h.shape[0], device=h.device), last]
+        denom = valid.sum(1, keepdim=True).clamp(min=1.0)
+        return (h * valid.unsqueeze(-1)).sum(1) / denom                     # (m,d_model)

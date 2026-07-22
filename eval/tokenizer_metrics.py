@@ -38,25 +38,36 @@ def _cap(Z, *arrays, n=4000, seed=0):
     return (Z[idx], *[a[idx] for a in arrays])
 
 
-def knn_purity(Z: np.ndarray, y: np.ndarray, k: int = 10) -> float:
-    """Mean fraction of each point's k nearest (cosine) neighbours that share its label."""
+def knn_purity(Z: np.ndarray, y: np.ndarray, k: int = 10, macro: bool = True) -> float:
+    """Fraction of each point's k nearest (cosine) neighbours that share its label.
+
+    ``macro=True`` (default) averages per-label so common activities don't dominate (audit #7);
+    ``macro=False`` is the window-micro average.
+    """
     Z, y = _cap(Z, y)
     S = _l2(Z) @ _l2(Z).T
     np.fill_diagonal(S, -np.inf)
     nn = np.argpartition(-S, kth=min(k, len(Z) - 1) - 1, axis=1)[:, :k]
-    return float((y[nn] == y[:, None]).mean())
+    per_point = (y[nn] == y[:, None]).mean(axis=1)
+    if macro:
+        return float(np.mean([per_point[y == l].mean() for l in np.unique(y)]))
+    return float(per_point.mean())
 
 
-def cross_config_retrieval(Z: np.ndarray, y: np.ndarray, cfg: np.ndarray, k: int = 10) -> float:
+def cross_config_retrieval(Z: np.ndarray, y: np.ndarray, cfg: np.ndarray, k: int = 10,
+                           macro: bool = True) -> float:
     """precision@k where each query retrieves only neighbours from a DIFFERENT config.
 
     Tests representation invariance to the config axis: can the same activity be retrieved across a
     rate/placement change? Only queries that HAVE a same-label instance in another config count.
+    ``macro=True`` averages per-label (audit #7). NOTE: with synchronized-stream configs (e.g. xrf's
+    6 simultaneous placements) this is *paired-placement* evidence, not independent cross-dataset
+    generalization.
     """
     Z, y, cfg = _cap(Z, y, cfg)
     Zn = _l2(Z)
     S = Zn @ Zn.T
-    precs = []
+    precs, qlab = [], []
     for i in range(len(Z)):
         other = cfg != cfg[i]
         if not (other & (y == y[i])).any():          # no cross-config positive exists -> skip
@@ -64,7 +75,13 @@ def cross_config_retrieval(Z: np.ndarray, y: np.ndarray, cfg: np.ndarray, k: int
         cand = np.where(other)[0]
         top = cand[np.argsort(-S[i, cand])[:k]]
         precs.append(float((y[top] == y[i]).mean()))
-    return float(np.mean(precs)) if precs else float("nan")
+        qlab.append(y[i])
+    if not precs:
+        return float("nan")
+    if macro:
+        precs, qlab = np.array(precs), np.array(qlab)
+        return float(np.mean([precs[qlab == l].mean() for l in np.unique(qlab)]))
+    return float(np.mean(precs))
 
 
 def alignment(Z: np.ndarray, y: np.ndarray, n_pairs: int = 20000, seed: int = 0) -> float:
@@ -187,7 +204,60 @@ def run_suite(enc, device, cap: int = 10_000, per_stream_cap: int = 2000) -> dic
                 cross_config_retrieval(ho["Z"], ho["y"], ho["placement"]), 4),
         },
     }
-    # downstream: linear probe trained on val, tested on held-out config (transfer)
-    out["transfer_probe_ba"] = round(
-        linear_probe_ba(*_stratified_split(val["Z"], val["y"])), 4)
+    # downstream TRANSFER: probe TRAINED on subset-val, TESTED on the held-out config.
+    ba, n_shared = transfer_probe_ba(val["Z"], val["y"], ho["Z"], ho["y"])
+    out["transfer_probe_ba"] = round(ba, 4) if ba == ba else ba
+    out["transfer_n_shared_labels"] = n_shared
+    # in-distribution probe for contrast (this is NOT transfer)
+    out["indist_probe_ba"] = round(linear_probe_ba(*_stratified_split(val["Z"], val["y"])), 4)
     return out
+
+
+def transfer_probe_ba(train_Z, train_y, test_Z, test_y):
+    """Probe TRAINED on train_*, TESTED on test_* — restricted to the labels shared by both.
+
+    This is the genuine transfer number. The earlier ``run_suite`` mislabelled an in-distribution
+    val-split probe as "transfer" (it never touched the held-out set); this makes train≠test explicit
+    and is unit-tested. Returns (balanced_accuracy, n_shared_labels).
+    """
+    shared = sorted(set(np.asarray(train_y).tolist()) & set(np.asarray(test_y).tolist()))
+    if len(shared) < 2:
+        return float("nan"), len(shared)
+    trm, tem = np.isin(train_y, shared), np.isin(test_y, shared)
+    return linear_probe_ba(train_Z[trm], train_y[trm], test_Z[tem], test_y[tem]), len(shared)
+
+
+def main() -> None:
+    """CLI: run the suite on a checkpoint and write a JSON artifact (audit #8)."""
+    import argparse
+    import json
+    from pathlib import Path
+
+    import torch
+    from training.tokenizer.eval_transfer import build_encoder
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--checkpoint", type=Path, required=True)
+    ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--cap", type=int, default=10_000)
+    ap.add_argument("--per-stream-cap", type=int, default=2000)
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args()
+    np.random.seed(args.seed)
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    enc = build_encoder(ckpt, device)
+    res = run_suite(enc, device, cap=args.cap, per_stream_cap=args.per_stream_cap)
+    res["_meta"] = {"checkpoint": str(args.checkpoint), "seed": args.seed,
+                    "frontend": ckpt.get("config", {}).get("frontend"),
+                    "train_datasets": sorted(ckpt.get("config", {}).get("train_datasets", []) or []),
+                    "step": ckpt.get("step")}
+    print(json.dumps(res, indent=2))
+    if args.out:
+        args.out.write_text(json.dumps(res, indent=2) + "\n")
+        print(f"-> {args.out}")
+
+
+if __name__ == "__main__":
+    main()

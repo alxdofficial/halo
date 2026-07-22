@@ -196,6 +196,9 @@ class CorpusIndex:
         # canonical labels + 6-ch pad+mask layout this loader expects. The 60 Hz "harmonised" grids
         # remain the layout-locked baselines' source; they are not used here.
         self.alignment = alignment
+        self.max_per_stream = max_per_stream   # retained for the checkpoint corpus fingerprint (F5)
+        self.seed = seed
+        self.datasets = tuple(datasets)
         self.refs: list[GridRef] = [
             r for r in discover_grids(alignment) if r.dataset in set(datasets)
         ]
