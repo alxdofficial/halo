@@ -116,10 +116,22 @@ class PretrainConfig:
 class PipelineAModel(nn.Module):
     def __init__(self, cfg: PretrainConfig, a1_target_dim: int):
         super().__init__()
+        # Fail loud rather than silently substitute: the mamba frontend is not yet integrated into
+        # the training LIFECYCLE (A1 calibration, regularization/logging hooks, checkpoint config,
+        # eval reconstruction — see docs/design/TOKENIZER_ABLATION.md "Audit blockers" #2/#3). Passing
+        # frontend=cfg.frontend below WOULD build it, but the loop would then mishandle it; worse, the
+        # old code never passed frontend at all, so cfg.frontend="mamba" silently built the FIXED
+        # filterbank and stamped the checkpoint "mamba" — a falsely-labelled ablation. Refuse it here.
+        if cfg.frontend not in ("fixed", "learnable"):
+            raise NotImplementedError(
+                f"frontend={cfg.frontend!r} is not wired into the training loop yet (calibration / "
+                f"regularization / checkpoint / eval hooks assume the filterbank). See "
+                f"docs/design/TOKENIZER_ABLATION.md. Prototype is reachable via "
+                f"SetTokenizerEncoder(frontend=...) for standalone use only.")
         self.encoder = SetTokenizerEncoder(
             d_model=cfg.d_model, num_layers=cfg.num_layers, num_heads=cfg.num_heads,
             dim_feedforward=cfg.dim_feedforward, dropout=cfg.dropout, dft_size=DFT_SIZE,
-            learnable=cfg.frontend == "learnable",
+            frontend=cfg.frontend,          # route the ARM's frontend (was: silently ignored -> fixed)
             use_duration_embedding=cfg.multiresolution,
             duration_min_seconds=min(cfg.short_patch_choices),
             duration_max_seconds=max(cfg.long_patch_choices),
@@ -319,8 +331,10 @@ def main() -> None:
                              "multiresolution (the winning Phase-A config; see "
                              "docs/design/LEARNABLE_TOKENIZER_ARM.md). 'learnable' swaps in the "
                              "constrained adaptive frontend — a documented negative result, kept opt-in.")
-    parser.add_argument("--frontend", choices=("fixed", "learnable"), default=None,
-                        help="override the arm's frontend for an attribution diagnostic")
+    parser.add_argument("--frontend", choices=("fixed", "learnable", "mamba"), default=None,
+                        help="override the arm's frontend for an attribution diagnostic. 'mamba' is a "
+                             "standalone prototype and raises NotImplementedError here until its "
+                             "training lifecycle is integrated (docs/design/TOKENIZER_ABLATION.md).")
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
                         help="override multiresolution (default ON); --no-multiresolution is the "
                              "single-resolution ablation")

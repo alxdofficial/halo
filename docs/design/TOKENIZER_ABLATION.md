@@ -40,9 +40,10 @@ sinusoid, `tests/test_mamba_frontend.py`).
 > 4 taps span 0.2 s at 20 Hz but 0.04 s at 100 Hz — a rate-dependent physical window; (b) the **`D`
 > skip** (`y += D·x`) is rate-independent. And the Δ multiplier is **unbounded at train time**
 > (`mult_min/max` bound only the *init* — a `dt_proj.bias=10` yields a 10× multiplier), so training
-> can distort the physical clock. **Measured on a real IMU window** (100→200 Hz resample): the
-> correct-rate vs wrong-rate advantage is **~1.0× (negligible)** — the clean-sinusoid 5× does not
-> carry to broadband data. So rate-invariance for Arm B is a **learned target seeded by the Δ init**,
+> can distort the physical clock. The clean-sinusoid margin is also **seed-dependent** (2–8× over 30
+> inits; ~5× at the test's seed 0 on current HEAD — an independent audit reported ~1× on a different
+> state). **Measured on a real IMU window** (100→200 Hz resample): the correct-rate vs wrong-rate
+> advantage is **~1.0× (negligible)** — the clean-sinusoid margin does not carry to broadband data. So rate-invariance for Arm B is a **learned target seeded by the Δ init**,
 > not a structural guarantee. If we want it structural we must make the conv physical-time-aware
 > (or drop it) and bound/monitor the multiplier — and if we don't, the comparison must say so and
 > track the multiplier distribution by source/rate.
@@ -82,17 +83,38 @@ comparison fair.
    already inert at this data scale, so over-sizing Arm B would test capacity, not method. Match
    parameter count to Arm A as closely as practical and report both counts.
 
-## Data subset for the head-to-head (TO BE CONFIRMED)
+## Data subset + metric suite — BUILT (2026-07-22)
 
-Pretraining both arms on the full corpus twice is wasteful for a first read. Select a subset that:
+**Subset** (`training/tokenizer/ablation_subset.py`), the "3-rate core": 6 train streams / 5 datasets
+spanning 20/50/100 Hz × pocket/waist/wrist × acc-only+acc+gyro × gravity ±, capped ~10k/stream
+(~55k windows), subject-disjoint. Held-out config = **xrf_v2** (unseen dataset; 6 simultaneous
+placements — ideal for cross-config retrieval). capture24 excluded (144k acc-only would dominate).
 
-- **spans the rate range** (20 / 50 / 100 Hz) — otherwise Arm B's rate-invariance is never exercised;
-- **spans placements/devices** — so the held-out-config transfer eval is meaningful;
-- is **small enough** to pretrain both arms quickly, large enough to be non-trivial.
+| stream | rate | placement | chans | gravity |
+|---|---|---|---|---|
+| wisdm phone_pocket / watch_wrist | 20 | pocket / wrist | 6 | present |
+| uci_har phone_waist | 50 | waist | 6 | present |
+| unimib phone_pocket | 50 | pocket | **3** | present |
+| pamap2 watch_wrist | 100 | wrist | 6 | present |
+| kuhar phone_waist | 100 | waist | 6 | **removed** |
 
-Candidate: a handful of datasets covering all three rates and ≥3 placements, held-out-config eval on
-the standard ZS-XD cells (or the internal subject-disjoint val-kNN for a fast inner loop). **Exact
-subset to be chosen with the user before spending GPU.**
+**Metrics** (`eval/tokenizer_metrics.py`, unit-tested `tests/test_tokenizer_metrics.py`): kNN purity,
+cross-config retrieval (rate & placement), alignment/uniformity, effective rank, rate/placement
+decodability, linear-probe/transfer BA — pure functions + `collect_embeddings`/`run_suite`.
+Deliberately excludes A1/filterbank-similarity (confound #7).
+
+**Arm A baseline** (fixed filterbank, `pretrain_fixed_mr`, on this subset — the bar Arm B must beat):
+
+| | kNN purity | cross-rate retr. | cross-place retr. | rate-decode | place-decode | eff. rank | frontend params |
+|---|---|---|---|---|---|---|---|
+| val (in-dist) | **0.869** | **0.925** | 0.794 | **1.00** | **0.997** | 133.6/256 | **25.3k** |
+| held-out xrf_v2 | 0.849 | — | 0.842 | — | — | — | (Mamba 194k, 7.67×) |
+
+**Already-interesting:** the filterbank fully **leaks** rate & placement (decode 1.00 / 0.997 —
+expected: Nyquist mask exposes rate, gravity survives) **yet cross-rate retrieval is 0.925** — so
+config leakage is *not* harmful here; the activity signal dominates. That gives Arm B a concrete
+target: *lower leakage at equal-or-better retrieval* is the win; *lower leakage that also hurts
+retrieval* is not.
 
 ## Decision criterion (pre-registered)
 
@@ -119,7 +141,8 @@ Recorded so the "NO-GO for training" status is concrete and actionable. Numbers 
 | # | severity | issue | status |
 |---|---|---|---|
 | 1 | blocker | `learnable=` passed twice via `build_frontend` broke the **default fixed path** (pretrain/eval). | ✅ **fixed** + regression test (`test_legacy_learnable_kwarg_still_builds_all_arms`). |
-| 2 | blocker | Mamba **not harness-integrated**: CLI accepts only `fixed\|learnable`; A1 calibration copies filterbank stats / calls `dc_mu`; the loop calls `adaptation_regularization`/`learnable`/`adaptation_summary`; `eval_transfer.build_encoder` always builds a filterbank. | ❌ open — needs a common frontend interface (calibration, regularization, save/resume/eval round-trip) + CLI. |
+| 1b | blocker | **Silent substitution** (2nd audit): `pretrain.py` never passed `frontend=cfg.frontend`, so `cfg.frontend="mamba"` built the FIXED filterbank and stamped the checkpoint `"mamba"` — a falsely-labelled ablation. | ✅ **fixed** — routes `frontend=cfg.frontend`; the mamba path now **fails loud** (`NotImplementedError`) at model construction until its lifecycle lands, so no mislabeled run is possible (CLI or programmatic). |
+| 2 | blocker | Mamba **not harness-integrated**: A1 calibration copies filterbank stats / calls `dc_mu`; the loop calls `adaptation_regularization`/`learnable`/`adaptation_summary`; `eval_transfer.build_encoder` always builds a filterbank. | ❌ open — needs a common frontend interface (calibration, regularization, save/resume/eval round-trip). CLI now accepts `mamba` but it raises until this lands. |
 | 3 | blocker | **Backward graph too large** (see perf caveat). | ❌ open — needs parallel scan / kernel. |
 | 4 | high | **Rate-invariance over-claimed** ("by construction", 5.6×). Real-window advantage ~1.0×; conv/skip are rate-dependent. | ✅ **claim corrected** (physics note above). Open *design* choice: make conv physical-time-aware / bound Δ, or keep the weaker "learned bias" claim. |
 | 5 | high | **Δ multiplier unbounded** at train time (`mult_min/max` bound only init). | ⚠️ documented; bound-or-monitor is a design decision tied to #4. |
