@@ -203,3 +203,32 @@ and unpublished.
 * Whether operational advantages carry a top venue without a deployment.
 * Prior art on few-shot / query-by-example HAR, which has **not** been checked — and the pose episode
   showed what happens when we skip that step.
+
+---
+
+## 10. Novelty check (literature sweep, 2026-07-22) — both contributions are in crowded territory
+
+Ran directly against Consensus + Exa, no workflow. The honest verdict: **both candidate
+contributions are less novel than hoped, and the pose-idea lesson (assert nothing, verify) applies.**
+
+**Contribution A — language-conditioned sensor/config encoding — largely taken.** GOAT (IMWUT 2024,
+device-position text encoding), oneHAR/uniHAR (IMWUT 2025, arbitrary sensor-position configs),
+ActivityNarrated (2026, open-vocab + heterogeneous placement + retrieval eval), LanHAR, AnyMo,
+MobiDiary all occupy this space; MobiDiary even evaluates on our own `xrf_v2`. Remaining daylight is
+**narrow**: the per-sensor free-text factorization (`TEXT_CONDITIONING.md`) feeding a non-parametric
+evidence engine. Needs close reading of GOAT/oneHAR/ActivityNarrated to confirm, not assert.
+
+**Contribution B — teach-by-example / retrieval-append — mechanism is taken; the HAR framing may have
+a gap.** The append-to-memory, prototype-distance, no-retraining mechanism is heavily established in
+vision/VLM/detection (RAC "Online Learning via Memory", T3AR, and many memory-bank TTA methods), and
+OFTTA (IMWUT 2023) already brings optimization-free prototype TTA to HAR — but **unsupervised**
+(pseudo-labels, cross-person drift), not "append *labeled* exemplars of new configs/labels." The
+specific open question — *does appending labeled exemplars match fine-tuning's data-efficiency for
+wearable HAR, with calibrated abstention?* — was **not** found answered. One search (few-shot
+query-by-example HAR) hit a rate limit and is still unchecked.
+
+**Consequence.** Neither contribution is a clear open lane on its face. The defensible position, if
+one survives, is the **combination** — per-sensor language conditioning + non-parametric test-time
+acquisition + calibrated abstention + the k-curve showing a low-k regime we own — not any single
+component. Before building, close two threads: (1) retry the few-shot/query-by-example HAR search;
+(2) close-read GOAT, oneHAR, ActivityNarrated.

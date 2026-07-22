@@ -37,6 +37,9 @@ Organized into subfolders by concern.
 - [**POSITIONING.md**](design/POSITIONING.md) — is zero-shot HAR worth pursuing, what the deliverable
   is *for* (operational properties, not accuracy), the k-curve, the controlled-shift protocol.
 - [LANGUAGE_HIERARCHY.md](design/LANGUAGE_HIERARCHY.md) — second-act design: language at every level.
+- [**TEXT_CONDITIONING.md**](design/TEXT_CONDITIONING.md) — factoring channel text into a
+  per-sensor identity (device+placement+modality) + trivial intra-sensor role; current-code mapping
+  and the fold-in plan. ⚠️ prior-art lane is crowded — see MOTIVATION §2b.
 
 **Evidence engine** (read FINDINGS before the others)
 - [**EVIDENCE_ENGINE_FINDINGS.md**](design/EVIDENCE_ENGINE_FINDINGS.md) — ⭐ current empirical truth,

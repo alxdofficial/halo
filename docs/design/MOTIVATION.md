@@ -72,8 +72,38 @@ aligns the motion latent to it. **The distinction is the interface:**
 
 (No code/weights are publicly released for ZeroHAR as of 2026-07, so it is a **related-work / cite**
 target, not a runnable frozen baseline. UniMTS remains the runnable closest competitor, differentiated
-by invariance-vs-conditioning per §2.) Adjacent, on the *output* side: **ActivityNarrated** (Ray et al.,
-2026) explores open-vocabulary sensor-language recognition — relevant to `LANGUAGE_HIERARCHY.md`.
+by invariance-vs-conditioning per §2.)
+
+> ### ⚠️ Prior-art reality check (literature sweep, 2026-07-22) — this lane is CROWDED
+>
+> An earlier draft treated language-conditioned config handling as close to novel. **A direct
+> literature sweep found otherwise**, and this is recorded so we do not overclaim (the same mistake
+> that killed the pose-pretext idea by assertion). The differentiation left to us is **narrow** and
+> must be established by close reading, not assumed:
+>
+> - **[GOAT](https://consensus.app/papers/details/ed52d465eb1d5e1f8a35fb611d3ba628/) (IMWUT 2024)** —
+>   natural-language supervision over activity labels **and device on-body positions**, with an
+>   explicit "novel device position encoding technique," for zero-shot cross-dataset HAR. This is the
+>   config-side language conditioning, already published. *Open question that may be our daylight: is
+>   GOAT's position encoding categorical/closed, or genuinely free-text?*
+> - **[oneHAR / uniHAR](https://doi.org/10.1145/3749509) (IMWUT 2025)** — "one model to fit them all,"
+>   LLM-assisted, handles a **variable number and combination of sensor positions**, device types
+>   spanning phone/watch/glasses, IMU–text alignment. Directly targets our heterogeneity claim.
+> - **[ActivityNarrated](https://consensus.app/papers/details/03e9ee0ed61d5708b0a51b30402f8e61/)
+>   (2026)** — a "language-conditioned learning architecture over **variable-length sensor streams and
+>   heterogeneous sensor placements**," open-vocabulary, **retrieval-based evaluation**. This is much
+>   closer to our whole pitch than the "adjacent, output-side" framing above admitted — it overlaps
+>   the open-vocab + heterogeneous-placement + retrieval-eval combination.
+> - **[LanHAR](https://consensus.app/papers/details/2bfc914ea3265cb6a0b3c911238bc195/) (2024)**,
+>   **[AnyMo](https://arxiv.org/html/2605.22715) (2026)**, **MobiDiary (2026)** — all condition on /
+>   normalize across device+placement heterogeneity via language or geometry; MobiDiary even evaluates
+>   on **xrf_v2**, one of our own datasets.
+>
+> **The narrow lane that MIGHT survive** (needs verification, not assertion): the specific
+> *factorization* — a per-**sensor** free-text embedding (device + placement + modality) shared across
+> that sensor's channels, a trivial fixed intra-sensor channel role, an arbitrary **set** of sensors,
+> with the whole thing feeding a **non-parametric evidence engine** rather than a parametric head. No
+> single found paper clearly does all of that, but the margin is thin. See `TEXT_CONDITIONING.md`.
 
 ## 3. The falsifiable claim and the experiment that ConSE cannot rebut
 
