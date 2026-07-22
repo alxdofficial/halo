@@ -34,6 +34,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Official fused selective-scan kernel (state-spaces/mamba). CUDA-only; when absent (CPU / not
+# installed) the pure-PyTorch reference scan below is used — the same dual the mamba repo ships.
+try:
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn as _selective_scan_fn
+    _HAS_KERNEL = True
+except Exception:      # pragma: no cover - import guard
+    _selective_scan_fn = None
+    _HAS_KERNEL = False
+
 
 class SelectiveSSMChannelTokenizer(nn.Module):
     def __init__(
@@ -48,12 +57,14 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         standardize: bool = True,       # frozen PER-MODALITY (mu,sd); preserves gravity DC
         channel_groups: tuple = (0, 0, 0, 1, 1, 1),  # channel -> modality group (accel=0, gyro=1)
         pool: str = "mean",            # 'mean' over valid steps | 'last' valid state
-        scan_chunk: int = 32,           # timesteps per gradient-checkpointed scan chunk (backward memory)
+        scan_chunk: int = 32,           # timesteps per gradient-checkpointed scan chunk (ref path only)
+        use_kernel: bool = True,        # use the fused CUDA kernel when available (else the ref scan)
         dft_size: int | None = None,    # accepted+ignored: drop-in kwarg parity with the filterbank
         **_ignored,                     # tolerate filterbank-only kwargs so build_frontend can pass through
     ):
         super().__init__()
         self.scan_chunk = int(scan_chunk)
+        self.use_kernel = bool(use_kernel)
         self.learnable = True           # frontend-interface parity with the filterbank arm (fully learned)
         self.d_model = d_model
         self.d_state = int(d_state)
@@ -262,28 +273,40 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         dt_lr, Bm, Cm = torch.split(proj, [self.dt_rank, self.d_state, self.d_state], dim=-1)
         A = -torch.exp(self.A_log)                                          # (E, N)
 
-        # Per-step discretised scan (never materialises (M,S,E,N)). To bound the BACKWARD graph —
-        # which otherwise retains all S steps' activations (audit blocker #3) — the scan runs in
-        # CHUNKS, each wrapped in gradient checkpointing during training, so peak memory is
-        # O(chunk·M·E·N) not O(S·M·E·N), traded for one chunk recompute in backward.
-        E, Nst = self.d_inner, self.d_state
-        h = x.new_zeros(M, E, Nst)
-        chunk = self.scan_chunk
-        do_ckpt = self.training and torch.is_grad_enabled() and any(
-            t.requires_grad for t in (x, dt_lr, Bm, Cm))
-        y_chunks = []
-        for s0 in range(0, S, chunk):
-            s1 = min(s0 + chunk, S)
-            args = (h, x[:, s0:s1], dt_lr[:, s0:s1], Bm[:, s0:s1], Cm[:, s0:s1],
-                    dt_phys, valid[:, s0:s1], A)
-            if do_ckpt:
-                h, yc = torch.utils.checkpoint.checkpoint(self._scan_chunk, *args,
-                                                          use_reentrant=False)
-            else:
-                h, yc = self._scan_chunk(*args)
-            y_chunks.append(yc)
-        y = torch.cat(y_chunks, dim=1)                                               # (M,S,E)
-        y = y * F.silu(z)                                                   # gate
+        if self.use_kernel and _HAS_KERNEL and x.is_cuda:
+            # Official fused selective-scan kernel (state-spaces/mamba). Our physics lives entirely
+            # in the Δ we hand it — Δ = softplus(dt_proj)·(1/rate), already rate-scaled, so
+            # delta_softplus=False. The kernel applies the silu(z) gate and the D skip internally.
+            # Layout: kernel wants (M,E,S)/(M,N,S). This is the FAST training path.
+            delta = F.softplus(self.dt_proj(dt_lr)) * dt_phys.unsqueeze(1)             # (M,S,E)
+            y = _selective_scan_fn(
+                x.transpose(1, 2).contiguous(), delta.transpose(1, 2).contiguous(), A,
+                Bm.transpose(1, 2).contiguous(), Cm.transpose(1, 2).contiguous(),
+                self.D, z=z.transpose(1, 2).contiguous(), delta_softplus=False,
+            ).transpose(1, 2)                                                          # (M,S,E), gated
+        else:
+            # Portable pure-PyTorch reference scan (CPU / no-kernel / tests). Per-step discretisation
+            # (never materialises (M,S,E,N)); runs in CHUNKS wrapped in gradient checkpointing so the
+            # BACKWARD graph stays O(chunk·M·E·N) not O(S·M·E·N) (audit blocker #3). Numerically
+            # matches the kernel. This is the official mamba dual (selective_scan_ref + CUDA kernel).
+            E, Nst = self.d_inner, self.d_state
+            h = x.new_zeros(M, E, Nst)
+            chunk = self.scan_chunk
+            do_ckpt = self.training and torch.is_grad_enabled() and any(
+                t.requires_grad for t in (x, dt_lr, Bm, Cm))
+            y_chunks = []
+            for s0 in range(0, S, chunk):
+                s1 = min(s0 + chunk, S)
+                args = (h, x[:, s0:s1], dt_lr[:, s0:s1], Bm[:, s0:s1], Cm[:, s0:s1],
+                        dt_phys, valid[:, s0:s1], A)
+                if do_ckpt:
+                    h, yc = torch.utils.checkpoint.checkpoint(self._scan_chunk, *args,
+                                                              use_reentrant=False)
+                else:
+                    h, yc = self._scan_chunk(*args)
+                y_chunks.append(yc)
+            y = torch.cat(y_chunks, dim=1) * F.silu(z)                                 # (M,S,E), gated
+        y = y * valid.unsqueeze(-1)                                        # mask padded steps (both paths)
 
         # pool over valid timesteps -> one token per (channel, patch)
         if self.pool == "last":

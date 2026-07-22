@@ -7,10 +7,11 @@
 > - ✅ **Harness integration (#2)** — `--frontend mamba` builds the SSM (was silently the filterbank);
 >   frontend-agnostic calibration, `adaptation_regularization`/`adaptation_summary` hooks, checkpoint
 >   config, and `eval_transfer` reconstruction all done; 5 integration tests + 11 unit tests.
-> - ✅ **Backward memory (#3)** — chunked **gradient checkpointing** bounds the scan's backward graph to
->   O(chunk·M·E·N); numerically identical to the unchunked scan. **Remaining caveat:** the scan is
->   still a *Python loop* (throughput, not memory) — slow at batch 512; a parallel scan / CUDA kernel
->   is the speed fix (not correctness). *A full-scale training smoke has not yet been run.*
+> - ✅ **Backward memory + throughput (#3)** — the **official fused `mamba_ssm` CUDA kernel** is now
+>   wired in (`use_kernel`, auto-selected on CUDA), with the pure-PyTorch chunked-checkpointed scan as
+>   the CPU/test fallback (the same dual the mamba repo ships). Verified **numerically identical**
+>   (max diff 3e-8) and **9.7× faster** fwd+bwd on GPU. *A full-scale training smoke has still not
+>   been run, but the perf blocker is resolved.* Requires `causal-conv1d` + `mamba-ssm` (CUDA-only).
 > - ✅ **Objective neutrality (#7)** — `--a1-weight 0` runs the comparison on A2 (SupCon) + A3
 >   (grounding), both frontend-agnostic, so Arm B is no longer trained to reproduce the filterbank.
 > - ✅ **Δ-multiplier (#5)** — soft reg pulls the baseline toward the physical clock; monitored in
@@ -149,7 +150,7 @@ Recorded so the "NO-GO for training" status is concrete and actionable. Numbers 
 | 1 | blocker | `learnable=` passed twice via `build_frontend` broke the **default fixed path** (pretrain/eval). | ✅ **fixed** + regression test (`test_legacy_learnable_kwarg_still_builds_all_arms`). |
 | 1b | blocker | **Silent substitution**: `pretrain.py` never passed `frontend=cfg.frontend`, so `cfg.frontend="mamba"` built the FIXED filterbank and stamped the checkpoint `"mamba"`. | ✅ **fixed** — routes `frontend=cfg.frontend`. |
 | 2 | blocker | Mamba **not harness-integrated** (calibration, regularization/logging hooks, checkpoint config, eval reconstruction all assumed a filterbank). | ✅ **fixed** — frontend-agnostic calibration (each frontend runs its own `accumulate/finalize`); `learnable`/`adaptation_regularization`/`adaptation_summary` on the SSM; `eval_transfer.build_encoder` reconstructs the actual frontend; CLI accepts `mamba`. 5 integration tests (`test_pretrain_mamba_integration.py`). |
-| 3 | blocker | **Backward graph too large** (retains all S scan steps). | ✅ **addressed** — chunked **gradient checkpointing** (`scan_chunk`), backward memory O(chunk·M·E·N), numerically identical. ⚠️ **remaining:** scan is a Python loop → slow at batch 512 (throughput). Parallel scan / CUDA kernel is the speed fix. Full-scale smoke not yet run. |
+| 3 | blocker | **Backward graph too large / slow scan.** | ✅ **fixed** — official fused **`mamba_ssm` CUDA kernel** (`use_kernel`, auto on CUDA) + pure-PyTorch checkpointed fallback (CPU/tests). Verified identical (max diff 3e-8) and **9.7× faster** fwd+bwd. Needs `causal-conv1d`+`mamba-ssm`. Full-scale training smoke not yet run. |
 | 4 | high | **Rate-invariance over-claimed** ("by construction", 5.6×). Real-window advantage ~1.0×; conv/skip rate-dependent. | ✅ **claim corrected** (physics note). Making it structural (physical-time conv / bounded Δ) is an open design choice. |
 | 5 | high | **Δ multiplier unbounded** at train time. | ✅ **addressed** — `adaptation_regularization` softly pulls the multiplier baseline toward the physical clock (1/rate); `adaptation_summary` monitors its distribution. |
 | 6 | high | **Per-modality norm assumes canonical channel order** (0:3 accel, 3:6 gyro); a permuted/3-channel input misassigns/raises. | ⚠️ **documented constraint** — Arm B requires the canonical 6-channel layout, which the corpus always provides (pad+mask). General fix (modality id per channel) deferred; not needed for this corpus. |

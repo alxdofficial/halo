@@ -160,3 +160,18 @@ def test_legacy_learnable_kwarg_still_builds_all_arms():
     assert isinstance(fixed.filterbank, PhysicalFilterbankTokenizer) and not fixed.filterbank.learnable
     assert isinstance(learn.filterbank, PhysicalFilterbankTokenizer) and learn.filterbank.learnable
     assert isinstance(mamba.filterbank, SelectiveSSMChannelTokenizer)
+
+
+def test_kernel_matches_reference_scan_on_cuda():
+    """The fused mamba kernel and the pure-PyTorch reference scan must agree (they are the same math)."""
+    import pytest
+    from model.tokenizer.mamba_frontend import _HAS_KERNEL
+    if not (torch.cuda.is_available() and _HAS_KERNEL):
+        pytest.skip("mamba kernel / CUDA not available")
+    dev = torch.device("cuda")
+    torch.manual_seed(0)
+    tok = SelectiveSSMChannelTokenizer(d_model=32, d_state=8, d_inner=64, dft_size=256).to(dev).eval()
+    x = torch.randn(4, 3, 256, 6, device=dev); N = torch.full((4, 3), 200, device=dev)
+    tok.use_kernel = True;  yk = tok(x, 50.0, N)
+    tok.use_kernel = False; yr = tok(x, 50.0, N)
+    assert torch.allclose(yk, yr, atol=1e-3), f"kernel vs ref max diff {(yk-yr).abs().max():.2e}"
