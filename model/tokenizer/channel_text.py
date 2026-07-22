@@ -130,6 +130,100 @@ class TokenTextEncoder(nn.Module):
         self._cache.clear()
 
 
+class _TextPooler(nn.Module):
+    """Frozen-LM token embeddings (N, S, text_dim) + mask (N, S) -> one vector per item (N, d).
+
+    The shared "text -> vector -> learnable projection" primitive (docs/design/TEXT_CONDITIONING.md):
+    learned queries cross-attend the text tokens, the pooled queries are projected to one d_model
+    vector. Extracted so the factored conditioner can pool ROLE text and SENSOR text with the same
+    machinery ChannelTextFusion uses for per-channel text.
+    """
+
+    def __init__(self, d_model: int, text_dim: int, num_heads: int = 4,
+                 num_queries: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.text_proj = nn.Linear(text_dim, d_model) if text_dim != d_model else nn.Identity()
+        self.queries = nn.Parameter(torch.randn(num_queries, d_model) * 0.02)
+        self.cross_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.norm = nn.LayerNorm(d_model)
+        self.out_proj = nn.Sequential(
+            nn.Linear(d_model * num_queries, d_model), nn.GELU(), nn.Linear(d_model, d_model)
+        )
+
+    def forward(self, text_tokens: torch.Tensor, text_mask: torch.Tensor) -> torch.Tensor:
+        # text_tokens (N, S, text_dim), text_mask (N, S) bool True=valid -> (N, d_model)
+        N, S, _ = text_tokens.shape
+        t = self.text_proj(text_tokens)
+        m = text_mask.bool()
+        # An all-masked row (a padding sensor/channel) would NaN the softmax; unmask position 0
+        # as a dummy so it produces a finite (meaningless) vector the caller can ignore via masks.
+        all_masked = ~m.any(dim=1)
+        if all_masked.any():
+            m = m.clone()
+            m[all_masked, 0] = True
+        q = self.queries.unsqueeze(0).expand(N, -1, -1)
+        attn, _ = self.cross_attn(query=q, key=t, value=t, key_padding_mask=~m, need_weights=False)
+        attn = self.norm(q + attn)
+        return self.out_proj(attn.reshape(N, -1))
+
+
+class FactoredChannelTextFusion(nn.Module):
+    """Factored identity conditioning — per-channel ROLE text + per-sensor IDENTITY text.
+
+    The clean factorization of docs/design/TEXT_CONDITIONING.md, replacing the per-channel
+    placement-repeating text of ChannelTextFusion:
+
+      * role text  ("accelerometer x-axis")        -> per-CHANNEL embedding  (axis/modality only)
+      * sensor text ("a smartwatch on the left wrist") -> per-SENSOR embedding, broadcast to that
+                                                          sensor's channels via ``sensor_id``
+      * identity = role + sensor, injected as a GATED residual over the sensor tokens, broadcast
+        across patches. The gate bias inits negative, so identity starts lightly injected and the
+        model learns how much to use — making the whole conditioner do-no-harm at init and a clean
+        on/off ablation (set the gate bias very negative to turn it off).
+
+    Both text sources are pooled by the SAME ``_TextPooler`` (both are "text -> vector"). No
+    placement in the role text and no axis in the sensor text -> each config fact is injected once,
+    never compounded (docs/design/TEXT_CONDITIONING.md §6.1).
+    """
+
+    def __init__(self, d_model: int, text_dim: int = 384, num_heads: int = 4,
+                 num_queries: int = 4, dropout: float = 0.1, gate_bias_init: float = -2.0):
+        super().__init__()
+        self.pool = _TextPooler(d_model, text_dim, num_heads=num_heads,
+                                num_queries=num_queries, dropout=dropout)
+        # Gate is a function of BOTH the sensor token and the identity (as in ChannelTextFusion),
+        # split into two linears to avoid materializing a concat. Negative bias init => small gate.
+        self.gate_sensor = nn.Linear(d_model, d_model, bias=False)
+        self.gate_identity = nn.Linear(d_model, d_model, bias=True)
+        nn.init.constant_(self.gate_identity.bias, float(gate_bias_init))
+
+    def forward(
+        self,
+        sensor_tokens: torch.Tensor,      # (B, P, C, d)
+        role_tokens: torch.Tensor,        # (B, C, S, text_dim)
+        role_mask: torch.Tensor,          # (B, C, S) bool
+        sensor_text_tokens: torch.Tensor, # (B, N_sensors, S, text_dim)
+        sensor_text_mask: torch.Tensor,   # (B, N_sensors, S) bool
+        sensor_id: torch.Tensor,          # (B, C) long: which sensor each channel belongs to
+    ) -> torch.Tensor:
+        B, P, C, D = sensor_tokens.shape
+        Sr = role_tokens.shape[2]
+        Ns = sensor_text_tokens.shape[1]
+        Ss = sensor_text_tokens.shape[2]
+
+        role = self.pool(role_tokens.reshape(B * C, Sr, -1),
+                         role_mask.reshape(B * C, Sr)).reshape(B, C, D)          # (B, C, d)
+        sens = self.pool(sensor_text_tokens.reshape(B * Ns, Ss, -1),
+                         sensor_text_mask.reshape(B * Ns, Ss)).reshape(B, Ns, D)  # (B, N_sensors, d)
+        # Broadcast each sensor's identity to its channels.
+        sens_bc = torch.gather(sens, 1, sensor_id.unsqueeze(-1).expand(B, C, D))  # (B, C, d)
+
+        identity = role + sens_bc                                                # (B, C, d)
+        gate = torch.sigmoid(self.gate_sensor(sensor_tokens)
+                             + self.gate_identity(identity).unsqueeze(1))        # (B, P, C, d)
+        return sensor_tokens + gate * identity.unsqueeze(1)
+
+
 class ChannelTextFusion(nn.Module):
     """
     Efficient per-channel text fusion with broadcast to patches.

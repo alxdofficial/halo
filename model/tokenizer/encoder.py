@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .channel_text import ChannelTextFusion, TokenTextEncoder
+from .channel_text import ChannelTextFusion, FactoredChannelTextFusion, TokenTextEncoder
 from .filterbank import PhysicalFilterbankTokenizer
 from .transformer import DualBranchTransformer, build_temporal_mask
 
@@ -56,6 +56,8 @@ class SetTokenizerEncoder(nn.Module):
         dim_feedforward: int = 256,
         dropout: float = 0.1,
         text_model: str = "all-MiniLM-L6-v2",
+        text_conditioning: str = "per_channel",  # 'per_channel' (legacy) | 'factored' (role+sensor)
+        gate_bias_init: float = -2.0,             # factored: negative => identity lightly injected @ init
         temporal_mode: str = "full",           # 'full' | 'causal' (streaming/world-model)
         use_duration_embedding: bool = False,
         duration_min_seconds: float = 0.4,
@@ -72,9 +74,17 @@ class SetTokenizerEncoder(nn.Module):
         self.duration_max_seconds = float(duration_max_seconds)
         if not 0 < self.duration_min_seconds < self.duration_max_seconds:
             raise ValueError("duration bounds must satisfy 0 < min < max")
+        if text_conditioning not in ("per_channel", "factored"):
+            raise ValueError("text_conditioning must be 'per_channel' or 'factored'")
+        self.text_conditioning = text_conditioning
         self.filterbank = PhysicalFilterbankTokenizer(d_model=d_model, **filterbank_kwargs)
         self.text_encoder = TokenTextEncoder(model_name=text_model)   # frozen, cached
-        self.fusion = ChannelTextFusion(d_model=d_model, text_dim=384)
+        if text_conditioning == "factored":
+            # per-channel ROLE text + per-sensor IDENTITY text (docs/design/TEXT_CONDITIONING.md)
+            self.fusion = FactoredChannelTextFusion(d_model=d_model, text_dim=384,
+                                                    gate_bias_init=gate_bias_init)
+        else:
+            self.fusion = ChannelTextFusion(d_model=d_model, text_dim=384)
         if self.use_duration_embedding:
             self.duration_proj = nn.Sequential(
                 nn.Linear(1, 16), nn.GELU(), nn.Linear(16, d_model),
@@ -128,6 +138,16 @@ class SetTokenizerEncoder(nn.Module):
         masks = masks_u.index_select(0, gather).reshape(B, C, S)
         return embs, masks
 
+    def encode_texts_factored(self, role_texts, sensor_texts, device):
+        """Encode the two factored text sources with the same frozen LM.
+
+        role_texts:   B lists of C role strings   -> (role_embs (B,C,S,384), role_masks (B,C,S))
+        sensor_texts: B lists of N_sensor strings -> (sensor_embs (B,N,S,384), sensor_masks (B,N,S))
+        """
+        role_embs, role_masks = self.encode_texts(role_texts, device)
+        sensor_embs, sensor_masks = self.encode_texts(sensor_texts, device)
+        return role_embs, role_masks, sensor_embs, sensor_masks
+
     def encode(
         self,
         sensor_tokens: torch.Tensor,                 # (B, P, C, d) from tokenize()
@@ -140,6 +160,10 @@ class SetTokenizerEncoder(nn.Module):
         token_mask: Optional[torch.Tensor] = None,   # (B, P, C) True = hide (A1)
         channel_mask: Optional[torch.Tensor] = None, # (B, C) True = channel exists
         patch_padding_mask: Optional[torch.Tensor] = None,  # (B, P) True = real patch
+        # --- factored text conditioning (only when text_conditioning='factored') ---
+        sensor_text_embs: Optional[torch.Tensor] = None,   # (B, N_sensors, S, 384)
+        sensor_text_masks: Optional[torch.Tensor] = None,  # (B, N_sensors, S)
+        sensor_id: Optional[torch.Tensor] = None,          # (B, C) long
     ) -> dict[str, torch.Tensor]:
         B, P, C, _ = sensor_tokens.shape
 
@@ -161,7 +185,15 @@ class SetTokenizerEncoder(nn.Module):
             duration_emb = self.duration_proj(normalized.unsqueeze(-1))
             duration_emb = duration_emb * valid_duration.unsqueeze(-1)
             tokens = tokens + torch.sigmoid(self.duration_gate_logit) * duration_emb.unsqueeze(2)
-        tokens = self.fusion(tokens, text_embs, text_masks)
+        if self.text_conditioning == "factored":
+            if sensor_text_embs is None or sensor_id is None:
+                raise ValueError("factored text_conditioning requires sensor_text_embs / "
+                                 "sensor_text_masks / sensor_id; use encode_texts_factored()")
+            # `text_embs`/`text_masks` carry the ROLE tokens in the factored path.
+            tokens = self.fusion(tokens, text_embs, text_masks,
+                                 sensor_text_embs, sensor_text_masks, sensor_id)
+        else:
+            tokens = self.fusion(tokens, text_embs, text_masks)
 
         temporal_mask = build_temporal_mask(positions, mode=self.temporal_mode)
         if not cross_resolution_attention:
@@ -212,7 +244,8 @@ class SetTokenizerEncoder(nn.Module):
         patches: torch.Tensor,                       # (B, P, S, C) zero-padded native-rate
         sampling_rate_hz,                            # scalar | (B,)
         patch_len_samples,                           # scalar | (B,) true N
-        channel_texts: Sequence[Sequence[str]],      # B lists of C descriptions
+        channel_texts: Sequence[Sequence[str]],      # per_channel: B lists of C descriptions;
+                                                     # factored: B lists of C ROLE strings
         positions: torch.Tensor,                     # (B, P) patch-center times in SECONDS
         patch_durations: Optional[torch.Tensor] = None,
         resolution_ids: Optional[torch.Tensor] = None,
@@ -220,11 +253,22 @@ class SetTokenizerEncoder(nn.Module):
         token_mask: Optional[torch.Tensor] = None,   # (B, P, C) True = hide (A1)
         channel_mask: Optional[torch.Tensor] = None, # (B, C) True = channel exists
         patch_padding_mask: Optional[torch.Tensor] = None,  # (B, P) True = real patch
+        sensor_texts: Optional[Sequence[Sequence[str]]] = None,  # factored: B lists of N_sensor strings
+        sensor_id: Optional[torch.Tensor] = None,                # factored: (B, C) long
     ) -> dict[str, torch.Tensor]:
         sensor_tokens = self.tokenize(patches, sampling_rate_hz, patch_len_samples)
-        text_embs, text_masks = self.encode_texts(channel_texts, sensor_tokens.device)
+        device = sensor_tokens.device
+        s_embs = s_masks = None
+        if self.text_conditioning == "factored":
+            if sensor_texts is None or sensor_id is None:
+                raise ValueError("factored text_conditioning requires sensor_texts and sensor_id")
+            text_embs, text_masks, s_embs, s_masks = self.encode_texts_factored(
+                channel_texts, sensor_texts, device)
+        else:
+            text_embs, text_masks = self.encode_texts(channel_texts, device)
         return self.encode(sensor_tokens, text_embs, text_masks, positions,
                            patch_durations=patch_durations, resolution_ids=resolution_ids,
                            cross_resolution_attention=cross_resolution_attention,
                            token_mask=token_mask, channel_mask=channel_mask,
-                           patch_padding_mask=patch_padding_mask)
+                           patch_padding_mask=patch_padding_mask,
+                           sensor_text_embs=s_embs, sensor_text_masks=s_masks, sensor_id=sensor_id)

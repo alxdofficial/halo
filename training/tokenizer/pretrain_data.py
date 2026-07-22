@@ -116,6 +116,49 @@ def stream_channel_descriptions(dataset: str, stream: str) -> list[str]:
             + [f"gyroscope {a}-axis worn at {where}" for a in "xyz"])
 
 
+# Fixed intra-sensor channel ROLE text (axis + modality ONLY — never placement/device). One entry
+# per CHANNELS slot; constant across the whole corpus. This is the trivial, positional half of the
+# factorization in docs/design/TEXT_CONDITIONING.md — the load-bearing device/placement/gravity
+# identity lives in the per-sensor text below.
+_CHANNEL_ROLE_TEXT = {
+    "acc_x": "accelerometer x-axis", "acc_y": "accelerometer y-axis", "acc_z": "accelerometer z-axis",
+    "gyro_x": "gyroscope x-axis", "gyro_y": "gyroscope y-axis", "gyro_z": "gyroscope z-axis",
+}
+
+
+def stream_sensor_texts(dataset: str, stream: str) -> tuple[list[str], list[str], list[int]]:
+    """Factored config text for a stream (docs/design/TEXT_CONDITIONING.md).
+
+    Returns ``(role_texts, sensor_texts, sensor_id)``:
+      * ``role_texts``  — one string per CHANNELS slot, axis+modality ONLY ("accelerometer x-axis").
+      * ``sensor_texts``— one string per SENSOR, device+placement (+gravity convention), NO axis
+                          ("a smartwatch on the left wrist; accelerometer includes gravity").
+      * ``sensor_id``   — length-6 map: which sensor each channel belongs to. The corpus is
+                          single-sensor per stream today, so this is all-zeros and ``sensor_texts``
+                          has one entry; the multi-sensor path (simultaneous streams) is future work.
+
+    Placement/device/gravity appear ONLY in the sensor text and axis ONLY in the role text, so no
+    config fact is injected twice when the two are summed (the compounding hazard of §6).
+    """
+    role_texts = [_CHANNEL_ROLE_TEXT[c] for c in CHANNELS]
+    try:
+        from data.scripts.curate.deployment_policy import get_stream_spec
+        spec = get_stream_spec(dataset, stream)
+        place = spec.placement if spec.placement.startswith(("the ", "a ", "an ", "smart")) \
+            else f"the {spec.placement}"
+        device = _DEVICE_WORDS.get(spec.device_profile, spec.device_profile.replace("_", " "))
+        gravity_removed = (spec.gravity_state == "removed")
+    except (KeyError, ValueError, ImportError):
+        tokens = stream.lower().split("_")
+        device = "phone" if "phone" in tokens else ("watch" if "watch" in tokens else "device")
+        place = next((PLACEMENT_WORDS[w] for w in tokens if w in PLACEMENT_WORDS), "the body")
+        gravity_removed = False
+    grav = "accelerometer gravity removed" if gravity_removed else "accelerometer includes gravity"
+    sensor_text = f"a {device} on {place}; {grav}"
+    sensor_id = [0] * len(CHANNELS)          # single sensor per stream (current corpus)
+    return role_texts, [sensor_text], sensor_id
+
+
 _GRAVITY_STATE_CACHE: dict[tuple[str, str], str | None] = {}
 
 

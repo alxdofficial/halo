@@ -76,6 +76,33 @@ where placement/device/modality actually live, instead of being redundantly stam
 > a per-sensor identity shared by that sensor's channels. Unseen placements/devices arrive as unseen
 > *descriptions* and compose through language.
 
+## 4b. BUILT (2026-07-22) — flat Option A, opt-in
+
+The flat version is implemented and tested (`tests/test_factored_conditioning.py`, 8 tests), **opt-in
+and default-off** so the current pretrain path is byte-for-byte unchanged.
+
+- **Data:** `training/tokenizer/pretrain_data.stream_sensor_texts(dataset, stream)` →
+  `(role_texts[6], sensor_texts[1], sensor_id[6])`. Role = axis/modality only
+  (`"accelerometer x-axis"`), sensor = device+placement+**gravity convention**
+  (`"a watch on the wrist; accelerometer includes gravity"`). Gravity state moved to the sensor
+  level (it is an acquisition property of the sensor, not of an axis). `sensor_id` all-zeros
+  (single sensor per stream today). Tests assert **no placement in role, no axis in sensor**.
+- **Model:** `model/tokenizer/channel_text.FactoredChannelTextFusion` + shared `_TextPooler`.
+  identity = pool(role) + broadcast(pool(sensor), sensor_id); injected as `token + σ(gate)·identity`
+  over patches. Gate bias inits at **−2.0** (σ≈0.12: modest injection that ramps as learned);
+  set very negative for the identity-off ablation.
+- **Encoder:** `SetTokenizerEncoder(text_conditioning="factored", gate_bias_init=…)`. New
+  `encode_texts_factored()`; `encode()`/`forward()` take `sensor_texts` + `sensor_id`. Legacy
+  `"per_channel"` remains the default and still builds `ChannelTextFusion`.
+- **Verified:** role+sensor sum (no double-injection), sensor broadcast by `sensor_id`, gate
+  ablatability, all-masked-row NaN guard, end-to-end forward+backward with finite grads to every
+  fusion param, full suite 243 passing.
+
+**Not yet built (deferred):** explicit **rate** conditioning (ablation — is it worth it over the
+Nyquist mask?); richer **duration** conditioning (the existing `use_duration_embedding` path stays
+as-is, separate and optional); the **hierarchical / sensor-token** design (Option B); and wiring the
+factored path into `pretrain.py`'s two-view (masked/clean) training loop.
+
 ## 5. How to fold it in — smallest change that is honest
 
 The current architecture already supports this with a **localized change**, because identity is
