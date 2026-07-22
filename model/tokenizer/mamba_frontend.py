@@ -17,8 +17,10 @@ side "conditioning token" the model must learn to interpret; it is the discretis
 **Per channel, shared weights.** One SSM is applied independently to each channel (weights shared
 across channels, exactly as the filterbank shares one bank), so channel count/order stay free and
 identity still comes from text downstream. Gravity is preserved: we do NOT instance-normalise
-(per-window mean removal would destroy the DC/gravity component that separates static postures);
-the corpus is already in g, so only an optional frozen global standardisation is applied.
+(per-window mean removal would destroy the DC/gravity component that separates static postures).
+Standardisation is frozen and **per-modality** (accel vs gyro have ~1.6× different scales in the
+corpus; one shared scalar would let the larger dominate σ and the shared in_proj cannot compensate),
+pooled within each modality's axes so the relative gravity direction survives.
 
 **Perf note.** The scan below is SEQUENTIAL (exact, portable, kernel-free) — correct and fine for
 tests / small runs, but O(S) Python steps. Full pretraining should swap in an associative parallel
@@ -43,7 +45,8 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         dt_rank: int | None = None,     # low-rank Δ projection; default ceil(d_inner/16)
         mult_min: float = 0.5,          # bounds of the dimensionless learned Δ multiplier (~1)
         mult_max: float = 2.0,
-        standardize: bool = True,       # frozen global per-channel (mu,sd); preserves gravity DC
+        standardize: bool = True,       # frozen PER-MODALITY (mu,sd); preserves gravity DC
+        channel_groups: tuple = (0, 0, 0, 1, 1, 1),  # channel -> modality group (accel=0, gyro=1)
         pool: str = "mean",            # 'mean' over valid steps | 'last' valid state
         dft_size: int | None = None,    # accepted+ignored: drop-in kwarg parity with the filterbank
         **_ignored,                     # tolerate filterbank-only kwargs so build_frontend can pass through
@@ -81,15 +84,23 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         m0 = torch.exp(torch.rand(E) * (math.log(mult_max) - math.log(mult_min)) + math.log(mult_min))
         self.dt_proj.bias.data.copy_(torch.log(torch.expm1(m0)))           # inverse-softplus(m0)
 
-        # Frozen global per-channel standardisation (preserves gravity: global, not per-window).
-        # Identity until calibrated via fit_norm_stats / accumulate+finalize.
+        # Frozen PER-MODALITY standardisation. Accel (g) and gyro (rad/s) have different natural
+        # scales (measured ~1.6x), so one shared scalar would let the larger modality dominate σ and
+        # under-normalise the other — and the shared in_proj cannot compensate per channel. Stats are
+        # pooled WITHIN each modality group (shared across that modality's axes), so the scale
+        # fingerprint is removed while the RELATIVE gravity direction across the accel axes is
+        # preserved (a shared μ shifts the 3 accel axes equally). Global-per-window normalisation
+        # (RevIN) is deliberately avoided — it would erase gravity. Identity until calibrated.
         self.standardize = bool(standardize)
-        self.register_buffer("norm_mu", torch.zeros(1))
-        self.register_buffer("norm_sd", torch.ones(1))
+        cg = torch.tensor(channel_groups, dtype=torch.long)
+        self.register_buffer("channel_group", cg)                          # (C,) channel -> group
+        self.n_groups = int(cg.max().item()) + 1
+        self.register_buffer("norm_mu", torch.zeros(self.n_groups))
+        self.register_buffer("norm_sd", torch.ones(self.n_groups))
         self.register_buffer("_norm_fitted", torch.zeros(1))
-        self.register_buffer("_acc_n", torch.zeros(1, dtype=torch.float64), persistent=False)
-        self.register_buffer("_acc_sum", torch.zeros(1, dtype=torch.float64), persistent=False)
-        self.register_buffer("_acc_sqsum", torch.zeros(1, dtype=torch.float64), persistent=False)
+        self.register_buffer("_acc_n", torch.zeros(self.n_groups, dtype=torch.float64), persistent=False)
+        self.register_buffer("_acc_sum", torch.zeros(self.n_groups, dtype=torch.float64), persistent=False)
+        self.register_buffer("_acc_sqsum", torch.zeros(self.n_groups, dtype=torch.float64), persistent=False)
 
     def get_output_dim(self) -> int:
         return self.d_model
@@ -101,12 +112,15 @@ class SelectiveSSMChannelTokenizer(nn.Module):
     @torch.no_grad()
     def accumulate_norm_stats(self, patches, sampling_rate_hz=None, patch_len_samples=None,
                               patch_mask=None, channel_mask=None):
-        """Fold one batch into the frozen standardisation stats over REAL samples only.
+        """Fold one batch into the PER-MODALITY standardisation stats over REAL samples only.
 
-        Pooled over all channels/patches/time (one scalar mu/sd), so scale is normalised while the
-        gravity DC survives. Padded patches / absent channels / zero-pad time excluded.
+        Stats are pooled within each modality group (accel / gyro), so scale is normalised per
+        modality while the relative gravity DC survives. Padded patches / absent channels / zero-pad
+        time are excluded.
         """
         B, P, S, C = patches.shape
+        if C != self.channel_group.numel():
+            raise ValueError(f"channel_groups has {self.channel_group.numel()} entries but C={C}")
         w = torch.ones(B, P, S, C, dtype=torch.float64)
         if patch_len_samples is not None:
             N = torch.as_tensor(patch_len_samples).to(patches.device)
@@ -121,17 +135,24 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         if channel_mask is not None:
             w = w * channel_mask.view(B, 1, 1, C).to(torch.float64)
         x = patches.to(torch.float64)
-        self._acc_n += w.sum()
-        self._acc_sum += (x * w).sum()
-        self._acc_sqsum += (x * x * w).sum()
+        for gi in range(self.n_groups):
+            sel = (self.channel_group == gi)
+            if not sel.any():
+                continue
+            xg, wg = x[..., sel], w[..., sel]
+            self._acc_n[gi] += wg.sum()
+            self._acc_sum[gi] += (xg * wg).sum()
+            self._acc_sqsum[gi] += (xg * xg * wg).sum()
 
     @torch.no_grad()
     def finalize_norm_stats(self, eps: float = 1e-5):
-        if self._acc_n.item() > 0:
-            mu = self._acc_sum / self._acc_n
-            var = (self._acc_sqsum / self._acc_n) - mu * mu
-            self.norm_mu.copy_(mu.to(self.norm_mu.dtype))
-            self.norm_sd.copy_(var.clamp(min=eps).sqrt().to(self.norm_sd.dtype))
+        seen = self._acc_n > 0
+        n = self._acc_n.clamp(min=1.0)
+        mu = self._acc_sum / n
+        var = (self._acc_sqsum / n) - mu * mu
+        sd = var.clamp(min=eps).sqrt()
+        self.norm_mu.copy_(torch.where(seen, mu, torch.zeros_like(mu)).to(self.norm_mu.dtype))
+        self.norm_sd.copy_(torch.where(seen, sd, torch.ones_like(sd)).to(self.norm_sd.dtype))
         self._norm_fitted.fill_(1.0)
 
     @torch.no_grad()
@@ -147,7 +168,11 @@ class SelectiveSSMChannelTokenizer(nn.Module):
             r = r.expand(B)
         assert r.numel() == B, f"sampling_rate_hz must be scalar or length B={B}"
         if patch_len_samples is None:
-            N = torch.full((B, P), self.S or 0, dtype=torch.long, device=device)
+            if not self.S:
+                raise ValueError("patch_len_samples is None and dft_size was not set: the true patch "
+                                 "length is unknown, which would mask every timestep. Pass "
+                                 "patch_len_samples, or set dft_size to treat all S steps as valid.")
+            N = torch.full((B, P), self.S, dtype=torch.long, device=device)
         else:
             N = torch.as_tensor(patch_len_samples, device=device).long()
             if N.numel() == 1:
@@ -165,7 +190,12 @@ class SelectiveSSMChannelTokenizer(nn.Module):
 
         u = patches
         if self.standardize:
-            u = (u - self.norm_mu) / self.norm_sd
+            if C != self.channel_group.numel():
+                raise ValueError(f"standardize expects C={self.channel_group.numel()} channels "
+                                 f"(channel_groups), got C={C}")
+            mu = self.norm_mu[self.channel_group]          # (C,) per-modality
+            sd = self.norm_sd[self.channel_group]          # (C,)
+            u = (u - mu) / sd
 
         # Per-channel independent sequences with SHARED SSM weights: (B,P,S,C) -> (B*P*C, S, 1)
         seq = u.permute(0, 1, 3, 2).reshape(B * P * C, S, 1)                 # (M, S, 1)
@@ -183,25 +213,26 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         xc = self.conv(x.transpose(1, 2))[..., :S].transpose(1, 2)
         x = F.silu(xc) * valid.unsqueeze(-1)
 
-        # selective params
-        proj = self.x_proj(x)                                               # (M,S, dt_rank+2N)
+        # selective params (kept SMALL: (M,S,dt_rank+2N), never (M,S,E,N))
+        proj = self.x_proj(x)
         dt_lr, Bm, Cm = torch.split(proj, [self.dt_rank, self.d_state, self.d_state], dim=-1)
-        delta = F.softplus(self.dt_proj(dt_lr)) * dt_phys.unsqueeze(1)      # (M,S,E) physical Δ
-        A = -torch.exp(self.A_log)                                          # (E,N)
+        A = -torch.exp(self.A_log)                                          # (E, N)
 
-        # discretise (ZOH-ish): Abar = exp(Δ·A), Bbar = Δ·B
-        Abar = torch.exp(delta.unsqueeze(-1) * A.view(1, 1, self.d_inner, self.d_state))  # (M,S,E,N)
-        Bbar = delta.unsqueeze(-1) * Bm.unsqueeze(2)                        # (M,S,E,N)
-        Bx = Bbar * x.unsqueeze(-1)                                         # (M,S,E,N)
-
-        # sequential selective scan (exact; see perf note in the module docstring)
-        h = x.new_zeros(M, self.d_inner, self.d_state)
+        # Sequential selective scan, computing the discretised (M,E,N) terms PER STEP. An earlier
+        # version pre-materialised Abar/Bbar/Bx as (M,S,E,N) — ~39 GB at d_model=256 / batch 64, an
+        # instant OOM. Per-step keeps the forward footprint at O(M·E·N). (Full-corpus pretraining
+        # still wants a parallel scan / CUDA kernel for the backward graph; see the module docstring.)
+        E, Nst = self.d_inner, self.d_state
+        h = x.new_zeros(M, E, Nst)
         ys = []
         for t in range(S):
-            h = Abar[:, t] * h + Bx[:, t]                                   # (M,E,N)
-            y_t = (h * Cm[:, t].unsqueeze(1)).sum(-1) + self.D * x[:, t]    # (M,E)
+            dt_t = (F.softplus(self.dt_proj(dt_lr[:, t])) * dt_phys).unsqueeze(-1)   # (M,E,1) physical Δ
+            Abar_t = torch.exp(dt_t * A.unsqueeze(0))                                # (M,E,N)
+            Bx_t = dt_t * Bm[:, t].unsqueeze(1) * x[:, t].unsqueeze(-1)              # (M,E,N)
+            h = Abar_t * h + Bx_t
+            y_t = (h * Cm[:, t].unsqueeze(1)).sum(-1) + self.D * x[:, t]             # (M,E)
             ys.append(y_t * valid[:, t:t + 1])
-        y = torch.stack(ys, dim=1)                                         # (M,S,E)
+        y = torch.stack(ys, dim=1)                                                   # (M,S,E)
         y = y * F.silu(z)                                                   # gate
 
         # pool over valid timesteps -> one token per (channel, patch)

@@ -37,9 +37,11 @@ AND channel grouping) and confound the comparison.
 The pipeline already rescales all accelerometer data to **g** (`accel_units.to_g`, m/s²→÷9.80665), so
 raw values are in consistent physical units — gravity ≈ 1 g on whichever axis points down. Therefore:
 
-- **Only a light, frozen, GLOBAL per-channel standardisation** is applied (one μ/σ over the corpus,
-  same calibration pattern as the filterbank: `fit_norm_stats` / `accumulate`+`finalize`), for
-  optimisation stability. Default on; identity until calibrated.
+- **A light, frozen, PER-MODALITY standardisation** is applied (separate μ/σ for accel vs gyro —
+  they differ ~1.6× in scale in the corpus, and a single global scalar would let the larger dominate
+  σ while the shared `in_proj` cannot compensate per channel; same calibration pattern as the
+  filterbank: `fit_norm_stats` / `accumulate`+`finalize`). μ/σ are shared **within** each modality's
+  axes, so the relative gravity direction survives. Default on; identity until calibrated.
 - **NO instance normalisation.** Per-window mean removal (RevIN-style) would erase the DC/gravity
   component that separates static postures (stand/sit/lie) — the exact signal the filterbank is
   careful to keep as its signed-DC feature. Global (not per-window) standardisation removes the scale

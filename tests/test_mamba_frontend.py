@@ -89,12 +89,39 @@ def test_padding_beyond_N_is_ignored():
     assert torch.allclose(tok(x, 50.0, N), tok(y, 50.0, N), atol=1e-5)
 
 
-def test_frozen_standardization_preserves_relative_dc():
-    """Calibrated standardization removes scale but keeps the RELATIVE DC (gravity direction)."""
+def test_standardization_is_per_modality_not_global():
+    """Accel and gyro must get SEPARATE scale — a single global scalar under-normalises one."""
     tok = _tok(standardize=True)
-    cal = torch.randn(4, 4, 256, 6) * 3.0 + 0.5           # some scale + offset
-    tok.fit_norm_stats(cal, patch_len_samples=torch.full((4, 4), 200))
-    assert tok._norm_fitted.item() == 1.0 and tok.norm_sd.item() > 0
+    assert tok.norm_mu.numel() == 2, "expected per-modality (accel/gyro) stats, not one global scalar"
+    # accel channels ~unit scale, gyro channels ~5x scale
+    cal = torch.randn(8, 4, 256, 6)
+    cal[..., 3:6] *= 5.0
+    tok.fit_norm_stats(cal, patch_len_samples=torch.full((8, 4), 200))
+    accel_sd, gyro_sd = tok.norm_sd[0].item(), tok.norm_sd[1].item()
+    assert gyro_sd > 3 * accel_sd, f"per-modality σ should track the 5x gyro scale (accel {accel_sd:.2f}, gyro {gyro_sd:.2f})"
+
+
+def test_per_modality_standardization_preserves_relative_gravity():
+    """A shared per-modality μ shifts the 3 accel axes equally -> relative gravity direction survives."""
+    tok = _tok(standardize=True)
+    cal = torch.randn(8, 4, 256, 6) * 2.0 + torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # gravity on acc_x
+    tok.fit_norm_stats(cal, patch_len_samples=torch.full((8, 4), 200))
+    B, P, S, C = 1, 1, 64, 6
+    N = torch.full((B, P), 64)
+    x = torch.randn(B, P, S, C)
+    x_lift = x.clone(); x_lift[..., 0] += 1.0    # extra gravity offset on acc_x only
+    assert not torch.allclose(tok(x, 50.0, N), tok(x_lift, 50.0, N), atol=1e-4), \
+        "per-modality standardization must not erase a per-axis gravity difference"
+
+
+def test_missing_patch_len_and_dft_size_raises():
+    """The N=0 footgun: no patch_len and no dft_size must fail loud, not return a constant."""
+    tok = SelectiveSSMChannelTokenizer(d_model=8)      # no dft_size
+    try:
+        tok(torch.randn(1, 1, 64, 6), 50.0, None)
+        raise AssertionError("expected ValueError for unknown patch length")
+    except ValueError:
+        pass
 
 
 def test_encoder_mamba_frontend_end_to_end():
