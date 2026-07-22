@@ -98,10 +98,24 @@ and default-off** so the current pretrain path is byte-for-byte unchanged.
   ablatability, all-masked-row NaN guard, end-to-end forward+backward with finite grads to every
   fusion param, full suite 243 passing.
 
-**Not yet built (deferred):** explicit **rate** conditioning (ablation — is it worth it over the
-Nyquist mask?); richer **duration** conditioning (the existing `use_duration_embedding` path stays
-as-is, separate and optional); the **hierarchical / sensor-token** design (Option B); and wiring the
-factored path into `pretrain.py`'s two-view (masked/clean) training loop.
+**Explicit rate conditioning — DECIDED AGAINST (2026-07-22), by reasoning + measurement.** The
+Nyquist mask already encodes the sampling rate indirectly: features are in real Hz, and the mask
+marks which bands are trustworthy, so *which bands are cut* is the rate signal — **up to the
+observability equivalence class** (it separates rates that cut different bands: 20/25/30 Hz; it
+collapses rates that cut the same bands: 50 = 100 Hz → identical all-ones mask). That collapse is
+*correct* — two rates that both fully observe the 0.3–15 Hz HAR band should look identical, and
+explicit rate conditioning would let the encoder distinguish them, reintroducing a rate **shortcut**
+for zero observability gain. Measured: the mask actively cuts bands on only the 20 Hz streams
+(20.5% of the corpus, 6 of 32 bands); it is inert on the 50/100 Hz majority. So explicit rate
+conditioning is dropped. *Optional confirmation if ever wanted:* ablate the mask (zeroing + feature)
+and check whether a rate-linear-probe can suddenly read the rate off the features (shortcut
+detector).
+
+**Not yet built (deferred):** richer **duration** conditioning — the **resolution flag** (low-freq
+mirror of the Nyquist mask) already encodes duration observability, so the existing optional
+`use_duration_embedding` path stays as-is; it *may* add calibration value beyond the flag, so keep it
+optional rather than dropping it like rate. Also deferred: the **hierarchical / sensor-token** design
+(Option B); and wiring the factored path into `pretrain.py`'s two-view (masked/clean) training loop.
 
 ## 5. How to fold it in — smallest change that is honest
 
