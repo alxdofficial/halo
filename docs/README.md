@@ -56,6 +56,9 @@ Organized into subfolders by concern.
 - [AUGMENTATIONS.md](design/AUGMENTATIONS.md) — augmentation policy + the told-vs-not-told experiment.
 - [LEARNABLE_TOKENIZER_ARM.md](design/LEARNABLE_TOKENIZER_ARM.md) — ⚠️ hypothesis **falsified**: the
   learnable filterbank is inert; multiresolution did the work.
+- [**TOKENIZER_ABLATION.md**](design/TOKENIZER_ABLATION.md) — filterbank (Arm A) vs learned
+  rate-aware SSM/Mamba (Arm B, Δ=1/rate); both built behind `frontend=`; fair-comparison controls
+  and the pending data-subset decision.
 - [NATIVE_PRETRAIN_PREFLIGHT.md](design/NATIVE_PRETRAIN_PREFLIGHT.md) — provenance for the
   `pretrain_native` run.
 - [PIPELINE_A_PREFLIGHT.md](design/PIPELINE_A_PREFLIGHT.md) — older 8-dataset / 57-label / 60 Hz

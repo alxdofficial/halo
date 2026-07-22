@@ -56,6 +56,7 @@ class SetTokenizerEncoder(nn.Module):
         dim_feedforward: int = 256,
         dropout: float = 0.1,
         text_model: str = "all-MiniLM-L6-v2",
+        frontend: str = "fixed",                  # tokenizer front end: 'fixed'|'learnable'|'mamba' (see scattering.build_frontend)
         text_conditioning: str = "per_channel",  # 'per_channel' (legacy) | 'factored' (role+sensor)
         gate_bias_init: float = -2.0,             # factored: negative => identity lightly injected @ init
         temporal_mode: str = "full",           # 'full' | 'causal' (streaming/world-model)
@@ -77,7 +78,13 @@ class SetTokenizerEncoder(nn.Module):
         if text_conditioning not in ("per_channel", "factored"):
             raise ValueError("text_conditioning must be 'per_channel' or 'factored'")
         self.text_conditioning = text_conditioning
-        self.filterbank = PhysicalFilterbankTokenizer(d_model=d_model, **filterbank_kwargs)
+        self.frontend_kind = frontend
+        # The tokenizer front end is swappable (fixed filterbank | mamba | ...) but every option
+        # honours the same (B,P,S,C)+rate+N -> (B,P,C,d) contract, so the encoder body is identical
+        # across the ablation. Attribute stays named `filterbank` for back-compat with checkpoints
+        # and the tokenize() shim below.
+        from .scattering import build_frontend
+        self.filterbank = build_frontend(frontend, d_model=d_model, **filterbank_kwargs)
         self.text_encoder = TokenTextEncoder(model_name=text_model)   # frozen, cached
         if text_conditioning == "factored":
             # per-channel ROLE text + per-sensor IDENTITY text (docs/design/TEXT_CONDITIONING.md)
