@@ -229,13 +229,27 @@ knobs (cap, decay groups, support determinism, resume guards) are fixed so the t
 matched except for the **deliberate** method+capacity difference (#2b), which must be reported. Before
 launching: `git push`; then run ≥2 matched seeds per arm, and add the ZS-XD macro-F1 head-line (#7b).
 
-**Verified launch recipe** (`--subset` now caps to 10k/stream; both arms objective-neutral, xrf held out):
+### Third GPU audit (2026-07-23, second pass — verified here)
+
+| # | severity | issue | status |
+|---|---|---|---|
+| 1c | **blocker** | **Eval split ignored the training seed.** `run_suite` called `build_subset_index()` with no seed → always the default split, while `--seed` changed the training split → **~19 train subjects leaked into metric-val** for any seed≠default (reproduced: seed-1 leak = 19). | ✅ **fixed** — split is now a **`data_seed`** distinct from the model `seed`: `data_seed` is FIXED across arms/replicates, stamped in the checkpoint, and the metric CLI rebuilds *that exact* split. Verified: metric-val == the model's held-out 21 subjects, train∩metric-val = **0**. |
+| 4c | medium | Seeded support generator advanced between evals (support differed each val, reset on resume). | ✅ **fixed** — generator re-seeded from `data_seed` before every val: identical support at each eval and across arms/replicates. |
+| 6c | low | `run_config.json` was written *before* resume validation → a rejected resume overwrote it with the bad config. | ✅ **fixed** — written only after resume validation passes. |
+| 3c | high | `pyproject` pinned non-existent `causal-conv1d==1.6.2` / `mamba-ssm==2.3.2`; missing `sentence-transformers`, `scikit-learn`. | ✅ **fixed** — `.post1` builds; `model` extra now includes both runtime deps. |
+| 2c | high | **Budget still inherited from the full corpus.** 30k steps / LR / warmup assume 305k windows @ batch 512 (50 epochs); the capped subset is ~47.5k windows @ batch 376 → 30k steps ≈ 237 epochs (massive over-training). | ⏳ **decision pending** — pick steps/LR/warmup for the subset (tied to the Mamba-config/speed choice below). |
+
+**Launch protocol** (`--subset` caps to 10k/stream; `--data-seed` FIXED, `--seed` varied per replicate; budget TBD per 2c):
 
 ```bash
 PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
-$PY -m training.tokenizer.pretrain --frontend fixed --subset --a1-weight 0 --seed 0 --device cuda --out outputs/abl_fixed_s0
-$PY -m training.tokenizer.pretrain --frontend mamba --subset --a1-weight 0 --seed 0 --device cuda --out outputs/abl_mamba_s0
-$PY -m eval.tokenizer_metrics --checkpoint outputs/abl_fixed_s0/best.pt --out outputs/abl_fixed_s0/metrics.json
-$PY -m eval.tokenizer_metrics --checkpoint outputs/abl_mamba_s0/best.pt --out outputs/abl_mamba_s0/metrics.json
-# repeat with --seed 1 (and 2) for both arms; report mean±sd + both param counts + the #7b confounds
+DS=20260718                      # data_seed: the fixed subject split — SAME for every command below
+for S in 0 1 2; do               # model seed: varies per replicate
+  for FE in fixed mamba; do
+    $PY -m training.tokenizer.pretrain --frontend $FE --subset --a1-weight 0 \
+        --data-seed $DS --seed $S --steps <TBD> --device cuda --out outputs/abl_${FE}_s$S
+    $PY -m eval.tokenizer_metrics --checkpoint outputs/abl_${FE}_s$S/best.pt --out outputs/abl_${FE}_s$S/metrics.json
+  done
+done
+# report mean±sd over seeds + both param counts + the #7b confounds
 ```

@@ -119,7 +119,11 @@ class PretrainConfig:
     knn_k: int = 5
     num_workers: int = 12                 # profiled: nw=4 was data-bound (~35% GPU idle); 12 of 24
                                           # cores makes the step compute-bound (2026-07-19)
-    seed: int = 20260718
+    seed: int = 20260718                  # MODEL seed: weight init, augmentation, batch order (varies per replicate)
+    # DATA seed: the subject train/val split. Held FIXED across arms AND replicates so every run — and
+    # the metric harness — sees the SAME subject-disjoint split (audit 2026-07-23 #1: the eval used the
+    # default split regardless of --seed, so seed!=default leaked ~19 train subjects into metric-val).
+    data_seed: int = 20260718
     train_datasets: tuple | None = None   # None = full TRAIN_DATASETS; set for the ablation subset
     max_per_stream: int | None = None     # None = use ALL windows; the sampler is source-balanced
     device: str = "cpu"
@@ -364,7 +368,11 @@ def main() -> None:
     parser.add_argument("--max-per-stream", type=int, default=None,
                         help="per-stream window cap (default: None=all; --subset defaults to the "
                              "ablation DEFAULT_CAP so train and metric-eval share one corpus).")
-    parser.add_argument("--seed", type=int, default=None, help="override the run seed (matched multi-seed).")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="MODEL seed (init/augmentation/batch order). Vary this across replicates.")
+    parser.add_argument("--data-seed", type=int, default=None,
+                        help="DATA seed = the subject train/val split. Keep FIXED across all arms and "
+                             "replicates so the split (and the metric harness) stays identical (#1).")
     args = parser.parse_args()
 
     cfg = PretrainConfig(
@@ -382,6 +390,8 @@ def main() -> None:
         cfg.a1_weight = args.a1_weight
     if args.seed is not None:
         cfg.seed = args.seed
+    if args.data_seed is not None:
+        cfg.data_seed = args.data_seed
     if args.datasets is not None:
         cfg.train_datasets = tuple(args.datasets)
     elif args.subset:
@@ -405,7 +415,8 @@ def main() -> None:
             device=args.device, arm=cfg.arm, frontend=cfg.frontend,
             multiresolution=cfg.multiresolution,
             # carry the fine-grained overrides the smoke reconstruction used to DROP (audit #6):
-            a1_weight=cfg.a1_weight, seed=cfg.seed, train_datasets=cfg.train_datasets,
+            a1_weight=cfg.a1_weight, seed=cfg.seed, data_seed=cfg.data_seed,
+            train_datasets=cfg.train_datasets,
         )
     device = torch.device(cfg.device)
     if cfg.frontend == "mamba":
@@ -442,11 +453,14 @@ def main() -> None:
         else:
             raise SystemExit(f"output dir {args.out} already contains {[p.name for p in stale]}; "
                              f"choose a fresh --out or pass --force to overwrite (or --resume).")
-    (args.out / "run_config.json").write_text(json.dumps(asdict(cfg), indent=2))
     print(f"arm={cfg.arm} frontend={cfg.frontend} multiresolution={cfg.multiresolution}", flush=True)
+    # NB: run_config.json is written AFTER resume validation (below), so a rejected --resume can't
+    # overwrite the metadata with the bad attempted config (audit 2026-07-23 #6).
 
     # ------------------------------------------------------------------ data
-    index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.seed,
+    # DATA seed (fixed subject split), NOT the model seed, so the split is identical across replicates
+    # and reconstructable by the metric harness (#1).
+    index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.data_seed,
                         datasets=cfg.train_datasets or TRAIN_DATASETS)
     print(f"corpus: {index.summary()}  (datasets={sorted(cfg.train_datasets or TRAIN_DATASETS)})",
           flush=True)
@@ -482,8 +496,10 @@ def main() -> None:
                             pin_memory=device.type == "cuda")
     # Fixed generator so the kNN SUPPORT bank is deterministic across evals AND identical between the
     # two arms (audit 2026-07-23 #5: shuffle=True with no generator drew a different support set per
-    # arm/eval, so matched training seeds did NOT give matched validation). Seeded from cfg.seed.
-    train_eval_gen = torch.Generator().manual_seed(cfg.seed)
+    # arm/eval, so matched training seeds did NOT give matched validation). Seeded from DATA seed (the
+    # split), not the model seed, and RESET before each val (#4) so the support is identical at every
+    # evaluation and across replicates — not just across arms.
+    train_eval_gen = torch.Generator().manual_seed(cfg.data_seed)
     train_eval_loader = DataLoader(
         PretrainDataset(index, index.train, augment=False), batch_size=256,
         shuffle=True, collate_fn=val_collate, generator=train_eval_gen,
@@ -611,7 +627,7 @@ def main() -> None:
         # Validate EVERY load-bearing knob, not just frontend/multiresolution (audit 2026-07-23 #6:
         # omitting --subset or --a1-weight 0 on resume silently continued on the full corpus / A1 on).
         for key in ("frontend", "multiresolution", "train_datasets", "a1_weight", "max_per_stream",
-                    "d_model", "num_layers"):
+                    "d_model", "num_layers", "data_seed"):
             saved = saved_cfg.get(key, getattr(cfg, key))
             cur = getattr(cfg, key)
             # train_datasets round-trips through asdict as a list; compare order-insensitively as sets
@@ -645,6 +661,9 @@ def main() -> None:
         # (whose val_ba is the latest, not the best) must not let a later worse val overwrite best.pt.
         best_ba = float(rk.get("best_ba", rk["val_ba"]))
         print(f"resumed from {args.resume} at step {start_step} (best_ba {best_ba:.3f})", flush=True)
+
+    # Write run metadata only AFTER resume validation passed, so a rejected resume leaves it untouched (#6).
+    (args.out / "run_config.json").write_text(json.dumps(asdict(cfg), indent=2))
 
     model.train()
     for step, batch in enumerate(train_loader, start=start_step + 1):
@@ -764,6 +783,7 @@ def main() -> None:
             # Query = every val label (stratified, so all classes are scored); support = the same
             # labels drawn from the train set (early-stops once saturated). F1: covers all classes.
             val_z, val_y, val_src = embed_stratified(model, val_loader, device, cfg.val_per_label)
+            train_eval_gen.manual_seed(cfg.data_seed)   # same support bank at every val + across arms (#4)
             train_z, train_y, _ = embed_stratified(model, train_eval_loader, device,
                                                    cfg.val_per_label, target_labels=set(val_y.tolist()))
             ba = knn_balanced_acc(train_z, train_y, val_z, val_y, cfg.knn_k)

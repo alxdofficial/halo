@@ -176,13 +176,19 @@ def collect_embeddings(enc, index, split: str, device, per_stream_cap: Optional[
             "placement": np.concatenate(places), "dataset": np.concatenate(dsets)}
 
 
-def run_suite(enc, device, cap: int = 10_000, per_stream_cap: int = 2000) -> dict:
-    """Full head-free + config-axis + downstream suite on the ablation subset (in-dist val + held-out)."""
+def run_suite(enc, device, cap: int = 10_000, per_stream_cap: int = 2000,
+              data_seed: Optional[int] = None) -> dict:
+    """Full head-free + config-axis + downstream suite on the ablation subset (in-dist val + held-out).
+
+    ``data_seed`` MUST match the checkpoint's training data_seed so the metric-val subjects are the
+    SAME subject-disjoint split the model held out (audit 2026-07-23 #1: without this the harness used
+    the default split regardless of the training seed, leaking ~19 train subjects into metric-val).
+    """
     from training.tokenizer.ablation_subset import build_subset_index, build_heldout_index
 
-    idx = build_subset_index(cap=cap)
+    idx = build_subset_index(cap=cap, seed=data_seed)
     val = collect_embeddings(enc, idx, "val", device, per_stream_cap)
-    ho = collect_embeddings(enc, build_heldout_index(cap=cap), "val", device, per_stream_cap)
+    ho = collect_embeddings(enc, build_heldout_index(cap=cap, seed=data_seed), "val", device, per_stream_cap)
 
     out = {
         "n_frontend_params": int(sum(p.numel() for p in enc.filterbank.parameters())),
@@ -248,10 +254,13 @@ def main() -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     enc = build_encoder(ckpt, device)
-    res = run_suite(enc, device, cap=args.cap, per_stream_cap=args.per_stream_cap)
-    res["_meta"] = {"checkpoint": str(args.checkpoint), "seed": args.seed,
-                    "frontend": ckpt.get("config", {}).get("frontend"),
-                    "train_datasets": sorted(ckpt.get("config", {}).get("train_datasets", []) or []),
+    # Reconstruct the checkpoint's EXACT subject split so metric-val = the model's held-out subjects (#1).
+    cfg = ckpt.get("config", {})
+    data_seed = cfg.get("data_seed", cfg.get("seed"))   # fall back to seed for pre-data_seed checkpoints
+    res = run_suite(enc, device, cap=args.cap, per_stream_cap=args.per_stream_cap, data_seed=data_seed)
+    res["_meta"] = {"checkpoint": str(args.checkpoint), "seed": args.seed, "data_seed": data_seed,
+                    "frontend": cfg.get("frontend"),
+                    "train_datasets": sorted(cfg.get("train_datasets", []) or []),
                     "step": ckpt.get("step")}
     print(json.dumps(res, indent=2))
     if args.out:
