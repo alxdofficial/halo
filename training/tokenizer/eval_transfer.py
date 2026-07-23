@@ -29,8 +29,9 @@ from data.scripts.eda.grid_io import discover_grids
 from model.tokenizer.encoder import SetTokenizerEncoder
 from model.tokenizer.preprocess import gravity_align
 from training.tokenizer.pretrain_data import (CHANNELS, DFT_SIZE, stream_channel_descriptions,
-                                              _stream_gravity_state, MultiResolutionCollate,
-                                              MultiScaleCollate, VAL_RESOLUTION_PAIR)
+                                              stream_sensor_texts, _stream_gravity_state,
+                                              MultiResolutionCollate, MultiScaleCollate,
+                                              VAL_RESOLUTION_PAIR)
 
 # Held-out eval datasets (never in TRAIN_DATASETS). tnda_har/ut_complex excluded
 # (degenerate subject ids -> can't do subject-disjoint kNN).
@@ -58,7 +59,7 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
         duration_gate_init=c.get("duration_gate_init", 0.1),
         rope_min_period=0.4 if c.get("multiresolution", False) else 0.5,
     )
-    if frontend == "mamba":
+    if frontend in ("mamba", "mamba_sensor"):
         kw.update(n_layers=c.get("mamba_n_layers", 3), d_state=c.get("mamba_d_state", 16),
                   d_conv=c.get("mamba_d_conv", 4), scan_chunk=c.get("mamba_scan_chunk", 32))
         if c.get("mamba_d_inner", 0):
@@ -81,28 +82,37 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
 
 @torch.no_grad()
 def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
-                   channel_mask=None) -> torch.Tensor:
-    """(N, T, 6) raw windows at the stream's NATIVE rate -> (N, d) pooled embeddings."""
+                   channel_mask=None, sensor_text=None) -> torch.Tensor:
+    """(N, T, 6) raw windows at the stream's NATIVE rate -> (N, d) pooled embeddings.
+
+    For frontend=mamba_sensor the encoder needs a CONTIGUOUS (non-overlapping) patch timeline, the
+    per-patch lengths, and the single sensor-identity text (C=1) — matched to training (audit #1/#2).
+    """
+    per_sensor = getattr(enc, "frontend_kind", "") == "mamba_sensor"
     collate = (
         MultiResolutionCollate(fixed_patch_seconds=enc.eval_resolution_pair,
                                min_resolution_ratio=enc.min_resolution_ratio,
                                compute_targets=False)
         if enc.use_duration_embedding else
-        MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS, compute_targets=False)
+        MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS, compute_targets=False,
+                          contiguous=per_sensor)
     )
+    enc_texts = [sensor_text or (texts[0] if isinstance(texts, (list, tuple)) else texts)] if per_sensor else texts
     cmask = (torch.ones(6, dtype=torch.bool) if channel_mask is None
              else torch.as_tensor(channel_mask, dtype=torch.bool))
     embs = []
     for start in range(0, len(data), 256):
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
         batch = collate([
-            {"data": window, "rate": rate, "texts": texts, "label_id": 0,
+            {"data": window, "rate": rate, "texts": enc_texts, "label_id": 0,
              "channel_mask": cmask, "gravity_state": gravity_state, "source": "eval"}
             for window in block
         ])
+        plen = (batch["patch_len_per"] if (per_sensor and "patch_len_per" in batch)
+                else batch["patch_len"])
         out = enc(
             batch["patches"].to(device), batch["rates"].to(device),
-            batch["patch_len"].to(device), batch["texts"], batch["positions"].to(device),
+            plen.to(device), batch["texts"], batch["positions"].to(device),
             patch_durations=(batch["patch_durations"].to(device)
                              if "patch_durations" in batch else None),
             resolution_ids=(batch["resolution_ids"].to(device)
@@ -151,8 +161,9 @@ def main() -> None:
         labels = np.asarray(ref.labels)
         subjects = np.asarray(ref.subjects)
         texts = stream_channel_descriptions(dataset, stream)
+        sensor_text = stream_sensor_texts(dataset, stream)[1][0]   # per-sensor arm (ignored otherwise)
         z = encode_dataset(enc, data, texts, device, ref.rate_hz,
-                           _stream_gravity_state(dataset, stream))
+                           _stream_gravity_state(dataset, stream), sensor_text=sensor_text)
 
         # subject-disjoint 50/50 split
         subj = sorted(set(subjects.tolist()))

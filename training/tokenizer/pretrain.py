@@ -285,11 +285,12 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
         lab = batch["labels"]
         take = [j for j, l in enumerate(lab.tolist()) if counts[l] < per_label]
         if take:
-            texts = (batch["sensor_texts"] if model.encoder.frontend_kind == "mamba_sensor"
-                     else batch["texts"])
+            per_sensor = model.encoder.frontend_kind == "mamba_sensor"
+            texts = batch["sensor_texts"] if per_sensor else batch["texts"]
+            plen = batch["patch_len_per"] if (per_sensor and "patch_len_per" in batch) else batch["patch_len"]
             out = model.encoder(
                 batch["patches"].to(device), batch["rates"].to(device),
-                batch["patch_len"].to(device), texts,
+                plen.to(device), texts,
                 batch["positions"].to(device),
                 patch_durations=(batch["patch_durations"].to(device)
                                  if "patch_durations" in batch else None),
@@ -372,6 +373,10 @@ def main() -> None:
     parser.add_argument("--max-per-stream", type=int, default=None,
                         help="per-stream window cap (default: None=all; --subset defaults to the "
                              "ablation DEFAULT_CAP so train and metric-eval share one corpus).")
+    parser.add_argument("--mamba-d-inner", type=int, default=None,
+                        help="mamba SSM inner width (default 2*d_model); lock it for the config sweep.")
+    parser.add_argument("--mamba-n-layers", type=int, default=None,
+                        help="mamba stacked blocks (default 3).")
     parser.add_argument("--seed", type=int, default=None,
                         help="MODEL seed (init/augmentation/batch order). Vary this across replicates.")
     parser.add_argument("--data-seed", type=int, default=None,
@@ -396,6 +401,10 @@ def main() -> None:
         cfg.seed = args.seed
     if args.data_seed is not None:
         cfg.data_seed = args.data_seed
+    if args.mamba_d_inner is not None:
+        cfg.mamba_d_inner = args.mamba_d_inner
+    if args.mamba_n_layers is not None:
+        cfg.mamba_n_layers = args.mamba_n_layers
     if args.datasets is not None:
         cfg.train_datasets = tuple(args.datasets)
     elif args.subset:
@@ -421,6 +430,7 @@ def main() -> None:
             # carry the fine-grained overrides the smoke reconstruction used to DROP (audit #6):
             a1_weight=cfg.a1_weight, seed=cfg.seed, data_seed=cfg.data_seed,
             train_datasets=cfg.train_datasets,
+            mamba_d_inner=cfg.mamba_d_inner, mamba_n_layers=cfg.mamba_n_layers,
         )
     device = torch.device(cfg.device)
     if cfg.frontend == "mamba_sensor":
@@ -479,11 +489,12 @@ def main() -> None:
           flush=True)
     train_ds = PretrainDataset(index, index.train, augment=True)
     val_ds = PretrainDataset(index, index.val, augment=False)
+    per_sensor = cfg.frontend == "mamba_sensor"   # needs a NON-overlapping (contiguous) patch timeline
     train_collate = (MultiResolutionCollate(
         short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
         min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
     ) if cfg.multiresolution
-                     else MultiScaleCollate(seed=cfg.seed))
+                     else MultiScaleCollate(seed=cfg.seed, contiguous=per_sensor))
     train_loader = DataLoader(
         train_ds,
         batch_sampler=BalancedBatchSampler(index.train, cfg.classes_per_batch,
@@ -502,7 +513,7 @@ def main() -> None:
                                min_resolution_ratio=cfg.min_resolution_ratio,
                                compute_targets=False)
         if cfg.multiresolution else
-        MultiScaleCollate(fixed_patch_seconds=1.0, compute_targets=False)
+        MultiScaleCollate(fixed_patch_seconds=1.0, compute_targets=False, contiguous=per_sensor)
     )
     val_loader = DataLoader(val_ds, batch_size=256, shuffle=False, collate_fn=val_collate,
                             num_workers=val_workers, persistent_workers=val_workers > 0,
@@ -520,31 +531,39 @@ def main() -> None:
         pin_memory=device.type == "cuda", worker_init_fn=_seed_worker,
     )
 
-    # ---------------------------------------------------- A1 target tokenizer
-    target_tok = PhysicalFilterbankTokenizer(d_model=1, dft_size=DFT_SIZE)
-    target_tok.proj = nn.Identity()
-    print(f"calibrating filterbank norm on {cfg.calib_batches} batches ...", flush=True)
-    target_tok.reset_norm_accumulator()
     def _cycle(loader):
         while True:
             yield from loader
-    calib_iter = _cycle(train_loader)     # robust if calib_batches > sampler steps (smoke)
-    for _ in range(cfg.calib_batches):
-        batch = next(calib_iter)          # gravity-aligned + patch-masked in the collate
-        target_tok.accumulate_norm_stats(
-            batch["patches"], batch["rates"], batch["patch_len"],
-            patch_mask=batch["patch_padding_mask"], channel_mask=batch["channel_mask"])
-    target_tok.finalize_norm_stats()
-    target_tok.eval()
-    for p in target_tok.parameters():
-        p.requires_grad_(False)
+
+    # ---------------------------------------------------- A1 target tokenizer (only if A1 is on)
+    # A1's target is the fixed filterbank's per-channel features. When a1_weight=0 (e.g. the
+    # objective-neutral tokenizer comparison / the per-sensor arm) building + calibrating it for
+    # calib_batches is avoidable work (audit #7); the a1_head stays but is fed a zero-weight term.
+    compute_a1 = cfg.a1_weight > 0
+    if compute_a1:
+        target_tok = PhysicalFilterbankTokenizer(d_model=1, dft_size=DFT_SIZE)
+        target_tok.proj = nn.Identity()
+        print(f"calibrating filterbank norm on {cfg.calib_batches} batches ...", flush=True)
+        target_tok.reset_norm_accumulator()
+        calib_iter = _cycle(train_loader)     # robust if calib_batches > sampler steps (smoke)
+        for _ in range(cfg.calib_batches):
+            batch = next(calib_iter)          # gravity-aligned + patch-masked in the collate
+            target_tok.accumulate_norm_stats(
+                batch["patches"], batch["rates"], batch["patch_len"],
+                patch_mask=batch["patch_padding_mask"], channel_mask=batch["channel_mask"])
+        target_tok.finalize_norm_stats()
+        target_tok.eval()
+        for p in target_tok.parameters():
+            p.requires_grad_(False)
+        # A1 predicts only the SIGNAL-content dims (band energies + amplitude + dc); rate-metadata
+        # masks dropped (they were ~81% of the target norm — audit 2026-07-18).
+        signal_idx = torch.tensor(target_tok.signal_feature_indices(), device=device)
+        a1_target_dim = len(signal_idx)
+    else:
+        target_tok, signal_idx, a1_target_dim = None, None, 1   # dormant a1_head
 
     # ------------------------------------------------------------------ model
-    # A1 predicts only the SIGNAL-content dims of the filterbank feature (band energies +
-    # amplitude + dc); the rate-metadata masks are dropped (they were ~81% of the target
-    # norm and turned A1 into 'echo the rate' — second-agent audit 2026-07-18).
-    signal_idx = torch.tensor(target_tok.signal_feature_indices(), device=device)
-    model = PipelineAModel(cfg, a1_target_dim=len(signal_idx)).to(device)
+    model = PipelineAModel(cfg, a1_target_dim=a1_target_dim).to(device)
     # Calibrate the ENCODER's frontend with its OWN accumulate/finalize (frontend-agnostic). The
     # filterbank computes per-band + signed-DC stats; the mamba SSM computes per-modality stats. This
     # replaces copying filterbank-specific buffers (norm_mu/dc_mu), which assumed the encoder frontend
@@ -559,7 +578,8 @@ def main() -> None:
             b["patches"].to(device), b["rates"].to(device), b["patch_len"].to(device),
             patch_mask=b["patch_padding_mask"].to(device), channel_mask=b["channel_mask"].to(device))
     fe.finalize_norm_stats()
-    target_tok = target_tok.to(device)
+    if compute_a1:
+        target_tok = target_tok.to(device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"model: {n_params / 1e6:.2f}M trainable params · device={device}", flush=True)
@@ -683,6 +703,8 @@ def main() -> None:
         patches = batch["patches"].to(device, non_blocking=True)   # NOT gravity-aligned (2026-07-19 design)
         rates = batch["rates"].to(device)
         patch_len = batch["patch_len"].to(device)
+        # per-patch real lengths for the per-sensor continuous scan (non-overlapping contiguous patches)
+        patch_len_per = batch["patch_len_per"].to(device) if "patch_len_per" in batch else patch_len
         positions = batch["positions"].to(device)
         patch_durations = (batch["patch_durations"].to(device)
                            if "patch_durations" in batch else None)
@@ -727,8 +749,9 @@ def main() -> None:
                         a1_feature_valid = torch.cat([o, extra], dim=1).view(B, 1, 1, -1)
                 if per_sensor:
                     # fused stem needs the raw (B,C) mask; the frontend emits (B,P,1,d), so the encoder
-                    # sees ONE always-present 'sensor channel' and the sensor-identity TEXT (C=1).
-                    sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len,
+                    # sees ONE always-present 'sensor channel' and the sensor-identity TEXT (C=1). Uses
+                    # PER-PATCH lengths so the continuous scan masks each non-overlapping patch honestly.
+                    sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len_per,
                                                            channel_mask=channel_mask)
                     enc_channel_mask = torch.ones(B, 1, dtype=torch.bool, device=device)
                     enc_texts = batch["sensor_texts"]

@@ -70,7 +70,8 @@ def iter_split_streams(index, split: str = "val") -> Iterator[dict]:
              stream, placement}.
     """
     from collections import defaultdict
-    from training.tokenizer.pretrain_data import stream_channel_descriptions, _stream_gravity_state
+    from training.tokenizer.pretrain_data import (stream_channel_descriptions, stream_sensor_texts,
+                                                  _stream_gravity_state)
 
     keys = getattr(index, split)
     by_stream: dict[int, list] = defaultdict(list)
@@ -90,6 +91,7 @@ def iter_split_streams(index, split: str = "val") -> Iterator[dict]:
             "data": data,
             "labels": labels,
             "texts": stream_channel_descriptions(ref.dataset, ref.stream),
+            "sensor_text": stream_sensor_texts(ref.dataset, ref.stream)[1][0],  # per-sensor arm
             "rate": float(ref.rate_hz),
             "gravity": _stream_gravity_state(ref.dataset, ref.stream),
             "channel_mask": np.asarray(ref.mask, dtype=bool),

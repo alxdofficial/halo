@@ -126,7 +126,9 @@ _CHANNEL_ROLE_TEXT = {
 }
 
 
-def stream_sensor_texts(dataset: str, stream: str) -> tuple[list[str], list[str], list[int]]:
+def stream_sensor_texts(dataset: str, stream: str, gravity_removed: bool | None = None,
+                        has_accel: bool = True, has_gyro: bool = True
+                        ) -> tuple[list[str], list[str], list[int]]:
     """Factored config text for a stream (docs/design/TEXT_CONDITIONING.md).
 
     Returns ``(role_texts, sensor_texts, sensor_id)``:
@@ -147,14 +149,20 @@ def stream_sensor_texts(dataset: str, stream: str) -> tuple[list[str], list[str]
         place = spec.placement if spec.placement.startswith(("the ", "a ", "an ", "smart")) \
             else f"the {spec.placement}"
         device = _DEVICE_WORDS.get(spec.device_profile, spec.device_profile.replace("_", " "))
-        gravity_removed = (spec.gravity_state == "removed")
+        spec_gravity_removed = (spec.gravity_state == "removed")
     except (KeyError, ValueError, ImportError):
         tokens = stream.lower().split("_")
         device = "phone" if "phone" in tokens else ("watch" if "watch" in tokens else "device")
         place = next((PLACEMENT_WORDS[w] for w in tokens if w in PLACEMENT_WORDS), "the body")
-        gravity_removed = False
-    grav = "accelerometer gravity removed" if gravity_removed else "accelerometer includes gravity"
-    sensor_text = f"a {device} on {place}; {grav}"
+        spec_gravity_removed = False
+    # gravity_removed override lets the caller pass the FINAL AUGMENTED state (the 15%-prob gravity
+    # augmentation can flip it), so the sensor text never contradicts the signal (audit #3).
+    gr = spec_gravity_removed if gravity_removed is None else gravity_removed
+    grav = "accelerometer gravity removed" if gr else "accelerometer includes gravity"
+    # State the ACTIVE modalities so 'gyroscope absent' is explicit, not implied by a zeroed signal (#6).
+    mod = ("accelerometer and gyroscope" if (has_accel and has_gyro)
+           else "accelerometer only" if has_accel else "gyroscope only")
+    sensor_text = f"a {device} on {place}; {grav}; {mod}"
     sensor_id = [0] * len(CHANNELS)          # single sensor per stream (current corpus)
     return role_texts, [sensor_text], sensor_id
 
@@ -318,7 +326,13 @@ class PretrainDataset(Dataset):
             "data": data6,                                # (T', 6) canonical slots
             "rate": float(sample.sampling_rate),
             "texts": texts6,
-            "sensor_text": stream_sensor_texts(ref.dataset, ref.stream)[1][0],  # per-sensor identity (device+placement)
+            # per-sensor identity derived from the FINAL AUGMENTED view: gravity state from the
+            # augmented accel text (the 15% gravity aug can flip it, audit #3) + active modalities
+            # from the presence mask (audit #6), so the sensor text never contradicts the signal.
+            "sensor_text": stream_sensor_texts(
+                ref.dataset, ref.stream,
+                gravity_removed=any("gravity removed" in texts6[i].lower() for i in range(3) if mask6[i]),
+                has_accel=bool(mask6[:3].any()), has_gyro=bool(mask6[3:].any()))[1][0],
             "label_id": key.label_id,
             "channel_mask": mask6,
             "gravity_state": _stream_gravity_state(ref.dataset, ref.stream),
@@ -424,11 +438,17 @@ class MultiScaleCollate:
     def __init__(self, dft_size: int = DFT_SIZE,
                  patch_choices: Sequence[float] = PATCH_SECONDS_CHOICES,
                  fixed_patch_seconds: float | None = None, seed: int = SEED,
-                 align_gravity: bool = False, compute_targets: bool = True):
+                 align_gravity: bool = False, compute_targets: bool = True,
+                 contiguous: bool = False):
         self.dft_size = dft_size
         self.patch_choices = tuple(patch_choices)
         self.fixed = fixed_patch_seconds
         self.align_gravity = align_gravity
+        # contiguous=True: NON-overlapping patches (partial padded tail instead of the end-anchored
+        # overlapping tail) + per-patch real lengths in "patch_len_per". Required by the per-sensor
+        # CONTINUOUS scan, whose concatenated timeline would otherwise rewind & double-count the
+        # overlap (independent audit 2026-07-23 #2). The filterbank arm keeps the overlapping tail.
+        self.contiguous = contiguous
         # A3 grounding targets (cadence + eigen) cost an FFT + PCA per window. They are ONLY used
         # by the training loss; validation/embedding never reads them, so val loaders pass
         # compute_targets=False to skip that per-window DSP (the val-speed fix — 2026-07-19).
@@ -449,6 +469,7 @@ class MultiScaleCollate:
         B = len(batch)
         patches = torch.zeros(B, P, self.dft_size, len(CHANNELS))
         patch_len = torch.zeros(B, dtype=torch.long)
+        patch_len_per = torch.zeros(B, P, dtype=torch.long)  # per-patch real length (contiguous arm)
         patch_pad = torch.zeros(B, P, dtype=torch.bool)     # True = real patch
         rates = torch.zeros(B)
         cadence_t = torch.zeros(B)
@@ -494,16 +515,27 @@ class MultiScaleCollate:
                 per_patch, usable = data.shape[0], 1
                 positions[b, 0] = 0.5 * per_patch / rate   # true center of the short patch (F4a)
                 patches[b, 0, :per_patch] = data[:per_patch]
+                patch_len_per[b, 0] = per_patch
             else:
                 for p in range(usable):
                     patches[b, p, :n] = data[p * n:(p + 1) * n]
-                # F4b: recover the discarded tail (data.shape[0] % n samples) with ONE extra patch
-                # anchored to the END of the window, when a patch slot is free. Uniform length n
-                # (it overlaps the previous patch); its position is that end-anchored patch's true
-                # center. Floors used to silently drop up to one patch of real signal per window.
+                patch_len_per[b, :usable] = n
+                # Recover the discarded tail (data.shape[0] % n samples) with ONE extra patch.
                 if usable < P and data.shape[0] > usable * n:
-                    patches[b, usable, :n] = data[-n:]
-                    positions[b, usable] = (data.shape[0] - 0.5 * n) / rate
+                    if self.contiguous:
+                        # NON-overlapping partial tail: honest [usable*n : end] interval, zero-padded.
+                        # (The per-sensor continuous scan concatenates these; an overlapping tail would
+                        # rewind the timeline and double-count samples — audit #2.)
+                        rem = data.shape[0] - usable * n
+                        patches[b, usable, :rem] = data[usable * n:]
+                        positions[b, usable] = (usable * n + 0.5 * rem) / rate
+                        patch_len_per[b, usable] = rem
+                    else:
+                        # F4b: end-anchored uniform-length tail (overlaps the previous patch). Fine for
+                        # the filterbank, which tokenizes each patch INDEPENDENTLY (no cross-patch state).
+                        patches[b, usable, :n] = data[-n:]
+                        positions[b, usable] = (data.shape[0] - 0.5 * n) / rate
+                        patch_len_per[b, usable] = n
                     usable += 1
             patch_pad[b, :usable] = True
             patch_len[b] = per_patch
@@ -511,6 +543,7 @@ class MultiScaleCollate:
         return {
             "patches": patches,
             "patch_len": patch_len,
+            "patch_len_per": patch_len_per,   # (B,P) per-patch real length (per-sensor contiguous scan)
             "rates": rates,
             "positions": positions,
             "patch_seconds": ps,

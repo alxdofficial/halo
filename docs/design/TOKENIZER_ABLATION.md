@@ -186,6 +186,36 @@ compute 3× and the param gap 54×→13× — the "keep the design intent, drop 
 fastest config is still ~850× the filterbank, so per-channel Mamba is intrinsically expensive; a
 per-sensor (not per-channel) variant would cut M by 6× and is the other axis to explore.
 
+## Per-sensor arm (`frontend=mamba_sensor`) — BUILT, then PARKED (2026-07-23)
+
+A patch-free, **causal** continuous-scan, **per-sensor** tokenizer (`PerSensorMambaTokenizer`): all
+channels enter one stem, one causal scan over the window (state carried across patches), mean-pool
+readout per patch → `(B,P,1,d)`. **Measured L=3/d_inner=256 = 1,269 ms fwd+bwd (~9× the per-channel
+arm), 0.66M params** — ~4 days → ~10.6 h per 30k run. Requires `--no-multiresolution --a1-weight 0`.
+
+**This is NOT an isolated tokenizer swap** (independent audit #4). Versus the fixed-filterbank baseline
+it changes, simultaneously: per-channel → early 6-channel fusion; 6 tokens/patch → 1; patch-local →
+cross-patch recurrence; per-channel text → one sensor description; multiresolution → single resolution;
+A1+A2+A3 → A2+A3. So it measures an *efficient per-sensor continuous-Mamba encoder*, **not** "Mamba vs
+physical-filterbank tokenization." A fair read requires **retraining the filterbank comparator with
+`--no-multiresolution --a1-weight 0`** and reporting the residual architectural differences.
+
+**Correctness fixes applied (audit 2026-07-23) before parking:**
+- #1 external eval reconstructs `mamba_sensor` + uses the sensor text (metric harness runs).
+- #2 the "continuous" timeline no longer rewinds: `MultiScaleCollate(contiguous=True)` emits a
+  NON-overlapping partial tail + per-patch lengths, so the concatenated scan sees each sample once.
+- #3 the sensor text is derived from the **final augmented** sample (gravity state can flip under the
+  15% gravity aug) — it no longer contradicts the channel text.
+- #6 (partial) the sensor text now states active modalities ("accelerometer only" vs "…and gyroscope").
+- #7 the A1 target filterbank is no longer built/calibrated when `a1_weight=0`.
+
+**Known limitations (accepted at park):**
+- #5 the scan still runs `P·S` steps (~90% padding at low rates); the true fix is packing the raw
+  window once (see "Profiling": cost is ~linear in the scanned length). Not done — parked.
+- #6 (residual) channel presence reaches the stem only as zeroed inputs + the sensor-text modality
+  clause; it is not projected as a separate presence feature.
+- The sensor text is not run through the channel-text paraphrase/dropout augmentations.
+
 ## Audit blockers (independent review, 2026-07-22 — verified here)
 
 Recorded so the "NO-GO for training" status is concrete and actionable. Numbers reproduced locally.
