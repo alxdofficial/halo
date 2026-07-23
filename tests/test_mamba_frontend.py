@@ -175,3 +175,54 @@ def test_kernel_matches_reference_scan_on_cuda():
     tok.use_kernel = True;  yk = tok(x, 50.0, N)
     tok.use_kernel = False; yr = tok(x, 50.0, N)
     assert torch.allclose(yk, yr, atol=1e-3), f"kernel vs ref max diff {(yk-yr).abs().max():.2e}"
+
+
+def test_checkpointing_fires_on_real_path_inputs_without_requires_grad(monkeypatch):
+    """Regression for the 2026-07-23 audit blocker #1b: the activation-checkpoint gate was
+    `seq.requires_grad`, but raw sensor inputs have requires_grad=False, so checkpointing NEVER
+    fired in real training and the backward graph blew up (21 GiB at tiny scale). The gate must fire
+    whenever we are in train()+grad with trainable params, EVEN when the input needs no grad."""
+    import torch.utils.checkpoint as _ckpt
+    calls = {"n": 0}
+    orig = _ckpt.checkpoint
+    monkeypatch.setattr(_ckpt, "checkpoint", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), orig(*a, **k))[1])
+
+    tok = SelectiveSSMChannelTokenizer(d_model=16, n_layers=2, d_state=8, d_inner=32,
+                                       dft_size=256, forward_chunk=64)  # small chunk -> several chunks
+    tok.train()
+    x = torch.randn(3, 4, 256, 6)                     # M = 3*4*6 = 72 > forward_chunk -> multiple chunks
+    assert x.requires_grad is False                   # the REAL training-path condition
+    N = torch.full((3, 4), 200)
+    out = tok(x, 50.0, N)
+    out.pow(2).mean().backward()
+
+    assert calls["n"] >= 2, f"checkpoint must fire for chunks on the real path, got {calls['n']}"
+    # and the parameters actually received finite gradients through the checkpointed recompute
+    grads = [p.grad for p in tok.parameters() if p.grad is not None]
+    assert grads and all(torch.isfinite(g).all() for g in grads)
+    assert sum(g is not None for g in grads) == sum(1 for _ in tok.parameters())
+
+
+def test_no_checkpointing_in_eval_mode(monkeypatch):
+    """Under no-grad/eval, chunking alone bounds memory; checkpointing (recompute) must NOT fire."""
+    import torch.utils.checkpoint as _ckpt
+    calls = {"n": 0}
+    orig = _ckpt.checkpoint
+    monkeypatch.setattr(_ckpt, "checkpoint", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), orig(*a, **k))[1])
+    tok = SelectiveSSMChannelTokenizer(d_model=16, n_layers=2, d_state=8, d_inner=32,
+                                       dft_size=256, forward_chunk=64).eval()
+    x = torch.randn(3, 4, 256, 6); N = torch.full((3, 4), 200)
+    with torch.no_grad():
+        tok(x, 50.0, N)
+    assert calls["n"] == 0, f"no checkpoint under no_grad, got {calls['n']}"
+
+
+def test_auto_chunk_scales_inversely_with_width():
+    """forward_chunk=0 auto-sizes so peak (~chunk*d_inner*S) stays bounded: wider d_inner -> smaller
+    chunk. Guards the fix that a fixed 4096 default OOMs at production d_model=256."""
+    narrow = SelectiveSSMChannelTokenizer(d_model=64, d_inner=128, dft_size=256)   # forward_chunk=0
+    wide = SelectiveSSMChannelTokenizer(d_model=256, d_inner=512, dft_size=256)
+    cn, cw = narrow._auto_chunk(256), wide._auto_chunk(256)
+    assert cn > cw >= 64, f"wider width must get a smaller (or floor) chunk: narrow={cn} wide={cw}"
+    # product chunk*d_inner is ~constant (the memory budget), within a factor of ~2
+    assert 0.5 < (cn * 128) / (cw * 512) < 2.0

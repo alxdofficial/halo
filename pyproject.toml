@@ -19,6 +19,11 @@ dev = ["pytest"]
 eda = ["matplotlib", "torch"]
 experiments = ["torch"]
 model = ["torch"]
+# Fused selective-scan kernel for the Arm B (mamba) tokenizer. Requires a CUDA toolchain to build
+# (nvcc); on a fresh pod: `pip install causal-conv1d==1.6.2 mamba-ssm==2.3.2 --no-build-isolation`.
+# Without these the mamba frontend falls back to the slow reference scan (pretrain.py fails loud on
+# CUDA). Pinned to the versions verified in the 2026-07 tokenizer ablation.
+mamba = ["causal-conv1d==1.6.2", "mamba-ssm==2.3.2"]
 
 [tool.setuptools.packages.find]
 include = ["data*", "experiments*", "model*", "training*"]

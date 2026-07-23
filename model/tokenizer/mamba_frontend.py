@@ -137,8 +137,9 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         channel_groups: tuple = (0, 0, 0, 1, 1, 1),  # channel -> modality group (accel=0, gyro=1)
         pool: str = "mean",            # 'mean' over valid steps | 'last' valid state
         scan_chunk: int = 32,           # timesteps per gradient-checkpointed scan chunk (ref path only)
-        forward_chunk: int = 4096,      # max per-channel sequences (M=B*P*C) processed at once; bounds
-                                        # peak memory independent of caller batch (eval uses B=256 blocks)
+        forward_chunk: int = 0,         # max per-channel sequences (M=B*P*C) processed at once; bounds
+                                        # peak memory independent of caller batch. 0 = auto-scale from
+                                        # d_inner*S (~2.5 GiB/chunk); >0 pins it. (4096 OOMs at d=256.)
         use_kernel: bool = True,        # use the fused CUDA kernel when available (else the ref scan)
         dft_size: int | None = None,    # accepted+ignored: drop-in kwarg parity with the filterbank
         **_ignored,                     # tolerate filterbank-only kwargs so build_frontend can pass through
@@ -270,6 +271,14 @@ class SelectiveSSMChannelTokenizer(nn.Module):
                 N = N.reshape(B, P)
         return r, N
 
+    def _auto_chunk(self, S: int) -> int:
+        """Per-chunk sequence count that keeps the fused kernel's peak ~constant across widths.
+        Measured peak is ~linear in chunk*d_inner*S (RTX 4090, S=256: chunk=256,d_inner=512 -> 5.4 GiB;
+        chunk=256,d_inner=128 -> 1.37 GiB). Budget ~2.5 GiB so the frontend leaves headroom for the
+        transformer/heads in a full step. forward_chunk>0 overrides this."""
+        d_inner = self.blocks[0].d_inner
+        return max(64, 16_000_000 // (d_inner * max(int(S), 1)))
+
     def forward(self, patches, sampling_rate_hz, patch_len_samples=None) -> torch.Tensor:
         B, P, S, C = patches.shape
         device, dtype = patches.device, patches.dtype
@@ -292,15 +301,22 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         valid = (idx < Nm).to(dtype)                                        # (M, S)
         dt_phys = (1.0 / r).view(B, 1, 1, 1).expand(B, P, 1, C).reshape(M, 1)  # (M,1) physical step
 
-        import os as _os
-        if _os.environ.get("MAMBA_DEBUG_SHAPES"):
-            print(f"[mamba-shape] B={B} P={P} S={S} C={C} M={M} d_model={self.d_model} "
-                  f"d_inner={self.blocks[0].d_inner} n_blocks={len(self.blocks)}", flush=True)
         # Each of the M=B*P*C sequences is INDEPENDENT, so process M in chunks: peak memory is bounded
-        # by forward_chunk regardless of the caller's batch (eval embeds B=256 blocks -> M~24k, which
-        # would otherwise materialise multi-GB kernel intermediates and OOM). Math is chunk-invariant.
-        chunk = self.forward_chunk or M
-        do_ckpt = self.training and torch.is_grad_enabled() and seq.requires_grad
+        # by the chunk size regardless of the caller's batch (eval embeds B=256 blocks -> M~24k; the
+        # real train batch gives M~45k at d_model=256 -> the fused kernel's per-chunk intermediates are
+        # ~linear in chunk*d_inner*S and would OOM in one shot). Math is chunk-invariant (verified
+        # bit-exact). The chunk auto-scales with d_inner*S so peak stays ~constant (~3 GiB) across
+        # widths; forward_chunk>0 overrides. (Independent audit 2026-07-23: fc=4096 default was ~21 GiB
+        # at d=256/fc=1024 -> OOM; measured peak is linear in chunk, so the budget picks the chunk.)
+        chunk = self.forward_chunk if self.forward_chunk > 0 else self._auto_chunk(S)
+        chunk = min(chunk, M)
+        # Gate on train+grad ONLY, NOT seq.requires_grad: raw sensor inputs have requires_grad=False,
+        # so gating on the input would DISABLE checkpointing in the real training path (the chunk's
+        # graph is kept for the frontend PARAMETERS, not the input). use_reentrant=False correctly
+        # differentiates the parameters even when no input requires grad. (Independent audit 2026-07-23:
+        # the old gate never fired -> 21 GiB backward at tiny scale; verified fixed with a real step.)
+        do_ckpt = self.training and torch.is_grad_enabled() and any(
+            p.requires_grad for p in self.parameters())
         toks = []
         for s0 in range(0, M, chunk):
             s1 = min(s0 + chunk, M)

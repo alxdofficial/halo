@@ -166,29 +166,42 @@ Recorded so the "NO-GO for training" status is concrete and actionable. Numbers 
 | 5 | high | **Δ multiplier unbounded** at train time. | ✅ **addressed** — `adaptation_regularization` softly pulls the multiplier baseline toward the physical clock (1/rate); `adaptation_summary` monitors its distribution. |
 | 6 | high | **Per-modality norm assumes canonical channel order** (0:3 accel, 3:6 gyro); a permuted/3-channel input misassigns/raises. | ⚠️ **documented constraint** — Arm B requires the canonical 6-channel layout, which the corpus always provides (pad+mask). General fix (modality id per channel) deferred; not needed for this corpus. |
 | 7 | medium | **A1 objective target is the filterbank's features** → Arm B trained to reproduce Arm A. | ✅ **addressed** — `--a1-weight 0` runs an objective-neutral comparison on A2 (SupCon) + A3 (grounding), both frontend-agnostic. Report with A1 off (and optionally on, disclosed). |
-| 8 | medium | Protocol repro: Mamba settings absent from `PretrainConfig`/checkpoints. Params: frontend **25.3k vs 194.3k (7.67×)**; full encoder **+2.35%**. | ✅ **config stamped** (`mamba_d_state/d_inner/d_conv/scan_chunk`). Remaining: matched multi-seed runs + disclose the param gap when reporting. |
+| 8 | medium | Protocol repro: Mamba settings absent from `PretrainConfig`/checkpoints. | ✅ **config stamped** (`mamba_d_state/d_inner/d_conv/scan_chunk`). Param gap corrected below (#2b); matched multi-seed runs still required. |
 | 9 | blocker | **Calibration device mismatch** (found in the 2026-07-22 readiness sweep): `accumulate_norm_stats` built its weight tensor on CPU while patches/buffers were on CUDA → `RuntimeError` on the *first* real GPU run. CPU-only unit tests could not catch it. | ✅ **fixed** — every calibration factor now follows `patches.device`; caught only by an actual `--device cuda` run. |
-| 10 | blocker | **Eval OOM** (readiness sweep): the per-channel scan runs `M=B·P·C` sequences at once; the val embedder's `B=256` block → `M≈24.6k`, `S=256` → multi-GB kernel intermediates → 21 GiB / OOM on a 24 GB card. Training (`B=32`) fit, so it only surfaced at validation. | ✅ **fixed** — `forward_chunk` (default 4096) processes M in chunks (each sequence is independent → **bit-exact**, verified 0.0 diff), with per-chunk gradient checkpointing under autograd so training memory is bounded too. |
-| 11 | low | Corpus fingerprint (audit #10) ignored cap/seed/selected-window counts → two subset runs could collide. | ✅ **fixed** — `corpus_fingerprint` folds in `max_per_stream`, `seed`, and realised train/val sizes. |
+| 10 | blocker | **Eval OOM** (readiness sweep): the per-channel scan runs `M=B·P·C` sequences at once; the val embedder's `B=256` block → `M≈24.6k`, `S=256` → multi-GB kernel intermediates → 21 GiB / OOM on a 24 GB card. Training (`B=32`) fit, so it only surfaced at validation. | ✅ **fixed** — chunk M via `forward_chunk` (each sequence is independent → **bit-exact**, verified 0.0 diff). See #1b: the default had to become *auto* to bound production memory. |
 
-**Verdict (2026-07-22 readiness sweep): GO — the comparison is launchable.** Both arms were run
-**end-to-end on the subset** with `--a1-weight 0` on CUDA (fused kernel), through training *and* the
-B=256 validation embedding, then through the full metric harness (`eval.tokenizer_metrics.main`) —
-every metric computes, the checkpoint `_meta.frontend` correctly reads `fixed` vs `mamba` (no silent
-substitution), and the corrected transfer probe (train subset-val, test held-out xrf) fires. The two
-GPU-only bugs above (#9, #10) were found *because* this sweep ran the real pipeline rather than the
-CPU tests. What remains is the **experiment itself**, not plumbing: pick the subset cap + a matched
-budget (steps/LR/warmup) for both arms, run ≥2 matched seeds each, and report with the param gap
-(frontend 7.67×, encoder +2.35%) and the metric confounds (§ retraction block) disclosed.
+### Second GPU audit (independent review, 2026-07-23 — all verified here on-GPU)
 
-**Verified launch recipe** (smoke → real; drop `--smoke` and set `--steps`/`--out` for the real run):
+This review correctly caught that the 2026-07-22 "GO" was **premature**: the checkpointing that was
+supposed to bound training memory *never fired*, and several protocol knobs made the comparison
+scientifically ambiguous. All confirmed empirically and fixed.
+
+| # | severity | issue | status |
+|---|---|---|---|
+| 1b | **blocker** | **Training memory was NOT bounded.** The `forward_chunk` checkpoint gate was `seq.requires_grad`, which is **False** for raw sensor inputs → checkpoint fired **0 times** (instrumented); real-path backward peaked **21 GiB at tiny d=64/M=4224**, and the production batch OOM'd on the first kernel call. The prior "0.0 diff" check masked it by forcing `requires_grad_(True)`. | ✅ **fixed** — gate on train+grad+`any(param.requires_grad)` (`use_reentrant=False` differentiates params even when no input needs grad); **`forward_chunk` default is now auto** (`16M // (d_inner·S)`, ~2.5 GiB/chunk) since peak is *linear in chunk·d_inner·S* and a fixed 4096 OOMs at d=256. Measured real-path backward peak **~2.8 GiB** at M=45k/d=256, invariant to batch; still bit-exact. |
+| 2b | high | **Arms are not capacity-matched, and the doc understated it.** At the production `d_model=256`: frontend **1,368,832 vs 25,344 (54.0×)**; full trainable **8,627,664 vs 7,284,176 (+18.4%)**. Doc still cited 7.67× / +2.35% (a smaller-width figure). | ✅ **doc corrected** (these numbers verified locally). Per the user's call (param-matching is not a priority at this absolute size), this is framed as a **method+capacity** comparison — report both counts; a param-matched filterbank control is optional. |
+| 3b | high | **`--subset` did not apply the documented cap** (`DEFAULT_CAP=10_000`): it set only dataset names, so training used ~94k windows while the metric harness capped at 10k — train and eval used *different* corpora. | ✅ **fixed** — `--subset` now sets `max_per_stream=DEFAULT_CAP`; added `--max-per-stream` override. Train and eval share one corpus definition. |
+| 4b | high | **Mamba SSM params got AdamW weight decay.** `A_log`, `D`, `dt_proj.bias` fell in the `wd=0.05` group; official mamba marks `A_log`/`D` `_no_weight_decay`; ~0.53× shrinkage over 30k steps corrupts SSM timescales/skip. | ✅ **fixed** — dedicated no-decay group for those params (`dt_proj.bias` too — decaying it fights the Δ-baseline regularizer). |
+| 5b | high | **kNN support bank was non-deterministic.** `train_eval_loader` used `shuffle=True` with no `generator=`, so the support set differed per eval **and per arm** → matched training seeds ≠ matched validation. | ✅ **fixed** — fixed `torch.Generator(seed=cfg.seed)` on that loader; support is now identical across arms/evals. |
+| 6b | high | **Resume could corrupt a run.** Only `frontend`/`multiresolution` validated → omitting `--subset`/`--a1-weight 0` on resume silently continued on the full corpus with A1 on; and `best_ba` was read from the resumed ckpt's own `val_ba`, so a resume from `last.pt` could overwrite a better `best.pt`. | ✅ **fixed** — validate `train_datasets/a1_weight/max_per_stream/d_model/num_layers` + corpus fingerprint on resume; persist and restore the running `best_ba`. |
+| 7b | medium | **Narrow eval evidence:** only 10/46 val labels support cross-rate retrieval; xrf transfer probe shares 9/28 labels; xrf placement retrieval benefits from synchronized streams. | ⚠️ **disclosed** (retraction block above + `eval/tokenizer_metrics.py`). The pre-registered ZS-XD macro-F1 still lives outside the suite — run both ckpts through the HALO baseline adapter (separate cache paths) as the headline. |
+| 8b | medium | **Remote repro:** local commit ahead of `origin/main`; `pyproject.toml` didn't declare `mamba-ssm`/`causal-conv1d`. | ✅ **deps added** (`[project.optional-dependencies] mamba`, pinned + build note). **Must `git push`** before a pod clones; the GO is conditional on that. |
+
+**Revised verdict (2026-07-23): GO for a matched run, with the framing caveats disclosed.** The
+memory blocker is genuinely fixed — a real default-width (`d_model=256`, batch 512) mamba training
+step **plus** validation runs on the 4090 with peak recorded (`peak_gib` in the val log), and the
+per-chunk auto-sizing holds the frontend backward peak at ~2.8 GiB regardless of batch. The protocol
+knobs (cap, decay groups, support determinism, resume guards) are fixed so the two arms are now truly
+matched except for the **deliberate** method+capacity difference (#2b), which must be reported. Before
+launching: `git push`; then run ≥2 matched seeds per arm, and add the ZS-XD macro-F1 head-line (#7b).
+
+**Verified launch recipe** (`--subset` now caps to 10k/stream; both arms objective-neutral, xrf held out):
 
 ```bash
 PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
-# Arm A (fixed filterbank) and Arm B (mamba), objective-neutral, subset (xrf held out), matched seed
 $PY -m training.tokenizer.pretrain --frontend fixed --subset --a1-weight 0 --seed 0 --device cuda --out outputs/abl_fixed_s0
 $PY -m training.tokenizer.pretrain --frontend mamba --subset --a1-weight 0 --seed 0 --device cuda --out outputs/abl_mamba_s0
-# Head-free + config-axis + transfer metrics on each trained checkpoint
 $PY -m eval.tokenizer_metrics --checkpoint outputs/abl_fixed_s0/best.pt --out outputs/abl_fixed_s0/metrics.json
 $PY -m eval.tokenizer_metrics --checkpoint outputs/abl_mamba_s0/best.pt --out outputs/abl_mamba_s0/metrics.json
+# repeat with --seed 1 (and 2) for both arms; report mean±sd + both param counts + the #7b confounds
 ```

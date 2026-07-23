@@ -361,6 +361,9 @@ def main() -> None:
                              "held out) instead of the full corpus. See ablation_subset.py.")
     parser.add_argument("--datasets", nargs="+", default=None,
                         help="explicit train dataset list (overrides --subset and the full corpus).")
+    parser.add_argument("--max-per-stream", type=int, default=None,
+                        help="per-stream window cap (default: None=all; --subset defaults to the "
+                             "ablation DEFAULT_CAP so train and metric-eval share one corpus).")
     parser.add_argument("--seed", type=int, default=None, help="override the run seed (matched multi-seed).")
     args = parser.parse_args()
 
@@ -382,8 +385,15 @@ def main() -> None:
     if args.datasets is not None:
         cfg.train_datasets = tuple(args.datasets)
     elif args.subset:
-        from training.tokenizer.ablation_subset import SUBSET_TRAIN_DATASETS
+        from training.tokenizer.ablation_subset import SUBSET_TRAIN_DATASETS, DEFAULT_CAP
         cfg.train_datasets = SUBSET_TRAIN_DATASETS
+        # Apply the SAME per-stream cap the metric harness uses (build_subset_index(cap=DEFAULT_CAP)),
+        # so TRAIN and EVAL share one corpus definition (audit 2026-07-23 #3: --subset previously left
+        # max_per_stream=None -> trained on ~94k windows while metrics used the 10k cap).
+        if args.max_per_stream is None:
+            cfg.max_per_stream = DEFAULT_CAP
+    if args.max_per_stream is not None:
+        cfg.max_per_stream = args.max_per_stream
     if args.steps:
         cfg.steps = args.steps
     if args.smoke:
@@ -470,9 +480,13 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=256, shuffle=False, collate_fn=val_collate,
                             num_workers=val_workers, persistent_workers=val_workers > 0,
                             pin_memory=device.type == "cuda")
+    # Fixed generator so the kNN SUPPORT bank is deterministic across evals AND identical between the
+    # two arms (audit 2026-07-23 #5: shuffle=True with no generator drew a different support set per
+    # arm/eval, so matched training seeds did NOT give matched validation). Seeded from cfg.seed.
+    train_eval_gen = torch.Generator().manual_seed(cfg.seed)
     train_eval_loader = DataLoader(
         PretrainDataset(index, index.train, augment=False), batch_size=256,
-        shuffle=True, collate_fn=val_collate,
+        shuffle=True, collate_fn=val_collate, generator=train_eval_gen,
         num_workers=val_workers, persistent_workers=val_workers > 0,
         pin_memory=device.type == "cuda", worker_init_fn=_seed_worker,
     )
@@ -529,15 +543,30 @@ def main() -> None:
         "encoder.filterbank._compression_logits", "encoder.filterbank._shape_logit",
         "encoder.filterbank._adaptive_gate_logit",
     }
-    adaptive_params, base_params = [], []
+    # Mamba SSM parameters that must NOT get weight decay (audit 2026-07-23 #4): the official
+    # mamba_ssm marks A_log and D as `_no_weight_decay`; AdamW shrinkage over 30k steps (~0.53x)
+    # would corrupt the state timescales / skip strength. dt_proj.bias encodes the physical Δ
+    # baseline — decaying it fights `adaptation_regularization` (which pulls Δ-mult toward 1), so it
+    # is excluded too. These live under the frontend (named `filterbank` even for the mamba arm).
+    def _is_mamba_no_decay(name: str) -> bool:
+        return name.startswith("encoder.filterbank.") and (
+            name.endswith(".A_log") or name.endswith(".D") or name.endswith(".dt_proj.bias"))
+    adaptive_params, mamba_no_decay, base_params = [], [], []
     for name, parameter in model.named_parameters():
-        (adaptive_params if name in adaptive_names else base_params).append(parameter)
+        if name in adaptive_names:
+            adaptive_params.append(parameter)
+        elif _is_mamba_no_decay(name):
+            mamba_no_decay.append(parameter)
+        else:
+            base_params.append(parameter)
     param_groups = [{"params": base_params, "lr": cfg.lr, "weight_decay": cfg.weight_decay}]
     if adaptive_params:
         # Explicit physical regularization replaces AdamW's logit-space decay. In particular,
         # weight decay would pull the residual gate logit toward zero, i.e. gate=0.5, not fixed=0.
         param_groups.append({"params": adaptive_params, "lr": cfg.lr * cfg.frontend_lr_scale,
                              "weight_decay": 0.0})
+    if mamba_no_decay:
+        param_groups.append({"params": mamba_no_decay, "lr": cfg.lr, "weight_decay": 0.0})
     opt = torch.optim.AdamW(param_groups)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min((s + 1) / max(cfg.warmup_steps, 1), 1.0)
@@ -559,6 +588,7 @@ def main() -> None:
             "config": asdict(cfg),
             "label_ids": index.label_ids,
             "step": step, "val_ba": val_ba,
+            "best_ba": max(best_ba, val_ba),   # running best so a resume can't overwrite a better best.pt (#6)
             "git": git_commit(),
             "corpus": index.summary(),
             "corpus_fingerprint": corpus_fingerprint(index),   # which corpus produced this (F5)
@@ -578,12 +608,26 @@ def main() -> None:
     if args.resume:
         rk = torch.load(args.resume, map_location=device, weights_only=False)
         saved_cfg = rk.get("config", {})
-        for key in ("frontend", "multiresolution"):
-            if saved_cfg.get(key, getattr(cfg, key)) != getattr(cfg, key):
+        # Validate EVERY load-bearing knob, not just frontend/multiresolution (audit 2026-07-23 #6:
+        # omitting --subset or --a1-weight 0 on resume silently continued on the full corpus / A1 on).
+        for key in ("frontend", "multiresolution", "train_datasets", "a1_weight", "max_per_stream",
+                    "d_model", "num_layers"):
+            saved = saved_cfg.get(key, getattr(cfg, key))
+            cur = getattr(cfg, key)
+            # train_datasets round-trips through asdict as a list; compare order-insensitively as sets
+            if key == "train_datasets" and saved is not None and cur is not None:
+                if set(saved) != set(cur):
+                    raise ValueError(f"resume mismatch for {key}: checkpoint={saved!r}, requested={cur!r}")
+            elif saved != cur:
                 raise ValueError(
                     f"resume configuration mismatch for {key}: checkpoint="
-                    f"{saved_cfg.get(key)!r}, requested={getattr(cfg, key)!r}"
+                    f"{saved!r}, requested={cur!r}"
                 )
+        saved_fp = rk.get("corpus_fingerprint")
+        if saved_fp is not None and saved_fp != corpus_fingerprint(index):
+            raise ValueError(
+                f"resume corpus fingerprint mismatch: checkpoint={saved_fp}, "
+                f"current={corpus_fingerprint(index)} — the corpus/cap/seed changed since the run started.")
         model.encoder.load_state_dict(rk["encoder"])
         for k, head in (("a1", model.a1_head), ("a2", model.a2_proj),
                         ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen)):
@@ -597,7 +641,9 @@ def main() -> None:
             np.random.set_state(rk["rng"]["numpy"])
             _sr.setstate(rk["rng"]["python"])
         start_step = int(rk["step"])
-        best_ba = float(rk["val_ba"])
+        # Restore the RUNNING best, not this checkpoint's own val_ba (#6): resuming from last.pt
+        # (whose val_ba is the latest, not the best) must not let a later worse val overwrite best.pt.
+        best_ba = float(rk.get("best_ba", rk["val_ba"]))
         print(f"resumed from {args.resume} at step {start_step} (best_ba {best_ba:.3f})", flush=True)
 
     model.train()
@@ -737,6 +783,10 @@ def main() -> None:
                     conse_by_src[s] = round(balanced_acc(conse_pred[mt], val_y[mt]), 4)
             rec = {"step": step, "val_knn_ba": ba, "val_conse_ba": round(conse_ba, 4),
                    "val_ba_by_source": ba_by_src, "val_conse_by_source": conse_by_src}
+            if device.type == "cuda":
+                # peak so far (train step + val embedding) — telemetry for the memory-sensitive
+                # mamba tokenizer, whose per-channel scan is far heavier than the filterbank.
+                rec["peak_gib"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
             print(json.dumps(rec), flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
