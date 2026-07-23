@@ -137,7 +137,7 @@ class PipelineAModel(nn.Module):
         # regularization / logging / checkpoint / eval reconstruction all go through the shared
         # frontend interface); its hyperparameters are stamped in PretrainConfig for reproducibility.
         fe_kwargs = {}
-        if cfg.frontend == "mamba":
+        if cfg.frontend in ("mamba", "mamba_sensor"):
             fe_kwargs = dict(n_layers=cfg.mamba_n_layers, d_state=cfg.mamba_d_state,
                              d_conv=cfg.mamba_d_conv, scan_chunk=cfg.mamba_scan_chunk)
             if cfg.mamba_d_inner:
@@ -285,9 +285,11 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
         lab = batch["labels"]
         take = [j for j, l in enumerate(lab.tolist()) if counts[l] < per_label]
         if take:
+            texts = (batch["sensor_texts"] if model.encoder.frontend_kind == "mamba_sensor"
+                     else batch["texts"])
             out = model.encoder(
                 batch["patches"].to(device), batch["rates"].to(device),
-                batch["patch_len"].to(device), batch["texts"],
+                batch["patch_len"].to(device), texts,
                 batch["positions"].to(device),
                 patch_durations=(batch["patch_durations"].to(device)
                                  if "patch_durations" in batch else None),
@@ -349,10 +351,12 @@ def main() -> None:
                              "multiresolution (the winning Phase-A config; see "
                              "docs/design/LEARNABLE_TOKENIZER_ARM.md). 'learnable' swaps in the "
                              "constrained adaptive frontend — a documented negative result, kept opt-in.")
-    parser.add_argument("--frontend", choices=("fixed", "learnable", "mamba"), default=None,
-                        help="override the arm's frontend for the tokenizer ablation. 'mamba' = the "
-                             "selective-SSM tokenizer (Arm B), fully harness-integrated; requires the "
-                             "fused mamba_ssm kernel on CUDA (docs/design/TOKENIZER_ABLATION.md).")
+    parser.add_argument("--frontend", choices=("fixed", "learnable", "mamba", "mamba_sensor"),
+                        default=None,
+                        help="tokenizer arm. 'mamba' = per-channel per-patch selective SSM; "
+                             "'mamba_sensor' = per-sensor, patch-free, CAUSAL continuous-scan SSM "
+                             "(requires --no-multiresolution and --a1-weight 0). Both need the fused "
+                             "mamba_ssm kernel on CUDA (docs/design/TOKENIZER_ABLATION.md).")
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
                         help="override multiresolution (default ON); --no-multiresolution is the "
                              "single-resolution ablation")
@@ -419,21 +423,30 @@ def main() -> None:
             train_datasets=cfg.train_datasets,
         )
     device = torch.device(cfg.device)
-    if cfg.frontend == "mamba":
+    if cfg.frontend == "mamba_sensor":
+        # The per-sensor continuous scan concatenates patches into one timeline, so multiresolution
+        # (two patch sizes over the same window) has no single ordering; and A1's target is per-channel.
+        if cfg.multiresolution:
+            raise RuntimeError("frontend=mamba_sensor requires --no-multiresolution (the continuous "
+                               "scan needs one patch timeline; multi-scale = multi-stride readout, TODO).")
+        if cfg.a1_weight != 0:
+            raise RuntimeError("frontend=mamba_sensor requires --a1-weight 0 (A1's reconstruction "
+                               "target is the per-CHANNEL filterbank; it is undefined for C=1 tokens).")
+    if cfg.frontend in ("mamba", "mamba_sensor"):
         # Fail LOUD rather than silently falling back to the ~50x-slower Python scan on a real run.
         from model.tokenizer.mamba_frontend import _HAS_KERNEL
         use_kernel = _HAS_KERNEL and device.type == "cuda"
-        print(f"[mamba] scan backend: {'fused CUDA kernel' if use_kernel else 'pure-PyTorch reference'}",
-              flush=True)
+        print(f"[{cfg.frontend}] scan backend: "
+              f"{'fused CUDA kernel' if use_kernel else 'pure-PyTorch reference'}", flush=True)
         if device.type == "cuda" and not _HAS_KERNEL:
             raise RuntimeError(
-                "frontend=mamba on CUDA but the fused mamba_ssm kernel is NOT importable — the "
-                "pure-PyTorch scan is ~50x slower and will not finish a real run. Install "
+                f"frontend={cfg.frontend} on CUDA but the fused mamba_ssm kernel is NOT importable — "
+                "the pure-PyTorch scan is ~50x slower and will not finish a real run. Install "
                 "causal-conv1d + mamba-ssm, or use --frontend fixed.")
         if device.type != "cuda" and not args.smoke:
             raise RuntimeError(
-                "frontend=mamba without CUDA uses the pure-PyTorch scan (fine for --smoke, far too "
-                "slow for a real run). Use --device cuda, or --smoke for a tiny CPU sanity run.")
+                f"frontend={cfg.frontend} without CUDA uses the pure-PyTorch scan (fine for --smoke, "
+                "far too slow for a real run). Use --device cuda, or --smoke for a tiny CPU sanity run.")
     if device.type == "cuda":
         # TF32 for the fp32 regions autocast doesn't cover (filterbank einsum/proj, val ridge
         # solve). Free + zero-risk on Ampere+; the transformer already runs fp16 under autocast.
@@ -680,17 +693,21 @@ def main() -> None:
         labels = batch["labels"].to(device)
         B, P, _, C = patches.shape
 
-        # validity-aware: temporal block lands on real patches, drops hit real channels,
-        # so A1 supervision is non-empty for every window with >=2 real patches
-        if cfg.multiresolution:
-            plan = make_multiresolution_mask_plan(
-                batch["patch_starts"].to(device), batch["patch_ends"].to(device),
-                resolution_ids, C, GYRO_IDX, channel_mask=channel_mask,
-                valid_patches=patch_pad,
-            )
-        else:
-            plan = make_mask_plan(B, P, C, GYRO_IDX, device=device,
-                                  valid_patches=patch_pad, channel_mask=channel_mask)
+        per_sensor = cfg.frontend == "mamba_sensor"
+        # A1's reconstruction target is the FILTERBANK's per-CHANNEL features, so it is inherently a
+        # per-channel objective — undefined for the per-sensor arm (C=1 tokens), and pure waste when
+        # a1_weight=0. Gate the whole A1 path (incl. its second, masked encoder pass) on it.
+        compute_a1 = cfg.a1_weight > 0
+
+        # validity-aware A1 mask: temporal block on real patches, drops on real channels.
+        if compute_a1:
+            if cfg.multiresolution:
+                plan = make_multiresolution_mask_plan(
+                    batch["patch_starts"].to(device), batch["patch_ends"].to(device),
+                    resolution_ids, C, GYRO_IDX, channel_mask=channel_mask, valid_patches=patch_pad)
+            else:
+                plan = make_mask_plan(B, P, C, GYRO_IDX, device=device,
+                                      valid_patches=patch_pad, channel_mask=channel_mask)
         targets = GroundingTargets(
             cadence_log2hz=batch["cadence_target"].to(device),
             cadence_valid=batch["cadence_valid"].to(device),
@@ -698,40 +715,50 @@ def main() -> None:
             eigen_valid=batch["eigen_valid"].to(device),
         )
 
-        # A1 loss only counts tokens that are masked AND a real channel AND a real patch —
-        # otherwise accel-only windows + rate-shortened phantom patches waste loss budget
-        # "predicting" the zero-padding signature.
-        a1_loss_mask = plan.token_mask & channel_mask.unsqueeze(1) & patch_pad.unsqueeze(2)
-
         with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
-            # The filterbank DSP (rDFT + constant-Q einsum) runs in fp32 — fp16 has too
-            # little headroom for the band-energy magnitudes (sweep finding 15). The
-            # transformer/heads stay in autocast fp16. sensor_tokens keeps grad (trainable
-            # proj); only the A1 TARGET is under no_grad.
+            # The filterbank DSP (rDFT + constant-Q einsum) runs in fp32 — fp16 has too little headroom
+            # for the band-energy magnitudes (sweep finding 15). sensor_tokens keeps grad; A1 TARGET is no_grad.
             with torch.amp.autocast(device.type, enabled=False):
-                with torch.no_grad():
-                    a1_target = target_tok(patches.float(), rates, patch_len)[..., signal_idx]
-                    # observable-band validity over the SIGNAL dims: band dims use the
-                    # Nyquist mask o (B,K); amplitude/dc dims are always valid.
-                    o, _ = target_tok.masks(rates, patch_len)            # (B, K)
-                    extra = o.new_ones(B, len(signal_idx) - o.shape[1])
-                    a1_feature_valid = torch.cat([o, extra], dim=1).view(B, 1, 1, -1)
-                sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len)
-            text_embs, text_masks = model.encoder.encode_texts(batch["texts"], device)
-            masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
-                                          patch_durations=patch_durations,
-                                          resolution_ids=resolution_ids,
-                                          cross_resolution_attention=not cfg.multiresolution,
-                                          token_mask=plan.token_mask,
-                                          channel_mask=channel_mask,
-                                          patch_padding_mask=patch_pad)
+                if compute_a1:
+                    with torch.no_grad():
+                        a1_target = target_tok(patches.float(), rates, patch_len)[..., signal_idx]
+                        o, _ = target_tok.masks(rates, patch_len)            # (B, K) Nyquist-observable
+                        extra = o.new_ones(B, len(signal_idx) - o.shape[1])
+                        a1_feature_valid = torch.cat([o, extra], dim=1).view(B, 1, 1, -1)
+                if per_sensor:
+                    # fused stem needs the raw (B,C) mask; the frontend emits (B,P,1,d), so the encoder
+                    # sees ONE always-present 'sensor channel' and the sensor-identity TEXT (C=1).
+                    sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len,
+                                                           channel_mask=channel_mask)
+                    enc_channel_mask = torch.ones(B, 1, dtype=torch.bool, device=device)
+                    enc_texts = batch["sensor_texts"]
+                else:
+                    sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len)
+                    enc_channel_mask = channel_mask
+                    enc_texts = batch["texts"]
+            text_embs, text_masks = model.encoder.encode_texts(enc_texts, device)
             clean = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
                                          patch_durations=patch_durations,
                                          resolution_ids=resolution_ids,
-                                         channel_mask=channel_mask,
+                                         channel_mask=enc_channel_mask,
                                          patch_padding_mask=patch_pad)
             z = model.a2_proj(clean["pooled"])
-            a1_pred = model.a1_head(masked["tokens"])
+            if compute_a1:
+                masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
+                                              patch_durations=patch_durations,
+                                              resolution_ids=resolution_ids,
+                                              cross_resolution_attention=not cfg.multiresolution,
+                                              token_mask=plan.token_mask,
+                                              channel_mask=enc_channel_mask,
+                                              patch_padding_mask=patch_pad)
+                a1_pred = model.a1_head(masked["tokens"])
+                a1_loss_mask = plan.token_mask & enc_channel_mask.unsqueeze(1) & patch_pad.unsqueeze(2)
+            else:
+                # A1 neutralised: no masked pass; a zero-weight term (all-False mask -> 0 loss).
+                a1_pred = model.a1_head(clean["tokens"].detach())
+                a1_target = torch.zeros_like(a1_pred)
+                a1_loss_mask = torch.zeros(clean["tokens"].shape[:3], dtype=torch.bool, device=device)
+                a1_feature_valid = None
             out = elite3_loss(
                 a1_pred=a1_pred, a1_target=a1_target,
                 a1_mask=a1_loss_mask,
@@ -759,15 +786,16 @@ def main() -> None:
         sched.step()
 
         if do_log:
-            with torch.no_grad():                               # per-source A1 (diagnostic, off-graph)
-                a1_pw = masked_latent_per_window(a1_pred.float(), a1_target, a1_loss_mask,
-                                                 feature_valid=a1_feature_valid)
             lrs = sched.get_last_lr()
             rec = {"step": step, "lr": lrs[0],
                    "elapsed_s": round(time.time() - t0, 1),
                    "patch_seconds": batch["patch_seconds"],
-                   "total": round(float(out.total.detach()), 4), **out.parts, **gnorms,
-                   "a1_by_source": per_source_mean(a1_pw, batch["sources"])}
+                   "total": round(float(out.total.detach()), 4), **out.parts, **gnorms}
+            if compute_a1:                                       # per-source A1 (diagnostic, off-graph)
+                with torch.no_grad():
+                    a1_pw = masked_latent_per_window(a1_pred.float(), a1_target, a1_loss_mask,
+                                                     feature_valid=a1_feature_valid)
+                rec["a1_by_source"] = per_source_mean(a1_pw, batch["sources"])
             if len(lrs) > 1:
                 rec["lr_frontend"] = lrs[1]
             if model.encoder.filterbank.learnable:

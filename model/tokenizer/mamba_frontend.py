@@ -505,19 +505,34 @@ class PerSensorMambaTokenizer(nn.Module):
         if r.numel() == 1:
             r = r.expand(B)
         dt_phys = (1.0 / r).view(B, 1)                      # (B,1) physical step 1/rate
+        vm = valid_ps.to(dtype).unsqueeze(-1)               # (B,P,S,1) readout weights
 
-        h = self.stem(seq) * valid.unsqueeze(-1)            # (B, P*S, d_model)
+        # Each of the B (sensor) sequences is independent, so process the batch in chunks: one kernel
+        # call over the full B × (P*S) at d_inner would allocate multi-GB workspaces and OOM. Chunk B
+        # and checkpoint each chunk under grad (recompute in backward) -> peak ~ one chunk. Chunk size
+        # auto-scales with d_inner·(P*S) so the workspace stays bounded across widths / window lengths.
+        chunk = max(8, 50_000_000 // (self.d_inner * (P * S)))
         do_ckpt = self.training and torch.is_grad_enabled()
-        for blk in self.blocks:                             # continuous, causal, carry state through padding
-            if do_ckpt:                                     # per-block checkpoint bounds the long-scan memory
-                h = torch.utils.checkpoint.checkpoint(
-                    blk, h, dt_phys, valid, self.use_kernel, False, True, use_reentrant=False)
+        toks = []
+        for b0 in range(0, B, chunk):
+            b1 = min(b0 + chunk, B)
+            args = (seq[b0:b1], valid[b0:b1], vm[b0:b1], dt_phys[b0:b1])
+            if do_ckpt:
+                toks.append(torch.utils.checkpoint.checkpoint(self._encode_readout, *args,
+                                                              use_reentrant=False))
             else:
-                h = blk(h, dt_phys, valid, self.use_kernel,
-                        allow_inner_ckpt=True, carry_through_invalid=True)
-        h = self.final_norm(h) * valid.unsqueeze(-1)
-
-        hp = h.reshape(B, P, S, self.d_model)               # strided readout: mean over each patch's reals
-        vm = valid_ps.to(dtype).unsqueeze(-1)               # (B,P,S,1)
-        tok = (hp * vm).sum(2) / vm.sum(2).clamp(min=1.0)   # (B,P,d)
+                toks.append(self._encode_readout(*args))
+        tok = torch.cat(toks, dim=0)                        # (B,P,d)
         return tok.unsqueeze(2)                             # (B,P,1,d) — single 'sensor channel'
+
+    def _encode_readout(self, seq, valid, vm, dt_phys):
+        """stem -> continuous causal blocks (state carried through padding) -> per-patch mean readout,
+        for one chunk of sensor sequences. seq (b,P*S,C); valid (b,P*S); vm (b,P,S,1) -> (b,P,d)."""
+        b = seq.shape[0]
+        h = self.stem(seq) * valid.unsqueeze(-1)            # (b, P*S, d_model)
+        for blk in self.blocks:
+            h = blk(h, dt_phys, valid, self.use_kernel,
+                    allow_inner_ckpt=False, carry_through_invalid=True)
+        h = self.final_norm(h) * valid.unsqueeze(-1)
+        hp = h.reshape(b, vm.shape[1], vm.shape[2], self.d_model)   # (b, P, S, d)
+        return (hp * vm).sum(2) / vm.sum(2).clamp(min=1.0)          # (b, P, d)

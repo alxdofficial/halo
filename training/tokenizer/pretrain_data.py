@@ -318,6 +318,7 @@ class PretrainDataset(Dataset):
             "data": data6,                                # (T', 6) canonical slots
             "rate": float(sample.sampling_rate),
             "texts": texts6,
+            "sensor_text": stream_sensor_texts(ref.dataset, ref.stream)[1][0],  # per-sensor identity (device+placement)
             "label_id": key.label_id,
             "channel_mask": mask6,
             "gravity_state": _stream_gravity_state(ref.dataset, ref.stream),
@@ -514,6 +515,7 @@ class MultiScaleCollate:
             "positions": positions,
             "patch_seconds": ps,
             "texts": [item["texts"] for item in batch],
+            "sensor_texts": [[item.get("sensor_text", "")] for item in batch],   # B lists of 1 sensor string (per-sensor arm)
             "labels": torch.tensor([item["label_id"] for item in batch]),
             "sources": [item.get("source", "?") for item in batch],   # per-window dataset (telemetry)
             "channel_mask": torch.stack([item["channel_mask"] for item in batch]),
@@ -654,6 +656,7 @@ class MultiResolutionCollate:
             "resolution_ids": resolution_ids,
             "patch_seconds": pair,
             "texts": [item["texts"] for item in batch],
+            "sensor_texts": [[item.get("sensor_text", "")] for item in batch],   # B lists of 1 sensor string (per-sensor arm)
             "labels": torch.tensor([item["label_id"] for item in batch]),
             "sources": [item.get("source", "?") for item in batch],
             "channel_mask": channel_mask,

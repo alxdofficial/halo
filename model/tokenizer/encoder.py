@@ -274,7 +274,16 @@ class SetTokenizerEncoder(nn.Module):
         sensor_texts: Optional[Sequence[Sequence[str]]] = None,  # factored: B lists of N_sensor strings
         sensor_id: Optional[torch.Tensor] = None,                # factored: (B, C) long
     ) -> dict[str, torch.Tensor]:
-        sensor_tokens = self.tokenize(patches, sampling_rate_hz, patch_len_samples)
+        if self.frontend_kind == "mamba_sensor":
+            # per-sensor arm: pass the raw (B,C) mask to the fused stem; the frontend emits ONE token
+            # per patch (C=1), so downstream the single "sensor channel" is always present. The caller
+            # passes the sensor-identity text as channel_texts (C=1).
+            sensor_tokens = self.tokenize(patches, sampling_rate_hz, patch_len_samples,
+                                          channel_mask=channel_mask)
+            channel_mask = torch.ones(sensor_tokens.shape[0], 1, dtype=torch.bool,
+                                      device=sensor_tokens.device)
+        else:
+            sensor_tokens = self.tokenize(patches, sampling_rate_hz, patch_len_samples)
         device = sensor_tokens.device
         s_embs = s_masks = None
         if self.text_conditioning == "factored":
