@@ -152,6 +152,40 @@ scan (`scan_chunk=32`) so the backward graph never materialises all S steps at o
 **fails loud** (`RuntimeError`) if `frontend="mamba"` is requested on CUDA without the kernel, or on CPU
 outside a smoke run — no silent fallback to the slow path in a real run.
 
+## Profiling (2026-07-23, RTX 4090, real production batch B=328·P=18·S=256·C=6 → M=35,424)
+
+Tokenizer fwd+bwd, measured through `encoder.tokenize` on a real balanced batch:
+
+| tokenizer | fwd+bwd | frontend VRAM | full-step VRAM | frontend params |
+|---|---|---|---|---|
+| **fixed filterbank** | **1.3 ms** | 0.28 GiB | ~3–4 GiB | 25.3k |
+| **mamba** (d_inner=512, 3L) | **11,442 ms** | 2.67 GiB | 10.2 GiB | 1.37M |
+
+The mamba tokenizer is **~8,600× slower**. At ~11.5 s/step, 30k steps ≈ **~4 days per run** — i.e. the
+comparison (2 arms × 2–3 seeds) is infeasible as configured. Cause: the tokenizer runs **M = B·P·C ≈
+35k independent per-channel SSM sequences** (length 256) through 3 layers at inner width 512; the
+filterbank does the same job in one batched FFT.
+
+**VRAM is NOT the problem** (it is bounded to 2.67 GiB by the auto-chunk, ~20 GiB headroom). Chunk size
+trades **memory, not speed** — at the real batch, chunk=122 (2.7 GiB) and chunk=251 (5.3 GiB) timed the
+same within noise (the scan is compute-bound), so the auto-chunk is deliberately kept small. Gradient
+checkpointing doubles the frontend forward but is required to bound the M-activation memory.
+
+**The lever is structural** (d_model stays 256; only d_inner / n_layers change):
+
+| config | fwd+bwd | speedup | frontend params (× filterbank) | 30k-step run |
+|---|---|---|---|---|
+| d_inner=512, L=3 (current) | 11,442 ms | 1.0× | 1.37M (54×) | ~4 days |
+| **d_inner=128, L=3** | 3,810 ms | **3.0×** | 0.33M (13×) | ~32 h |
+| d_inner=512, L=1 | 3,973 ms | 2.9× | 0.46M (18×) | ~33 h |
+| d_inner=128, L=1 | 1,521 ms | 7.5× | 0.11M (4.3×) | ~13 h |
+| d_inner=64, L=1 | 1,131 ms | 10.1× | 0.06M (2.4×) | ~9 h |
+
+`d_inner=128, L=3` keeps the 3-layer depth (the "feature extraction per patch" rationale) while cutting
+compute 3× and the param gap 54×→13× — the "keep the design intent, drop the waste" option. Even the
+fastest config is still ~850× the filterbank, so per-channel Mamba is intrinsically expensive; a
+per-sensor (not per-channel) variant would cut M by 6× and is the other axis to explore.
+
 ## Audit blockers (independent review, 2026-07-22 — verified here)
 
 Recorded so the "NO-GO for training" status is concrete and actionable. Numbers reproduced locally.

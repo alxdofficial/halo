@@ -272,10 +272,13 @@ class SelectiveSSMChannelTokenizer(nn.Module):
         return r, N
 
     def _auto_chunk(self, S: int) -> int:
-        """Per-chunk sequence count that keeps the fused kernel's peak ~constant across widths.
-        Measured peak is ~linear in chunk*d_inner*S (RTX 4090, S=256: chunk=256,d_inner=512 -> 5.4 GiB;
-        chunk=256,d_inner=128 -> 1.37 GiB). Budget ~2.5 GiB so the frontend leaves headroom for the
-        transformer/heads in a full step. forward_chunk>0 overrides this."""
+        """Per-chunk sequence count that bounds the fused kernel's peak ~constant across widths.
+        Profiling (RTX 4090) showed the selective scan is COMPUTE-bound at production scale, so chunk
+        size trades **memory**, not speed: at the real batch (M=35424, d_inner=512) chunk=122 (~2.7
+        GiB) and chunk=251 (~5.3 GiB) timed the same within noise. So keep the chunk small to leave
+        headroom for the transformer/heads. Budget ~16M -> chunk≈122 at d_inner=512/S=256 (~2.7 GiB).
+        forward_chunk>0 overrides. NOTE: none of this touches the fundamental cost — the per-channel
+        scan over M=B*P*C sequences is ~4 orders slower than the filterbank (see TOKENIZER_ABLATION)."""
         d_inner = self.blocks[0].d_inner
         return max(64, 16_000_000 // (d_inner * max(int(S), 1)))
 
