@@ -66,12 +66,15 @@ class _MambaBlock(nn.Module):
         m0 = torch.exp(torch.rand(d_inner) * (math.log(mult_max) - math.log(mult_min)) + math.log(mult_min))
         self.dt_proj.bias.data.copy_(torch.log(torch.expm1(m0)))
 
-    def _scan_chunk(self, h, x_c, dtlr_c, Bm_c, Cm_c, dt_phys, valid_c, A):
-        """Selective recurrence over one chunk of timesteps; carry h in, (h_out, y_chunk) out."""
+    def _scan_chunk(self, h, x_c, dtlr_c, Bm_c, Cm_c, dt_phys, valid_c, A, carry=False):
+        """Selective recurrence over one chunk of timesteps; carry h in, (h_out, y_chunk) out.
+        carry=True zeroes Δ at invalid steps so the state passes through unchanged (continuous scan)."""
         L = x_c.shape[1]
         ys = []
         for t in range(L):
             dt_t = (F.softplus(self.dt_proj(dtlr_c[:, t])) * dt_phys).unsqueeze(-1)   # (M,E,1) physical Δ
+            if carry:
+                dt_t = dt_t * valid_c[:, t].view(-1, 1, 1)                            # Δ=0 -> state carries
             Abar_t = torch.exp(dt_t * A.unsqueeze(0))                                 # (M,E,N)
             Bx_t = dt_t * Bm_c[:, t].unsqueeze(1) * x_c[:, t].unsqueeze(-1)           # (M,E,N)
             h = Abar_t * h + Bx_t
@@ -79,8 +82,12 @@ class _MambaBlock(nn.Module):
             ys.append(y_t * valid_c[:, t:t + 1])
         return h, torch.stack(ys, dim=1)
 
-    def forward(self, u, dt_phys, valid, use_kernel, allow_inner_ckpt=True):
-        # u (M,S,d_model) residual stream; dt_phys (M,1); valid (M,S)
+    def forward(self, u, dt_phys, valid, use_kernel, allow_inner_ckpt=True,
+                carry_through_invalid=False):
+        # u (M,S,d_model) residual stream; dt_phys (M,1); valid (M,S).
+        # carry_through_invalid: zero Δ at invalid steps so the SSM state is CARRIED (A_bar=exp(0)=1,
+        # Bx=0) rather than decayed — needed for a continuous scan whose inter-patch padding must not
+        # bleed the state. Off for the per-patch tokenizer (state is reset per patch anyway).
         M, S, _ = u.shape
         residual = u
         x = self.norm(u)
@@ -94,6 +101,8 @@ class _MambaBlock(nn.Module):
             # Fused kernel: our physics is entirely in Δ (rate-scaled) -> delta_softplus=False. The
             # kernel applies the silu(z) gate and the D skip internally. Layout: (M,E,S)/(M,N,S).
             delta = F.softplus(self.dt_proj(dt_lr)) * dt_phys.unsqueeze(1)               # (M,S,E)
+            if carry_through_invalid:
+                delta = delta * valid.unsqueeze(-1)                                     # Δ=0 -> state carries
             y = _selective_scan_fn(
                 x.transpose(1, 2).contiguous(), delta.transpose(1, 2).contiguous(), A,
                 Bm.transpose(1, 2).contiguous(), Cm.transpose(1, 2).contiguous(),
@@ -109,7 +118,7 @@ class _MambaBlock(nn.Module):
             for s0 in range(0, S, self.scan_chunk):
                 s1 = min(s0 + self.scan_chunk, S)
                 args = (h, x[:, s0:s1], dt_lr[:, s0:s1], Bm[:, s0:s1], Cm[:, s0:s1],
-                        dt_phys, valid[:, s0:s1], A)
+                        dt_phys, valid[:, s0:s1], A, carry_through_invalid)
                 if do_ckpt:
                     h, yc = torch.utils.checkpoint.checkpoint(self._scan_chunk, *args, use_reentrant=False)
                 else:
@@ -347,3 +356,168 @@ class SelectiveSSMChannelTokenizer(nn.Module):
             return h[torch.arange(h.shape[0], device=h.device), last]
         denom = valid.sum(1, keepdim=True).clamp(min=1.0)
         return (h * valid.unsqueeze(-1)).sum(1) / denom                     # (m,d_model)
+
+
+class PerSensorMambaTokenizer(nn.Module):
+    """Per-SENSOR, patch-free, CAUSAL selective-SSM tokenizer (design 2026-07-23).
+
+    Differs from SelectiveSSMChannelTokenizer (per-channel, per-patch) on four axes:
+      * PER-SENSOR — all C channel slots enter the stem as ONE vector (`Linear(C, d_model)`); the SSM
+        mixes channels and channel identity is implicit in the stem weights (no per-channel text).
+      * CONTINUOUS — a single causal scan over the whole window (P*S steps), not P independent
+        per-patch scans; the state carries across patch boundaries (inter-patch padding is skipped via
+        `carry_through_invalid`, Δ=0). This is the long-range temporal mixing attention used to do.
+      * READOUT — mean-pool the scan output over each patch's REAL samples → one token/patch, so the
+        encoder contract stays (B, P, 1, d) (a single "sensor channel"). Patch duration sets the
+        readout stride; Δ=1/rate keeps physical coverage consistent across sampling rates.
+      * CAUSAL — forward-only (streaming-compatible); a bidirectional variant would add a reversed scan.
+
+    Δ=1/rate rate-conditioning and per-modality standardisation are unchanged from the per-channel arm.
+    """
+
+    def __init__(self, d_model: int = 256, n_layers: int = 3, d_state: int = 16,
+                 d_inner: int | None = None, d_conv: int = 4, dt_rank: int | None = None,
+                 mult_min: float = 0.5, mult_max: float = 2.0, standardize: bool = True,
+                 channel_groups: tuple = (0, 0, 0, 1, 1, 1), scan_chunk: int = 32,
+                 use_kernel: bool = True, dft_size: int | None = None, **_ignored):
+        super().__init__()
+        self.d_model = d_model
+        self.n_layers = int(n_layers)
+        self.d_state = int(d_state)
+        self.d_inner = int(d_inner or 2 * d_model)
+        self.d_conv = int(d_conv)
+        self.dt_rank = int(dt_rank or math.ceil(self.d_inner / 16))
+        self.use_kernel = bool(use_kernel)
+        self.n_channels = len(channel_groups)
+
+        self.stem = nn.Linear(self.n_channels, d_model)     # lift the C-channel sensor vector -> d_model
+        self.blocks = nn.ModuleList(
+            _MambaBlock(d_model, self.d_inner, self.d_state, self.d_conv, self.dt_rank,
+                        mult_min, mult_max, int(scan_chunk))
+            for _ in range(self.n_layers))
+        self.final_norm = nn.LayerNorm(d_model)
+        self.learnable = True                               # frontend-interface parity with the filterbank
+
+        self.standardize = bool(standardize)
+        cg = torch.tensor(channel_groups, dtype=torch.long)
+        self.register_buffer("channel_group", cg)
+        self.n_groups = int(cg.max().item()) + 1
+        self.register_buffer("norm_mu", torch.zeros(self.n_groups))
+        self.register_buffer("norm_sd", torch.ones(self.n_groups))
+        self.register_buffer("_norm_fitted", torch.zeros(1))
+        self.register_buffer("_acc_n", torch.zeros(self.n_groups, dtype=torch.float64), persistent=False)
+        self.register_buffer("_acc_sum", torch.zeros(self.n_groups, dtype=torch.float64), persistent=False)
+        self.register_buffer("_acc_sqsum", torch.zeros(self.n_groups, dtype=torch.float64), persistent=False)
+
+    def get_output_dim(self) -> int:
+        return self.d_model
+
+    # ------------------------------------------------ frontend interface (parity with the filterbank)
+    def adaptation_regularization(self) -> torch.Tensor:
+        terms = [b.delta_mult_baseline().clamp_min(1e-6).log().square().mean() for b in self.blocks]
+        return torch.stack(terms).mean()
+
+    @torch.no_grad()
+    def adaptation_summary(self) -> dict[str, float]:
+        base = torch.cat([b.delta_mult_baseline().detach() for b in self.blocks])
+        return {
+            "frontend/delta_mult_baseline_min": float(base.min()),
+            "frontend/delta_mult_baseline_max": float(base.max()),
+            "frontend/delta_mult_baseline_mean": float(base.mean()),
+            "frontend/norm_sd_accel": float(self.norm_sd[0]) if self.norm_sd.numel() else 1.0,
+            "frontend/norm_sd_gyro": float(self.norm_sd[-1]) if self.norm_sd.numel() > 1 else 1.0,
+        }
+
+    # ------------------------------------------------------------------ calibration (per-modality)
+    def reset_norm_accumulator(self):
+        self._acc_n.zero_(); self._acc_sum.zero_(); self._acc_sqsum.zero_()
+
+    @torch.no_grad()
+    def accumulate_norm_stats(self, patches, sampling_rate_hz=None, patch_len_samples=None,
+                              patch_mask=None, channel_mask=None):
+        B, P, S, C = patches.shape
+        dev = patches.device
+        w = torch.ones(B, P, S, C, dtype=torch.float64, device=dev)
+        if patch_len_samples is not None:
+            N = torch.as_tensor(patch_len_samples).to(dev)
+            if N.ndim == 0:
+                N = N.view(1, 1).expand(B, P)
+            elif N.ndim == 1:
+                N = N.view(B, 1).expand(B, P)
+            idx = torch.arange(S, device=dev).view(1, 1, S)
+            w = w * (idx < N.unsqueeze(-1)).view(B, P, S, 1).to(torch.float64)
+        if patch_mask is not None:
+            w = w * patch_mask.to(dev).view(B, P, 1, 1).to(torch.float64)
+        if channel_mask is not None:
+            w = w * channel_mask.to(dev).view(B, 1, 1, C).to(torch.float64)
+        x = patches.to(torch.float64)
+        for gi in range(self.n_groups):
+            sel = (self.channel_group == gi)
+            if not sel.any():
+                continue
+            xg, wg = x[..., sel], w[..., sel]
+            self._acc_n[gi] += wg.sum()
+            self._acc_sum[gi] += (xg * wg).sum()
+            self._acc_sqsum[gi] += (xg * xg * wg).sum()
+
+    @torch.no_grad()
+    def finalize_norm_stats(self, eps: float = 1e-5):
+        seen = self._acc_n > 0
+        n = self._acc_n.clamp(min=1.0)
+        mu = self._acc_sum / n
+        sd = ((self._acc_sqsum / n) - mu * mu).clamp(min=eps).sqrt()
+        self.norm_mu.copy_(torch.where(seen, mu, torch.zeros_like(mu)).to(self.norm_mu.dtype))
+        self.norm_sd.copy_(torch.where(seen, sd, torch.ones_like(sd)).to(self.norm_sd.dtype))
+        self._norm_fitted.fill_(1.0)
+
+    @torch.no_grad()
+    def fit_norm_stats(self, patches, sampling_rate_hz=None, patch_len_samples=None, eps: float = 1e-5):
+        self.reset_norm_accumulator()
+        self.accumulate_norm_stats(patches, patch_len_samples=patch_len_samples)
+        self.finalize_norm_stats(eps)
+
+    # ------------------------------------------------------------------------------- forward
+    def forward(self, patches, sampling_rate_hz, patch_len_samples=None, channel_mask=None):
+        """(B,P,S,C) patches -> (B,P,1,d): one causal continuous scan, mean-pool readout per patch."""
+        B, P, S, C = patches.shape
+        device, dtype = patches.device, patches.dtype
+        if C != self.n_channels:
+            raise ValueError(f"expected C={self.n_channels} channel slots, got {C}")
+
+        u = patches
+        if self.standardize:                                # per-modality (accel/gyro) standardise
+            u = (u - self.norm_mu[self.channel_group]) / self.norm_sd[self.channel_group]
+        if channel_mask is not None:                        # absent channels must NOT feed the fused stem
+            u = u * channel_mask.view(B, 1, 1, C).to(dtype)
+
+        if patch_len_samples is None:
+            N = torch.full((B, P), S, device=device, dtype=torch.long)
+        else:
+            N = torch.as_tensor(patch_len_samples, device=device).long()
+            N = (N.view(1, 1).expand(B, P) if N.numel() == 1
+                 else N.view(B, 1).expand(B, P) if N.numel() == B else N.reshape(B, P))
+        idx = torch.arange(S, device=device).view(1, 1, S)
+        valid_ps = idx < N.unsqueeze(-1)                    # (B,P,S) real-sample mask
+        valid = valid_ps.reshape(B, P * S).to(dtype)        # (B, P*S) continuous validity
+
+        seq = u.reshape(B, P * S, C)                        # continuous per-sensor stream
+        r = torch.as_tensor(sampling_rate_hz, device=device, dtype=dtype).reshape(-1)
+        if r.numel() == 1:
+            r = r.expand(B)
+        dt_phys = (1.0 / r).view(B, 1)                      # (B,1) physical step 1/rate
+
+        h = self.stem(seq) * valid.unsqueeze(-1)            # (B, P*S, d_model)
+        do_ckpt = self.training and torch.is_grad_enabled()
+        for blk in self.blocks:                             # continuous, causal, carry state through padding
+            if do_ckpt:                                     # per-block checkpoint bounds the long-scan memory
+                h = torch.utils.checkpoint.checkpoint(
+                    blk, h, dt_phys, valid, self.use_kernel, False, True, use_reentrant=False)
+            else:
+                h = blk(h, dt_phys, valid, self.use_kernel,
+                        allow_inner_ckpt=True, carry_through_invalid=True)
+        h = self.final_norm(h) * valid.unsqueeze(-1)
+
+        hp = h.reshape(B, P, S, self.d_model)               # strided readout: mean over each patch's reals
+        vm = valid_ps.to(dtype).unsqueeze(-1)               # (B,P,S,1)
+        tok = (hp * vm).sum(2) / vm.sum(2).clamp(min=1.0)   # (B,P,d)
+        return tok.unsqueeze(2)                             # (B,P,1,d) — single 'sensor channel'

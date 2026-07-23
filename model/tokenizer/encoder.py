@@ -126,8 +126,12 @@ class SetTokenizerEncoder(nn.Module):
     # needs two views (masked for A1, clean for A2/A3) computes the filterbank and the
     # text embeddings ONCE and only re-runs the cheap transformer tail.
 
-    def tokenize(self, patches, sampling_rate_hz, patch_len_samples) -> torch.Tensor:
-        """Filterbank sensor tokens (B, P, C, d) — identical across masked/clean views."""
+    def tokenize(self, patches, sampling_rate_hz, patch_len_samples, channel_mask=None) -> torch.Tensor:
+        """Sensor tokens (B, P, C, d) — identical across masked/clean views. The per-SENSOR frontend
+        needs channel_mask (absent channels must not feed its fused stem, C=1 output); the filterbank
+        and per-channel arms ignore it (they emit per-channel tokens the encoder masks downstream)."""
+        if channel_mask is not None and self.frontend_kind == "mamba_sensor":
+            return self.filterbank(patches, sampling_rate_hz, patch_len_samples, channel_mask=channel_mask)
         return self.filterbank(patches, sampling_rate_hz, patch_len_samples)
 
     def encode_texts(
