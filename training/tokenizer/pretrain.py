@@ -726,22 +726,31 @@ def main() -> None:
     if args.resume:
         rk = torch.load(args.resume, map_location=device, weights_only=False)
         saved_cfg = rk.get("config", {})
-        # Validate EVERY load-bearing knob, not just frontend/multiresolution (audit 2026-07-23 #6:
-        # omitting --subset or --a1-weight 0 on resume silently continued on the full corpus / A1 on).
-        for key in ("frontend", "text_conditioning", "gate_bias_init", "multiresolution",
-                    "train_datasets", "a1_weight", "max_per_stream", "d_model", "num_layers",
-                    "data_seed"):
-            saved = saved_cfg.get(key, getattr(cfg, key))
-            cur = getattr(cfg, key)
+        # A faithful resume must reproduce the SAME optimization trajectory, so validate the ENTIRE
+        # serialized config against the checkpoint — NOT a hand-listed subset. The old subset silently
+        # accepted a mixed objective/sampler/seed resume (e.g. --a2-mode supcon --sampler balanced
+        # --tfc-weight 0 --seed 999 on a SimCLR/TF-C run), which then overwrote run_config.json and
+        # made the mixed-protocol run look pure. Only knobs that touch NEITHER the training trajectory
+        # NOR the saved model's meaning may differ — runtime + eval-cadence. (steps stays checked: it
+        # rescales the cosine LR schedule, so a faithful resume passes the same --steps.)
+        _RESUME_RUNTIME_ONLY = {"device", "num_workers", "val_every", "val_per_label", "knn_k"}
+
+        def _norm(v):
+            return list(v) if isinstance(v, (list, tuple)) else v
+        cur_cfg = asdict(cfg)
+        for key in sorted(set(cur_cfg) | set(saved_cfg)):
+            if key in _RESUME_RUNTIME_ONLY:
+                continue
+            saved = saved_cfg.get(key, cur_cfg.get(key))
+            cur = cur_cfg.get(key)
             # train_datasets round-trips through asdict as a list; compare order-insensitively as sets
             if key == "train_datasets" and saved is not None and cur is not None:
                 if set(saved) != set(cur):
                     raise ValueError(f"resume mismatch for {key}: checkpoint={saved!r}, requested={cur!r}")
-            elif saved != cur:
+            elif _norm(saved) != _norm(cur):
                 raise ValueError(
-                    f"resume configuration mismatch for {key}: checkpoint="
-                    f"{saved!r}, requested={cur!r}"
-                )
+                    f"resume configuration mismatch for {key}: checkpoint={saved!r}, requested={cur!r} "
+                    f"— a resume must reproduce the run; only {sorted(_RESUME_RUNTIME_ONLY)} may differ.")
         saved_fp = rk.get("corpus_fingerprint")
         if saved_fp is not None and saved_fp != corpus_fingerprint(index):
             raise ValueError(
@@ -766,6 +775,13 @@ def main() -> None:
         # Restore the RUNNING best, not this checkpoint's own val_ba (#6): resuming from last.pt
         # (whose val_ba is the latest, not the best) must not let a later worse val overwrite best.pt.
         best_ba = float(rk.get("best_ba", rk["val_ba"]))
+        # Draw FRESH windows for the remaining steps instead of REPLAYING the sampler prefix (audit F1):
+        # advance the temperature sampler's epoch so the resumed run's training draw differs from the
+        # interrupted run's. Not bit-exact (the design accepts a fresh epoch for the remaining steps),
+        # but it no longer re-trains on the exact windows the prefix already saw.
+        _samp = getattr(train_loader, "sampler", None)
+        if isinstance(_samp, TemperatureSampler):
+            _samp.epoch += start_step
         print(f"resumed from {args.resume} at step {start_step} (best_ba {best_ba:.3f})", flush=True)
 
     # Write run metadata only AFTER resume validation passed, so a rejected resume leaves it untouched (#6).
