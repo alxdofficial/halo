@@ -7,11 +7,17 @@ encoder, ~50 epochs, retrieval purity plateaued at 0.68 with fine-grained classe
 
 | quantity | value |
 |---|---|
-| train windows | 306,666 (+38,167 val), 93 labels, 20 streams |
+| train windows | 305,049 (+38,186 val), 93 labels, 20 streams |
 | materialised native-grid hours | **547.3 h** |
-| hours actually **reachable in training** (after `MAX_PER_STREAM=20_000`) | **290.0 h** |
+| hours **reachable in training** — `MAX_PER_STREAM` is DEAD CODE (default `None`), so all materialised hours enter | **547.3 h** |
 | harnet / UK-Biobank pretraining | ~1.7 × 10⁷ h |
-| ratio | **~58,000×** |
+| ratio | **~31,000×** |
+
+> **B1 correction:** `MAX_PER_STREAM=20_000` is referenced nowhere and never applied (default `None`),
+> so the earlier "290 h reachable" was stale — all 547.3 materialised hours reach the loader. The real
+> throttles are (1) the build-time capture24 grid cap (only ~9.4% of its 2,562 annotated hours are
+> gridded) and (2) the source-balanced / temperature sampler, under which capture24 is 41% of windows
+> but a much smaller share of the gradient. See the 2026-07-24 data audit.
 
 > Corrects `EVIDENCE_ENGINE_TIER2.md` §0.1, which estimated "≈10³ h assuming ~10 s windows". The
 > measured figure is **290 h reachable / 547 h materialised**. The ~4-orders-of-magnitude framing stands.

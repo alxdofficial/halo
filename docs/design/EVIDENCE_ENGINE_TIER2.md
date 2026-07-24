@@ -23,9 +23,11 @@ M4a is built and diagnosed. On the 7-cell ZS-XD gate (same frozen fixed+MR encod
 > hand-authored synonyms for **eval-dataset** labels (70% of eval candidates) — selected using
 > hyperparameters tuned **on the eval cells**, against a harnet head fit on a corpus missing the wrist
 > streams where we win, with no CIs. What survives is the **internally-controlled** claim: on the same
-> frozen encoder + corpus, a retrieval bridge beats the ConSE bridge 42.7 → 47.5 → 49.5, reaching
-> *parity* with harnet at ~10⁴× less pretraining data. Also see §2 of FINDINGS: the decoder's gain is
-> confined to seen-label cells (r = −0.973) and it *regresses* on the most open-vocabulary ones.
+> frozen encoder + corpus, the **UNtrained** retrieval + text-ensemble bridge beats the ConSE bridge
+> 42.7 → **47.5** (edging harnet 47.3) at ~10⁴× less pretraining data. The further **→ 49.5 trained
+> decoder is RETRACTED** (59-label vocab; on the corrected 93-label bank it is 44.2 vs a 46.7 control —
+> net-negative). Also see §2 of FINDINGS: the decoder's gain was confined to seen-label cells
+> (r = −0.973) and it *regressed* on the most open-vocabulary ones.
 
 > # ⛔ THE GATE DID NOT HOLD — the paragraph below is RETRACTED IN FULL (2026-07-21)
 >
