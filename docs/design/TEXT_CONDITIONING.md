@@ -81,7 +81,7 @@ where placement/device/modality actually live, instead of being redundantly stam
 The flat version is implemented and tested (`tests/test_factored_conditioning.py`, 8 tests), **opt-in
 and default-off** so the current pretrain path is byte-for-byte unchanged.
 
-- **Data:** `training/tokenizer/pretrain_data.stream_sensor_texts(dataset, stream)` →
+- **Data:** `training/tokenizer/pretrain_data.stream_sensor_texts(dataset, stream, ...)` →
   `(role_texts[6], sensor_texts[1], sensor_id[6])`. Role = axis/modality only
   (`"accelerometer x-axis"`), sensor = device+placement+**gravity convention**
   (`"a watch on the wrist; accelerometer includes gravity"`). Gravity state moved to the sensor
@@ -94,6 +94,14 @@ and default-off** so the current pretrain path is byte-for-byte unchanged.
 - **Encoder:** `SetTokenizerEncoder(text_conditioning="factored", gate_bias_init=…)`. New
   `encode_texts_factored()`; `encode()`/`forward()` take `sensor_texts` + `sensor_id`. Legacy
   `"per_channel"` remains the default and still builds `ChannelTextFusion`.
+- **Augmentation synchronization:** gravity removal rewrites the factored sensor gravity state;
+  gyro dropout rewrites the sensor modality to `accelerometer only`; channel-text phrase/dropout
+  mutates the factored role text with the same per-channel budget. Shared single-sensor identity is
+  not erased by a per-channel dropout, because that would exceed `max_frac`.
+- **Training/evaluation wiring:** the Phase-A clean and masked views reuse the same factored
+  role/sensor embeddings. Frozen-encoder evaluation, memory-bank construction, HALO adapters, and
+  evidence diagnostics all supply dataset, stream, channel mask, and gravity state so acc-only and
+  gravity-removed streams receive honest sensor text.
 - **Verified:** role+sensor sum (no double-injection), sensor broadcast by `sensor_id`, gate
   ablatability, all-masked-row NaN guard, end-to-end forward+backward with finite grads to every
   fusion param, full suite 243 passing.
@@ -115,7 +123,9 @@ detector).
 mirror of the Nyquist mask) already encodes duration observability, so the existing optional
 `use_duration_embedding` path stays as-is; it *may* add calibration value beyond the flag, so keep it
 optional rather than dropping it like rate. Also deferred: the **hierarchical / sensor-token** design
-(Option B); and wiring the factored path into `pretrain.py`'s two-view (masked/clean) training loop.
+(Option B). The flat model accepts multiple sensor groups, but the current corpus loader still emits
+one stream/sensor at a time; multi-sensor learning is therefore structurally supported but not trained
+or empirically validated on simultaneous multi-sensor examples.
 
 ## 5. How to fold it in — smallest change that is honest
 

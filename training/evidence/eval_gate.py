@@ -111,7 +111,9 @@ def main() -> None:
             texts = stream_channel_descriptions(ds, stream)
             gs = _stream_gravity_state(ds, stream)
             z = encode_dataset(enc, np.asarray(es.windows), texts, device,
-                               float(es.rate_hz), gs).to(device)     # (N, d)
+                               float(es.rate_hz), gs,
+                               channel_mask=es.mask, dataset=ds,
+                               stream=stream).to(device)     # (N, d)
             cand_proj = head.project_text(
                 torch.from_numpy(sbert(es.eval_labels).astype(np.float32)).to(device))  # (C, proj)
 

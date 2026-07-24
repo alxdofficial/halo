@@ -158,10 +158,25 @@ class SetTokenizerEncoder(nn.Module):
         """Encode the two factored text sources with the same frozen LM.
 
         role_texts:   B lists of C role strings   -> (role_embs (B,C,S,384), role_masks (B,C,S))
-        sensor_texts: B lists of N_sensor strings -> (sensor_embs (B,N,S,384), sensor_masks (B,N,S))
+        sensor_texts: B ragged lists of sensor strings -> padded
+                      (sensor_embs (B,N_max,S,384), sensor_masks (B,N_max,S)).
         """
         role_embs, role_masks = self.encode_texts(role_texts, device)
-        sensor_embs, sensor_masks = self.encode_texts(sensor_texts, device)
+        if not sensor_texts or any(len(texts) == 0 for texts in sensor_texts):
+            raise ValueError("factored text conditioning requires at least one sensor description "
+                             "per sample")
+        B, n_max = len(sensor_texts), max(map(len, sensor_texts))
+        flat = [text for texts in sensor_texts for text in texts]
+        unique = list(dict.fromkeys(flat))
+        embs_u, masks_u = self.text_encoder.encode(unique, device=device)
+        lookup = {text: i for i, text in enumerate(unique)}
+        S, D = embs_u.shape[1], embs_u.shape[2]
+        sensor_embs = embs_u.new_zeros(B, n_max, S, D)
+        sensor_masks = torch.zeros(B, n_max, S, dtype=torch.bool, device=device)
+        for b, texts in enumerate(sensor_texts):
+            gather = torch.tensor([lookup[text] for text in texts], device=device)
+            sensor_embs[b, :len(texts)] = embs_u.index_select(0, gather)
+            sensor_masks[b, :len(texts)] = masks_u.index_select(0, gather)
         return role_embs, role_masks, sensor_embs, sensor_masks
 
     def encode(
@@ -202,9 +217,23 @@ class SetTokenizerEncoder(nn.Module):
             duration_emb = duration_emb * valid_duration.unsqueeze(-1)
             tokens = tokens + torch.sigmoid(self.duration_gate_logit) * duration_emb.unsqueeze(2)
         if self.text_conditioning == "factored":
-            if sensor_text_embs is None or sensor_id is None:
+            if sensor_text_embs is None or sensor_text_masks is None or sensor_id is None:
                 raise ValueError("factored text_conditioning requires sensor_text_embs / "
                                  "sensor_text_masks / sensor_id; use encode_texts_factored()")
+            sensor_id = sensor_id.to(device=tokens.device, dtype=torch.long)
+            if sensor_id.shape != (B, C):
+                raise ValueError(f"sensor_id must have shape {(B, C)}, got {tuple(sensor_id.shape)}")
+            if sensor_id.numel() and (
+                int(sensor_id.min().item()) < 0
+                or int(sensor_id.max().item()) >= sensor_text_embs.shape[1]
+            ):
+                raise ValueError("sensor_id contains an index without a corresponding sensor description")
+            valid_sensor = sensor_text_masks.any(dim=2)
+            selected_sensor_valid = torch.gather(valid_sensor, 1, sensor_id)
+            if not bool(selected_sensor_valid.all()):
+                raise ValueError(
+                    "sensor_id points to a padded/missing sensor description for at least one sample"
+                )
             # `text_embs`/`text_masks` carry the ROLE tokens in the factored path.
             tokens = self.fusion(tokens, text_embs, text_masks,
                                  sensor_text_embs, sensor_text_masks, sensor_id)

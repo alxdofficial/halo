@@ -610,8 +610,9 @@ def main() -> None:
         saved_cfg = rk.get("config", {})
         # Validate EVERY load-bearing knob, not just frontend/multiresolution (audit 2026-07-23 #6:
         # omitting --subset or --a1-weight 0 on resume silently continued on the full corpus / A1 on).
-        for key in ("frontend", "multiresolution", "train_datasets", "a1_weight", "max_per_stream",
-                    "d_model", "num_layers", "data_seed"):
+        for key in ("frontend", "text_conditioning", "gate_bias_init", "multiresolution",
+                    "train_datasets", "a1_weight", "max_per_stream", "d_model", "num_layers",
+                    "data_seed"):
             saved = saved_cfg.get(key, getattr(cfg, key))
             cur = getattr(cfg, key)
             # train_datasets round-trips through asdict as a list; compare order-insensitively as sets

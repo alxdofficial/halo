@@ -126,7 +126,14 @@ _CHANNEL_ROLE_TEXT = {
 }
 
 
-def stream_sensor_texts(dataset: str, stream: str) -> tuple[list[str], list[str], list[int]]:
+def stream_sensor_texts(
+    dataset: str,
+    stream: str,
+    *,
+    gravity_removed: bool | None = None,
+    has_accel: bool = True,
+    has_gyro: bool = True,
+) -> tuple[list[str], list[str], list[int]]:
     """Factored config text for a stream (docs/design/TEXT_CONDITIONING.md).
 
     Returns ``(role_texts, sensor_texts, sensor_id)``:
@@ -147,14 +154,19 @@ def stream_sensor_texts(dataset: str, stream: str) -> tuple[list[str], list[str]
         place = spec.placement if spec.placement.startswith(("the ", "a ", "an ", "smart")) \
             else f"the {spec.placement}"
         device = _DEVICE_WORDS.get(spec.device_profile, spec.device_profile.replace("_", " "))
-        gravity_removed = (spec.gravity_state == "removed")
+        stream_gravity_removed = (spec.gravity_state == "removed")
     except (KeyError, ValueError, ImportError):
         tokens = stream.lower().split("_")
         device = "phone" if "phone" in tokens else ("watch" if "watch" in tokens else "device")
         place = next((PLACEMENT_WORDS[w] for w in tokens if w in PLACEMENT_WORDS), "the body")
-        gravity_removed = False
-    grav = "accelerometer gravity removed" if gravity_removed else "accelerometer includes gravity"
-    sensor_text = f"a {device} on {place}; {grav}"
+        stream_gravity_removed = False
+    removed = stream_gravity_removed if gravity_removed is None else bool(gravity_removed)
+    modality = ("accelerometer and gyroscope" if has_accel and has_gyro
+                else "accelerometer only" if has_accel
+                else "gyroscope only" if has_gyro else "inertial sensor")
+    grav = ("accelerometer gravity removed" if removed
+            else "accelerometer includes gravity" if has_accel else "no accelerometer")
+    sensor_text = f"a {device} on {place}; {modality}; {grav}"
     sensor_id = [0] * len(CHANNELS)          # single sensor per stream (current corpus)
     return role_texts, [sensor_text], sensor_id
 
@@ -287,6 +299,10 @@ class PretrainDataset(Dataset):
         window = torch.tensor(
             np.asarray(self._grid(key.stream_i)[key.window_i], dtype=np.float32)
         )
+        role_texts, sensor_texts, sensor_id = stream_sensor_texts(
+            ref.dataset, ref.stream,
+            has_accel=bool(any(ref.mask[:3])), has_gyro=bool(any(ref.mask[3:])),
+        )
         sample = IMUSample(
             data=window,
             channel_names=list(CHANNELS),
@@ -295,6 +311,10 @@ class PretrainDataset(Dataset):
             label=ref.labels[key.window_i],
             dataset_name=ref.dataset,
             channel_mask=[bool(m) for m in ref.mask],   # real vs zero-padded channels (F10b)
+            role_descriptions=role_texts,
+            sensor_descriptions=sensor_texts,
+            sensor_id=sensor_id,
+            gravity_state=_stream_gravity_state(ref.dataset, ref.stream),
         )
         sample = self.augmenter(sample)
 
@@ -314,21 +334,26 @@ class PretrainDataset(Dataset):
         # Enforce the pad+mask contract: augmentations (jitter etc.) write noise into
         # grid-masked zero-filled channels — a masked slot must stay exactly zero.
         data6[:, ~mask6] = 0.0
-        # Factored text conditioning inputs (docs/design/TEXT_CONDITIONING.md §4b). Derived from the
-        # SAME (dataset, stream) as texts6; carried alongside for the factored path, ignored by the
-        # default per_channel path. role_texts = axis/modality only; sensor_texts = device/placement/
-        # gravity; sensor_id maps each channel slot to its sensor (all-zeros = single sensor per stream).
-        role_texts, sensor_texts, sensor_id = stream_sensor_texts(ref.dataset, ref.stream)
+        # Scatter the fully augmented role text back to canonical slots just like the signal. Sensor
+        # text is already sensor-level and carries any gravity/phrase/dropout augmentation.
+        role_texts6 = [_CHANNEL_ROLE_TEXT[c] for c in CHANNELS]
+        sensor_id6 = torch.zeros(len(CHANNELS), dtype=torch.long)
+        for j, name in enumerate(sample.channel_names):
+            i = slot[name]
+            if sample.role_descriptions is not None:
+                role_texts6[i] = sample.role_descriptions[j]
+            if sample.sensor_id is not None:
+                sensor_id6[i] = int(sample.sensor_id[j])
         return {
             "data": data6,                                # (T', 6) canonical slots
             "rate": float(sample.sampling_rate),
             "texts": texts6,
-            "role_texts": role_texts,
-            "sensor_texts": sensor_texts,
-            "sensor_id": torch.tensor(sensor_id, dtype=torch.long),
+            "role_texts": role_texts6,
+            "sensor_texts": list(sample.sensor_descriptions or sensor_texts),
+            "sensor_id": sensor_id6,
             "label_id": key.label_id,
             "channel_mask": mask6,
-            "gravity_state": _stream_gravity_state(ref.dataset, ref.stream),
+            "gravity_state": sample.gravity_state,
             "source": ref.dataset,                        # for per-source telemetry
         }
 

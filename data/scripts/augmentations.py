@@ -285,8 +285,8 @@ class AugmentationConfig:
 @dataclass
 class IMUSample:
     """Per-sample carrier threaded through the augmenter. Physics augmentations mutate
-    sampling_rate / channel_names / channel_descriptions and the TEXT augmentations mutate
-    channel_descriptions / label_text, so the loader reads back a fully-augmented sample."""
+    sampling_rate / channel metadata and the TEXT augmentations mutate both legacy per-channel
+    descriptions and, when supplied, factored role/sensor descriptions."""
     data: "torch.Tensor"              # (T, C)
     channel_names: List[str]
     sampling_rate: float
@@ -296,6 +296,10 @@ class IMUSample:
     label_text: str = ""              # augmented label text (output; defaults to raw label)
     channel_mask: Optional[List[bool]] = None   # True = REAL channel (False = zero-padded absent);
                                                 # lets text dropout skip padded channels (F10b)
+    role_descriptions: Optional[List[str]] = None
+    sensor_descriptions: Optional[List[str]] = None
+    sensor_id: Optional[List[int]] = None
+    gravity_state: Optional[str] = None
 
     def __post_init__(self):
         if not self.label_text:
@@ -344,6 +348,20 @@ def _mark_gravity_removed(desc: str) -> str:
     if "gravity removed" not in d.lower():
         d = f"{d} (gravity removed)"
     return d
+
+
+def _mark_sensor_modality(desc: str, has_accel: bool, has_gyro: bool) -> str:
+    """Keep a factored sensor description consistent after channel-group dropout."""
+    modality = ("accelerometer and gyroscope" if has_accel and has_gyro
+                else "accelerometer only" if has_accel
+                else "gyroscope only" if has_gyro else "inertial sensor")
+    pattern = re.compile(
+        r"\b(?:accelerometer and gyroscope|accelerometer only|gyroscope only|inertial sensor)\b",
+        flags=re.I,
+    )
+    if pattern.search(desc):
+        return pattern.sub(modality, desc, count=1)
+    return f"{desc.rstrip(' ;')}; {modality}"
 
 
 def _random_so3() -> "torch.Tensor":
@@ -480,20 +498,33 @@ class IMUAugmenter:
         x = s.data.detach().cpu().numpy().astype(np.float64)
         desc = list(s.channel_descriptions)
         changed = False
+        affected_sensor_ids = set()
         for _loc, triads in self._triads(s.channel_names).items():
             for idxs, gname in triads:
                 if "acc" not in gname:       # only accelerometer carries gravity
                     continue
+                if s.channel_mask is not None and not all(s.channel_mask[j] for j in idxs):
+                    continue                 # canonical zero-padding is not a physical accelerometer
                 if not _gravity_present(x[:, idxs], [desc[j] for j in idxs]):  # already gravity-removed -> skip
                     continue
                 for j in idxs:
                     grav = _sps.filtfilt(b, a, x[:, j])
                     x[:, j] = x[:, j] - grav
                     desc[j] = _mark_gravity_removed(desc[j])
+                    if s.sensor_id is not None:
+                        affected_sensor_ids.add(s.sensor_id[j])
                 changed = True
         if changed:
             s.data = torch.from_numpy(x).float().to(s.data.device)
             s.channel_descriptions = desc
+            s.gravity_state = "removed"
+            if s.sensor_descriptions is not None:
+                affected = (affected_sensor_ids if s.sensor_id is not None
+                            else set(range(len(s.sensor_descriptions))))
+                sensor_desc = list(s.sensor_descriptions)
+                for sid in affected:
+                    sensor_desc[sid] = _mark_gravity_removed(sensor_desc[sid])
+                s.sensor_descriptions = sensor_desc
         return s
 
     # ---------- P2: full uniform-random SO(3) rotation ----------
@@ -510,6 +541,8 @@ class IMUAugmenter:
         def loc_has_gravity(triads):
             for idxs, gname in triads:
                 if "acc" in gname:
+                    if s.channel_mask is not None and not all(s.channel_mask[j] for j in idxs):
+                        continue
                     tri = x[:, idxs]
                     if _gravity_present(tri.detach().cpu().numpy(),
                                         [s.channel_descriptions[k] for k in idxs]):
@@ -572,9 +605,25 @@ class IMUAugmenter:
         # require at least one full x/y/z triad to survive the drop
         if not any(len(v) == 3 for v in group_channels_by_sensor(kept_names).values()):
             return s
+        if s.sensor_descriptions is not None:
+            ids = s.sensor_id if s.sensor_id is not None else [0] * len(names)
+            cm = s.channel_mask if s.channel_mask is not None else [True] * len(names)
+            sensor_desc = list(s.sensor_descriptions)
+            for sid in range(len(sensor_desc)):
+                kept_real = [i for i in keep if ids[i] == sid and cm[i]]
+                has_accel = any("acc" in names[i].lower() for i in kept_real)
+                has_gyro = any("gyro" in names[i].lower() for i in kept_real)
+                sensor_desc[sid] = _mark_sensor_modality(
+                    sensor_desc[sid], has_accel=has_accel, has_gyro=has_gyro
+                )
+            s.sensor_descriptions = sensor_desc
         s.data = s.data[:, keep]
         s.channel_names = kept_names
         s.channel_descriptions = [s.channel_descriptions[i] for i in keep]
+        if s.role_descriptions is not None:
+            s.role_descriptions = [s.role_descriptions[i] for i in keep]
+        if s.sensor_id is not None:
+            s.sensor_id = [s.sensor_id[i] for i in keep]
         if s.channel_mask is not None:
             s.channel_mask = [s.channel_mask[i] for i in keep]
         return s
@@ -584,6 +633,10 @@ class IMUAugmenter:
         # Paraphrase each channel description independently (surface form only; placement /
         # units / gravity are preserved by construction — see _paraphrase_channel).
         s.channel_descriptions = [_paraphrase_channel(d) for d in s.channel_descriptions]
+        if s.role_descriptions is not None:
+            s.role_descriptions = [_paraphrase_channel(d) for d in s.role_descriptions]
+        if s.sensor_descriptions is not None:
+            s.sensor_descriptions = [_paraphrase_channel(d) for d in s.sensor_descriptions]
         return s
 
     # ---------- text: channel-description dropout (neutralize, keep signal) ----------
@@ -595,14 +648,23 @@ class IMUAugmenter:
         cm = s.channel_mask
         real = [i for i in range(len(s.channel_descriptions))
                 if cm is None or (i < len(cm) and cm[i])]
-        if len(real) <= 1:
-            return s
-        max_drop = max(1, int(spec.max_frac * len(real)))
-        k = min(_random.randint(1, max_drop), len(real) - 1)   # keep >=1 real channel described
-        desc = list(s.channel_descriptions)
-        for i in _random.sample(real, k):
-            desc[i] = spec.neutral
-        s.channel_descriptions = desc
+        if len(real) > 1:
+            max_drop = max(1, int(spec.max_frac * len(real)))
+            k = min(_random.randint(1, max_drop), len(real) - 1)   # keep >=1 real channel described
+            dropped = _random.sample(real, k)
+            desc = list(s.channel_descriptions)
+            for i in dropped:
+                desc[i] = spec.neutral
+            s.channel_descriptions = desc
+
+            # The same selected CHANNEL roles are neutralized in the factored path. Sensor identity
+            # is shared by every channel on that sensor, so dropping a one-sensor description would
+            # erase 100% of placement/gravity metadata and violate max_frac.
+            if s.role_descriptions is not None:
+                role_desc = list(s.role_descriptions)
+                for i in dropped:
+                    role_desc[i] = spec.neutral
+                s.role_descriptions = role_desc
         return s
 
     # ---------- text: label paraphrase (dataset-specific synonyms + templates) ----------
@@ -614,8 +676,5 @@ class IMUAugmenter:
             use_synonyms=spec.use_synonyms, use_templates=spec.use_templates,
         )
         return s
-
-
-
 
 

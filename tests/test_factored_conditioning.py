@@ -9,6 +9,7 @@ broadcast by ``sensor_id``; the two sources are summed (no double-injection); th
 do-no-harm / ablatable at init; and the legacy per-channel path is byte-for-byte unchanged.
 """
 
+import numpy as np
 import torch
 
 from model.tokenizer.channel_text import FactoredChannelTextFusion, _TextPooler
@@ -35,6 +36,47 @@ def test_role_text_is_constant_across_streams_sensor_text_is_not():
     r2, s2, _ = stream_sensor_texts("wisdm", "phone_pocket")
     assert r1 == r2, "role text must be corpus-constant (axis/modality only)"
     assert s1 != s2, "sensor text must vary with device/placement"
+
+
+def test_sensor_text_reports_actual_modality_and_gravity_state():
+    _, sensor, _ = stream_sensor_texts(
+        "capture24", "watch_wrist", has_accel=True, has_gyro=False,
+        gravity_removed=True,
+    )
+    assert "accelerometer only" in sensor[0]
+    assert "gyroscope" not in sensor[0]
+    assert "gravity removed" in sensor[0]
+
+
+def test_eval_encoding_builds_factored_text_from_actual_channel_mask():
+    from training.tokenizer.eval_transfer import encode_dataset
+
+    class SpyEncoder:
+        text_conditioning = "factored"
+        use_duration_embedding = False
+
+        def __init__(self):
+            self.sensor_texts = None
+
+        def __call__(self, patches, rates, patch_len, role_texts, positions, **kwargs):
+            self.sensor_texts = kwargs["sensor_texts"]
+            return {"pooled": torch.zeros(len(patches), 4)}
+
+    enc = SpyEncoder()
+    encode_dataset(
+        enc,
+        np.zeros((2, 60, 6), dtype=np.float32),
+        ["legacy"] * 6,
+        torch.device("cpu"),
+        rate=60.0,
+        gravity_state="removed",
+        channel_mask=[True, True, True, False, False, False],
+        dataset="capture24",
+        stream="watch_wrist",
+    )
+    text = enc.sensor_texts[0][0]
+    assert "accelerometer only" in text and "gyroscope" not in text
+    assert "gravity removed" in text
 
 
 # ------------------------------------------------------------------------------------ the pooler
@@ -122,20 +164,79 @@ def test_encoder_factored_forward_runs_and_legacy_is_unchanged():
     assert isinstance(legacy.fusion, ChannelTextFusion)
 
     enc = SetTokenizerEncoder(d_model=32, num_layers=1, num_heads=4, dim_feedforward=64,
-                              text_conditioning="factored")
+                              text_conditioning="factored").eval()
     assert isinstance(enc.fusion, FactoredChannelTextFusion)
 
     B, P, C, S = 2, 3, 6, enc.filterbank.S
     patches = torch.randn(B, P, S, C)
     role_texts = [["accelerometer x-axis"] * C for _ in range(B)]
-    sensor_texts = [["a watch on the left wrist; accelerometer includes gravity"] for _ in range(B)]
-    sensor_id = torch.zeros(B, C, dtype=torch.long)
+    sensor_texts = [
+        ["a watch on the left wrist; accelerometer includes gravity"],
+        ["a phone in the left pocket; accelerometer includes gravity",
+         "a watch on the right wrist; accelerometer includes gravity"],
+    ]
+    sensor_id = torch.tensor([[0] * C, [0, 0, 0, 1, 1, 1]])
     positions = torch.arange(P).float().unsqueeze(0).repeat(B, 1)
     out = enc(patches, 50.0, S, role_texts, positions,
               channel_mask=torch.ones(B, C, dtype=torch.bool),
               patch_padding_mask=torch.ones(B, P, dtype=torch.bool),
               sensor_texts=sensor_texts, sensor_id=sensor_id)
     assert out["pooled"].shape == (B, 32) and torch.isfinite(out["pooled"]).all()
+
+
+def test_factored_conditioning_changes_embedding_when_sensor_text_changes():
+    torch.manual_seed(8)
+    enc = SetTokenizerEncoder(d_model=24, num_layers=1, num_heads=4, dim_feedforward=48,
+                              dropout=0.0, text_conditioning="factored").eval()
+    B, P, C, S = 1, 2, 6, enc.filterbank.S
+    patches = torch.randn(B, P, S, C)
+    roles = [["accelerometer x-axis"] * C]
+    positions = torch.arange(P).float().unsqueeze(0)
+    kwargs = dict(
+        channel_mask=torch.ones(B, C, dtype=torch.bool),
+        patch_padding_mask=torch.ones(B, P, dtype=torch.bool),
+        sensor_id=torch.zeros(B, C, dtype=torch.long),
+    )
+    with torch.no_grad():
+        wrist = enc(
+            patches, 50.0, S, roles, positions,
+            sensor_texts=[["a watch on the left wrist; accelerometer includes gravity"]],
+            **kwargs,
+        )["pooled"]
+        pocket = enc(
+            patches, 50.0, S, roles, positions,
+            sensor_texts=[["a phone in the right pocket; accelerometer includes gravity"]],
+            **kwargs,
+        )["pooled"]
+    assert not torch.allclose(wrist, pocket, atol=1e-6), "sensor-level text has no operational effect"
+
+
+def test_encoder_accepts_two_complete_sensors_with_separate_descriptions():
+    torch.manual_seed(9)
+    enc = SetTokenizerEncoder(d_model=24, num_layers=1, num_heads=4, dim_feedforward=48,
+                              dropout=0.0, text_conditioning="factored").eval()
+    B, P, C, S = 1, 2, 12, enc.filterbank.S
+    roles = [[
+        "accelerometer x-axis", "accelerometer y-axis", "accelerometer z-axis",
+        "gyroscope x-axis", "gyroscope y-axis", "gyroscope z-axis",
+    ] * 2]
+    with torch.no_grad():
+        out = enc(
+            torch.randn(B, P, S, C),
+            50.0,
+            S,
+            roles,
+            torch.arange(P).float().unsqueeze(0),
+            channel_mask=torch.ones(B, C, dtype=torch.bool),
+            patch_padding_mask=torch.ones(B, P, dtype=torch.bool),
+            sensor_texts=[[
+                "a phone in the pocket; accelerometer and gyroscope; accelerometer includes gravity",
+                "a watch on the wrist; accelerometer and gyroscope; accelerometer includes gravity",
+            ]],
+            sensor_id=torch.tensor([[0] * 6 + [1] * 6]),
+        )
+    assert out["tokens"].shape == (B, P, C, 24)
+    assert torch.isfinite(out["pooled"]).all()
 
 
 def test_encoder_factored_requires_sensor_inputs():

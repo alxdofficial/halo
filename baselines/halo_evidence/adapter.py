@@ -115,7 +115,9 @@ class HALOEvidenceAdapter(BaselineAdapter):
         texts = stream_channel_descriptions(stream.dataset, stream.stream)
         gs = _stream_gravity_state(stream.dataset, stream.stream)
         z = encode_dataset(enc, np.asarray(stream.windows), texts, device,
-                           float(stream.rate_hz), gs).to(device)
+                           float(stream.rate_hz), gs,
+                           channel_mask=stream.mask, dataset=stream.dataset,
+                           stream=stream.stream).to(device)
         z = F.normalize(z, dim=-1)                                           # (Nq, d)
 
         cand = ensemble_text(labels, sbert, TEXT_ENSEMBLE).to(device)        # (C, 384)

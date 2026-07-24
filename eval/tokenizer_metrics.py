@@ -166,7 +166,8 @@ def collect_embeddings(enc, index, split: str, device, per_stream_cap: Optional[
             data, labels = data[sel], labels[sel]
         with torch.no_grad():
             z = encode_dataset(enc, data, st["texts"], device, st["rate"],
-                               gravity_state=st["gravity"], channel_mask=st["channel_mask"])
+                               gravity_state=st["gravity"], channel_mask=st["channel_mask"],
+                               dataset=st["dataset"], stream=st["stream"])
         Zs.append(z.numpy())
         ys.append(labels)
         rates.append(np.full(len(labels), st["rate"]))

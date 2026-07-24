@@ -88,7 +88,9 @@ def main() -> None:
                 continue
             z = encode_dataset(enc, np.asarray(es.windows),
                                stream_channel_descriptions(ds, spec.stream_id), device,
-                               float(es.rate_hz), _stream_gravity_state(ds, spec.stream_id)).to(device)
+                               float(es.rate_hz), _stream_gravity_state(ds, spec.stream_id),
+                               channel_mask=es.mask, dataset=ds,
+                               stream=spec.stream_id).to(device)
             cells[f"{ds}/{spec.stream_id}"] = {
                 "z": F.normalize(z, dim=-1),
                 "cand": ensemble_text(es.eval_labels, sbert, ENS).to(device),

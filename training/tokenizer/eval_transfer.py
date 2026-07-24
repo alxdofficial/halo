@@ -92,15 +92,23 @@ def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
         MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS, compute_targets=False)
     )
     enc_texts = texts
+    cmask = (torch.ones(6, dtype=torch.bool) if channel_mask is None
+             else torch.as_tensor(channel_mask, dtype=torch.bool))
+    if cmask.shape != (6,):
+        raise ValueError(f"channel_mask must have shape (6,), got {tuple(cmask.shape)}")
     factored = getattr(enc, "text_conditioning", "per_channel") == "factored"
     if factored:
         if dataset is None or stream is None:
             raise ValueError("a factored encoder needs dataset+stream to build the factored "
                              "(role/sensor) text conditioning; pass them to encode_dataset()")
-        role_texts, sensor_texts, sensor_id_list = stream_sensor_texts(dataset, stream)
+        role_texts, sensor_texts, sensor_id_list = stream_sensor_texts(
+            dataset,
+            stream,
+            gravity_removed=(None if gravity_state is None else gravity_state == "removed"),
+            has_accel=bool(cmask[:3].any()),
+            has_gyro=bool(cmask[3:].any()),
+        )
         sensor_id_t = torch.tensor(sensor_id_list, dtype=torch.long)
-    cmask = (torch.ones(6, dtype=torch.bool) if channel_mask is None
-             else torch.as_tensor(channel_mask, dtype=torch.bool))
     embs = []
     for start in range(0, len(data), 256):
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
@@ -172,7 +180,7 @@ def main() -> None:
         texts = stream_channel_descriptions(dataset, stream)
         z = encode_dataset(enc, data, texts, device, ref.rate_hz,
                            _stream_gravity_state(dataset, stream),
-                           dataset=dataset, stream=stream)
+                           channel_mask=ref.mask, dataset=dataset, stream=stream)
 
         # subject-disjoint 50/50 split
         subj = sorted(set(subjects.tolist()))

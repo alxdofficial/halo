@@ -45,8 +45,10 @@ FIT_LR = 1e-3
 SEED = 20260720
 
 
-def _encode(enc, windows, texts, rate, gravity_state, device) -> np.ndarray:
-    z = encode_dataset(enc, np.asarray(windows), texts, device, float(rate), gravity_state)
+def _encode(enc, windows, texts, rate, gravity_state, channel_mask, device,
+            dataset, stream) -> np.ndarray:
+    z = encode_dataset(enc, np.asarray(windows), texts, device, float(rate), gravity_state,
+                       channel_mask=channel_mask, dataset=dataset, stream=stream)
     return z.numpy().astype(np.float32)
 
 
@@ -100,7 +102,7 @@ def main() -> None:
         windows = np.asarray(s.windows)[keep]
         texts = stream_channel_descriptions(ds, stream)
         gs = _stream_gravity_state(ds, stream)
-        X = _encode(enc, windows, texts, s.rate_hz, gs, device)
+        X = _encode(enc, windows, texts, s.rate_hz, gs, s.mask, device, ds, stream)
 
         subj = np.asarray(subjects)
         if len(set(subj.tolist())) < 3:

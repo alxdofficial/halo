@@ -133,7 +133,9 @@ def main() -> None:
             texts = stream_channel_descriptions(ds, stream)
             gs = _stream_gravity_state(ds, stream)
             z = F.normalize(encode_dataset(enc, np.asarray(es.windows), texts, device,
-                                           float(es.rate_hz), gs).to(device), dim=-1)
+                                           float(es.rate_hz), gs,
+                                           channel_mask=es.mask, dataset=ds,
+                                           stream=stream).to(device), dim=-1)
             cand_single = torch.from_numpy(sbert(es.eval_labels).astype(np.float32)).to(device)
             cand_single = F.normalize(cand_single, dim=-1)
             cand_ens = ensemble_text(es.eval_labels, sbert, ENS_E).to(device)

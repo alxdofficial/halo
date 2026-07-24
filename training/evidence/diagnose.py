@@ -118,7 +118,8 @@ def gate_ablation(head, Z, mem_y, label_text_raw, enc, sbert, device, datasets):
             texts = stream_channel_descriptions(ds, stream)
             gs = _stream_gravity_state(ds, stream)
             z = encode_dataset(enc, np.asarray(es.windows), texts, device,
-                               float(es.rate_hz), gs).to(device)
+                               float(es.rate_hz), gs,
+                               channel_mask=es.mask, dataset=ds, stream=stream).to(device)
             cand_raw = torch.from_numpy(sbert(es.eval_labels).astype(np.float32)).to(device)  # (C,384)
             cand_proj = head.project_text(cand_raw)                                            # (C,proj)
             cand_norm = F.normalize(cand_raw, dim=-1)

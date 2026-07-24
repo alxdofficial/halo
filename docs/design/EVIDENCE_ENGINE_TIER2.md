@@ -285,6 +285,26 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
   vacuous → abstain), θ calibrated on val. Apply FIX-A/B/C.
 - **Checkpoint selection = held-out-config transfer.**
 
+### Current EDL implementation boundary (2026-07-24)
+
+`training/evidence/train_decoder.py --loss edl` now implements the **transfer/KNOWN-style**
+Dirichlet objective: expected CE grows target evidence and an annealed KL term removes wrong-class
+evidence. A positive monotonic gate scales evidence from top-neighbour density. Its threshold is
+initialized from deterministic training-fold class-holdout retrieval rather than a fixed cosine
+constant; validation retrieval is restricted to the training fold; decoder and gate are selected and
+saved as one checkpoint.
+
+Episode candidate budgets are sampled uniformly from `--episode-labels` (default 12–24). Holding out
+more candidate labels correspondingly leaves fewer training labels in memory. This is **variable, not
+an annealed curriculum**.
+
+This is not yet the two-regime open-set objective described above: every training query's true label
+remains in the candidate set, there are no out-of-candidate novelty episodes that drive all evidence
+to the uniform prior, and no abstention threshold is calibrated. AURC/accuracy-at-coverage currently
+measure selective prediction on in-scope labels only. Do not report this arm as a trained open-set
+rejector until the NOVEL regime, held-out calibration split, threshold, and OSCR/OpenAUC evaluation
+are implemented.
+
 ## 4. Milestones + gates (each must beat the prior / the 47.5 floor on held-out configs)
 
 - **T2.0 — Lock the baseline into the harness.** ✅ DONE. `baselines/halo_evidence/adapter.py` wires the

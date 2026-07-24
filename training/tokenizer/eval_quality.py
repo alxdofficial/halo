@@ -68,14 +68,18 @@ def transform_windows(data, kind, rng, base_rate):
 
 # --------------------------------------------------------------------------- encoding
 @torch.no_grad()
-def encode(enc, data, texts, device, rate=RATE, accel_only=False, gravity_state=None):
+def encode(enc, data, texts, device, rate=RATE, accel_only=False, gravity_state=None,
+           channel_mask=None, dataset=None, stream=None):
     x = data if torch.is_tensor(data) else torch.tensor(np.asarray(data), dtype=torch.float32)
-    cmask = torch.tensor([True]*3 + [not accel_only]*3)
+    cmask = (torch.ones(6, dtype=torch.bool) if channel_mask is None
+             else torch.as_tensor(channel_mask, dtype=torch.bool).clone())
+    if accel_only:
+        cmask[3:] = False
     x = x.clone().float()
     if accel_only:
         x[:, :, 3:] = 0.0
     return encode_dataset(enc, x, texts, device, rate, gravity_state,
-                          channel_mask=cmask)
+                          channel_mask=cmask, dataset=dataset, stream=stream)
 
 
 def subj_split(subjects, rng):
@@ -123,12 +127,15 @@ def main():
         data = ref.load_data(); labels = np.asarray(ref.labels); subj = np.asarray(ref.subjects)
         texts = stream_channel_descriptions(dataset, stream)
         gstate = _stream_gravity_state(dataset, stream)
-        z = encode(enc, data, texts, device, rate=ref.rate_hz, gravity_state=gstate)
+        z = encode(enc, data, texts, device, rate=ref.rate_hz, gravity_state=gstate,
+                   channel_mask=ref.mask, dataset=dataset, stream=stream)
         tr, te = subj_split(subj, rng)
         y_tr, y_te = labels[tr].tolist(), labels[te].tolist()
         knn = knn_balanced_acc(z[tr], y_tr, z[te], y_te)
         lin = linear_probe(z[tr], y_tr, z[te], y_te)
-        z_ao = encode(enc, data, texts, device, rate=ref.rate_hz, accel_only=True, gravity_state=gstate)
+        z_ao = encode(enc, data, texts, device, rate=ref.rate_hz, accel_only=True,
+                      gravity_state=gstate, channel_mask=ref.mask,
+                      dataset=dataset, stream=stream)
         knn_ao = knn_balanced_acc(z_ao[tr], y_tr, z_ao[te], y_te)
         # handcrafted grav_band_energy on the same split (at the stream's native rate)
         hand = torch.tensor(np.stack([
@@ -152,12 +159,14 @@ def main():
     ref = refs[("motionsense", "phone_front_pocket")]
     data = ref.load_data(); labels = np.asarray(ref.labels); subj = np.asarray(ref.subjects)
     texts = stream_channel_descriptions("motionsense", "phone_front_pocket")
-    z0 = encode(enc, data, texts, device, rate=ref.rate_hz)
+    z0 = encode(enc, data, texts, device, rate=ref.rate_hz,
+                channel_mask=ref.mask, dataset="motionsense", stream="phone_front_pocket")
     tr, te = subj_split(subj, rng)
     base_knn = knn_balanced_acc(z0[tr], labels[tr].tolist(), z0[te], labels[te].tolist())
     for kind in ("rotation", "gain", "rate"):
         xt, rt = transform_windows(data, kind, np.random.default_rng(SEED), ref.rate_hz)
-        zt = encode(enc, xt, texts, device, rate=rt)
+        zt = encode(enc, xt, texts, device, rate=rt,
+                    channel_mask=ref.mask, dataset="motionsense", stream="phone_front_pocket")
         cos = torch.nn.functional.cosine_similarity(z0, zt, dim=1).mean().item()
         rel = ((z0 - zt).norm(dim=1) / (z0.norm(dim=1) + 1e-9)).mean().item()
         # classify TRANSFORMED query against CLEAN bank
@@ -173,9 +182,11 @@ def main():
     try:
         rp = refs[("wisdm", "phone_pocket")]; rw = refs[("wisdm", "watch_wrist")]
         zp = encode(enc, rp.load_data(), stream_channel_descriptions("wisdm", "phone_pocket"),
-                    device, rate=rp.rate_hz)
+                    device, rate=rp.rate_hz, channel_mask=rp.mask,
+                    dataset="wisdm", stream="phone_pocket")
         zw = encode(enc, rw.load_data(), stream_channel_descriptions("wisdm", "watch_wrist"),
-                    device, rate=rw.rate_hz)
+                    device, rate=rw.rate_hz, channel_mask=rw.mask,
+                    dataset="wisdm", stream="watch_wrist")
         yp, yw = list(map(str, rp.labels)), list(map(str, rw.labels))
         p2w = knn_balanced_acc(zp, yp, zw, yw)
         w2p = knn_balanced_acc(zw, yw, zp, yp)

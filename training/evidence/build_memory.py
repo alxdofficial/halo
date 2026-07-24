@@ -109,7 +109,9 @@ def main() -> None:
         data = np.asarray(ref.load_data()[keep])
         texts = stream_channel_descriptions(ref.dataset, ref.stream)
         gs = _stream_gravity_state(ref.dataset, ref.stream)
-        z = encode_dataset(enc, data, texts, device, float(ref.rate_hz), gs)   # (n, d) cpu
+        z = encode_dataset(enc, data, texts, device, float(ref.rate_hz), gs,
+                           channel_mask=ref.mask, dataset=ref.dataset,
+                           stream=ref.stream)   # (n, d) cpu
         cfg_id = cfg_names.setdefault(ref.key, len(cfg_names))
         subj_arr = np.asarray(ref.subjects)[keep]
         s_ids = np.array([subj_names.setdefault(f"{ref.dataset}:{s}", len(subj_names))

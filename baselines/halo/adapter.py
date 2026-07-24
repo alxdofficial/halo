@@ -65,13 +65,16 @@ def _backbone_fp() -> str:
     return hashlib.sha256(_BACKBONE_CKPT.read_bytes()).hexdigest() if _BACKBONE_CKPT.exists() else ""
 
 
-def _encode(enc, data: np.ndarray, texts, rate: float, gravity_state, device) -> np.ndarray:
+def _encode(enc, data: np.ndarray, texts, rate: float, gravity_state, channel_mask, device,
+            dataset: str, stream: str) -> np.ndarray:
     """(N, T, 6) native-rate windows -> (N, d) pooled HALO embeddings (numpy float32).
 
     Thin wrapper over the validated ``eval_transfer.encode_dataset`` so head-fit and eval
     features are produced identically to HALO's internal frozen-encoder transfer probe."""
     from training.tokenizer.eval_transfer import encode_dataset   # lazy: loads HALO's model pkg
-    z = encode_dataset(enc, data, texts, device, float(rate), gravity_state)  # (N, d) on cpu
+    z = encode_dataset(enc, data, texts, device, float(rate), gravity_state,
+                       channel_mask=channel_mask, dataset=dataset,
+                       stream=stream)  # (N, d) on cpu
     return z.numpy().astype(np.float32)
 
 
@@ -168,7 +171,8 @@ class HALOAdapter(ConSEAdapter):
             data = np.asarray(ref.load_data()[keep])          # (n, T, 6) into RAM
             texts = stream_channel_descriptions(ref.dataset, ref.stream)
             gs = _stream_gravity_state(ref.dataset, ref.stream)
-            feats.append(_encode(enc, data, texts, ref.rate_hz, gs, fit_device))
+            feats.append(_encode(enc, data, texts, ref.rate_hz, gs, ref.mask, fit_device,
+                                 ref.dataset, ref.stream))
             labs.append(gl[keep])
             subjs.append(np.array([f"{ref.dataset}:{s}" for s in np.asarray(ref.subjects)[keep]]))
             used.append(f"{ref.key}({keep.size})")
@@ -242,7 +246,8 @@ class HALOAdapter(ConSEAdapter):
         T = float(state.get("temperature", 1.0))     # calibrated temperature (#82)
         texts = stream_channel_descriptions(stream.dataset, stream.stream)
         gs = _stream_gravity_state(stream.dataset, stream.stream)
-        feats = _encode(enc, np.asarray(stream.windows), texts, stream.rate_hz, gs, device)
+        feats = _encode(enc, np.asarray(stream.windows), texts, stream.rate_hz, gs, stream.mask, device,
+                        stream.dataset, stream.stream)
         probs = []
         with torch.no_grad():
             for s in range(0, len(feats), EMBED_BATCH):

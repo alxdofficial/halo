@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from data.scripts.curate import deployment_policy as policy
 from eval.data import load_eval_stream
 from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_encoder
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
+from model.evidence.edl import DensityGate, acc_at_coverage, aurc
 from training.evidence.bank_guard import assert_bank_current, vocab_fingerprint
 from training.evidence.labeltext import ensemble_text
 from training.tokenizer.eval_transfer import build_encoder, encode_dataset
@@ -47,26 +49,47 @@ _DIR = Path(__file__).resolve().parent / "outputs"
 
 @torch.no_grad()
 def score_cell(dec, enc, es, Z, mem_y, t_ens_mem, sbert, ens, topk, tau, device, batch=128,
-               raw_labels=False):
+               raw_labels=False, gate=None):
     z = encode_dataset(enc, np.asarray(es.windows), stream_channel_descriptions(es.dataset, es.stream),
-                       device, float(es.rate_hz), _stream_gravity_state(es.dataset, es.stream)).to(device)
+                       device, float(es.rate_hz), _stream_gravity_state(es.dataset, es.stream),
+                       channel_mask=es.mask, dataset=es.dataset, stream=es.stream).to(device)
     z = F.normalize(z, dim=-1)
     # raw_labels => bare string, identical to what eval/scoring.py gives every ConSE baseline
     cand_text = ensemble_text(es.eval_labels, sbert, 1 if raw_labels else ens,
                               use_descriptions=not raw_labels).to(device)     # (C, 384) frozen target
     preds = np.empty(len(z), dtype=object)
+    uncertainties = np.empty(len(z), dtype=np.float32) if gate is not None else None
     for s in range(0, len(z), batch):
         zq = z[s:s + batch]
         sim = zq @ Z.t()                                                      # (b, N) — full bank allowed
-        vals, idx = sim.topk(topk, dim=1)
+        vals, idx = sim.topk(min(int(topk), Z.shape[0]), dim=1)
         w = torch.softmax(vals / tau, dim=1)
-        logits = dec(zq=zq, zev=Z[idx], ev_label_text=t_ens_mem[mem_y[idx]], w_retr=w,
-                     cand_text=cand_text)
+        out = dec(zq=zq, zev=Z[idx], ev_label_text=t_ens_mem[mem_y[idx]], w_retr=w,
+                  cand_text=cand_text, return_aux=gate is not None)
+        if gate is not None:
+            logits, aux = out
+            alpha, _ = gate.alpha(aux["evidence"], vals)
+            uncertainties[s:s + len(zq)] = (
+                alpha.shape[1] / alpha.sum(1)
+            ).cpu().numpy()
+        else:
+            logits = out
         preds[s:s + batch] = [es.eval_labels[i] for i in logits.argmax(1).cpu().numpy()]
     kept_gt, _, keep = filter_ground_truth(es.gt, es.subjects, es.eval_labels)
     if not len(keep):
         return None
-    return float(classification_metrics(kept_gt, list(preds[keep]))["f1_macro"])
+    f1 = float(classification_metrics(kept_gt, list(preds[keep]))["f1_macro"])
+    calibration = {}
+    if gate is not None:
+        correct = np.asarray(preds[keep]) == np.asarray(kept_gt)
+        u = uncertainties[keep]
+        calibration = {
+            "mean_u_correct": float(u[correct].mean()) if correct.any() else float("nan"),
+            "mean_u_incorrect": float(u[~correct].mean()) if (~correct).any() else float("nan"),
+            "aurc": aurc(u, correct),
+            "acc@0.8cov": acc_at_coverage(u, correct, 0.8),
+        }
+    return f1, calibration
 
 
 def main() -> None:
@@ -109,10 +132,25 @@ def main() -> None:
         p.requires_grad_(False)
     dc = blob["cfg"]
     dec = EvidenceDecoder(DecoderConfig(d_model=dc["d_model"], n_layers=dc["n_layers"],
-                                        n_heads=dc["n_heads"])).to(device)
+                                        n_heads=dc["n_heads"],
+                                        n_subspaces=dc.get("n_subspaces", 0),
+                                        subspace_dim=dc.get("subspace_dim", 64))).to(device)
     if not args.untrained:
         dec.load_state_dict(blob["decoder"])
     dec.eval()
+    gate = None
+    if blob.get("loss") == "edl":
+        gc = blob.get("gate_cfg", {})
+        gate = DensityGate(
+            gate_delta=float(gc.get("density_threshold_init", 0.3)),
+            log_gamma=math.log(float(gc.get("density_slope_init", 10.0))),
+            log_beta=math.log(float(gc.get("evidence_scale_init", 10.0))),
+        ).to(device)
+        if not args.untrained:
+            if "gate" not in blob:
+                raise SystemExit("[eval_dec] EDL checkpoint is missing its density-gate state")
+            gate.load_state_dict(blob["gate"])
+        gate.eval()
 
     Z = F.normalize(bank["Z"].float().to(device), dim=-1)
     mem_y = bank["y"].to(device)
@@ -121,19 +159,23 @@ def main() -> None:
     print(f"[eval_dec] decoder init {blob.get('init_val_transfer_ba'):.4f} -> best "
           f"{blob.get('best_val_transfer_ba'):.4f} · topk {blob['topk']} tau {blob['tau_retr']}", flush=True)
 
-    per_cell = {}
+    per_cell, calibration = {}, {}
     for ds in args.datasets:
         for spec in policy.stream_specs(ds, "primary"):
             try:
                 es = load_eval_stream(ds, spec.stream_id, alignment="non_harmonised")
             except FileNotFoundError:
                 continue
-            f1 = score_cell(dec, enc, es, Z, mem_y, t_ens_mem, sbert, blob["ensemble"],
-                            blob["topk"], blob["tau_retr"], device,
-                            raw_labels=args.raw_labels)
-            if f1 is not None:
+            result = score_cell(dec, enc, es, Z, mem_y, t_ens_mem, sbert, blob["ensemble"],
+                                blob["topk"], blob["tau_retr"], device,
+                                raw_labels=args.raw_labels, gate=gate)
+            if result is not None:
+                f1, cal = result
                 per_cell[f"{ds}/{spec.stream_id}"] = round(f1, 1)
-                print(f"  {ds}/{spec.stream_id:22} F1={f1:.1f}", flush=True)
+                if cal:
+                    calibration[f"{ds}/{spec.stream_id}"] = cal
+                suffix = f" AURC={cal['aurc']:.3f}" if cal else ""
+                print(f"  {ds}/{spec.stream_id:22} F1={f1:.1f}{suffix}", flush=True)
     mean = round(float(np.mean(list(per_cell.values()))), 1)
     # Do NOT print a hardcoded comparison here. The old line quoted "untrained 47.5", which was
     # measured at a DIFFERENT retrieval config (top_k=0, tau=0.03) and a different label-text
@@ -142,17 +184,28 @@ def main() -> None:
     parity = "baseline-parity (bare eval labels)" if args.raw_labels else "NON-PARITY (ensembled candidates)"
     print(f"  MEAN = {mean}   [{parity}, top_k={blob['topk']}, tau={blob['tau_retr']}]", flush=True)
     print(f"  compare ONLY against `--untrained` at these same settings.", flush=True)
+    if calibration:
+        mean_aurc = float(np.nanmean([c["aurc"] for c in calibration.values()]))
+        mean_cov_acc = float(np.nanmean([c["acc@0.8cov"] for c in calibration.values()]))
+        print(f"  EDL calibration: mean AURC={mean_aurc:.3f}, "
+              f"mean acc@0.8cov={mean_cov_acc:.3f}", flush=True)
     # Separate artifacts so no run can clobber another's PER-CELL breakdown. The arm tags alone
     # were not enough: rebuilding the bank at a new vocabulary reuses the same filenames, and the
     # Phase-2 93-label rerun destroyed the 59-label per-cell numbers that way (only the mean
     # survived, in prose). The bank vocabulary is therefore part of the filename.
     vocab_fp = bank.get("vocab_fp") or vocab_fingerprint(list(bank["vocab"]))
     # Parity is the default, so it is the UNmarked case; a non-parity diagnostic is marked.
-    tag = ("_untrained" if args.untrained else "") + ("" if args.raw_labels else "_enscand")
+    tag = (
+        ("_untrained" if args.untrained else "")
+        + ("_edl" if blob.get("loss") == "edl" else "")
+        + ("" if args.raw_labels else "_enscand")
+    )
     out = _DIR / f"eval_decoder{tag}__v{len(bank['vocab'])}_{vocab_fp[:8]}.json"
     out.write_text(json.dumps({"per_cell": per_cell, "mean": mean,
                                "untrained_control": bool(args.untrained),
                                "raw_labels_parity": bool(args.raw_labels),
+                               "loss": blob.get("loss", "ce"),
+                               "calibration": calibration,
                                "topk": blob["topk"], "tau_retr": blob["tau_retr"],
                                "bank": {"n_windows": int(bank["Z"].shape[0]),
                                         "n_labels": len(bank["vocab"]),
