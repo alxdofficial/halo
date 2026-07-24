@@ -95,12 +95,12 @@ def assert_bank_matches_backbone(bank: dict, ckpt: dict, *, context: str = "") -
     ``corpus.phase_a_corpus_fp`` against the checkpoint's ``corpus_fingerprint``. Skips silently only
     when BOTH predate corpus fingerprints (both None); raises if present and different.
     """
-    bank_fp = (bank.get("corpus") or {}).get("phase_a_corpus_fp")
+    where = f" ({context})" if context else ""
+    corpus = bank.get("corpus") or {}
+    bank_fp = corpus.get("phase_a_corpus_fp")
     ckpt_fp = ckpt.get("corpus_fingerprint")
-    if bank_fp is None and ckpt_fp is None:
-        return
-    if bank_fp != ckpt_fp:
-        where = f" ({context})" if context else ""
+    # 1) Phase-A corpus fingerprint (skip only when BOTH predate corpus fingerprints).
+    if not (bank_fp is None and ckpt_fp is None) and bank_fp != ckpt_fp:
         raise SystemExit(
             f"\n[bank_guard] BANK/ENCODER CORPUS MISMATCH{where} — refusing an unattributable result.\n"
             f"  bank built over Phase-A corpus fp : {bank_fp!r}\n"
@@ -108,3 +108,19 @@ def assert_bank_matches_backbone(bank: dict, ckpt: dict, *, context: str = "") -
             f"  The retrieval vectors and the encoder disagree on which corpus they represent.\n"
             f"  Rebuild the bank against this checkpoint:\n\n"
             f"      python -m training.evidence.build_memory --checkpoint <this-ckpt> --device cuda\n")
+    # 2) A COPIED fingerprint is not proof — compare the ACTUAL dataset rosters (F4). The bank's
+    #    encoded datasets must equal the roster the encoder was trained on (build_memory now builds
+    #    from the checkpoint roster, so a legit bank always matches).
+    bank_ds = set(corpus.get("datasets") or [])
+    roster = ckpt.get("config", {}).get("train_datasets")
+    if roster is None:
+        from training.tokenizer.pretrain_data import TRAIN_DATASETS
+        roster = TRAIN_DATASETS
+    ckpt_ds = set(roster)
+    if bank_ds and ckpt_ds and bank_ds != ckpt_ds:
+        raise SystemExit(
+            f"\n[bank_guard] BANK/ENCODER ROSTER MISMATCH{where} — refusing an unattributable result.\n"
+            f"  bank encoded datasets : {sorted(bank_ds)}\n"
+            f"  encoder train roster  : {sorted(ckpt_ds)}\n"
+            f"  in bank not encoder: {sorted(bank_ds - ckpt_ds)}; in encoder not bank: {sorted(ckpt_ds - bank_ds)}\n"
+            f"  Rebuild the bank against this checkpoint (build_memory builds from its roster).\n")

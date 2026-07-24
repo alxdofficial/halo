@@ -92,7 +92,11 @@ def main() -> None:
     label_to_idx = {l: i for i, l in enumerate(vocab)}
     rng = np.random.RandomState(20260720)
 
-    refs = sorted((r for r in discover_grids("native") if r.dataset in TRAIN_DATASETS),
+    # Build from the roster the ENCODER was trained on (F4), not the current TRAIN_DATASETS: a bank
+    # encoded over a different roster than the checkpoint saw is unattributable. None config => full.
+    roster = tuple(ckpt["config"].get("train_datasets") or TRAIN_DATASETS)
+    print(f"[memory] roster from checkpoint config: {sorted(roster)}", flush=True)
+    refs = sorted((r for r in discover_grids("native") if r.dataset in roster),
                   key=lambda r: r.key)
     Z_parts, y_parts, subj_parts, cfg_parts = [], [], [], []
     subj_names: dict[str, int] = {}
@@ -168,6 +172,7 @@ def main() -> None:
                      "frontend": ckpt["config"].get("frontend"),
                      "multiresolution": ckpt["config"].get("multiresolution")},
         "max_per_stream": cap,
+        "max_per_label": label_cap,
         # Bind the bank to the corpus it was built from AND to the Phase-A corpus the encoder was
         # trained on (F3): a matching vocabulary + backbone is not enough — a bank encoded over a
         # different dataset roster / cap than the encoder saw is unattributable.
