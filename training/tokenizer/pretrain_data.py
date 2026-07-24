@@ -319,7 +319,8 @@ class PretrainDataset(Dataset):
             self._data_cache[stream_i] = self.index.refs[stream_i].load_data()
         return self._data_cache[stream_i]
 
-    def _augment_to_slots(self, ref, key: WindowKey, base_texts: list[str], slot: dict) -> dict:
+    def _augment_to_slots(self, ref, key: WindowKey, base_texts: list[str], slot: dict,
+                          shared_config_seed: int | None = None) -> dict:
         """Load a FRESH copy of the raw window, run one augmentation pass, and scatter the
         survivors back into the canonical 6-slot layout. Each call draws independently from the
         RNG, so two calls on the same key give two independent views (the SimCLR pair)."""
@@ -343,7 +344,7 @@ class PretrainDataset(Dataset):
             sensor_id=sensor_id,
             gravity_state=_stream_gravity_state(ref.dataset, ref.stream),
         )
-        sample = self.augmenter(sample)
+        sample = self.augmenter(sample, shared_config_seed=shared_config_seed)
 
         # channel_dropout REMOVES channels from the tensor (e.g. gyro drop -> (T',3)).
         # Scatter survivors back into the canonical 6-slot layout and mask the rest —
@@ -388,16 +389,22 @@ class PretrainDataset(Dataset):
         ref = self.index.refs[key.stream_i]
         base_texts = stream_channel_descriptions(ref.dataset, ref.stream)
         slot = {c: k for k, c in enumerate(CHANNELS)}
-        view = self._augment_to_slots(ref, key, base_texts, slot)
+        # One CONFIG-text-dropout decision per window, shared by both SimCLR views. The signal
+        # augmentations still draw independently (that is what makes the pair a positive), but the
+        # views never disagree on WHETHER the acquisition config was described — otherwise NT-Xent
+        # would train embed(config) == embed(no config), i.e. to ignore the config text, which is
+        # the opposite of the config-conditional thesis. See SensorTextDropoutCfg.shared_across_views.
+        cfg_seed = stdlib_random.randrange(2 ** 31)
+        view = self._augment_to_slots(ref, key, base_texts, slot, shared_config_seed=cfg_seed)
         item = {
             **view,                                       # data/rate/texts/role_texts/sensor_texts/sensor_id/channel_mask/gravity_state
             "label_id": key.label_id,
             "source": ref.dataset,                        # for per-source telemetry
         }
         if self.two_view:
-            # A second, INDEPENDENT augmentation of the same window (the SimCLR positive pair).
+            # Second view: signal augmentation INDEPENDENT, config-text dropout SHARED (same seed).
             item["view_b"] = {
-                **self._augment_to_slots(ref, key, base_texts, slot),
+                **self._augment_to_slots(ref, key, base_texts, slot, shared_config_seed=cfg_seed),
                 "label_id": key.label_id,
                 "source": ref.dataset,
             }

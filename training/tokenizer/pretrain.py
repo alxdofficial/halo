@@ -765,12 +765,25 @@ def main() -> None:
                 f"resume corpus fingerprint mismatch: checkpoint={saved_fp}, "
                 f"current={corpus_fingerprint(index)} — the corpus/cap/seed changed since the run started.")
         model.encoder.load_state_dict(rk["encoder"])
+        _AUX_TFC = {"time_encoder", "tfc_proj", "tfc_proj_time"}
         for k, head in (("a1", model.a1_head), ("a2", model.a2_proj),
                         ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen),
                         ("time_encoder", model.time_encoder), ("tfc_proj", model.tfc_proj),
                         ("tfc_proj_time", model.tfc_proj_time)):
-            if k in rk["heads"]:               # aux TF-C modules absent in pre-TF-C checkpoints
-                head.load_state_dict(rk["heads"][k])
+            if k not in rk["heads"]:           # aux TF-C modules absent in pre-TF-C checkpoints
+                continue
+            if k in _AUX_TFC:
+                # The aux TF-C rail is training-only and discarded at inference, and its shape has
+                # changed (the F2/F3 rate/position FiLM added parameters). A checkpoint predating
+                # that must still be resumable, so load it leniently and re-init what is missing
+                # rather than crashing the run on a module the encoder never uses.
+                try:
+                    head.load_state_dict(rk["heads"][k])
+                except RuntimeError as exc:
+                    print(f"[resume] aux TF-C module {k!r} predates the current architecture "
+                          f"({str(exc).splitlines()[0]}); re-initialised.", flush=True)
+            else:
+                head.load_state_dict(rk["heads"][k])   # main heads stay STRICT
         opt.load_state_dict(rk["optimizer"])
         sched.load_state_dict(rk["scheduler"])
         scaler.load_state_dict(rk["scaler"])

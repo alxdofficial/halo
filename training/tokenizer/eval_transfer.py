@@ -76,6 +76,31 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
     return enc.to(device).eval()
 
 
+#: Fixed probe spec. A window length that does NOT divide evenly into the patch grid, so the probe
+#: exercises partial-tail handling (duration-weighted pooling + the tail floor) — the exact code the
+#: F1/F7 fixes changed. Never edit these numbers: doing so invalidates every stored fingerprint.
+_PROBE = dict(n=2, samples=128, rate=50.0, dataset="wisdm", stream="phone_pocket")
+
+
+@torch.no_grad()
+def embedding_fingerprint(enc, device) -> torch.Tensor:
+    """Deterministic BEHAVIOURAL fingerprint of the whole embedding path -> (n, d) float32 cpu.
+
+    Weights + corpus + vocab fingerprints cannot detect a change to the *code* that turns them into
+    an embedding (pooling, tail selection, text construction). A pre-F1-pooling memory bank paired
+    with a post-F1 encoder passed every existing guard while storing vectors from a different
+    function. This runs a FIXED synthetic window through the real ``encode_dataset`` path, so ANY
+    behavioural change to that path shows up as a different fingerprint — no version bump to
+    remember. Compared with a tolerance (not hashed) so CPU/GPU float noise can't false-alarm.
+    """
+    g = torch.Generator().manual_seed(20260724)
+    data = torch.randn(_PROBE["n"], _PROBE["samples"], 6, generator=g).numpy()
+    texts = [f"probe channel {i}" for i in range(6)]
+    return encode_dataset(enc, data, texts, device, _PROBE["rate"], gravity_state="present",
+                          channel_mask=[True] * 6, dataset=_PROBE["dataset"],
+                          stream=_PROBE["stream"]).float().cpu()
+
+
 @torch.no_grad()
 def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
                    channel_mask=None, dataset=None, stream=None) -> torch.Tensor:

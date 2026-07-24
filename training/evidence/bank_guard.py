@@ -86,6 +86,48 @@ def assert_bank_current(bank: dict, *, context: str = "") -> None:
         f"  See docs/design/REMEDIATION_PLAN.md Phase 0.2 / Phase 2.\n")
 
 
+#: Max relative L2 drift tolerated between the stored and live embedding probe. Well above CPU/GPU
+#: float noise (~1e-6) and far below the smallest real behavioural change we have measured
+#: (the F1 pooling fix moved real windows by 3e-3 .. 2e-2).
+EMBED_PROBE_TOL = 1e-4
+
+
+def assert_embedding_path_current(bank: dict, enc, device, *, context: str = "") -> None:
+    """Raise if the live encode CODE no longer reproduces the bank's stored embedding probe.
+
+    Vocabulary, backbone-weight and corpus fingerprints are all blind to a change in the *function*
+    that maps weights+data to a vector. The F1 duration-weighted pooling fix is exactly that: it
+    left every other fingerprint identical while moving real embeddings by 0.3-2%. A bank built
+    before it, used after it, is a silent mixed-protocol result. Re-running the fixed probe catches
+    any such change without anyone remembering to bump a version.
+    """
+    stored = bank.get("embed_probe")
+    where = f" ({context})" if context else ""
+    if stored is None:
+        raise SystemExit(
+            f"\n[bank_guard] BANK PREDATES THE EMBEDDING-PATH PROBE{where}.\n"
+            f"  It cannot be shown to have been built by the CURRENT encode path (pooling / tail\n"
+            f"  selection / text construction), and those have changed. Rebuild it:\n\n"
+            f"      python -m training.evidence.build_memory --checkpoint <ckpt> --device cuda\n")
+    import torch
+    from training.tokenizer.eval_transfer import embedding_fingerprint
+    live = embedding_fingerprint(enc, device)
+    stored = torch.as_tensor(stored).float().cpu()
+    if live.shape != stored.shape:
+        raise SystemExit(
+            f"\n[bank_guard] EMBEDDING-PATH MISMATCH{where}: probe shape {tuple(live.shape)} != "
+            f"stored {tuple(stored.shape)} — the encoder/embedding path changed. Rebuild the bank.\n")
+    drift = float((live - stored).norm() / stored.norm().clamp(min=1e-12))
+    if drift > EMBED_PROBE_TOL:
+        raise SystemExit(
+            f"\n[bank_guard] EMBEDDING-PATH CHANGED{where} — refusing a mixed-protocol result.\n"
+            f"  relative drift of the fixed probe: {drift:.2e}  (tolerance {EMBED_PROBE_TOL:.0e})\n"
+            f"  The weights and corpus match, but the CODE that turns them into an embedding does\n"
+            f"  not reproduce the vectors stored in this bank (e.g. pooling or tail handling\n"
+            f"  changed since it was built). Rebuild the bank against the current code:\n\n"
+            f"      python -m training.evidence.build_memory --checkpoint <ckpt> --device cuda\n")
+
+
 def assert_bank_matches_backbone(bank: dict, ckpt: dict, *, context: str = "") -> None:
     """Verify the bank was built over the SAME Phase-A corpus as the encoder checkpoint (F3).
 

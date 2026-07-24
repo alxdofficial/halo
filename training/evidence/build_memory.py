@@ -41,7 +41,8 @@ import torch
 from data.scripts.eda.grid_io import discover_grids
 from data.scripts.labels.canonical_labels import canonicalize
 from eval.scoring import get_sbert_encoder
-from training.tokenizer.eval_transfer import build_encoder, encode_dataset
+from training.tokenizer.eval_transfer import (build_encoder, embedding_fingerprint,
+                                              encode_dataset)
 from training.tokenizer.pretrain_data import (TRAIN_DATASETS, _stream_gravity_state,
                                               stream_channel_descriptions)
 
@@ -184,6 +185,11 @@ def main() -> None:
             "phase_a_corpus_fp": ckpt.get("corpus_fingerprint"),   # None for pre-fingerprint ckpts
             "phase_a_corpus": ckpt.get("corpus"),
         },
+        # BEHAVIOURAL fingerprint of the embedding path that produced Z. Corpus/weight/roster
+        # fingerprints all stay identical when the encode CODE changes (e.g. the F1 pooling fix),
+        # so without this a stale bank passes every guard while storing vectors from a different
+        # function. Consumers re-run the probe and compare (see bank_guard).
+        "embed_probe": embedding_fingerprint(enc, device),
     }, str(args.out))
     print(f"-> {args.out}", flush=True)
 

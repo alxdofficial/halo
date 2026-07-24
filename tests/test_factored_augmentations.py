@@ -86,6 +86,31 @@ def test_sensor_text_dropout_is_bounded_and_keeps_one_with_two_sensors():
     assert len(survived) >= 1, "bounded dropout must keep >=1 sensor described when there are 2"
 
 
+def test_sensor_text_dropout_decision_is_shared_across_simclr_views():
+    """Config-conditional thesis guard: the two SimCLR views of one window must never disagree on
+    WHETHER the acquisition config was described. With independent draws ~2p(1-p) of positive pairs
+    are 'config in A, neutralised in B', and NT-Xent then trains embed(config) == embed(no config),
+    i.e. to IGNORE the config — the opposite of salient-not-invariant."""
+    cfg = AugmentationConfig.none()
+    cfg.sensor_text_dropout.enabled = True
+    cfg.sensor_text_dropout.p = 0.5            # high rate so disagreement would be common
+    aug = IMUAugmenter(cfg)
+    neutral = cfg.sensor_text_dropout.neutral
+    asymmetric = 0
+    for seed in range(60):
+        random.seed(seed); np.random.seed(seed)
+        shared = random.randrange(2**31)
+        a = aug(_sample(), shared_config_seed=shared)
+        b = aug(_sample(), shared_config_seed=shared)
+        na = any(s == neutral for s in a.sensor_descriptions)
+        nb = any(s == neutral for s in b.sensor_descriptions)
+        if na != nb:
+            asymmetric += 1
+        if na and nb:                           # same sensors chosen, not just the same count
+            assert a.sensor_descriptions == b.sensor_descriptions
+    assert asymmetric == 0, f"{asymmetric}/60 pairs had config in one view only"
+
+
 def test_padding_only_accelerometer_is_not_treated_as_physical_gravity():
     cfg = AugmentationConfig.none()
     cfg.gravity.enabled = True

@@ -39,7 +39,8 @@ from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.edl import DensityGate, acc_at_coverage, aurc
 from training.evidence.bank_guard import (
-    assert_bank_current, assert_bank_matches_backbone, vocab_fingerprint)
+    assert_bank_current, assert_bank_matches_backbone, assert_embedding_path_current,
+    vocab_fingerprint)
 from training.evidence.labeltext import ensemble_text
 from training.tokenizer.eval_transfer import build_encoder, encode_dataset
 from training.tokenizer.pretrain_data import _stream_gravity_state, stream_channel_descriptions
@@ -130,6 +131,8 @@ def main() -> None:
     ckpt = torch.load(str(args.checkpoint), map_location="cpu", weights_only=False)
     assert_bank_matches_backbone(bank, ckpt, context="eval_decoder")   # F3: same Phase-A corpus
     enc = build_encoder(ckpt, device)
+    # ...and the same encode CODE path (pooling/tail/text), which no other fingerprint covers.
+    assert_embedding_path_current(bank, enc, device, context="eval_decoder")
     for p in enc.parameters():
         p.requires_grad_(False)
     dc = blob["cfg"]
