@@ -270,12 +270,17 @@ def _seed_worker(worker_id: int) -> None:
 
 
 class PretrainDataset(Dataset):
-    """One item = one augmented window: variable (T', 6) data + rate + texts + label."""
+    """One item = one augmented window: variable (T', 6) data + rate + texts + label.
+
+    ``two_view`` (SimCLR A2): also emit an INDEPENDENTLY-augmented second view of the same
+    window under ``item["view_b"]`` (its own signal augmentation, rate, channel_mask and
+    augmentation-consistent channel text). The collate patchifies it into the ``*_b`` keys."""
 
     def __init__(self, index: CorpusIndex, keys: list[WindowKey],
-                 augment: bool = True):
+                 augment: bool = True, two_view: bool = False):
         self.index = index
         self.keys = keys
+        self.two_view = two_view
         cfg = AugmentationConfig.default_v2() if augment else AugmentationConfig.none()
         if augment:
             cfg.gravity.p = GRAVITY_AUG_P     # audit: 0.5 killed gravity on half the corpus
@@ -293,9 +298,10 @@ class PretrainDataset(Dataset):
             self._data_cache[stream_i] = self.index.refs[stream_i].load_data()
         return self._data_cache[stream_i]
 
-    def __getitem__(self, i: int) -> dict:
-        key = self.keys[i]
-        ref = self.index.refs[key.stream_i]
+    def _augment_to_slots(self, ref, key: WindowKey, base_texts: list[str], slot: dict) -> dict:
+        """Load a FRESH copy of the raw window, run one augmentation pass, and scatter the
+        survivors back into the canonical 6-slot layout. Each call draws independently from the
+        RNG, so two calls on the same key give two independent views (the SimCLR pair)."""
         window = torch.tensor(
             np.asarray(self._grid(key.stream_i)[key.window_i], dtype=np.float32)
         )
@@ -307,7 +313,7 @@ class PretrainDataset(Dataset):
             data=window,
             channel_names=list(CHANNELS),
             sampling_rate=ref.rate_hz,
-            channel_descriptions=stream_channel_descriptions(ref.dataset, ref.stream),
+            channel_descriptions=list(base_texts),
             label=ref.labels[key.window_i],
             dataset_name=ref.dataset,
             channel_mask=[bool(m) for m in ref.mask],   # real vs zero-padded channels (F10b)
@@ -321,11 +327,9 @@ class PretrainDataset(Dataset):
         # channel_dropout REMOVES channels from the tensor (e.g. gyro drop -> (T',3)).
         # Scatter survivors back into the canonical 6-slot layout and mask the rest —
         # the same pad+mask contract the grids use.
-        base_texts = stream_channel_descriptions(ref.dataset, ref.stream)
         data6 = sample.data.new_zeros(sample.data.shape[0], len(CHANNELS))
         mask6 = torch.zeros(len(CHANNELS), dtype=torch.bool)
         texts6 = list(base_texts)
-        slot = {c: i for i, c in enumerate(CHANNELS)}
         for j, name in enumerate(sample.channel_names):
             i = slot[name]
             data6[:, i] = sample.data[:, j]
@@ -348,14 +352,35 @@ class PretrainDataset(Dataset):
             "data": data6,                                # (T', 6) canonical slots
             "rate": float(sample.sampling_rate),
             "texts": texts6,
+            # Factored text (docs/design/TEXT_CONDITIONING.md §4b): carried per-VIEW so the SimCLR
+            # second view gets its OWN independently-augmented role/sensor text. label_id is
+            # view-independent and lives in __getitem__ below.
             "role_texts": role_texts6,
             "sensor_texts": list(sample.sensor_descriptions or sensor_texts),
             "sensor_id": sensor_id6,
-            "label_id": key.label_id,
             "channel_mask": mask6,
             "gravity_state": sample.gravity_state,
+        }
+
+    def __getitem__(self, i: int) -> dict:
+        key = self.keys[i]
+        ref = self.index.refs[key.stream_i]
+        base_texts = stream_channel_descriptions(ref.dataset, ref.stream)
+        slot = {c: k for k, c in enumerate(CHANNELS)}
+        view = self._augment_to_slots(ref, key, base_texts, slot)
+        item = {
+            **view,                                       # data/rate/texts/role_texts/sensor_texts/sensor_id/channel_mask/gravity_state
+            "label_id": key.label_id,
             "source": ref.dataset,                        # for per-source telemetry
         }
+        if self.two_view:
+            # A second, INDEPENDENT augmentation of the same window (the SimCLR positive pair).
+            item["view_b"] = {
+                **self._augment_to_slots(ref, key, base_texts, slot),
+                "label_id": key.label_id,
+                "source": ref.dataset,
+            }
+        return item
 
 
 class BalancedBatchSampler(Sampler[list[int]]):
@@ -431,6 +456,43 @@ class BalancedBatchSampler(Sampler[list[int]]):
             yield batch
 
 
+class TemperatureSampler(Sampler[int]):
+    """Per-window temperature sampler — the SimCLR default (NO class balancing).
+
+    Draws window indices i.i.d. with per-DATASET probability ∝ ``n_dataset ** alpha``. This
+    is realised as a per-window weight ``n_dataset ** (alpha - 1)``: summed over a dataset's
+    ``n_dataset`` windows it gives ``P(dataset) ∝ n_dataset ** alpha``.
+      * alpha = 1  -> proportional to dataset size (large corpora dominate),
+      * alpha = 0  -> uniform per source (every dataset equally likely),
+      * alpha = 0.5 (default) -> the geometric middle.
+    Draws ``num_samples`` indices WITH replacement via ``torch.multinomial``; with a DataLoader
+    ``batch_size`` and ``drop_last=True`` that yields ``num_samples // batch_size`` full batches.
+    Unlike ``BalancedBatchSampler`` there is no per-class structure — labels are unused (SimCLR)."""
+
+    def __init__(self, keys: list[WindowKey], stream_datasets: list[str], num_samples: int,
+                 alpha: float = 0.5, seed: int = SEED):
+        from collections import Counter
+        datasets = [stream_datasets[k.stream_i] for k in keys]
+        counts = Counter(datasets)
+        self.weights = torch.tensor(
+            [counts[d] ** (float(alpha) - 1.0) for d in datasets], dtype=torch.double)
+        self.num_samples = int(num_samples)
+        self.alpha = float(alpha)
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def __len__(self) -> int:
+        return self.num_samples
+
+    def __iter__(self) -> Iterator[int]:
+        # Advance the seed per epoch so the calibration pass and each training epoch draw
+        # different windows (mirrors BalancedBatchSampler's per-__iter__ epoch bump).
+        gen = torch.Generator().manual_seed(self.seed + self.epoch)
+        self.epoch += 1
+        idx = torch.multinomial(self.weights, self.num_samples, replacement=True, generator=gen)
+        yield from idx.tolist()
+
+
 # ----------------------------------------------------------------------------------------------
 # Multi-scale collate
 # ----------------------------------------------------------------------------------------------
@@ -456,7 +518,8 @@ class MultiScaleCollate:
     def __init__(self, dft_size: int = DFT_SIZE,
                  patch_choices: Sequence[float] = PATCH_SECONDS_CHOICES,
                  fixed_patch_seconds: float | None = None, seed: int = SEED,
-                 align_gravity: bool = False, compute_targets: bool = True):
+                 align_gravity: bool = False, compute_targets: bool = True,
+                 two_view: bool = False):
         self.dft_size = dft_size
         self.patch_choices = tuple(patch_choices)
         self.fixed = fixed_patch_seconds
@@ -465,6 +528,8 @@ class MultiScaleCollate:
         # by the training loss; validation/embedding never reads them, so val loaders pass
         # compute_targets=False to skip that per-window DSP (the val-speed fix — 2026-07-19).
         self.compute_targets = compute_targets
+        # SimCLR: also patchify item["view_b"] (the second augmented view) into `*_b` keys.
+        self.two_view = two_view
         self.seed = seed
 
     def _patch_seconds(self, batch: list[dict]) -> float:
@@ -477,6 +542,17 @@ class MultiScaleCollate:
 
     def __call__(self, batch: list[dict]) -> dict:
         ps = self._patch_seconds(batch)
+        out = self._collate_impl(batch, ps, self.compute_targets)
+        if self.two_view and batch and "view_b" in batch[0]:
+            # Second SimCLR view: same patch_seconds, no A3 targets needed (A1/A3 use view A).
+            out_b = self._collate_impl([item["view_b"] for item in batch], ps, compute_targets=False)
+            for k in ("patches", "patch_len", "rates", "positions", "texts",
+                      "role_texts", "sensor_texts", "sensor_id",
+                      "channel_mask", "patch_padding_mask"):
+                out[f"{k}_b"] = out_b[k]
+        return out
+
+    def _collate_impl(self, batch: list[dict], ps: float, compute_targets: bool) -> dict:
         P = max(1, int(round(WINDOW_SECONDS / ps)))
         B = len(batch)
         patches = torch.zeros(B, P, self.dft_size, len(CHANNELS))
@@ -502,7 +578,7 @@ class MultiScaleCollate:
             # unused families (grav-energy/coherence/shape/dc_tilt); that redundant work +
             # the double align is the second-agent efficiency finding. Skipped entirely when
             # compute_targets is False (val/embedding loaders don't use A3).
-            if self.compute_targets:
+            if compute_targets:
                 acc = data[:, :3].unsqueeze(0)                           # (1, T, 3)
                 cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
                 cadence_t[b] = cad.values[0, 0].nan_to_num(0.0)
@@ -583,6 +659,7 @@ class MultiResolutionCollate:
         seed: int = SEED,
         align_gravity: bool = False,
         compute_targets: bool = True,
+        two_view: bool = False,
     ):
         self.dft_size = int(dft_size)
         self.short_choices = tuple(float(x) for x in short_choices)
@@ -592,6 +669,8 @@ class MultiResolutionCollate:
         self.seed = int(seed)
         self.align_gravity = bool(align_gravity)
         self.compute_targets = bool(compute_targets)
+        # SimCLR: also patchify item["view_b"] (the second augmented view) into `*_b` keys.
+        self.two_view = bool(two_view)
         self._valid_pairs = tuple(
             (short, long)
             for short in self.short_choices
@@ -615,6 +694,19 @@ class MultiResolutionCollate:
 
     def __call__(self, batch: list[dict]) -> dict:
         pair = self._patch_seconds(batch)
+        out = self._collate_impl(batch, pair, self.compute_targets)
+        if self.two_view and batch and "view_b" in batch[0]:
+            # Second SimCLR view: same resolution pair, no A3 targets needed (A1/A3 use view A).
+            out_b = self._collate_impl([item["view_b"] for item in batch], pair,
+                                       compute_targets=False)
+            for k in ("patches", "patch_len", "rates", "positions", "patch_durations",
+                      "resolution_ids", "texts", "role_texts", "sensor_texts", "sensor_id",
+                      "channel_mask", "patch_padding_mask"):
+                out[f"{k}_b"] = out_b[k]
+        return out
+
+    def _collate_impl(self, batch: list[dict], pair: tuple[float, float],
+                      compute_targets: bool) -> dict:
         B = len(batch)
         rates = torch.zeros(B)
         channel_mask = torch.stack([item["channel_mask"] for item in batch])
@@ -627,7 +719,7 @@ class MultiResolutionCollate:
         for b, item in enumerate(batch):
             data, rate = item["data"], float(item["rate"])
             rates[b] = rate
-            if self.compute_targets:
+            if compute_targets:
                 acc = data[:, :3].unsqueeze(0)
                 cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
                 cadence_t[b] = cad.values[0, 0].nan_to_num(0.0)

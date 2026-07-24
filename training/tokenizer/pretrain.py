@@ -1,15 +1,28 @@
-"""Pipeline A Phase-1 pretraining — the elite-3 objectives at corpus scale.
+"""Pipeline A Phase-1 pretraining — FULLY SELF-SUPERVISED by default.
 
-Everything the gates taught is baked in:
-  * TWO forwards per step: masked -> A1 (feature targets from the CALIBRATED frozen
-    filterbank); clean -> A2 SupCon + A3 grounding.        (M2 lesson 1)
+The default recipe uses NO labels in the training loss:
+  * A1 masked-latent recon (masked forward; feature targets from the CALIBRATED frozen
+    filterbank) — the world-model rail.                     (M2 lesson 1)
+  * A2 = self-supervised SimCLR NT-Xent between TWO independent augmentations of each
+    window (a2_mode='simclr'). Labels are used ONLY for the val kNN/ConSE metric.
+  * TF-C = time-frequency consistency: NT-Xent pulling the FREQUENCY view (the main encoder's
+    pooled output, reused from A2) toward a TIME view (an auxiliary TimeEncoder over the raw
+    samples) of the SAME window. Augmentation-free, ON by default alongside SimCLR; summed into
+    the total (weight cfg.tfc_weight). --tfc-weight 0 (or --a2-mode supcon) skips it. The
+    TimeEncoder is discarded at inference.
+  * All three (A1 + SimCLR + TF-C) are SUMMED into one loss — no separate ablation arms.
+  * A3 grounding is OFF by default (a3_weight=0); heads + DSP re-enable with --a3-weight 0.1.
+  * The corpus sampler is the per-window 'temperature' sampler (P(dataset) ∝ n^alpha),
+    NOT class-balanced.
+The ORIGINAL label-supervised recipe is fully selectable for the do-no-harm ablation:
+  --a2-mode supcon --a3-weight 0.1 --sampler balanced (A1 + label-SupCon A2 + A3 rail).
+
+Other invariants:
   * Config conditioning is channel TEXT; the text-dropout/paraphrase augs supply the
     "unseen description" robustness.                        (M2 lesson 2, upgraded by M3)
   * Gravity alignment is disabled by default; signed DC preserves posture while SO(3)
     augmentation supplies orientation robustness.           (2026-07-19 decision)
-  * The encoder's inner filterbank norm is CALIBRATED before training (copied from
-    the target tokenizer's fitted stats).                    (M3 lesson)
-  * A3 stays a rail (weight 0.1), targets validity-masked, computed on augmented views.
+  * The encoder's inner filterbank norm is CALIBRATED before training.  (M3 lesson)
 
 Model selection: subject-disjoint val kNN balanced accuracy (macro), not loss.
 Checkpoints carry config + label map + filterbank norm stats + git provenance.
@@ -42,7 +55,9 @@ from training.tokenizer.losses_repr import (
     make_mask_plan,
     make_multiresolution_mask_plan,
     masked_latent_per_window,
+    nt_xent,
 )
+from training.tokenizer.time_encoder import TimeEncoder
 from training.tokenizer.pretrain_data import (
     CHANNELS,
     DFT_SIZE,
@@ -56,6 +71,7 @@ from training.tokenizer.pretrain_data import (
     MultiScaleCollate,
     PretrainDataset,
     TRAIN_DATASETS,
+    TemperatureSampler,
     _seed_worker,
 )
 
@@ -108,11 +124,33 @@ class PretrainConfig:
     weight_decay: float = 0.05
     warmup_steps: int = 1_000
     grad_clip: float = 1.0
-    a3_weight: float = 0.1
+    # A3 (physical-primitive grounding) weight. NEW DEFAULT 0.0 — A3 is OFF in the fully
+    # self-supervised recipe (grounding rail dropped). Re-enable the rail with --a3-weight 0.1;
+    # the heads + grounding_loss + target DSP all stay intact and switch back on together.
+    a3_weight: float = 0.0
     # A1 (masked-latent recon) weight. A1's target is the FIXED filterbank's features, so it is
     # home-field for the filterbank arm (audit #7). For an objective-NEUTRAL tokenizer comparison set
-    # a1_weight=0 -> train on A2 (SupCon) + A3 (grounding) only, both frontend-agnostic.
+    # a1_weight=0 -> train on A2 + A3 (grounding) only, both frontend-agnostic.
     a1_weight: float = 1.0
+    # A2 window-level contrastive mode. NEW DEFAULT 'simclr' = self-supervised NT-Xent over two
+    # independent augmentations (no labels in the loss). 'supcon' = the label-SupCon ablation
+    # (reproduced with --a2-mode supcon --a3-weight 0.1 --sampler balanced).
+    a2_mode: str = "simclr"
+    simclr_temperature: float = 0.1       # NT-Xent temperature (SimCLR default)
+    # TF-C (time-frequency consistency): a THIRD self-supervised term summed alongside A1 + A2,
+    # ON by default whenever the SSL recipe is active (a2_mode='simclr'). It pulls together the
+    # frequency-domain embedding (the main encoder's pooled output) and a time-domain embedding
+    # (an auxiliary TimeEncoder over the raw samples) of the SAME window; NT-Xent, augmentation-free.
+    # tfc_weight==0 cleanly skips the TimeEncoder forward + the TF-C term (a free hygiene knob, NOT
+    # a separate arm); a2_mode='supcon' (the old label recipe) also skips it — TF-C is SSL-only.
+    tfc_weight: float = 1.0
+    tfc_temperature: float = 0.1          # NT-Xent temperature for the time<->freq contrast
+    # Corpus sampler. NEW DEFAULT 'temperature' = per-window draw with P(dataset) ∝ n^alpha, NO
+    # class balancing. 'balanced' = the label-balanced BalancedBatchSampler (needed for supcon).
+    sampler: str = "temperature"
+    sampler_alpha: float = 0.5            # 1=proportional, 0=uniform-per-source, 0.5=middle
+    batch_size: int = 512                 # batch for the temperature sampler (balanced uses
+                                          # classes_per_batch * samples_per_class instead)
     calib_batches: int = 50               # frontend norm calibration pass
     val_every: int = 1_000
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
@@ -157,6 +195,19 @@ class PipelineAModel(nn.Module):
         )
         self.a3_cadence = nn.Linear(cfg.d_model, 1)
         self.a3_eigen = nn.Linear(cfg.d_model, 4 * 3)
+        # --- TF-C rail (auxiliary; discarded at inference) ------------------------------------
+        # A compact TIME-domain encoder over the raw samples, plus two SEPARATE projection heads
+        # (kept independent of a2_proj so SimCLR and TF-C do not share a bottleneck): tfc_proj
+        # projects the FREQUENCY view (reused encoder pooled output), tfc_proj_time the TIME view.
+        self.time_encoder = TimeEncoder(cfg.d_model, n_channels=len(CHANNELS))
+        self.tfc_proj = nn.Sequential(
+            nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
+            nn.Linear(cfg.d_model, 128),
+        )
+        self.tfc_proj_time = nn.Sequential(
+            nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
+            nn.Linear(cfg.d_model, 128),
+        )
 
 
 def git_commit() -> str:
@@ -313,12 +364,18 @@ def module_grad_norms(model) -> dict:
     """Per-module gradient L2 norm (call AFTER unscale_, BEFORE clip → real, un-clipped scale).
     A cheap reduction — computed only on log steps, so no hot-loop cost. Diagnoses vanish/explode
     per component (encoder vs each head)."""
+    def _gn(params) -> float:
+        sq = sum(float(p.grad.detach().pow(2).sum()) for p in params if p.grad is not None)
+        return sq ** 0.5
+
     mods = (("encoder", model.encoder), ("a1", model.a1_head), ("a2", model.a2_proj),
-            ("a3_cad", model.a3_cadence), ("a3_eig", model.a3_eigen))
-    out = {}
-    for name, mod in mods:
-        sq = sum(float(p.grad.detach().pow(2).sum()) for p in mod.parameters() if p.grad is not None)
-        out[f"grad/{name}"] = sq ** 0.5
+            ("a3_cad", model.a3_cadence), ("a3_eig", model.a3_eigen),
+            ("time_encoder", model.time_encoder))
+    out = {f"grad/{name}": _gn(mod.parameters()) for name, mod in mods}
+    # TF-C projection heads (both freq- and time-view heads) under one key so their health is
+    # visible alongside grad/time_encoder — is the TF-C rail alive, and is any objective drowning?
+    out["grad/tfc_proj"] = _gn(list(model.tfc_proj.parameters())
+                               + list(model.tfc_proj_time.parameters()))
     return out
 
 
@@ -363,6 +420,29 @@ def main() -> None:
     parser.add_argument("--a1-weight", type=float, default=None,
                         help="scale the A1 masked-recon loss. Set 0 for an objective-NEUTRAL tokenizer "
                              "comparison because A1's target is the fixed filterbank.")
+    parser.add_argument("--a2-mode", choices=("simclr", "supcon"), default=None,
+                        help="A2 contrastive mode. DEFAULT 'simclr' = self-supervised NT-Xent over two "
+                             "augmented views (no labels). 'supcon' = the label-SupCon ablation.")
+    parser.add_argument("--a3-weight", type=float, default=None,
+                        help="scale the A3 grounding rail. DEFAULT 0.0 (off); pass 0.1 to re-enable it.")
+    parser.add_argument("--simclr-temperature", type=float, default=None,
+                        help="NT-Xent temperature for --a2-mode simclr (default 0.1).")
+    parser.add_argument("--tfc-weight", type=float, default=None,
+                        help="scale the TF-C (time-frequency consistency) term, summed alongside "
+                             "A1 + SimCLR. DEFAULT 1.0 (ON with the SSL recipe). 0 cleanly skips the "
+                             "TimeEncoder forward + TF-C loss (a hygiene knob, not a separate arm); "
+                             "TF-C is also skipped under --a2-mode supcon.")
+    parser.add_argument("--tfc-temperature", type=float, default=None,
+                        help="NT-Xent temperature for the TF-C time<->freq contrast (default 0.1).")
+    parser.add_argument("--sampler", choices=("temperature", "balanced"), default=None,
+                        help="corpus sampler. DEFAULT 'temperature' (per-window, P(dataset) ∝ n^alpha, "
+                             "no class balancing). 'balanced' = label-balanced batches (needed for supcon).")
+    parser.add_argument("--sampler-alpha", type=float, default=None,
+                        help="temperature-sampler exponent: 1=proportional, 0=uniform-per-source, "
+                             "0.5=middle (default).")
+    parser.add_argument("--batch", type=int, default=None,
+                        help="batch size for the temperature sampler (default 512). The balanced "
+                             "sampler ignores this and uses classes_per_batch * samples_per_class.")
     parser.add_argument("--subset", action="store_true",
                         help="train on the tokenizer-ablation 3-rate-core subset (5 datasets, xrf_v2 "
                              "held out) instead of the full corpus. See ablation_subset.py.")
@@ -393,6 +473,22 @@ def main() -> None:
         cfg.multiresolution = args.multiresolution
     if args.a1_weight is not None:
         cfg.a1_weight = args.a1_weight
+    if args.a2_mode is not None:
+        cfg.a2_mode = args.a2_mode
+    if args.a3_weight is not None:
+        cfg.a3_weight = args.a3_weight
+    if args.simclr_temperature is not None:
+        cfg.simclr_temperature = args.simclr_temperature
+    if args.tfc_weight is not None:
+        cfg.tfc_weight = args.tfc_weight
+    if args.tfc_temperature is not None:
+        cfg.tfc_temperature = args.tfc_temperature
+    if args.sampler is not None:
+        cfg.sampler = args.sampler
+    if args.sampler_alpha is not None:
+        cfg.sampler_alpha = args.sampler_alpha
+    if args.batch is not None:
+        cfg.batch_size = args.batch
     if args.seed is not None:
         cfg.seed = args.seed
     if args.data_seed is not None:
@@ -414,7 +510,7 @@ def main() -> None:
     if args.smoke:
         cfg = PretrainConfig(
             d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
-            classes_per_batch=8, samples_per_class=4, steps=args.steps or 10,
+            classes_per_batch=8, samples_per_class=4, batch_size=32, steps=args.steps or 10,
             warmup_steps=2, calib_batches=3, val_every=max(args.steps or 10, 5),
             val_per_label=10, num_workers=0, max_per_stream=200,
             device=args.device, arm=cfg.arm, frontend=cfg.frontend,
@@ -423,6 +519,10 @@ def main() -> None:
             a1_weight=cfg.a1_weight, seed=cfg.seed, data_seed=cfg.data_seed,
             train_datasets=cfg.train_datasets,
             text_conditioning=cfg.text_conditioning, gate_bias_init=cfg.gate_bias_init,
+            a2_mode=cfg.a2_mode, a3_weight=cfg.a3_weight,
+            simclr_temperature=cfg.simclr_temperature, sampler=cfg.sampler,
+            sampler_alpha=cfg.sampler_alpha,
+            tfc_weight=cfg.tfc_weight, tfc_temperature=cfg.tfc_temperature,
         )
     device = torch.device(cfg.device)
     if device.type == "cuda":
@@ -455,22 +555,36 @@ def main() -> None:
                         datasets=cfg.train_datasets or TRAIN_DATASETS)
     print(f"corpus: {index.summary()}  (datasets={sorted(cfg.train_datasets or TRAIN_DATASETS)})",
           flush=True)
-    train_ds = PretrainDataset(index, index.train, augment=True)
+    two_view = cfg.a2_mode == "simclr"            # SimCLR needs a second augmented view per window
+    train_compute_targets = cfg.a3_weight > 0     # A3 off (default) -> skip the per-window A3 DSP
+    train_ds = PretrainDataset(index, index.train, augment=True, two_view=two_view)
     val_ds = PretrainDataset(index, index.val, augment=False)
     train_collate = (MultiResolutionCollate(
         short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
         min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
+        compute_targets=train_compute_targets, two_view=two_view,
     ) if cfg.multiresolution
-                     else MultiScaleCollate(seed=cfg.seed))
-    train_loader = DataLoader(
-        train_ds,
-        batch_sampler=BalancedBatchSampler(index.train, cfg.classes_per_batch,
-                                           cfg.samples_per_class, cfg.steps, cfg.seed,
-                                           stream_datasets=index.stream_datasets),
-        collate_fn=train_collate,
-        num_workers=cfg.num_workers, worker_init_fn=_seed_worker,
-        persistent_workers=cfg.num_workers > 0, pin_memory=device.type == "cuda",
-    )
+                     else MultiScaleCollate(seed=cfg.seed, compute_targets=train_compute_targets,
+                                            two_view=two_view))
+    loader_kwargs = dict(
+        collate_fn=train_collate, num_workers=cfg.num_workers, worker_init_fn=_seed_worker,
+        persistent_workers=cfg.num_workers > 0, pin_memory=device.type == "cuda")
+    if cfg.sampler == "balanced":
+        # Label-balanced batches (the supcon path): classes_per_batch x samples_per_class.
+        train_loader = DataLoader(
+            train_ds,
+            batch_sampler=BalancedBatchSampler(index.train, cfg.classes_per_batch,
+                                               cfg.samples_per_class, cfg.steps, cfg.seed,
+                                               stream_datasets=index.stream_datasets),
+            **loader_kwargs)
+    else:
+        # Temperature sampler (default): per-window draw, P(dataset) ∝ n^alpha, no class balancing.
+        train_loader = DataLoader(
+            train_ds,
+            sampler=TemperatureSampler(index.train, index.stream_datasets,
+                                       num_samples=cfg.steps * cfg.batch_size,
+                                       alpha=cfg.sampler_alpha, seed=cfg.seed),
+            batch_size=cfg.batch_size, drop_last=True, **loader_kwargs)
     # val: no aug, fixed 1.0 s patches, plain order. compute_targets=False skips the per-window
     # A3 DSP (unused by embedding), and parallel persistent workers cut the collate time — together
     # these take a val from ~9.5 min to seconds (the val-speed fix; val ran 5x the train cost).
@@ -584,7 +698,11 @@ def main() -> None:
             "encoder": model.encoder.state_dict(),
             "heads": {k: v.state_dict() for k, v in
                       (("a1", model.a1_head), ("a2", model.a2_proj),
-                       ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen))},
+                       ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen),
+                       # TF-C aux modules: saved only so a warm --resume stays consistent; the
+                       # inference loaders read ckpt["encoder"] alone and never touch these.
+                       ("time_encoder", model.time_encoder), ("tfc_proj", model.tfc_proj),
+                       ("tfc_proj_time", model.tfc_proj_time))},
             "config": asdict(cfg),
             "label_ids": index.label_ids,
             "step": step, "val_ba": val_ba,
@@ -631,8 +749,11 @@ def main() -> None:
                 f"current={corpus_fingerprint(index)} — the corpus/cap/seed changed since the run started.")
         model.encoder.load_state_dict(rk["encoder"])
         for k, head in (("a1", model.a1_head), ("a2", model.a2_proj),
-                        ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen)):
-            head.load_state_dict(rk["heads"][k])
+                        ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen),
+                        ("time_encoder", model.time_encoder), ("tfc_proj", model.tfc_proj),
+                        ("tfc_proj_time", model.tfc_proj_time)):
+            if k in rk["heads"]:               # aux TF-C modules absent in pre-TF-C checkpoints
+                head.load_state_dict(rk["heads"][k])
         opt.load_state_dict(rk["optimizer"])
         sched.load_state_dict(rk["scheduler"])
         scaler.load_state_dict(rk["scaler"])
@@ -649,6 +770,37 @@ def main() -> None:
 
     # Write run metadata only AFTER resume validation passed, so a rejected resume leaves it untouched (#6).
     (args.out / "run_config.json").write_text(json.dumps(asdict(cfg), indent=2))
+
+    def encode_clean_view_b(batch: dict) -> dict:
+        """Encode the SECOND SimCLR view (the collate's ``*_b`` keys) — clean, no A1 mask.
+        Only ['pooled'] is consumed (its a2_proj gives z_b). Tokenization runs fp32 (autocast
+        off) like view A; the transformer runs under whatever autocast the caller is in. The
+        conditioning path MATCHES view A (per_channel vs factored), so the encoder sees the same
+        text mode — factored view B carries its OWN independently-augmented role/sensor text."""
+        p_b = batch["patches_b"].to(device, non_blocking=True).float()
+        r_b = batch["rates_b"].to(device)
+        pl_b = batch["patch_len_b"].to(device)
+        pos_b = batch["positions_b"].to(device)
+        pdur_b = (batch["patch_durations_b"].to(device)
+                  if "patch_durations_b" in batch else None)
+        rids_b = (batch["resolution_ids_b"].to(device)
+                  if "resolution_ids_b" in batch else None)
+        cmask_b = batch["channel_mask_b"].to(device)
+        ppad_b = batch["patch_padding_mask_b"].to(device)
+        with torch.amp.autocast(device.type, enabled=False):
+            tokens_b = model.encoder.tokenize(p_b, r_b, pl_b)
+        if cfg.text_conditioning == "factored":
+            te_b, tm_b, ste_b, stm_b = model.encoder.encode_texts_factored(
+                batch["role_texts_b"], batch["sensor_texts_b"], device)
+            sid_b = batch["sensor_id_b"].to(device)
+        else:
+            te_b, tm_b = model.encoder.encode_texts(batch["texts_b"], device)
+            ste_b = stm_b = sid_b = None
+        return model.encoder.encode(tokens_b, te_b, tm_b, pos_b,
+                                    patch_durations=pdur_b, resolution_ids=rids_b,
+                                    channel_mask=cmask_b, patch_padding_mask=ppad_b,
+                                    sensor_text_embs=ste_b, sensor_text_masks=stm_b,
+                                    sensor_id=sid_b)
 
     model.train()
     for step, batch in enumerate(train_loader, start=start_step + 1):
@@ -719,6 +871,7 @@ def main() -> None:
                                          sensor_text_masks=sensor_text_masks,
                                          sensor_id=enc_sensor_id)
             z = model.a2_proj(clean["pooled"])
+            # --- A1 masked pass (factored-aware), gated on a1_weight ---
             if compute_a1:
                 masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
                                               patch_durations=patch_durations,
@@ -738,16 +891,53 @@ def main() -> None:
                 a1_target = torch.zeros_like(a1_pred)
                 a1_loss_mask = torch.zeros(clean["tokens"].shape[:3], dtype=torch.bool, device=device)
                 a1_feature_valid = None
+            # --- A2 (SimCLR) + TF-C, the SSL recipe ---
+            tfc_loss = None
+            if cfg.a2_mode == "simclr":
+                # A2 = self-supervised NT-Xent between the two independently-augmented views.
+                # Labels are NOT used in the loss (only later, in the val kNN/ConSE metric).
+                z_b = model.a2_proj(encode_clean_view_b(batch)["pooled"])
+                a2_loss, a2_key = nt_xent(z, z_b, cfg.simclr_temperature), "a2_simclr"
+                # TF-C: pull the FREQUENCY view (REUSE view-A's already-computed pooled output —
+                # no second main-encoder forward) toward the TIME view (auxiliary TimeEncoder over
+                # the raw samples) of the SAME window; NT-Xent, augmentation-free. Separate heads
+                # from a2_proj keep SimCLR and TF-C independent. tfc_weight==0 skips it entirely.
+                if cfg.tfc_weight > 0:
+                    z_freq = model.tfc_proj(clean["pooled"])
+                    time_emb = model.time_encoder(patches.float(), patch_len, channel_mask,
+                                                  patch_padding_mask=patch_pad)
+                    z_time = model.tfc_proj_time(time_emb)
+                    tfc_loss = nt_xent(z_time, z_freq, cfg.tfc_temperature)
+            else:
+                a2_loss, a2_key = None, "a2_supcon"   # elite3_loss computes the label-SupCon
+                # TF-C belongs to the SSL recipe; the old-recipe supcon ablation skips it.
+            # A3 grounding rail: OFF by default (a3_weight=0). Skip the heads and pass the
+            # (validity-False) targets so the term is exactly 0; --a3-weight 0.1 turns both the
+            # heads and the collate's A3 DSP back on together.
+            if cfg.a3_weight > 0:
+                a3_cad = model.a3_cadence(clean["pooled"]).squeeze(1)
+                a3_eig = model.a3_eigen(clean["pooled"]).view(B, 4, 3)
+            else:
+                a3_cad = clean["pooled"].new_zeros(B)
+                a3_eig = clean["pooled"].new_zeros(B, 4, 3)
             out = elite3_loss(
                 a1_pred=a1_pred, a1_target=a1_target,
                 a1_mask=a1_loss_mask,
                 a2_embeddings=z, a2_labels=labels,
-                a3_cadence_pred=model.a3_cadence(clean["pooled"]).squeeze(1),
-                a3_eigen_pred=model.a3_eigen(clean["pooled"]).view(B, 4, 3),
+                a3_cadence_pred=a3_cad,
+                a3_eigen_pred=a3_eig,
                 a3_targets=targets, weights=weights,
                 a1_feature_valid=a1_feature_valid,
                 a1_token_groups=resolution_ids,
+                a2_loss=a2_loss, a2_key=a2_key,
             )
+            # Total = a1 + simclr + tfc (A3 is off by default). TF-C scaled by cfg.tfc_weight;
+            # the 'tfc' part is always logged (0.0 when skipped) so telemetry stays stable.
+            if tfc_loss is not None:
+                out.total = out.total + cfg.tfc_weight * tfc_loss
+                out.parts["tfc"] = float(tfc_loss.detach())
+            else:
+                out.parts["tfc"] = 0.0
             frontend_reg = model.encoder.filterbank.adaptation_regularization()
             out.total = out.total + cfg.frontend_reg_weight * frontend_reg
             out.parts["frontend_reg"] = float(frontend_reg.detach())
