@@ -468,6 +468,9 @@ def main() -> None:
         frontend="learnable" if args.arm == "learnable" else "fixed",
         multiresolution=True,          # new Phase-A default: multiresolution ON (diagnostic-confirmed
                                        # winner, 0.835 held-out transfer); --no-multiresolution to ablate
+        text_conditioning="factored",  # PAPER default (F8): factored role+sensor conditioning is the
+                                       # committed arm; --text-conditioning per_channel is the ablation.
+                                       # (The dataclass default stays per_channel for direct/test ctors.)
     )
     if args.frontend is not None:
         cfg.frontend = args.frontend
@@ -587,7 +590,8 @@ def main() -> None:
             train_ds,
             sampler=TemperatureSampler(index.train, index.stream_datasets,
                                        num_samples=cfg.steps * cfg.batch_size,
-                                       alpha=cfg.sampler_alpha, seed=cfg.seed),
+                                       alpha=cfg.sampler_alpha, seed=cfg.seed,
+                                       batch_size=cfg.batch_size),   # within-batch no-replacement (F11)
             batch_size=cfg.batch_size, drop_last=True, **loader_kwargs)
     # val: no aug, fixed 1.0 s patches, plain order. compute_targets=False skips the per-window
     # A3 DSP (unused by embedding), and parallel persistent workers cut the collate time — together

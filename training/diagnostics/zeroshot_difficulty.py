@@ -880,10 +880,15 @@ def main() -> None:
     print_report(result, out)
 
     if tmpdir is not None:
-        # persist the JSON to cwd before deleting the synthetic scratch tree
-        final = Path("zeroshot_difficulty_synth.json")
-        final.write_text(json.dumps(result, indent=2))
-        print(f"\n(synthetic scratch grids deleted; JSON copied to {final.resolve()})")
+        # The synthetic `out` lives inside the scratch tree we are about to delete. If the caller
+        # gave --out, the JSON was ALSO written there (above) and survives — don't also litter cwd
+        # (F12). Only when no --out was given do we rescue a copy to cwd.
+        if args.out is None:
+            final = Path("zeroshot_difficulty_synth.json")
+            final.write_text(json.dumps(result, indent=2))
+            print(f"\n(synthetic scratch grids deleted; JSON copied to {final.resolve()})")
+        else:
+            print(f"\n(synthetic scratch grids deleted; JSON written to {args.out})")
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

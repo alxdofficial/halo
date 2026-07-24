@@ -491,7 +491,7 @@ class TemperatureSampler(Sampler[int]):
     Unlike ``BalancedBatchSampler`` there is no per-class structure — labels are unused (SimCLR)."""
 
     def __init__(self, keys: list[WindowKey], stream_datasets: list[str], num_samples: int,
-                 alpha: float = 0.5, seed: int = SEED):
+                 alpha: float = 0.5, seed: int = SEED, batch_size: int = 0):
         from collections import Counter
         datasets = [stream_datasets[k.stream_i] for k in keys]
         counts = Counter(datasets)
@@ -500,6 +500,10 @@ class TemperatureSampler(Sampler[int]):
         self.num_samples = int(num_samples)
         self.alpha = float(alpha)
         self.seed = int(seed)
+        # When >0, draw each batch of this size WITHOUT replacement so a batch never contains an exact
+        # duplicate window (an exact duplicate is an NT-Xent false negative for SimCLR); replacement
+        # still holds ACROSS batches (F11). 0 => legacy per-window with-replacement draw.
+        self.batch_size = int(batch_size)
         self.epoch = 0
 
     def __len__(self) -> int:
@@ -510,8 +514,16 @@ class TemperatureSampler(Sampler[int]):
         # different windows (mirrors BalancedBatchSampler's per-__iter__ epoch bump).
         gen = torch.Generator().manual_seed(self.seed + self.epoch)
         self.epoch += 1
-        idx = torch.multinomial(self.weights, self.num_samples, replacement=True, generator=gen)
-        yield from idx.tolist()
+        bs = self.batch_size
+        if 1 < bs <= self.weights.numel():
+            # Each batch drawn WITHOUT replacement (no exact within-batch duplicate = no NT-Xent
+            # false negative), WITH replacement across batches. num_samples is a multiple of bs.
+            for _ in range(self.num_samples // bs):
+                idx = torch.multinomial(self.weights, bs, replacement=False, generator=gen)
+                yield from idx.tolist()
+        else:
+            idx = torch.multinomial(self.weights, self.num_samples, replacement=True, generator=gen)
+            yield from idx.tolist()
 
 
 # ----------------------------------------------------------------------------------------------
