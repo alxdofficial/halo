@@ -241,26 +241,59 @@ class CorpusIndex:
         self.stream_datasets = [r.dataset for r in self.refs]   # stream_i -> dataset (for the sampler)
         rng = np.random.default_rng(seed)
 
-        # subject-disjoint split per dataset
+        # Windows the plausibility scan rejected as physically impossible (gyro beyond any consumer
+        # full-scale range). Cached by data.scripts.scan_implausible so indexing stays lazy.
+        from data.scripts.scan_implausible import load as _load_implausible
+        self.implausible = _load_implausible(alignment)
+
+        # Subject-disjoint split per dataset, chosen to COVER AS MANY LABELS as the budget allows.
+        # A purely random 10% draw left whole labels with zero val windows (e.g. `sleeping`: 15,100
+        # train / 0 val; `table_tennis`: 216/0), so val_knn_ba / val_conse_ba / best.pt selection
+        # silently scored 91 of 93 labels while the code claimed all of them. Greedy set-cover over
+        # subjects fixes that without touching disjointness (a subject is still wholly train or val).
         val_subjects: set[tuple[str, str]] = set()
         by_dataset: dict[str, set[str]] = {}
+        subj_labels: dict[tuple[str, str], set[str]] = {}
         for ref in self.refs:
             by_dataset.setdefault(ref.dataset, set()).update(ref.subjects)
+            for w in range(ref.n_windows):
+                subj_labels.setdefault((ref.dataset, ref.subjects[w]), set()).add(ref.labels[w])
         for dataset, subjects in sorted(by_dataset.items()):
             ordered = sorted(subjects)
             rng.shuffle(ordered)
             n_val = max(1, int(round(len(ordered) * VAL_SUBJECT_FRACTION)))
-            val_subjects.update((dataset, s) for s in ordered[:n_val])
+            need = set().union(*(subj_labels.get((dataset, s), set()) for s in ordered))
+            picked: list[str] = []
+            # greedy: repeatedly take the subject covering the most still-uncovered labels
+            while len(picked) < n_val and need:
+                best = max((s for s in ordered if s not in picked),
+                           key=lambda s: (len(subj_labels.get((dataset, s), set()) & need), s),
+                           default=None)
+                if best is None or not (subj_labels.get((dataset, best), set()) & need):
+                    break
+                picked.append(best)
+                need -= subj_labels.get((dataset, best), set())
+            for s in ordered:                       # fill any remaining budget in shuffled order
+                if len(picked) >= n_val:
+                    break
+                if s not in picked:
+                    picked.append(s)
+            val_subjects.update((dataset, s) for s in picked)
 
         # balanced selection + label map (train labels only)
         label_ids: dict[str, int] = {}
         self.train: list[WindowKey] = []
         self.val: list[WindowKey] = []
+        self.n_implausible_dropped = 0
         for stream_i, ref in enumerate(self.refs):
             n = ref.n_windows
+            bad = self.implausible.get(ref.key, set())
             chosen = (np.arange(n) if max_per_stream is None or n <= max_per_stream
                       else rng.choice(n, size=max_per_stream, replace=False))
             for w in np.sort(chosen):
+                if int(w) in bad:                    # physically impossible window — drop, never clip
+                    self.n_implausible_dropped += 1
+                    continue
                 label = ref.labels[int(w)]
                 if label not in label_ids:
                     label_ids[label] = len(label_ids)
@@ -270,14 +303,28 @@ class CorpusIndex:
                 else:
                     self.train.append(key)
         self.label_ids = label_ids
+        # Which labels the VAL split can actually score. best.pt is selected on val_knn_ba, so a
+        # label with zero val windows is silently unscored — surface it instead of claiming
+        # "all classes are scored" (audit F1).
+        val_labels = {k.label_id for k in self.val}
+        self.val_missing_labels = sorted(l for l, i in label_ids.items() if i not in val_labels)
+        self.n_val_labels = len(val_labels)
         # Shuffle val so any truncated eval subset (embed() caps at val_max_windows) is a
         # representative cross-dataset sample — index.val is otherwise stream-ordered, so a
         # 2k cap saw only capture24 (alphabetically first) = 8 of 56 labels.
         rng.shuffle(self.val)
 
     def summary(self) -> str:
+        extra = ""
+        if getattr(self, "n_implausible_dropped", 0):
+            extra += f" · {self.n_implausible_dropped} implausible dropped"
+        if getattr(self, "val_missing_labels", None):
+            extra += f" · val scores {self.n_val_labels}/{len(self.label_ids)} labels " \
+                     f"(missing: {', '.join(self.val_missing_labels[:4])})"
+        elif hasattr(self, "n_val_labels"):
+            extra += f" · val scores ALL {self.n_val_labels} labels"
         return (f"{len(self.refs)} streams · {len(self.train)} train / {len(self.val)} val "
-                f"windows · {len(self.label_ids)} labels")
+                f"windows · {len(self.label_ids)} labels{extra}")
 
 
 # ----------------------------------------------------------------------------------------------

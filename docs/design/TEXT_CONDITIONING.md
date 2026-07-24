@@ -1,3 +1,8 @@
+> **STATUS UPDATE (2026-07-24): factored conditioning is now the PAPER DEFAULT.** The
+> `pretrain` CLI defaults to `--text-conditioning factored`; `per_channel` is the ablation.
+> (The `PretrainConfig` dataclass default stays `per_channel` so direct/test constructors
+> are unaffected.) Text below that calls factored "opt-in" / "default off" is superseded.
+
 # Text conditioning — factoring channel text into per-sensor identity
 
 > **Status: design, 2026-07-22.** A refactor of how the tokenizer injects acquisition-config

@@ -26,6 +26,9 @@ RAW_DIR = DS_DIR / "downloads" / "USC-HAD"
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root for data.scripts imports
 
 SAMPLING_RATE = 100  # Hz
+# USC-HAD ships the gyroscope in DEGREES/second; the corpus canonical is rad/s and there is
+# no downstream gyro-unit rescale, so the converter must do it (as nfi_fared / xrf_v2 do).
+DEG2RAD = np.pi / 180.0
 
 # activity number (from the a{m}t{n}.mat filename) -> native label (Readme Section 3), underscored.
 ACTIVITY_MAP = {
@@ -82,7 +85,13 @@ def main():
             df = pd.DataFrame({
                 "timestamp_sec": np.arange(n) / SAMPLING_RATE,
                 "acc_x": readings[:, 0], "acc_y": readings[:, 1], "acc_z": readings[:, 2],
-                "gyro_x": readings[:, 3], "gyro_y": readings[:, 4], "gyro_z": readings[:, 5],
+                # USC-HAD ships the gyro in DEGREES/s; the corpus canonical is rad/s and there is NO
+                # downstream gyro-unit rescale (unlike accel's accel_units). Without this the stream
+                # was 57.3x too large — median |gyro| 28.4 rad/s and peaks of 1209 rad/s, ~35x beyond
+                # any consumer MEMS full scale. Converted here, exactly as nfi_fared/xrf_v2 do.
+                "gyro_x": readings[:, 3] * DEG2RAD,
+                "gyro_y": readings[:, 4] * DEG2RAD,
+                "gyro_z": readings[:, 5] * DEG2RAD,
                 "subject": f"s{subj:02d}",
             })
 

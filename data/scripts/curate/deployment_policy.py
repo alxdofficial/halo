@@ -140,7 +140,8 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                note="WearOS smartwatch, 15 fine-grained kitchen/bathroom hand ADLs. Acc m/s^2 "
                     "(gravity present); gyro rad/s. Left-wrist Puck.js excluded (unrecoverable gyro)."),
-    # XRF V2 (WWADL): five-position body IMU + AirPods ear IMU; 34 indoor ADLs, 3 volunteers.
+    # XRF V2 (WWADL) 'Plus' release: five-position body IMU + AirPods ear IMU; 34 indoor ADLs,
+    # 16 volunteers (upgraded from the old 3-subject WWADL_open subset).
     # Device->placement is read from the h5's OWN `device_order` field at convert time
     # (self-describing, so the Plus-vs-WWADL_open ordering difference cannot bite). Acc g, gyro rad/s.
     StreamSpec("xrf_v2", "glasses", "device", "the head (smart glasses)",
