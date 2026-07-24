@@ -184,6 +184,19 @@ class ChannelTextDropoutCfg:
     neutral: str = "an inertial sensor channel"
 
 
+@dataclass
+class SensorTextDropoutCfg:
+    """Neutralize per-SENSOR identity text (device/placement/gravity) so the factored model learns
+    to fall back gracefully when config metadata is missing (F7). Distinct from channel-text dropout,
+    which only touches the per-channel ROLE text and never the sensor identity. Bounded: with >=2
+    sensors it keeps >=1 described; a single-sensor stream may be fully neutralized (the
+    fully-unconditioned case), but only within the low sample rate `p`."""
+    enabled: bool = False
+    p: float = 0.1           # fraction of samples that get any sensor-text neutralized
+    max_frac: float = 0.5    # never neutralize more than this fraction of a sample's sensors (>=2 case)
+    neutral: str = "an inertial sensor"
+
+
 # Conservative, meaning-preserving substitutions for channel-description paraphrase. Only
 # sensor-family + axis SURFACE FORMS are swapped; placement/units/gravity are never touched.
 _CH_SYNONYMS = [
@@ -235,6 +248,7 @@ class AugmentationConfig:
     # Text augmentations (unified here so ALL augmentation lives in one config).
     channel_text_phrase: ChannelTextPhraseCfg = field(default_factory=ChannelTextPhraseCfg)
     channel_text_dropout: ChannelTextDropoutCfg = field(default_factory=ChannelTextDropoutCfg)
+    sensor_text_dropout: SensorTextDropoutCfg = field(default_factory=SensorTextDropoutCfg)
     label_text: LabelTextCfg = field(default_factory=LabelTextCfg)
 
     # Application order: metadata/physics-changing first, then value-space, then TEXT last
@@ -244,7 +258,7 @@ class AugmentationConfig:
     # after gravity/rotation.
     ORDER = ("window_crop", "channel_dropout", "rotation_3d", "gravity", "rate",
              "time_warp", "time_shift", "magnitude_warp", "scale", "jitter",
-             "channel_text_phrase", "channel_text_dropout", "label_text")
+             "channel_text_phrase", "channel_text_dropout", "sensor_text_dropout", "label_text")
 
     @classmethod
     def default_v2(cls) -> "AugmentationConfig":
@@ -258,6 +272,7 @@ class AugmentationConfig:
         cfg.window_crop.enabled = True    # variable observation length (session-length invariance)
         cfg.channel_text_phrase.enabled = True
         cfg.channel_text_dropout.enabled = True
+        cfg.sensor_text_dropout.enabled = True     # F7: teach graceful fallback on missing config text
         cfg.label_text.enabled = True
         return cfg
 
@@ -655,6 +670,29 @@ class IMUAugmenter:
                 for i in dropped:
                     role_desc[i] = spec.neutral
                 s.role_descriptions = role_desc
+        return s
+
+    # ---------- text: per-SENSOR identity dropout (device/placement/gravity) ----------
+    def _sensor_text_dropout(self, s, spec):
+        # F7: the factored model always saw the full sensor identity, so it never learned to operate
+        # when placement/device metadata is missing. Neutralize a bounded subset of the per-sensor
+        # descriptions: with >=2 sensors keep >=1 described; a single-sensor stream may be fully
+        # neutralized (the fully-unconditioned fallback), but that is rare (gated by the low spec.p).
+        if s.sensor_descriptions is None:
+            return s
+        n = len(s.sensor_descriptions)
+        if n == 0:
+            return s
+        if n == 1:
+            s.sensor_descriptions = [spec.neutral]
+            return s
+        max_drop = max(1, int(spec.max_frac * n))
+        k = min(_random.randint(1, max_drop), n - 1)      # keep >=1 sensor described
+        dropped = _random.sample(range(n), k)
+        desc = list(s.sensor_descriptions)
+        for i in dropped:
+            desc[i] = spec.neutral
+        s.sensor_descriptions = desc
         return s
 
     # ---------- text: label paraphrase (dataset-specific synonyms + templates) ----------

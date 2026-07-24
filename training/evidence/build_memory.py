@@ -97,6 +97,8 @@ def main() -> None:
     Z_parts, y_parts, subj_parts, cfg_parts = [], [], [], []
     subj_names: dict[str, int] = {}
     cfg_names: dict[str, int] = {}
+    bank_streams: dict[str, int] = {}       # ref.key -> encoded window count (corpus provenance, F3)
+    bank_datasets: set[str] = set()
 
     for ref in refs:
         gl = np.array([label_to_idx.get(canonicalize(l), -1) for l in ref.labels])
@@ -120,6 +122,8 @@ def main() -> None:
         y_parts.append(torch.from_numpy(gl[keep].astype(np.int64)))
         subj_parts.append(torch.from_numpy(s_ids))
         cfg_parts.append(torch.full((keep.size,), cfg_id, dtype=torch.int64))
+        bank_streams[ref.key] = int(keep.size)
+        bank_datasets.add(ref.dataset)
         print(f"[memory]   {ref.key}: {keep.size} windows, {len(set(subj_arr))} subjects", flush=True)
 
     Z = torch.cat(Z_parts)
@@ -164,6 +168,17 @@ def main() -> None:
                      "frontend": ckpt["config"].get("frontend"),
                      "multiresolution": ckpt["config"].get("multiresolution")},
         "max_per_stream": cap,
+        # Bind the bank to the corpus it was built from AND to the Phase-A corpus the encoder was
+        # trained on (F3): a matching vocabulary + backbone is not enough — a bank encoded over a
+        # different dataset roster / cap than the encoder saw is unattributable.
+        "corpus": {
+            "datasets": sorted(bank_datasets),
+            "n_streams": len(bank_streams),
+            "streams": bank_streams,                       # ref.key -> encoded window count
+            "n_encoded_windows": int(sum(bank_streams.values())),
+            "phase_a_corpus_fp": ckpt.get("corpus_fingerprint"),   # None for pre-fingerprint ckpts
+            "phase_a_corpus": ckpt.get("corpus"),
+        },
     }, str(args.out))
     print(f"-> {args.out}", flush=True)
 

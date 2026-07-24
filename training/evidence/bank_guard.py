@@ -39,9 +39,11 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
     enforceable guarantee is that they ARE recorded; consumers that know the expected backbone
     (eval_decoder, halo_evidence) additionally compare the checkpoint hash themselves.
     """
-    missing = [k for k in ("vocab_fp", "backbone") if k not in bank]
+    missing = [k for k in ("vocab_fp", "backbone", "corpus") if k not in bank]
     if "backbone" in bank and not bank["backbone"].get("fingerprint"):
         missing.append("backbone.fingerprint")
+    if "corpus" in bank and not bank["corpus"].get("streams"):
+        missing.append("corpus.streams")               # which streams the bank was encoded over (F3)
     if not missing:
         return
     where = f" ({context})" if context else ""
@@ -82,3 +84,27 @@ def assert_bank_current(bank: dict, *, context: str = "") -> None:
         f"      HALO_CKPT=training/tokenizer/outputs/pretrain_fixed_mr/best.pt \\\n"
         f"        python -m training.evidence.build_memory --device cuda\n\n"
         f"  See docs/design/REMEDIATION_PLAN.md Phase 0.2 / Phase 2.\n")
+
+
+def assert_bank_matches_backbone(bank: dict, ckpt: dict, *, context: str = "") -> None:
+    """Verify the bank was built over the SAME Phase-A corpus as the encoder checkpoint (F3).
+
+    A matching vocabulary + backbone fingerprint still is not enough: a bank encoded over a
+    different dataset roster / cap than the encoder was trained on produces retrieval vectors that
+    do not correspond to what the encoder learned. We compare the bank's recorded
+    ``corpus.phase_a_corpus_fp`` against the checkpoint's ``corpus_fingerprint``. Skips silently only
+    when BOTH predate corpus fingerprints (both None); raises if present and different.
+    """
+    bank_fp = (bank.get("corpus") or {}).get("phase_a_corpus_fp")
+    ckpt_fp = ckpt.get("corpus_fingerprint")
+    if bank_fp is None and ckpt_fp is None:
+        return
+    if bank_fp != ckpt_fp:
+        where = f" ({context})" if context else ""
+        raise SystemExit(
+            f"\n[bank_guard] BANK/ENCODER CORPUS MISMATCH{where} — refusing an unattributable result.\n"
+            f"  bank built over Phase-A corpus fp : {bank_fp!r}\n"
+            f"  encoder checkpoint corpus fp      : {ckpt_fp!r}\n"
+            f"  The retrieval vectors and the encoder disagree on which corpus they represent.\n"
+            f"  Rebuild the bank against this checkpoint:\n\n"
+            f"      python -m training.evidence.build_memory --checkpoint <this-ckpt> --device cuda\n")

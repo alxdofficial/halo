@@ -74,6 +74,18 @@ def test_text_dropout_respects_channel_budget_without_erasing_sensor_identity():
     assert all(out.channel_descriptions[i] == cfg.channel_text_dropout.neutral for i in dropped)
 
 
+def test_sensor_text_dropout_is_bounded_and_keeps_one_with_two_sensors():
+    cfg = AugmentationConfig.none()
+    cfg.sensor_text_dropout.enabled = True
+    cfg.sensor_text_dropout.p = 1.0
+    random.seed(3)
+    np.random.seed(3)
+    out = IMUAugmenter(cfg)(_sample())          # hhar phone_waist -> accel + gyro sensors
+    assert len(out.sensor_descriptions) == 2    # both slots kept; identity may be neutralized
+    survived = [d for d in out.sensor_descriptions if d != cfg.sensor_text_dropout.neutral]
+    assert len(survived) >= 1, "bounded dropout must keep >=1 sensor described when there are 2"
+
+
 def test_padding_only_accelerometer_is_not_treated_as_physical_gravity():
     cfg = AugmentationConfig.none()
     cfg.gravity.enabled = True
