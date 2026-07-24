@@ -58,21 +58,17 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
         duration_max_seconds=max(c.get("long_patch_choices", (1.5,))),
         duration_gate_init=c.get("duration_gate_init", 0.1),
         rope_min_period=0.4 if c.get("multiresolution", False) else 0.5,
+        text_conditioning=c.get("text_conditioning", "per_channel"),  # reconstruct the ACTUAL arm
+        gate_bias_init=c.get("gate_bias_init", -2.0),
     )
-    if frontend in ("mamba", "mamba_sensor"):
-        kw.update(n_layers=c.get("mamba_n_layers", 3), d_state=c.get("mamba_d_state", 16),
-                  d_conv=c.get("mamba_d_conv", 4), scan_chunk=c.get("mamba_scan_chunk", 32))
-        if c.get("mamba_d_inner", 0):
-            kw["d_inner"] = c["mamba_d_inner"]
-    else:                                                   # fixed / learnable filterbank hyperparams
-        kw.update(
-            center_shift_fraction=c.get("center_shift_fraction", 0.45),
-            bandwidth_factor_max=c.get("bandwidth_factor_max", 1.5),
-            compression_gain_max=c.get("compression_gain_max", 2.0),
-            filter_shape_min=c.get("filter_shape_min", 1.5),
-            filter_shape_max=c.get("filter_shape_max", 2.5),
-            adaptive_gate_init=c.get("adaptive_gate_init", 0.1),
-        )
+    kw.update(                                              # fixed / learnable filterbank hyperparams
+        center_shift_fraction=c.get("center_shift_fraction", 0.45),
+        bandwidth_factor_max=c.get("bandwidth_factor_max", 1.5),
+        compression_gain_max=c.get("compression_gain_max", 2.0),
+        filter_shape_min=c.get("filter_shape_min", 1.5),
+        filter_shape_max=c.get("filter_shape_max", 2.5),
+        adaptive_gate_init=c.get("adaptive_gate_init", 0.1),
+    )
     enc = SetTokenizerEncoder(**kw)
     enc.load_state_dict(ckpt["encoder"])
     enc.eval_resolution_pair = tuple(c.get("val_resolution_pair", VAL_RESOLUTION_PAIR))
@@ -82,43 +78,56 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
 
 @torch.no_grad()
 def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
-                   channel_mask=None, sensor_text=None) -> torch.Tensor:
+                   channel_mask=None, dataset=None, stream=None) -> torch.Tensor:
     """(N, T, 6) raw windows at the stream's NATIVE rate -> (N, d) pooled embeddings.
 
-    For frontend=mamba_sensor the encoder needs a CONTIGUOUS (non-overlapping) patch timeline, the
-    per-patch lengths, and the single sensor-identity text (C=1) — matched to training (audit #1/#2).
+    ``dataset``/``stream`` are only needed for a FACTORED encoder (to build the role/sensor text);
+    the default per_channel path uses the ``texts`` (per-channel descriptions) exactly as before.
     """
-    per_sensor = getattr(enc, "frontend_kind", "") == "mamba_sensor"
     collate = (
         MultiResolutionCollate(fixed_patch_seconds=enc.eval_resolution_pair,
                                min_resolution_ratio=enc.min_resolution_ratio,
                                compute_targets=False)
         if enc.use_duration_embedding else
-        MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS, compute_targets=False,
-                          contiguous=per_sensor)
+        MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS, compute_targets=False)
     )
-    enc_texts = [sensor_text or (texts[0] if isinstance(texts, (list, tuple)) else texts)] if per_sensor else texts
+    enc_texts = texts
+    factored = getattr(enc, "text_conditioning", "per_channel") == "factored"
+    if factored:
+        if dataset is None or stream is None:
+            raise ValueError("a factored encoder needs dataset+stream to build the factored "
+                             "(role/sensor) text conditioning; pass them to encode_dataset()")
+        role_texts, sensor_texts, sensor_id_list = stream_sensor_texts(dataset, stream)
+        sensor_id_t = torch.tensor(sensor_id_list, dtype=torch.long)
     cmask = (torch.ones(6, dtype=torch.bool) if channel_mask is None
              else torch.as_tensor(channel_mask, dtype=torch.bool))
     embs = []
     for start in range(0, len(data), 256):
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
-        batch = collate([
-            {"data": window, "rate": rate, "texts": enc_texts, "label_id": 0,
-             "channel_mask": cmask, "gravity_state": gravity_state, "source": "eval"}
-            for window in block
-        ])
-        plen = (batch["patch_len_per"] if (per_sensor and "patch_len_per" in batch)
-                else batch["patch_len"])
+        items = []
+        for window in block:
+            item = {"data": window, "rate": rate, "texts": enc_texts, "label_id": 0,
+                    "channel_mask": cmask, "gravity_state": gravity_state, "source": "eval"}
+            if factored:
+                item["role_texts"] = role_texts
+                item["sensor_texts"] = sensor_texts
+                item["sensor_id"] = sensor_id_t
+            items.append(item)
+        batch = collate(items)
+        plen = batch["patch_len"]
         out = enc(
             batch["patches"].to(device), batch["rates"].to(device),
-            plen.to(device), batch["texts"], batch["positions"].to(device),
+            plen.to(device),
+            batch["role_texts"] if factored else batch["texts"],   # channel_texts = ROLE when factored
+            batch["positions"].to(device),
             patch_durations=(batch["patch_durations"].to(device)
                              if "patch_durations" in batch else None),
             resolution_ids=(batch["resolution_ids"].to(device)
                             if "resolution_ids" in batch else None),
             channel_mask=batch["channel_mask"].to(device),
             patch_padding_mask=batch["patch_padding_mask"].to(device),
+            sensor_texts=(batch["sensor_texts"] if factored else None),
+            sensor_id=(batch["sensor_id"].to(device) if factored else None),
         )
         embs.append(out["pooled"].cpu())
     return torch.cat(embs)
@@ -161,9 +170,9 @@ def main() -> None:
         labels = np.asarray(ref.labels)
         subjects = np.asarray(ref.subjects)
         texts = stream_channel_descriptions(dataset, stream)
-        sensor_text = stream_sensor_texts(dataset, stream)[1][0]   # per-sensor arm (ignored otherwise)
         z = encode_dataset(enc, data, texts, device, ref.rate_hz,
-                           _stream_gravity_state(dataset, stream), sensor_text=sensor_text)
+                           _stream_gravity_state(dataset, stream),
+                           dataset=dataset, stream=stream)
 
         # subject-disjoint 50/50 split
         subj = sorted(set(subjects.tolist()))

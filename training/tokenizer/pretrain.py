@@ -78,6 +78,12 @@ class PretrainConfig:
     dropout: float = 0.1
     arm: str = "fixed"                    # headline preset: fixed | learnable
     frontend: str = "fixed"               # independently switchable for attribution
+    # Config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). 'per_channel' (default) is the
+    # legacy one-description-per-channel path; 'factored' splits it into per-channel ROLE text +
+    # per-sensor IDENTITY text. Default MUST stay 'per_channel' (do-no-harm). asdict(cfg) serializes
+    # both into the checkpoint config, so eval/reconstruction picks up the arm automatically.
+    text_conditioning: str = "per_channel"
+    gate_bias_init: float = -2.0          # factored fusion identity-gate bias at init (sigma~=0.12)
     # NB: the `pretrain` CLI defaults multiresolution=True (the diagnostic-confirmed winner); this
     # dataclass default stays False so direct constructors (e.g. grad_check) get the single-res encoder.
     multiresolution: bool = False
@@ -107,12 +113,6 @@ class PretrainConfig:
     # home-field for the filterbank arm (audit #7). For an objective-NEUTRAL tokenizer comparison set
     # a1_weight=0 -> train on A2 (SupCon) + A3 (grounding) only, both frontend-agnostic.
     a1_weight: float = 1.0
-    # --- mamba frontend (only used when frontend=="mamba"); stamped in the checkpoint for repro ---
-    mamba_n_layers: int = 3               # stacked Mamba blocks (intra-patch depth)
-    mamba_d_state: int = 16
-    mamba_d_inner: int = 0                 # 0 -> 2*d_model
-    mamba_d_conv: int = 4
-    mamba_scan_chunk: int = 32             # gradient-checkpointed scan chunk (backward memory)
     calib_batches: int = 50               # frontend norm calibration pass
     val_every: int = 1_000
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
@@ -132,20 +132,12 @@ class PretrainConfig:
 class PipelineAModel(nn.Module):
     def __init__(self, cfg: PretrainConfig, a1_target_dim: int):
         super().__init__()
-        # Frontend-specific kwargs (only the selected arm's; build_frontend forwards these to the
-        # chosen tokenizer). The mamba arm is now integrated into the loop (calibration /
-        # regularization / logging / checkpoint / eval reconstruction all go through the shared
-        # frontend interface); its hyperparameters are stamped in PretrainConfig for reproducibility.
-        fe_kwargs = {}
-        if cfg.frontend in ("mamba", "mamba_sensor"):
-            fe_kwargs = dict(n_layers=cfg.mamba_n_layers, d_state=cfg.mamba_d_state,
-                             d_conv=cfg.mamba_d_conv, scan_chunk=cfg.mamba_scan_chunk)
-            if cfg.mamba_d_inner:
-                fe_kwargs["d_inner"] = cfg.mamba_d_inner
         self.encoder = SetTokenizerEncoder(
             d_model=cfg.d_model, num_layers=cfg.num_layers, num_heads=cfg.num_heads,
             dim_feedforward=cfg.dim_feedforward, dropout=cfg.dropout, dft_size=DFT_SIZE,
-            frontend=cfg.frontend, **fe_kwargs,   # route the ARM's frontend (was: silently ignored -> fixed)
+            frontend=cfg.frontend,                # 'fixed' (default) | 'learnable'
+            text_conditioning=cfg.text_conditioning,  # 'per_channel' (default) | 'factored'
+            gate_bias_init=cfg.gate_bias_init,
             use_duration_embedding=cfg.multiresolution,
             duration_min_seconds=min(cfg.short_patch_choices),
             duration_max_seconds=max(cfg.long_patch_choices),
@@ -285,9 +277,11 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
         lab = batch["labels"]
         take = [j for j, l in enumerate(lab.tolist()) if counts[l] < per_label]
         if take:
-            per_sensor = model.encoder.frontend_kind == "mamba_sensor"
-            texts = batch["sensor_texts"] if per_sensor else batch["texts"]
-            plen = batch["patch_len_per"] if (per_sensor and "patch_len_per" in batch) else batch["patch_len"]
+            # factored: channel_texts carries ROLE text and the sensor identity is passed alongside;
+            # per_channel (default): unchanged (sensor_texts/sensor_id stay None -> forward defaults).
+            factored = model.encoder.text_conditioning == "factored"
+            texts = batch["role_texts"] if factored else batch["texts"]
+            plen = batch["patch_len"]
             out = model.encoder(
                 batch["patches"].to(device), batch["rates"].to(device),
                 plen.to(device), texts,
@@ -298,6 +292,8 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
                                 if "resolution_ids" in batch else None),
                 channel_mask=batch["channel_mask"].to(device),
                 patch_padding_mask=batch["patch_padding_mask"].to(device),
+                sensor_texts=(batch["sensor_texts"] if factored else None),
+                sensor_id=(batch["sensor_id"].to(device) if factored else None),
             )
             pooled = out["pooled"].cpu()
             zs.append(pooled[take])
@@ -352,19 +348,21 @@ def main() -> None:
                              "multiresolution (the winning Phase-A config; see "
                              "docs/design/LEARNABLE_TOKENIZER_ARM.md). 'learnable' swaps in the "
                              "constrained adaptive frontend — a documented negative result, kept opt-in.")
-    parser.add_argument("--frontend", choices=("fixed", "learnable", "mamba", "mamba_sensor"),
-                        default=None,
-                        help="tokenizer arm. 'mamba' = per-channel per-patch selective SSM; "
-                             "'mamba_sensor' = per-sensor, patch-free, CAUSAL continuous-scan SSM "
-                             "(requires --no-multiresolution and --a1-weight 0). Both need the fused "
-                             "mamba_ssm kernel on CUDA (docs/design/TOKENIZER_ABLATION.md).")
+    parser.add_argument("--frontend", choices=("fixed", "learnable"), default=None,
+                        help="tokenizer arm. 'fixed' = physical-Hz constant-Q filterbank (default); "
+                             "'learnable' = the constrained-adaptive filterbank (documented negative "
+                             "result, kept opt-in; docs/design/LEARNABLE_TOKENIZER_ARM.md).")
+    parser.add_argument("--text-conditioning", choices=("per_channel", "factored"), default=None,
+                        help="config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). "
+                             "'per_channel' (default) = one description per channel; 'factored' = "
+                             "per-channel ROLE text + per-sensor IDENTITY text. None keeps the "
+                             "config default (per_channel).")
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
                         help="override multiresolution (default ON); --no-multiresolution is the "
                              "single-resolution ablation")
     parser.add_argument("--a1-weight", type=float, default=None,
                         help="scale the A1 masked-recon loss. Set 0 for an objective-NEUTRAL tokenizer "
-                             "comparison (A1's target is the filterbank — home-field; see "
-                             "docs/design/TOKENIZER_ABLATION.md #7).")
+                             "comparison because A1's target is the fixed filterbank.")
     parser.add_argument("--subset", action="store_true",
                         help="train on the tokenizer-ablation 3-rate-core subset (5 datasets, xrf_v2 "
                              "held out) instead of the full corpus. See ablation_subset.py.")
@@ -373,10 +371,6 @@ def main() -> None:
     parser.add_argument("--max-per-stream", type=int, default=None,
                         help="per-stream window cap (default: None=all; --subset defaults to the "
                              "ablation DEFAULT_CAP so train and metric-eval share one corpus).")
-    parser.add_argument("--mamba-d-inner", type=int, default=None,
-                        help="mamba SSM inner width (default 2*d_model); lock it for the config sweep.")
-    parser.add_argument("--mamba-n-layers", type=int, default=None,
-                        help="mamba stacked blocks (default 3).")
     parser.add_argument("--seed", type=int, default=None,
                         help="MODEL seed (init/augmentation/batch order). Vary this across replicates.")
     parser.add_argument("--data-seed", type=int, default=None,
@@ -393,6 +387,8 @@ def main() -> None:
     )
     if args.frontend is not None:
         cfg.frontend = args.frontend
+    if args.text_conditioning is not None:
+        cfg.text_conditioning = args.text_conditioning
     if args.multiresolution is not None:
         cfg.multiresolution = args.multiresolution
     if args.a1_weight is not None:
@@ -401,10 +397,6 @@ def main() -> None:
         cfg.seed = args.seed
     if args.data_seed is not None:
         cfg.data_seed = args.data_seed
-    if args.mamba_d_inner is not None:
-        cfg.mamba_d_inner = args.mamba_d_inner
-    if args.mamba_n_layers is not None:
-        cfg.mamba_n_layers = args.mamba_n_layers
     if args.datasets is not None:
         cfg.train_datasets = tuple(args.datasets)
     elif args.subset:
@@ -430,33 +422,9 @@ def main() -> None:
             # carry the fine-grained overrides the smoke reconstruction used to DROP (audit #6):
             a1_weight=cfg.a1_weight, seed=cfg.seed, data_seed=cfg.data_seed,
             train_datasets=cfg.train_datasets,
-            mamba_d_inner=cfg.mamba_d_inner, mamba_n_layers=cfg.mamba_n_layers,
+            text_conditioning=cfg.text_conditioning, gate_bias_init=cfg.gate_bias_init,
         )
     device = torch.device(cfg.device)
-    if cfg.frontend == "mamba_sensor":
-        # The per-sensor continuous scan concatenates patches into one timeline, so multiresolution
-        # (two patch sizes over the same window) has no single ordering; and A1's target is per-channel.
-        if cfg.multiresolution:
-            raise RuntimeError("frontend=mamba_sensor requires --no-multiresolution (the continuous "
-                               "scan needs one patch timeline; multi-scale = multi-stride readout, TODO).")
-        if cfg.a1_weight != 0:
-            raise RuntimeError("frontend=mamba_sensor requires --a1-weight 0 (A1's reconstruction "
-                               "target is the per-CHANNEL filterbank; it is undefined for C=1 tokens).")
-    if cfg.frontend in ("mamba", "mamba_sensor"):
-        # Fail LOUD rather than silently falling back to the ~50x-slower Python scan on a real run.
-        from model.tokenizer.mamba_frontend import _HAS_KERNEL
-        use_kernel = _HAS_KERNEL and device.type == "cuda"
-        print(f"[{cfg.frontend}] scan backend: "
-              f"{'fused CUDA kernel' if use_kernel else 'pure-PyTorch reference'}", flush=True)
-        if device.type == "cuda" and not _HAS_KERNEL:
-            raise RuntimeError(
-                f"frontend={cfg.frontend} on CUDA but the fused mamba_ssm kernel is NOT importable — "
-                "the pure-PyTorch scan is ~50x slower and will not finish a real run. Install "
-                "causal-conv1d + mamba-ssm, or use --frontend fixed.")
-        if device.type != "cuda" and not args.smoke:
-            raise RuntimeError(
-                f"frontend={cfg.frontend} without CUDA uses the pure-PyTorch scan (fine for --smoke, "
-                "far too slow for a real run). Use --device cuda, or --smoke for a tiny CPU sanity run.")
     if device.type == "cuda":
         # TF32 for the fp32 regions autocast doesn't cover (filterbank einsum/proj, val ridge
         # solve). Free + zero-risk on Ampere+; the transformer already runs fp16 under autocast.
@@ -489,12 +457,11 @@ def main() -> None:
           flush=True)
     train_ds = PretrainDataset(index, index.train, augment=True)
     val_ds = PretrainDataset(index, index.val, augment=False)
-    per_sensor = cfg.frontend == "mamba_sensor"   # needs a NON-overlapping (contiguous) patch timeline
     train_collate = (MultiResolutionCollate(
         short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
         min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
     ) if cfg.multiresolution
-                     else MultiScaleCollate(seed=cfg.seed, contiguous=per_sensor))
+                     else MultiScaleCollate(seed=cfg.seed))
     train_loader = DataLoader(
         train_ds,
         batch_sampler=BalancedBatchSampler(index.train, cfg.classes_per_batch,
@@ -513,7 +480,7 @@ def main() -> None:
                                min_resolution_ratio=cfg.min_resolution_ratio,
                                compute_targets=False)
         if cfg.multiresolution else
-        MultiScaleCollate(fixed_patch_seconds=1.0, compute_targets=False, contiguous=per_sensor)
+        MultiScaleCollate(fixed_patch_seconds=1.0, compute_targets=False)
     )
     val_loader = DataLoader(val_ds, batch_size=256, shuffle=False, collate_fn=val_collate,
                             num_workers=val_workers, persistent_workers=val_workers > 0,
@@ -536,9 +503,8 @@ def main() -> None:
             yield from loader
 
     # ---------------------------------------------------- A1 target tokenizer (only if A1 is on)
-    # A1's target is the fixed filterbank's per-channel features. When a1_weight=0 (e.g. the
-    # objective-neutral tokenizer comparison / the per-sensor arm) building + calibrating it for
-    # calib_batches is avoidable work (audit #7); the a1_head stays but is fed a zero-weight term.
+    # A1's target is the fixed filterbank's per-channel features. When a1_weight=0, building and
+    # calibrating it for calib_batches is avoidable work; the a1_head stays but receives zero weight.
     compute_a1 = cfg.a1_weight > 0
     if compute_a1:
         target_tok = PhysicalFilterbankTokenizer(d_model=1, dft_size=DFT_SIZE)
@@ -564,11 +530,8 @@ def main() -> None:
 
     # ------------------------------------------------------------------ model
     model = PipelineAModel(cfg, a1_target_dim=a1_target_dim).to(device)
-    # Calibrate the ENCODER's frontend with its OWN accumulate/finalize (frontend-agnostic). The
-    # filterbank computes per-band + signed-DC stats; the mamba SSM computes per-modality stats. This
-    # replaces copying filterbank-specific buffers (norm_mu/dc_mu), which assumed the encoder frontend
-    # WAS a filterbank and broke for mamba (different buffer shapes / no dc_mu). Same data as the A1
-    # target, so the filterbank arm's stats are unchanged.
+    # Calibrate the ENCODER's frontend with its OWN accumulate/finalize (per-band + signed-DC stats),
+    # over the same data as the A1 target.
     fe = model.encoder.filterbank
     fe.reset_norm_accumulator()
     fe_iter = _cycle(train_loader)
@@ -592,20 +555,10 @@ def main() -> None:
         "encoder.filterbank._compression_logits", "encoder.filterbank._shape_logit",
         "encoder.filterbank._adaptive_gate_logit",
     }
-    # Mamba SSM parameters that must NOT get weight decay (audit 2026-07-23 #4): the official
-    # mamba_ssm marks A_log and D as `_no_weight_decay`; AdamW shrinkage over 30k steps (~0.53x)
-    # would corrupt the state timescales / skip strength. dt_proj.bias encodes the physical Δ
-    # baseline — decaying it fights `adaptation_regularization` (which pulls Δ-mult toward 1), so it
-    # is excluded too. These live under the frontend (named `filterbank` even for the mamba arm).
-    def _is_mamba_no_decay(name: str) -> bool:
-        return name.startswith("encoder.filterbank.") and (
-            name.endswith(".A_log") or name.endswith(".D") or name.endswith(".dt_proj.bias"))
-    adaptive_params, mamba_no_decay, base_params = [], [], []
+    adaptive_params, base_params = [], []
     for name, parameter in model.named_parameters():
         if name in adaptive_names:
             adaptive_params.append(parameter)
-        elif _is_mamba_no_decay(name):
-            mamba_no_decay.append(parameter)
         else:
             base_params.append(parameter)
     param_groups = [{"params": base_params, "lr": cfg.lr, "weight_decay": cfg.weight_decay}]
@@ -614,8 +567,6 @@ def main() -> None:
         # weight decay would pull the residual gate logit toward zero, i.e. gate=0.5, not fixed=0.
         param_groups.append({"params": adaptive_params, "lr": cfg.lr * cfg.frontend_lr_scale,
                              "weight_decay": 0.0})
-    if mamba_no_decay:
-        param_groups.append({"params": mamba_no_decay, "lr": cfg.lr, "weight_decay": 0.0})
     opt = torch.optim.AdamW(param_groups)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min((s + 1) / max(cfg.warmup_steps, 1), 1.0)
@@ -703,8 +654,6 @@ def main() -> None:
         patches = batch["patches"].to(device, non_blocking=True)   # NOT gravity-aligned (2026-07-19 design)
         rates = batch["rates"].to(device)
         patch_len = batch["patch_len"].to(device)
-        # per-patch real lengths for the per-sensor continuous scan (non-overlapping contiguous patches)
-        patch_len_per = batch["patch_len_per"].to(device) if "patch_len_per" in batch else patch_len
         positions = batch["positions"].to(device)
         patch_durations = (batch["patch_durations"].to(device)
                            if "patch_durations" in batch else None)
@@ -715,10 +664,8 @@ def main() -> None:
         labels = batch["labels"].to(device)
         B, P, _, C = patches.shape
 
-        per_sensor = cfg.frontend == "mamba_sensor"
-        # A1's reconstruction target is the FILTERBANK's per-CHANNEL features, so it is inherently a
-        # per-channel objective — undefined for the per-sensor arm (C=1 tokens), and pure waste when
-        # a1_weight=0. Gate the whole A1 path (incl. its second, masked encoder pass) on it.
+        # A1's reconstruction target is the FILTERBANK's per-CHANNEL features; gate the whole A1 path
+        # (incl. its second, masked encoder pass) on a1_weight so a1_weight=0 skips it entirely.
         compute_a1 = cfg.a1_weight > 0
 
         # validity-aware A1 mask: temporal block on real patches, drops on real channels.
@@ -747,24 +694,29 @@ def main() -> None:
                         o, _ = target_tok.masks(rates, patch_len)            # (B, K) Nyquist-observable
                         extra = o.new_ones(B, len(signal_idx) - o.shape[1])
                         a1_feature_valid = torch.cat([o, extra], dim=1).view(B, 1, 1, -1)
-                if per_sensor:
-                    # fused stem needs the raw (B,C) mask; the frontend emits (B,P,1,d), so the encoder
-                    # sees ONE always-present 'sensor channel' and the sensor-identity TEXT (C=1). Uses
-                    # PER-PATCH lengths so the continuous scan masks each non-overlapping patch honestly.
-                    sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len_per,
-                                                           channel_mask=channel_mask)
-                    enc_channel_mask = torch.ones(B, 1, dtype=torch.bool, device=device)
-                    enc_texts = batch["sensor_texts"]
-                else:
-                    sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len)
-                    enc_channel_mask = channel_mask
-                    enc_texts = batch["texts"]
-            text_embs, text_masks = model.encoder.encode_texts(enc_texts, device)
+                sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len)
+                enc_channel_mask = channel_mask
+                enc_texts = batch["texts"]
+            # Config-text conditioning, built ONCE and reused by the clean and masked encode passes.
+            # per_channel (default): per-channel descriptions -> (B,C,S,384); UNCHANGED from before.
+            # factored: ROLE text -> text_embs/text_masks; the per-sensor IDENTITY carried separately
+            # (sensor_text_embs/masks/id), summed inside the fusion (docs/design/TEXT_CONDITIONING.md).
+            if cfg.text_conditioning == "factored":
+                text_embs, text_masks, sensor_text_embs, sensor_text_masks = \
+                    model.encoder.encode_texts_factored(
+                        batch["role_texts"], batch["sensor_texts"], device)
+                enc_sensor_id = batch["sensor_id"].to(device)
+            else:
+                text_embs, text_masks = model.encoder.encode_texts(enc_texts, device)
+                sensor_text_embs = sensor_text_masks = enc_sensor_id = None
             clean = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
                                          patch_durations=patch_durations,
                                          resolution_ids=resolution_ids,
                                          channel_mask=enc_channel_mask,
-                                         patch_padding_mask=patch_pad)
+                                         patch_padding_mask=patch_pad,
+                                         sensor_text_embs=sensor_text_embs,
+                                         sensor_text_masks=sensor_text_masks,
+                                         sensor_id=enc_sensor_id)
             z = model.a2_proj(clean["pooled"])
             if compute_a1:
                 masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
@@ -773,7 +725,10 @@ def main() -> None:
                                               cross_resolution_attention=not cfg.multiresolution,
                                               token_mask=plan.token_mask,
                                               channel_mask=enc_channel_mask,
-                                              patch_padding_mask=patch_pad)
+                                              patch_padding_mask=patch_pad,
+                                              sensor_text_embs=sensor_text_embs,
+                                              sensor_text_masks=sensor_text_masks,
+                                              sensor_id=enc_sensor_id)
                 a1_pred = model.a1_head(masked["tokens"])
                 a1_loss_mask = plan.token_mask & enc_channel_mask.unsqueeze(1) & patch_pad.unsqueeze(2)
             else:
@@ -855,8 +810,7 @@ def main() -> None:
             rec = {"step": step, "val_knn_ba": ba, "val_conse_ba": round(conse_ba, 4),
                    "val_ba_by_source": ba_by_src, "val_conse_by_source": conse_by_src}
             if device.type == "cuda":
-                # peak so far (train step + val embedding) — telemetry for the memory-sensitive
-                # mamba tokenizer, whose per-channel scan is far heavier than the filterbank.
+                # peak so far (train step + val embedding) — memory telemetry.
                 rec["peak_gib"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
             print(json.dumps(rec), flush=True)
             with log_path.open("a") as f:

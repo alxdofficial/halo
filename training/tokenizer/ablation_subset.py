@@ -1,9 +1,8 @@
-"""The 3-rate-core subset for the tokenizer ablation (docs/design/TOKENIZER_ABLATION.md).
+"""The 3-rate-core subset for controlled tokenizer experiments.
 
-A small, deliberately diverse slice of the corpus for pretraining BOTH tokenizer arms (fixed
-filterbank vs learned SSM) fast and fairly. Chosen to span the three axes the comparison must
-exercise — sampling rate (20/50/100 Hz), on-body placement, and channel modality (acc-only vs
-acc+gyro) — plus gravity present/removed, with a held-out dataset for cross-config transfer.
+A small, deliberately diverse slice of the corpus for running tokenizer experiments quickly.
+It spans sampling rate (20/50/100 Hz), on-body placement, channel modality (acc-only vs
+acc+gyro), and gravity present/removed, with a held-out dataset for cross-config transfer.
 
     6 train streams / 5 datasets:
       wisdm phone_pocket   20 Hz  pocket  acc+gyro  gravity     (only 20 Hz — low-rate stress)
@@ -70,7 +69,7 @@ def iter_split_streams(index, split: str = "val") -> Iterator[dict]:
              stream, placement}.
     """
     from collections import defaultdict
-    from training.tokenizer.pretrain_data import (stream_channel_descriptions, stream_sensor_texts,
+    from training.tokenizer.pretrain_data import (stream_channel_descriptions,
                                                   _stream_gravity_state)
 
     keys = getattr(index, split)
@@ -91,7 +90,6 @@ def iter_split_streams(index, split: str = "val") -> Iterator[dict]:
             "data": data,
             "labels": labels,
             "texts": stream_channel_descriptions(ref.dataset, ref.stream),
-            "sensor_text": stream_sensor_texts(ref.dataset, ref.stream)[1][0],  # per-sensor arm
             "rate": float(ref.rate_hz),
             "gravity": _stream_gravity_state(ref.dataset, ref.stream),
             "channel_mask": np.asarray(ref.mask, dtype=bool),

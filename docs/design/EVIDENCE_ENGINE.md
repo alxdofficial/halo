@@ -46,7 +46,7 @@ query ──▶ ARCHETYPAL MEMORY (curated, non-parametric, evolving) ──▶ 
 ANALYSIS = per-candidate {evidence-for, evidence-against, analogues, calibrated confidence, ABSTAIN}
 ```
 The **feature unit is a primitive, not a patch.** A patch is a time-box; the *feature* is
-"this band's energy on this channel," "this cross-channel phase pattern," "this cadence."
+"this band's energy on this channel," "this channel's spectral shape," "this cadence."
 A never-seen activity is then a **novel combination of familiar primitives** → retrieval
 *composes* instead of matching whole embeddings.
 
@@ -376,8 +376,7 @@ robustness they buy (each must be **ablatable**; physics-grounded hand-crafting 
 because it's more heterogeneity-robust than learned filters):
 
 - **A. Cross-channel relational (biggest salience win — "patterns formed by channels"):**
-  per-band **coherence/phase** between channels (amplitude-normalized → gain-robust; encodes
-  movement plane/direction); inter-channel **covariance/correlation** structure;
+  inter-channel **covariance/correlation** structure;
   **orientation-normalized projection** (within-patch PCA of the accel triad → dominant motion
   plane → project → mounting-angle/placement-robust axes = *earned*, config-conditional invariance).
 - **B. Amplitude-relative / scale-free (gain & g-vs-m/s² robust):** **relative band energies**

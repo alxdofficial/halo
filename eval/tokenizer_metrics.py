@@ -1,6 +1,6 @@
-"""Tokenizer-quality metric suite (docs/design/TOKENIZER_ABLATION.md §"How to compare").
+"""Tokenizer-quality metric suite for controlled frontend experiments.
 
-Head-free and config-axis metrics for comparing tokenizer arms, chosen so the comparison does NOT
+Head-free and config-axis metrics for comparing tokenizer configurations, chosen so the comparison does NOT
 rest only on a downstream predictor head — and, crucially, does NOT use the A1/filterbank-similarity
 objective (confound #7: A1's target is the fixed filterbank, so it is home-field for Arm A).
 
@@ -166,8 +166,7 @@ def collect_embeddings(enc, index, split: str, device, per_stream_cap: Optional[
             data, labels = data[sel], labels[sel]
         with torch.no_grad():
             z = encode_dataset(enc, data, st["texts"], device, st["rate"],
-                               gravity_state=st["gravity"], channel_mask=st["channel_mask"],
-                               sensor_text=st.get("sensor_text"))
+                               gravity_state=st["gravity"], channel_mask=st["channel_mask"])
         Zs.append(z.numpy())
         ys.append(labels)
         rates.append(np.full(len(labels), st["rate"]))

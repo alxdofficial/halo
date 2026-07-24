@@ -56,7 +56,7 @@ class SetTokenizerEncoder(nn.Module):
         dim_feedforward: int = 256,
         dropout: float = 0.1,
         text_model: str = "all-MiniLM-L6-v2",
-        frontend: str = "fixed",                  # tokenizer front end: 'fixed'|'learnable'|'mamba' (see scattering.build_frontend)
+        frontend: str = "fixed",                  # tokenizer front end: 'fixed'|'learnable' (see scattering.build_frontend)
         text_conditioning: str = "per_channel",  # 'per_channel' (legacy) | 'factored' (role+sensor)
         gate_bias_init: float = -2.0,             # factored: negative => identity lightly injected @ init
         temporal_mode: str = "full",           # 'full' | 'causal' (streaming/world-model)
@@ -86,7 +86,7 @@ class SetTokenizerEncoder(nn.Module):
         if legacy_learnable is not None and frontend == "fixed":
             frontend = "learnable" if legacy_learnable else "fixed"
         self.frontend_kind = frontend
-        # The tokenizer front end is swappable (fixed filterbank | mamba | ...) but every option
+        # The tokenizer front end is swappable (fixed filterbank | learnable) but every option
         # honours the same (B,P,S,C)+rate+N -> (B,P,C,d) contract, so the encoder body is identical
         # across the ablation. Attribute stays named `filterbank` for back-compat with checkpoints
         # and the tokenize() shim below.
@@ -127,11 +127,9 @@ class SetTokenizerEncoder(nn.Module):
     # text embeddings ONCE and only re-runs the cheap transformer tail.
 
     def tokenize(self, patches, sampling_rate_hz, patch_len_samples, channel_mask=None) -> torch.Tensor:
-        """Sensor tokens (B, P, C, d) — identical across masked/clean views. The per-SENSOR frontend
-        needs channel_mask (absent channels must not feed its fused stem, C=1 output); the filterbank
-        and per-channel arms ignore it (they emit per-channel tokens the encoder masks downstream)."""
-        if channel_mask is not None and self.frontend_kind == "mamba_sensor":
-            return self.filterbank(patches, sampling_rate_hz, patch_len_samples, channel_mask=channel_mask)
+        """Sensor tokens (B, P, C, d) — identical across masked/clean views. The filterbank emits
+        per-channel tokens the encoder masks downstream, so channel_mask is unused here (accepted
+        for a stable call signature)."""
         return self.filterbank(patches, sampling_rate_hz, patch_len_samples)
 
     def encode_texts(
@@ -274,16 +272,7 @@ class SetTokenizerEncoder(nn.Module):
         sensor_texts: Optional[Sequence[Sequence[str]]] = None,  # factored: B lists of N_sensor strings
         sensor_id: Optional[torch.Tensor] = None,                # factored: (B, C) long
     ) -> dict[str, torch.Tensor]:
-        if self.frontend_kind == "mamba_sensor":
-            # per-sensor arm: pass the raw (B,C) mask to the fused stem; the frontend emits ONE token
-            # per patch (C=1), so downstream the single "sensor channel" is always present. The caller
-            # passes the sensor-identity text as channel_texts (C=1).
-            sensor_tokens = self.tokenize(patches, sampling_rate_hz, patch_len_samples,
-                                          channel_mask=channel_mask)
-            channel_mask = torch.ones(sensor_tokens.shape[0], 1, dtype=torch.bool,
-                                      device=sensor_tokens.device)
-        else:
-            sensor_tokens = self.tokenize(patches, sampling_rate_hz, patch_len_samples)
+        sensor_tokens = self.tokenize(patches, sampling_rate_hz, patch_len_samples)
         device = sensor_tokens.device
         s_embs = s_masks = None
         if self.text_conditioning == "factored":

@@ -10,9 +10,6 @@ One flag chooses the frontend so ablations compare like-for-like
   sincnet   — backward-compatible alias for the learnable arm.
   scattering — fixed wavelet-scattering first order (deformation-stability north star).
                NOT YET IMPLEMENTED — deferred ablation.
-  mamba      — per-channel selective state-space (Mamba-style) tokenizer on the RAW native-rate
-               signal, with the discretisation step Δ = 1/rate (physical-time conditioning). The
-               learned-recurrent contender in the tokenizer ablation (docs/design/TOKENIZER_ABLATION.md).
   free_conv  — unconstrained conv frontend. Deliberately NOT implemented (M0/M1 design:
                free convs overfit acquisition configs); exists as a name so the ablation
                table has an explicit "we chose not to" row.
@@ -22,7 +19,7 @@ from __future__ import annotations
 
 from .filterbank import PhysicalFilterbankTokenizer
 
-FRONTENDS = ("fixed", "learnable", "sincnet", "scattering", "mamba", "mamba_sensor", "free_conv")
+FRONTENDS = ("fixed", "learnable", "sincnet", "scattering", "free_conv")
 
 
 def build_frontend(kind: str = "fixed", **filterbank_kwargs):
@@ -35,13 +32,6 @@ def build_frontend(kind: str = "fixed", **filterbank_kwargs):
         return PhysicalFilterbankTokenizer(learnable=False, **filterbank_kwargs)
     if kind in ("learnable", "sincnet"):
         return PhysicalFilterbankTokenizer(learnable=True, **filterbank_kwargs)
-    if kind == "mamba":
-        from .mamba_frontend import SelectiveSSMChannelTokenizer
-        return SelectiveSSMChannelTokenizer(**filterbank_kwargs)
-    if kind == "mamba_sensor":
-        # per-sensor, patch-free, causal continuous scan; output (B,P,1,d) (one 'sensor channel')
-        from .mamba_frontend import PerSensorMambaTokenizer
-        return PerSensorMambaTokenizer(**filterbank_kwargs)
     if kind == "scattering":
         raise NotImplementedError(
             "scattering frontend is a deferred ablation (build plan M1) — "
