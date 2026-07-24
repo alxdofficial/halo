@@ -23,6 +23,16 @@ A depthwise-separable 1D-conv stack runs over the S time axis, INDEPENDENTLY per
 masked pooling: over valid time, then over real channels, then over real patches. The padded
 time steps and absent channels are zeroed BEFORE the conv, so garbage there cannot leak across
 the valid/pad boundary — the embedding depends only on real signal.
+
+The sample-based conv is intrinsically rate-BLIND (the same S samples at 50 vs 100 Hz are
+DIFFERENT physical signals, which the filterbank correctly separates) and the patch-pool is
+order-BLIND. Before pooling over patches, each patch's (layer-normed) content is therefore
+FiLM-modulated by a physical embedding — [log physical duration, Fourier features of the
+physical patch-center time]: ``pooled = ln(content)*(1+gamma(phys)) + beta(phys)``. Multiplicative
+binding is non-separable under the mean pool, so the SAME samples at different rates get different
+embeddings and permuting the patch order changes the output — matching the physical, position-aware
+frequency view the TF-C loss pulls toward (F2/F3). When durations/positions are absent the
+modulation is skipped (backward-compatible).
 """
 
 from __future__ import annotations
@@ -55,13 +65,30 @@ class TimeEncoder(nn.Module):
     """
 
     def __init__(self, d_model: int, n_channels: int = 6, hidden: int = 192,
-                 kernel_size: int = 7, n_blocks: int = 4):
+                 kernel_size: int = 7, n_blocks: int = 4, n_pos_freq: int = 8):
         super().__init__()
         self.n_channels = n_channels
         blocks = [_DSConv1d(1, hidden, kernel_size)]
         blocks += [_DSConv1d(hidden, hidden, kernel_size) for _ in range(n_blocks - 1)]
         self.conv = nn.Sequential(*blocks)
         self.proj = nn.Linear(hidden, d_model)
+        # Physical conditioning of the per-patch embedding (F2/F3): the sample-based conv is
+        # rate-BLIND (the same S samples at 50 vs 100 Hz are DIFFERENT physical signals — the
+        # filterbank sees them differently) and the patch-pool is ORDER-blind. A small embedding of
+        # [log physical duration, Fourier features of the physical patch-center time] is added to
+        # each patch before pooling, so the same samples at different rates get different embeddings
+        # AND permuting patches changes the output. Geometric periods span the window (0.4 s .. 6 s).
+        self.n_pos_freq = n_pos_freq
+        periods = torch.logspace(torch.log10(torch.tensor(0.4)),
+                                 torch.log10(torch.tensor(6.0)), n_pos_freq)
+        self.register_buffer("pos_omega", 2.0 * torch.pi / periods)      # (n_pos_freq,)
+        # FiLM-modulate each patch's (layer-normed) content by its physical duration/position before
+        # pooling: pooled = ln(content) * (1 + gamma(phys)) + beta(phys). Multiplicative binding is
+        # non-separable under the mean pool (an additive/GELU embedding lets content drown phys and
+        # stays near-separable -> order-blind), so the SAME samples at different rates differ and the
+        # patch ORDER matters.
+        self.phys_ln = nn.LayerNorm(hidden)
+        self.phys_film = nn.Linear(1 + 2 * n_pos_freq, 2 * hidden)
 
     @staticmethod
     def _valid_len(patch_len, B: int, P: int, device) -> torch.Tensor:
@@ -81,6 +108,8 @@ class TimeEncoder(nn.Module):
         patch_len,                                          # scalar | (B,) | (B, P)
         channel_mask: torch.Tensor,                         # (B, C) bool
         patch_padding_mask: Optional[torch.Tensor] = None,  # (B, P) bool
+        patch_durations: Optional[torch.Tensor] = None,     # (B, P) physical seconds (F2)
+        positions: Optional[torch.Tensor] = None,           # (B, P) physical patch-center s (F3)
     ) -> torch.Tensor:
         B, P, S, C = patches.shape
         device = patches.device
@@ -109,6 +138,22 @@ class TimeEncoder(nn.Module):
         # Masked pool over real channels.
         cw = cmask.view(B, 1, C, 1).to(feat.dtype)
         pooled_c = (pooled_t * cw).sum(dim=2) / cw.sum(dim=2).clamp(min=1.0)   # (B, P, H)
+
+        # Physical conditioning (F2 rate-awareness + F3 order-awareness): add a per-patch embedding
+        # of [log physical duration, Fourier(physical position)] so the SAME samples at different
+        # rates get different embeddings and permuting patches changes the output. Backward-compatible
+        # no-op when neither is supplied.
+        if patch_durations is not None or positions is not None:
+            dur = (patch_durations if patch_durations is not None
+                   else patches.new_ones(B, P)).to(feat.dtype).clamp(min=1e-3)
+            pos = (positions if positions is not None
+                   else patches.new_zeros(B, P)).to(feat.dtype)
+            ang = pos.unsqueeze(-1) * self.pos_omega.to(feat.dtype)           # (B, P, F)
+            phys = torch.cat([dur.log().unsqueeze(-1),
+                              torch.sin(ang), torch.cos(ang)], dim=-1)        # (B, P, 1+2F)
+            # FiLM: modulate layer-normed content by the physical duration/position before pooling.
+            gamma, beta = self.phys_film(phys).chunk(2, dim=-1)              # (B, P, H) each
+            pooled_c = self.phys_ln(pooled_c) * (1.0 + gamma) + beta         # (B, P, H)
 
         # Masked pool over real patches. A patch is real if it has any valid time step (this
         # already excludes padding in the multi-resolution collate, where padded patches carry

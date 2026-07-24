@@ -921,7 +921,8 @@ def main() -> None:
                 if cfg.tfc_weight > 0:
                     z_freq = model.tfc_proj(clean["pooled"])
                     time_emb = model.time_encoder(patches.float(), patch_len, channel_mask,
-                                                  patch_padding_mask=patch_pad)
+                                                  patch_padding_mask=patch_pad,
+                                                  patch_durations=patch_durations, positions=positions)
                     z_time = model.tfc_proj_time(time_emb)
                     tfc_loss = nt_xent(z_time, z_freq, cfg.tfc_temperature)
             else:
