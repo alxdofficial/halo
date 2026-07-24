@@ -142,11 +142,12 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                     "(gravity present); gyro rad/s. Left-wrist Puck.js excluded (unrecoverable gyro)."),
     # XRF V2 (WWADL): five-position body IMU + AirPods ear IMU; 34 indoor ADLs, 3 volunteers.
     # Device->placement per repo imu.py name_to_id (NOT the newer Plus README order). Acc g, gyro rad/s.
-    StreamSpec("xrf_v2", "glasses", "device", "smart glasses",
+    StreamSpec("xrf_v2", "glasses", "device", "the head (smart glasses)",
                _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_glasses_",),
                note="Head-worn smart-glasses IMU — a placement absent elsewhere in the corpus. "
-                    "Placement is 'smart glasses' (not 'smart glasses on the head') so the rendered "
-                    "sensor text reads 'on smart glasses', not a double 'on ... on the head'."),
+                    "Placement 'the head (smart glasses)' keeps 'head' in the per-channel text AND "
+                    "renders the factored sensor text as 'on the head (smart glasses)' — a single "
+                    "'on', not the old 'on smart glasses on the head' double."),
     StreamSpec("xrf_v2", "left_wrist", "watch", "the left wrist",
                _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_left_wrist_",)),
     StreamSpec("xrf_v2", "right_wrist", "watch", "the right wrist",
