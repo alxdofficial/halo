@@ -1,5 +1,11 @@
 # Augmentation policy — what each model gets, and why
 
+> ⚠️ **Partially stale (2026-07-24).** Some claims predate the SSL pivot (label IDs used by A2;
+> gravity-gated rotation). Current facts: A2 is label-free SimCLR; SO(3) rotation now includes
+> gravity-removed streams (`require_gravity=False`); a bounded **sensor-text dropout** was added.
+> The authoritative Phase-A recipe table is in
+> [`training/tokenizer/README.md`](../../training/tokenizer/README.md).
+
 Augmentations run **on-the-fly** in the training dataloader (per-sample, stochastic) on top of the
 pre-materialised grids. This doc answers two questions: (1) which augmentations each model can
 *consume*, and (2) how they are *used* across our two experiments.

@@ -1,5 +1,11 @@
 # Native Phase-A pretrain — pre-launch manifest (2026-07-19)
 
+> ⚠️ **RECIPE SUPERSEDED (2026-07-24).** This predates the SSL pivot and describes the OLD objective
+> (SupCon, A3 0.1, balanced sampling, old batch/LR). The **authoritative** current launch recipe —
+> A1 + SimCLR + TF-C-inspired, temperature sampler, factored conditioning — is the table in
+> [`training/tokenizer/README.md`](../../training/tokenizer/README.md), mirroring the live
+> `PretrainConfig`. Use that for any launch.
+
 Provenance record for the from-scratch **native-rate** Phase-1 (HALO representation) run. This
 supersedes the old-corpus diagnostics in `PIPELINE_A_PREFLIGHT.md` (8-dataset / 57-label / 60 Hz).
 Save this next to the run.
