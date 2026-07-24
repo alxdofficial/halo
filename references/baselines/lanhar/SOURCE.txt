@@ -1,0 +1,2 @@
+https://github.com/DASHLab/LanHAR
+https://arxiv.org/abs/2410.00003

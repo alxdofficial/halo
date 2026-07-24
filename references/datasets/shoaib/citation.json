@@ -1,0 +1,15 @@
+{
+  "name": "shoaib",
+  "category": "datasets",
+  "paper_title": "Fusion of Smartphone Motion Sensors for Physical Activity Recognition",
+  "authors": "Muhammad Shoaib, Stephan Bosch, Ozlem Durmaz Incel, Hans Scholten, Paul J. M. Havinga",
+  "year": "2014",
+  "venue": "Sensors (MDPI), 14(6):10146-10176",
+  "doi": "10.3390/s140610146",
+  "paper_url": "https://www.mdpi.com/1424-8220/14/6/10146",
+  "pdf_url": "https://europepmc.org/articles/PMC4118351?pdf=render",
+  "data_or_code_url": "https://www.utwente.nl/en/eemcs/ps/research/dataset/",
+  "license": "CC BY 4.0 (paper, MDPI open access); dataset license unstated on the University of Twente page (free for research use)",
+  "bibtex": "@article{shoaib2014fusion,\n  title={Fusion of Smartphone Motion Sensors for Physical Activity Recognition},\n  author={Shoaib, Muhammad and Bosch, Stephan and Incel, Ozlem Durmaz and Scholten, Hans and Havinga, Paul J. M.},\n  journal={Sensors},\n  volume={14},\n  number={6},\n  pages={10146--10176},\n  year={2014},\n  publisher={MDPI},\n  doi={10.3390/s140610146}\n}",
+  "notes": "Smartphone IMU HAR dataset (often called the 'Shoaib SA'/2014 activity dataset). 10 male participants; 7 activities: walking, sitting, standing, jogging, biking, walking upstairs, walking downstairs (each performed 3-4 min, done simultaneously at all body positions). 5 on-body phone positions collected simultaneously: right jeans pocket, left jeans pocket, belt (right side via belt clip), right upper arm, right wrist. Device: Samsung Galaxy SII (i9100). Sensors logged: 3-axis accelerometer, gyroscope, magnetometer (plus linear acceleration). Sampling rate 50 Hz (50 samples/s). Paper uses a 2-second sliding window for feature extraction. Data hosted on the University of Twente Pervasive Systems (PS) group dataset page; a related follow-up dataset (complex activities, 2016) is on the same page as 'sensors-activity-recognition-dataset-shoaib.rar'. PMCID PMC4118351, PMID 24919015. PDF downloaded from Europe PMC render endpoint (MDPI direct PDF blocked by Akamai edge; publisher landing/PDF at https://www.mdpi.com/1424-8220/14/6/10146)."
+}

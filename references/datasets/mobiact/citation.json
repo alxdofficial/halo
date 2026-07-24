@@ -1,0 +1,15 @@
+{
+  "name": "mobiact",
+  "category": "datasets",
+  "paper_title": "The MobiAct Dataset: Recognition of Activities of Daily Living using Smartphones",
+  "authors": "George Vavoulas, Charikleia Chatzaki, Thodoris Malliotakis, Matthew Pediaditis, Manolis Tsiknakis",
+  "year": "2016",
+  "venue": "Proceedings of the 2nd International Conference on Information and Communication Technologies for Ageing Well and e-Health (ICT4AWE 2016), pages 143-151, SciTePress",
+  "doi": "10.5220/0005792401430151",
+  "paper_url": "https://www.scitepress.org/papers/2016/57924/",
+  "pdf_url": "https://www.scitepress.org/papers/2016/57924/57924.pdf",
+  "data_or_code_url": "https://bmi.hmu.gr/the-mobifall-and-mobiact-datasets-2/",
+  "license": "Non-commercial research/educational use only, available upon request after signing a database usage agreement (contact bmi@hmu.gr)",
+  "bibtex": "@inproceedings{vavoulas2016mobiact,\n  author    = {Vavoulas, George and Chatzaki, Charikleia and Malliotakis, Thodoris and Pediaditis, Matthew and Tsiknakis, Manolis},\n  title     = {The {MobiAct} Dataset: Recognition of Activities of Daily Living using Smartphones},\n  booktitle = {Proceedings of the 2nd International Conference on Information and Communication Technologies for Ageing Well and e-Health (ICT4AWE 2016)},\n  pages     = {143--151},\n  year      = {2016},\n  publisher = {SciTePress},\n  address   = {Rome, Italy},\n  isbn      = {978-989-758-180-9},\n  doi       = {10.5220/0005792401430151}\n}",
+  "notes": "Original 2016 release (as described in this paper): 50 subjects performing 9 ADLs + 54 subjects simulating 4 fall types. Sensors: accelerometer, gyroscope, orientation of a Samsung Galaxy S3 (LSM330DLC inertial module). Sampling rate ~100 Hz (Android SENSOR_DELAY_FASTEST); phone placed loosely in a trouser pocket at a random orientation. Paper uses 1.28 s windows with 50% overlap for HAR benchmarking. NOTE: the current public 'Second Release' on the BMI/HMU site is an EXTENDED version with 66 subjects, 12 ADLs + 4 falls + 1 daily-living scenario, >3200 trials (often cited as MobiAct v2.0 / Chatzaki et al. 2017, Springer CCIS DOI 10.1007/978-3-319-62704-5_7). Verify which release the HALO code actually uses. Data distributed by the Biomedical Informatics & eHealth Lab, Hellenic Mediterranean University (formerly TEI of Crete)."
+}

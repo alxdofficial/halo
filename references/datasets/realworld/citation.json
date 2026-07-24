@@ -1,0 +1,15 @@
+{
+  "name": "realworld",
+  "category": "datasets",
+  "paper_title": "On-body Localization of Wearable Devices: An Investigation of Position-Aware Activity Recognition",
+  "authors": "Timo Sztyler and Heiner Stuckenschmidt",
+  "year": "2016",
+  "venue": "2016 IEEE International Conference on Pervasive Computing and Communications (PerCom), Sydney, Australia, pp. 1-9",
+  "doi": "10.1109/PERCOM.2016.7456521",
+  "paper_url": "https://ieeexplore.ieee.org/document/7456521",
+  "pdf_url": "http://publications.wim.uni-mannheim.de/informatik/lski/Sztyler2016Localization.pdf",
+  "data_or_code_url": "https://www.uni-mannheim.de/dws/research/projects/activity-recognition/dataset/dataset-realworld/",
+  "license": "unknown",
+  "bibtex": "@inproceedings{SztylerS16,\n  title     = {On-body localization of wearable devices: An investigation of position-aware activity recognition},\n  author    = {Sztyler, Timo and Stuckenschmidt, Heiner},\n  booktitle = {2016 IEEE International Conference on Pervasive Computing and Communications (PerCom)},\n  pages     = {1--9},\n  year      = {2016},\n  address   = {Sydney, Australia},\n  publisher = {IEEE Computer Society},\n  doi       = {10.1109/PERCOM.2016.7456521},\n  isbn      = {978-1-4673-8779-8}\n}",
+  "notes": "RealWorld (HAR) 2016 dataset. 15 subjects (8 male, 7 female; age 31.9+/-12.4). Accelerometer sampling rate 50 Hz (confirmed in paper text: 'the accelerometer was sensed with a sampling rate of 50 Hz'). 7 on-body positions: chest, forearm, head, shin, thigh, upper arm (upperarm), waist. 8 activities: walking, running/jogging, sitting, standing, lying, climbing stairs up, climbing stairs down, jumping. ~10 min per activity per subject (jumping ~1.7 min). Sensors recorded via smartphones/smartwatch: accelerometer, GPS, gyroscope, light, magnetic field, sound level. Full dataset zip ~3.5GB at http://wifo5-14.informatik.uni-mannheim.de/sensor/dataset/realworld2016/realworld2016_dataset.zip . License not stated on the dataset page; free for research use, cite the PerCom 2016 paper. PDF is the official Uni Mannheim author copy (9 pages, verified PDF). Note there is a related 2017 journal extension (Sztyler2017 'Position-aware activity recognition with wearable devices') but the canonical dataset paper is this PerCom 2016 one."
+}

@@ -1,0 +1,15 @@
+{
+  "name": "kuhar",
+  "category": "datasets",
+  "paper_title": "KU-HAR: An open dataset for heterogeneous human activity recognition",
+  "authors": "Niloy Sikder, Abdullah-Al Nahid",
+  "year": "2021",
+  "venue": "Pattern Recognition Letters, vol. 146, pp. 46-54",
+  "doi": "10.1016/j.patrec.2021.02.024",
+  "paper_url": "https://www.sciencedirect.com/science/article/abs/pii/S0167865521000933",
+  "pdf_url": "",
+  "data_or_code_url": "https://data.mendeley.com/datasets/45f952y38r/5",
+  "license": "Dataset (Mendeley Data): CC BY 4.0; code repo (github.com/Niloy333/KU-HAR): MIT",
+  "bibtex": "@article{sikder2021kuhar,\n  title   = {KU-HAR: An open dataset for heterogeneous human activity recognition},\n  author  = {Sikder, Niloy and Nahid, Abdullah-Al},\n  journal = {Pattern Recognition Letters},\n  volume  = {146},\n  pages   = {46--54},\n  year    = {2021},\n  month   = jun,\n  publisher = {Elsevier},\n  doi     = {10.1016/j.patrec.2021.02.024},\n  url     = {https://doi.org/10.1016/j.patrec.2021.02.024}\n}",
+  "notes": "Canonical dataset paper (Pattern Recognition Letters, Elsevier). Closed access: no arXiv preprint, no open-access PDF (verified via Unpaywall oa_status=closed and Semantic Scholar isOpenAccess=false). No PDF could be downloaded; saved the Mendeley dataset landing page as webpage.html instead (ScienceDirect and ResearchGate block curl/WebFetch with HTTP 403). Dataset details (from paper abstract + author GitHub README): 90 participants aged 18-34 (75 male, 15 female); 18 activity classes; 1945 raw activity samples; 20,750 subsamples of 3 s non-overlapping data provided separately. Sensors = smartphone built-in accelerometer (m/s^2, X/Y/Z) and gyroscope (rad/s, X/Y/Z); signals resampled/interpolated to 100 Hz. Data collected via smartphone (varied placement / heterogeneous devices, hence 'heterogeneous'). Baseline in paper: Random Forest ~90% accuracy on subsamples. Data mirrors: Mendeley 45f952y38r (v5, CC BY 4.0), Kaggle niloy333/kuhar, GitHub Niloy333/KU-HAR (MIT), and an author Google Drive backup. A related conference paper also exists: Sikder, Ahad & Nahid, ICIEV/icIVPR 2021, DOI 10.1109/ICIEVicIVPR52578.2021.9564234 (not the canonical dataset paper)."
+}

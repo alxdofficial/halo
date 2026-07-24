@@ -1,0 +1,15 @@
+{
+  "name": "recgym",
+  "category": "datasets",
+  "paper_title": "The Contribution of Human Body Capacitance/Body-Area Electric Field To Individual and Collaborative Activity Recognition",
+  "authors": "Sizhen Bian, Vitor Fortes Rey, Siyu Yuan, Paul Lukowicz",
+  "year": "2022",
+  "venue": "arXiv preprint arXiv:2210.14794 (dataset later released via UCI Machine Learning Repository, 2025; associated with 7th Intl. Conf. on Activity and Behavior Computing (ABC) per UCI listing)",
+  "doi": "10.48550/arXiv.2210.14794",
+  "paper_url": "https://arxiv.org/abs/2210.14794",
+  "pdf_url": "https://arxiv.org/pdf/2210.14794",
+  "data_or_code_url": "https://archive.ics.uci.edu/dataset/1128",
+  "license": "CC BY 4.0 (UCI dataset)",
+  "bibtex": "@misc{bian2022hbc,\n  title        = {The Contribution of Human Body Capacitance/Body-Area Electric Field To Individual and Collaborative Activity Recognition},\n  author       = {Bian, Sizhen and Fortes Rey, Vitor and Yuan, Siyu and Lukowicz, Paul},\n  year         = {2022},\n  eprint       = {2210.14794},\n  archivePrefix= {arXiv},\n  primaryClass = {cs.HC},\n  doi          = {10.48550/arXiv.2210.14794},\n  url          = {https://arxiv.org/abs/2210.14794},\n  note         = {RecGym gym-workout dataset (IMU + body capacitance); dataset at UCI ML Repository, DOI 10.24432/C5PW4K, CC BY 4.0}\n}",
+  "notes": "RecGym = gym-workout human activity recognition dataset. Sensing unit = 6-axis IMU (accel A_x,A_y,A_z + gyro G_x,G_y,G_z) plus a single-channel Body Capacitance sensor (C_1). Sampling rate 20 Hz. Worn at THREE positions: wrist, pocket, calf. 10 volunteers, each 5 sessions over 5 days (~1h/session). 12 activity classes: 11 workouts (Adductor, ArmCurl, BenchPress, LegCurl, LegPress, Riding, RopeSkipping, Running, Squat, StairsClimber, Walking) + a 'Null' class for time between workouts. Dataset DOI (UCI): 10.24432/C5PW4K. Dataset mirrors: UCI dataset/1128, Kaggle (zhaxidelebsz/10-gym-exercises-with-615-abstracted-features), GitHub github.com/zhaxidele/Toolkit-for-HBC-sensing (Data/GymData), project page zhaxidele.github.io/RecGym. Paper's key HBC finding: capacitive sensing beats single wrist accelerometer on leg-only exercises (0.89 vs 0.78 F1) and improves collaborative-activity recognition by ~16%. The arXiv 2210.14794 preprint (2022) is the paper the UCI page attributes the dataset to; no separate published DOI/journal-ref found on arXiv."
+}

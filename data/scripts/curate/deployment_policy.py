@@ -136,12 +136,13 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                session_contains=("_back_",),
                note="NFI-FARED lower-back strapped IMU (rare placement); gyro deg/s->rad/s in convert."),
-    StreamSpec("harmes", "watch_wrist", "watch", "the dominant wrist",
+    StreamSpec("harmes", "watch_wrist", "watch", "the right wrist",
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                note="WearOS smartwatch, 15 fine-grained kitchen/bathroom hand ADLs. Acc m/s^2 "
                     "(gravity present); gyro rad/s. Left-wrist Puck.js excluded (unrecoverable gyro)."),
     # XRF V2 (WWADL): five-position body IMU + AirPods ear IMU; 34 indoor ADLs, 3 volunteers.
-    # Device->placement per repo imu.py name_to_id (NOT the newer Plus README order). Acc g, gyro rad/s.
+    # Device->placement is read from the h5's OWN `device_order` field at convert time
+    # (self-describing, so the Plus-vs-WWADL_open ordering difference cannot bite). Acc g, gyro rad/s.
     StreamSpec("xrf_v2", "glasses", "device", "the head (smart glasses)",
                _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_glasses_",),
                note="Head-worn smart-glasses IMU — a placement absent elsewhere in the corpus. "
@@ -163,7 +164,7 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
     StreamSpec("nfi_fared", "wrist", "device", "the dominant forearm",
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                session_contains=("_arm_",),
-               note="NFI-FARED dominant-wrist strapped IMU; gyro deg/s->rad/s in convert."),
+               note="NFI-FARED dominant-FOREARM strapped IMU (per the NFI/Hi-OSCAR paper; not the wrist); gyro deg/s->rad/s in convert."),
     StreamSpec("kuhar", "phone_waist", "phone", "waist",
                _GENERIC_ACC, _GENERIC_GYRO, "removed"),
     StreamSpec("unimib_shar", "phone_pocket", "phone", "trouser pocket",
@@ -197,7 +198,7 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
     StreamSpec("tnda_har", "watch_wrist", "watch", "right wrist",
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                note="Right-wrist IMU from the UniMTS TNDA-HAR bundle (cols 12:18); accel m/s^2 (gravity present), gyro rad/s."),
-    StreamSpec("ut_complex", "watch_wrist", "watch", "wrist",
+    StreamSpec("ut_complex", "watch_wrist", "watch", "the right wrist",
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                note="Wrist-worn phone (smartwatch emulation); complex hand-gesture activities. Accel m/s^2 (gravity present)."),
 

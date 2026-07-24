@@ -1,0 +1,2 @@
+https://github.com/mmalekzadeh/motion-sense
+https://arxiv.org/abs/1810.11546

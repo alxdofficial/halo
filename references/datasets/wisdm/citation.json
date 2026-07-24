@@ -1,0 +1,15 @@
+{
+  "name": "wisdm",
+  "category": "datasets",
+  "paper_title": "Smartphone and Smartwatch-Based Biometrics Using Activities of Daily Living",
+  "authors": "Gary M. Weiss, Kenichi Yoneda, Thaier Hayajneh",
+  "year": "2019",
+  "venue": "IEEE Access, vol. 7, pp. 133190-133202",
+  "doi": "10.1109/ACCESS.2019.2940729",
+  "paper_url": "https://ieeexplore.ieee.org/document/8835065",
+  "pdf_url": "https://ieeexplore.ieee.org/ielx7/6287639/8600701/08835065.pdf",
+  "data_or_code_url": "https://archive.ics.uci.edu/dataset/507/wisdm+smartphone+and+smartwatch+activity+and+biometrics+dataset",
+  "license": "Paper: CC BY (IEEE Access, gold open access, verified via Unpaywall/Semantic Scholar). Dataset: CC BY 4.0 (UCI ML Repository).",
+  "bibtex": "@article{weiss2019smartphone,\n  title   = {Smartphone and Smartwatch-Based Biometrics Using Activities of Daily Living},\n  author  = {Weiss, Gary M. and Yoneda, Kenichi and Hayajneh, Thaier},\n  journal = {IEEE Access},\n  volume  = {7},\n  pages   = {133190--133202},\n  year    = {2019},\n  publisher = {IEEE},\n  doi     = {10.1109/ACCESS.2019.2940729}\n}",
+  "notes": "Canonical paper for the WISDM 2019 dataset (a.k.a. 'WISDM Smartphone and Smartwatch Activity and Biometrics Dataset', UCI dataset #507, dataset DOI 10.24432/C5HK59). 51 subjects, 18 activities of daily living (each performed 3 minutes). Four sensor streams: accelerometer and gyroscope on BOTH a smartphone (Google Nexus 5/5X or Samsung Galaxy S5, in front pants pocket) and a smartwatch (LG G Watch, Android Wear, on dominant wrist). Sampling rate 20 Hz for all sensors. Raw time-series plus per-example ARFF feature files (10-second windows) are provided. Note: this is the biometrics/ADL WISDM release and is DISTINCT from the older 2011 WISDM Actitracker dataset (Kwapisz et al.). Original data collected by the Fordham University WISDM (Wireless Sensor Data Mining) Lab. Supported by NSF grant 1116124."
+}

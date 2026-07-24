@@ -182,6 +182,9 @@ class ChannelTextDropoutCfg:
     p: float = 0.15          # fraction of samples that get any channel-text neutralized
     max_frac: float = 0.5    # never neutralize more than this fraction of a sample's channels
     neutral: str = "an inertial sensor channel"
+    # Separate neutral for the AXIS-only role slot: the channel-level neutral above ("an inertial
+    # sensor channel") is not an axis, so dropping a role to it stated the wrong KIND of fact.
+    role_neutral: str = "an unspecified axis"
 
 
 @dataclass
@@ -220,15 +223,31 @@ _CH_SYNONYMS = [
 _CH_TEMPLATES = ["{}", "channel: {}", "sensor channel — {}", "signal from {}", "this channel measures {}"]
 
 
-def _paraphrase_channel(desc: str) -> str:
-    """Surface-form paraphrase of one channel description (sensor/axis synonyms + template).
+def _synonym_swap(desc: str) -> str:
+    """Sensor/axis SYNONYM substitution only — no template wrapper.
     re.escape not needed — replacements are plain words; placement/units are never matched."""
     import re
     out = desc
     for pat, options in _CH_SYNONYMS:
         if re.search(pat, out, flags=re.I):
             out = re.sub(pat, _random.choice(options), out, flags=re.I)
-    return _random.choice(_CH_TEMPLATES).format(out)
+    return out
+
+
+def _paraphrase_channel(desc: str) -> str:
+    """Surface-form paraphrase of one CHANNEL description (synonyms + channel template)."""
+    return _random.choice(_CH_TEMPLATES).format(_synonym_swap(desc))
+
+
+def _paraphrase_sensor(desc: str) -> str:
+    """Surface-form paraphrase of one SENSOR-identity string (synonyms only, NO template).
+
+    The `_CH_TEMPLATES` wrappers are CHANNEL-level ("this channel measures {}", "sensor channel — {}")
+    and are false when applied to a sensor: a sensor is not a channel. Before this split they produced
+    text like "this channel measures a watch accelerometer on the wrist". Sensor identity is exactly
+    the config fact the model is supposed to read, so it gets synonym variation only.
+    """
+    return _synonym_swap(desc)
 
 
 @dataclass
@@ -664,10 +683,11 @@ class IMUAugmenter:
         # Paraphrase each channel description independently (surface form only; placement /
         # units / gravity are preserved by construction — see _paraphrase_channel).
         s.channel_descriptions = [_paraphrase_channel(d) for d in s.channel_descriptions]
-        if s.role_descriptions is not None:
-            s.role_descriptions = [_paraphrase_channel(d) for d in s.role_descriptions]
+        # Role text is AXIS-ONLY ("x"/"y"/"z") since the factored rework — it is NOT paraphrased.
+        # Channel templates turned bare axes into "signal from x" / "this channel measures z", which
+        # is decoration with no semantic content and just adds SBERT noise to a 3-way distinction.
         if s.sensor_descriptions is not None:
-            s.sensor_descriptions = [_paraphrase_channel(d) for d in s.sensor_descriptions]
+            s.sensor_descriptions = [_paraphrase_sensor(d) for d in s.sensor_descriptions]
         return s
 
     # ---------- text: channel-description dropout (neutralize, keep signal) ----------
@@ -694,7 +714,7 @@ class IMUAugmenter:
             if s.role_descriptions is not None:
                 role_desc = list(s.role_descriptions)
                 for i in dropped:
-                    role_desc[i] = spec.neutral
+                    role_desc[i] = getattr(spec, "role_neutral", spec.neutral)
                 s.role_descriptions = role_desc
         return s
 

@@ -1,0 +1,15 @@
+{
+  "name": "hapt",
+  "category": "datasets",
+  "paper_title": "Transition-Aware Human Activity Recognition Using Smartphones",
+  "authors": "Jorge L. Reyes-Ortiz, Luca Oneto, Albert Samà, Xavier Parra, Davide Anguita",
+  "year": "2016",
+  "venue": "Neurocomputing, vol. 171, pp. 754-767 (Elsevier)",
+  "doi": "10.1016/j.neucom.2015.07.085",
+  "paper_url": "https://www.sciencedirect.com/science/article/abs/pii/S0925231215010930",
+  "pdf_url": "",
+  "data_or_code_url": "https://archive.ics.uci.edu/dataset/341/smartphone+based+recognition+of+human+activities+and+postural+transitions",
+  "license": "CC BY 4.0 (dataset, per UCI ML Repository). Paper: Elsevier, closed access.",
+  "bibtex": "@article{reyesortiz2016transition,\n  title   = {Transition-Aware Human Activity Recognition Using Smartphones},\n  author  = {Reyes-Ortiz, Jorge L. and Oneto, Luca and Sam{\\`a}, Albert and Parra, Xavier and Anguita, Davide},\n  journal = {Neurocomputing},\n  volume  = {171},\n  pages   = {754--767},\n  year    = {2016},\n  publisher = {Elsevier},\n  doi     = {10.1016/j.neucom.2015.07.085}\n}",
+  "notes": "Canonical paper for the HAPT dataset (a.k.a. 'Smartphone-Based Recognition of Human Activities and Postural Transitions', UCI ID 341). This is the transition-aware extension of the original 2013 ESANN UCI HAR dataset by the same SmartLab (UNIGE/DIBRIS) + CETpD (UPC) group. 30 subjects aged 19-48. Samsung Galaxy S II smartphone worn on the WAIST. 3-axial linear acceleration + 3-axial angular velocity (accelerometer + gyroscope) sampled at 50 Hz. Signals pre-processed with noise filters, windowed in 2.56 s sliding windows with 50% overlap (128 readings/window). 12 activity classes: 6 basic (WALKING, WALKING_UPSTAIRS, WALKING_DOWNSTAIRS, SITTING, STANDING, LAYING) + 6 postural transitions (STAND_TO_SIT, SIT_TO_STAND, SIT_TO_LIE, LIE_TO_SIT, STAND_TO_LIE, LIE_TO_STAND). Includes both raw inertial signals and a 561-feature time/frequency vector per window. NOTE: no open-access PDF of the Neurocomputing paper exists (confirmed closed via Semantic Scholar; ScienceDirect returns 403 to bots; no arXiv/UPCommons preprint of this specific paper), so a landing page (UCI dataset page) was saved as webpage.html instead of paper.pdf. UCI dataset DOI: 10.24432/C54G7M."
+}

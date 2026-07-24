@@ -1,0 +1,15 @@
+{
+  "name": "uci_har",
+  "category": "datasets",
+  "paper_title": "A Public Domain Dataset for Human Activity Recognition Using Smartphones",
+  "authors": "Davide Anguita, Alessandro Ghio, Luca Oneto, Xavier Parra, Jorge L. Reyes-Ortiz",
+  "year": "2013",
+  "venue": "ESANN 2013 - 21st European Symposium on Artificial Neural Networks, Computational Intelligence and Machine Learning, Bruges, Belgium (pp. 437-442)",
+  "doi": "",
+  "paper_url": "https://www.esann.org/sites/default/files/proceedings/legacy/es2013-84.pdf",
+  "pdf_url": "https://www.esann.org/sites/default/files/proceedings/legacy/es2013-84.pdf",
+  "data_or_code_url": "https://archive.ics.uci.edu/dataset/240/human+activity+recognition+using+smartphones",
+  "license": "Dataset: CC BY 4.0 (UCI Machine Learning Repository). ESANN proceedings paper: copyright ESANN/i6doc.",
+  "bibtex": "@inproceedings{anguita2013har,\n  title     = {A Public Domain Dataset for Human Activity Recognition Using Smartphones},\n  author    = {Anguita, Davide and Ghio, Alessandro and Oneto, Luca and Parra, Xavier and Reyes-Ortiz, Jorge L.},\n  booktitle = {Proceedings of the 21st European Symposium on Artificial Neural Networks, Computational Intelligence and Machine Learning (ESANN)},\n  pages     = {437--442},\n  year      = {2013},\n  month     = apr,\n  address   = {Bruges, Belgium},\n  publisher = {i6doc.com},\n  isbn      = {978-2-87419-081-0},\n  url       = {https://www.esann.org/sites/default/files/proceedings/legacy/es2013-84.pdf}\n}",
+  "notes": "Canonical UCI HAR dataset paper. 30 volunteers (age 19-48) performing 6 activities: WALKING, WALKING_UPSTAIRS, WALKING_DOWNSTAIRS, SITTING, STANDING, LAYING. Device: Samsung Galaxy S II, waist-mounted. Sensors: 3-axis accelerometer + 3-axis gyroscope, sampled at 50 Hz. Raw signals filtered (median + 3rd-order low-pass Butterworth 20 Hz cutoff); gravity separated from body acceleration via Butterworth low-pass at 0.3 Hz. Windowed into 2.56 s frames (128 readings) with 50% overlap -> 561-feature vectors (time + frequency domain). Data randomly split by subject: 70% train (21 subjects) / 30% test (9 subjects). Baseline result: multiclass one-vs-all Gaussian-kernel SVM ~ 96% overall test accuracy; main confusion between sitting and standing. The engineered 561-D feature set and the fixed train/test subject split are the standard 'UCI HAR' benchmark. Dataset DOI (UCI): https://doi.org/10.24432/C54S4K (recommended dataset citation: Reyes-Ortiz, Anguita, Ghio, Oneto, Parra 2013, UCI Machine Learning Repository). A follow-up 'HAPT' version adds 6 postural-transition classes and raw inertial signals. Note: the ESANN proceedings paper itself has no DOI; doi field left empty (dataset DOI recorded here)."
+}

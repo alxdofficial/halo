@@ -1,0 +1,15 @@
+{
+  "name": "extrasensory",
+  "category": "datasets",
+  "paper_title": "Recognizing Detailed Human Context In-the-Wild from Smartphones and Smartwatches",
+  "authors": "Yonatan Vaizman, Katherine Ellis, Gert Lanckriet",
+  "year": "2017",
+  "venue": "IEEE Pervasive Computing, vol. 16, no. 4, Oct-Dec 2017, pp. 62-74",
+  "doi": "10.1109/MPRV.2017.3971131",
+  "paper_url": "https://arxiv.org/abs/1609.06354",
+  "pdf_url": "https://arxiv.org/pdf/1609.06354",
+  "data_or_code_url": "http://extrasensory.ucsd.edu/",
+  "license": "Free for research use; must cite the paper. Data available at extrasensory.ucsd.edu (registration/agreement per site).",
+  "bibtex": "@article{vaizman2017extrasensory,\n  title={Recognizing Detailed Human Context In-the-Wild from Smartphones and Smartwatches},\n  author={Vaizman, Yonatan and Ellis, Katherine and Lanckriet, Gert},\n  journal={IEEE Pervasive Computing},\n  volume={16},\n  number={4},\n  pages={62--74},\n  year={2017},\n  publisher={IEEE},\n  doi={10.1109/MPRV.2017.3971131}\n}",
+  "notes": "ExtraSensory dataset. 60 subjects (34 iPhone, 26 Android), 300k+ minutes (~308,320 examples), free-living/in-the-wild: subjects used their OWN personal phones in natural routine, no scripted activities. Multi-label context (activities can co-occur), 51 context labels. Sensors per 1-minute example: phone accelerometer, gyroscope, magnetometer (measured for ~20s at 40Hz), watch accelerometer (Pebble smartwatch, ~25Hz), plus location, audio (22050Hz MFCC), phone-state, compass, watch compass. Precomputed feature vectors (225 features) and raw sensor measurements both released. Waist/pocket/hand placement uncontrolled (any convenient use). Relevant as planned free-living phone+watch TEST set for HALO. arXiv version 1609.06354 (23 pp) accepted to IEEE Pervasive Computing magazine."
+}

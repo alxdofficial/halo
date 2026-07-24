@@ -67,11 +67,17 @@ def test_text_dropout_respects_channel_budget_without_erasing_sensor_identity():
     sample = _sample()
     original_sensor = list(sample.sensor_descriptions)
     out = IMUAugmenter(cfg)(sample)
+    # Role slots are AXIS-only, so they neutralize to the axis-specific `role_neutral`, not to the
+    # channel neutral (which states the wrong kind of fact for an axis slot).
     dropped = [i for i, text in enumerate(out.role_descriptions)
-               if text == cfg.channel_text_dropout.neutral]
+               if text == cfg.channel_text_dropout.role_neutral]
     assert 1 <= len(dropped) <= 3
-    assert out.sensor_descriptions == original_sensor
+    assert out.sensor_descriptions == original_sensor      # sensor identity survives channel dropout
     assert all(out.channel_descriptions[i] == cfg.channel_text_dropout.neutral for i in dropped)
+    # every surviving role slot is still a bare axis
+    for i, text in enumerate(out.role_descriptions):
+        if i not in dropped:
+            assert text in {"x", "y", "z"}, f"role slot {i} is not an axis: {text!r}"
 
 
 def test_sensor_text_dropout_is_bounded_and_keeps_one_with_two_sensors():

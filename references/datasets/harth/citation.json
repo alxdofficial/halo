@@ -1,0 +1,15 @@
+{
+  "name": "harth",
+  "category": "datasets",
+  "paper_title": "HARTH: A Human Activity Recognition Dataset for Machine Learning",
+  "authors": "Aleksej Logacjov, Kerstin Bach, Atle Kongsvold, Hilde Bremseth Bardstu, Paul Jarle Mork",
+  "year": "2021",
+  "venue": "Sensors (MDPI), 21(23):7853",
+  "doi": "10.3390/s21237853",
+  "paper_url": "https://www.mdpi.com/1424-8220/21/23/7853",
+  "pdf_url": "https://europepmc.org/articles/PMC8659926?pdf=render",
+  "data_or_code_url": "https://archive.ics.uci.edu/dataset/779/harth",
+  "license": "CC BY 4.0",
+  "bibtex": "@article{logacjov2021harth,\n  title={HARTH: A Human Activity Recognition Dataset for Machine Learning},\n  author={Logacjov, Aleksej and Bach, Kerstin and Kongsvold, Atle and B{\\aa}rdstu, Hilde Bremseth and Mork, Paul Jarle},\n  journal={Sensors},\n  volume={21},\n  number={23},\n  pages={7853},\n  year={2021},\n  publisher={MDPI},\n  doi={10.3390/s21237853}\n}",
+  "notes": "SEED METADATA WAS WRONG: seed gave Sensors 21(21):7261, DOI 10.3390/s21217261 -- the CORRECT canonical publication is Sensors 2021, 21(23):7853, DOI 10.3390/s21237853 (published 25 Nov 2021), verified via PMC (PMC8659926), the paper's own self-citation on page 1, and DOI resolution to mdpi.com/1424-8220/21/23/7853. Dataset (HARTH = Human Activity Recognition Trondheim): 22 participants, each wore TWO Axivity AX3 3-axial accelerometers (right front thigh + lower back) for ~2 hours in free-living conditions. Sampling rate 50 Hz. Ground-truth labels annotated frame-by-frame from a chest-mounted camera; high inter-rater agreement (Fleiss' Kappa = 0.96). 12 annotated activity classes (walking, running, shuffling, stairs ascending/descending, standing, sitting, lying, cycling sit/stand, etc.). Official code + baseline ML models: https://github.com/ntnu-ai-lab/harth-ml-experiments . UCI mirror: dataset/779 (harth.zip ~296 MB). PDF downloaded from Europe PMC render of PMC8659926 (MDPI direct PDF was bot-blocked / Access Denied); verified as valid 19-page PDF, 4,401,722 bytes, first page title 'HARTH: A Human Activity Recognition Dataset for Machine Learning'."
+}

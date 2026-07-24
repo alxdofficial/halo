@@ -1,0 +1,15 @@
+{
+  "name": "dsads",
+  "category": "datasets",
+  "paper_title": "Recognizing Daily and Sports Activities in Two Open Source Machine Learning Environments Using Body-Worn Sensor Units",
+  "authors": "Billur Barshan and Murat Cihan Yuksek",
+  "year": "2014",
+  "venue": "The Computer Journal, Vol. 57, No. 11, pp. 1649-1667 (Advance Access 30 July 2013)",
+  "doi": "10.1093/comjnl/bxt075",
+  "paper_url": "https://academic.oup.com/comjnl/article-abstract/57/11/1649/411286",
+  "pdf_url": "https://repository.bilkent.edu.tr/server/api/core/bitstreams/d5e242a2-32b2-4a38-98f4-a0b654501893/content",
+  "data_or_code_url": "https://archive.ics.uci.edu/dataset/256/daily+and+sports+activities",
+  "license": "Dataset (UCI): CC BY 4.0. Paper: (c) The British Computer Society 2013, all rights reserved (open-access author copy via Bilkent institutional repository).",
+  "bibtex": "@article{barshan2014recognizing,\n  title={Recognizing Daily and Sports Activities in Two Open Source Machine Learning Environments Using Body-Worn Sensor Units},\n  author={Barshan, Billur and Y{\\\"u}ksek, Murat Cihan},\n  journal={The Computer Journal},\n  volume={57},\n  number={11},\n  pages={1649--1667},\n  year={2014},\n  publisher={Oxford University Press},\n  doi={10.1093/comjnl/bxt075}\n}",
+  "notes": "DSADS = Daily and Sports Activities Data Set. Canonical dataset paper (this 2014 Computer Journal article); the dataset was first introduced in Altun, Barshan & Tuncel 2010 (Pattern Recognition, doi:10.1016/j.patcog.2010.04.019). Sensor setup: 5 Xsens MTx units placed on torso/chest, right arm, left arm, right leg, left leg; each unit has tri-axial accelerometer + gyroscope + magnetometer (9 axes/unit => 45 sensor channels total). Sampling rate 25 Hz. 8 subjects (4 female, 4 male, ages 20-30). 19 activities, each performed 5 min per subject. Signals segmented into 5-second windows => 60 segments/subject/activity, 480 segments/activity total, 9120 segments overall. Dataset DOI: 10.24432/C5C59F. Download ZIP ~162.9 MB: https://data.uci.edu/static/public/256/daily+and+sports+activities.zip . PDF (19 pages, ~1.07 MB) obtained from Bilkent University institutional repository author copy."
+}

@@ -1,0 +1,15 @@
+{
+  "name": "limubert",
+  "category": "baselines",
+  "paper_title": "LIMU-BERT: Unleashing the Potential of Unlabeled Data for IMU Sensing Applications",
+  "authors": "Huatao Xu, Pengfei Zhou, Rui Tan, Mo Li, Guobin Shen",
+  "year": "2021",
+  "venue": "SenSys '21: Proceedings of the 19th ACM Conference on Embedded Networked Sensor Systems",
+  "doi": "10.1145/3485730.3485937",
+  "paper_url": "https://dl.acm.org/doi/10.1145/3485730.3485937",
+  "pdf_url": "https://tanrui.github.io/pub/LIMU_BERT.pdf",
+  "data_or_code_url": "https://github.com/dapowan/LIMU-BERT-Public",
+  "license": "MIT (code repo); paper (c) ACM",
+  "bibtex": "@inproceedings{xu2021limubert,\n  author    = {Xu, Huatao and Zhou, Pengfei and Tan, Rui and Li, Mo and Shen, Guobin},\n  title     = {{LIMU-BERT}: Unleashing the Potential of Unlabeled Data for {IMU} Sensing Applications},\n  booktitle = {Proceedings of the 19th ACM Conference on Embedded Networked Sensor Systems (SenSys '21)},\n  year      = {2021},\n  pages     = {220--233},\n  publisher = {Association for Computing Machinery},\n  address   = {New York, NY, USA},\n  doi       = {10.1145/3485730.3485937},\n  url       = {https://doi.org/10.1145/3485730.3485937}\n}",
+  "notes": "Self-supervised BERT-style representation model for IMU (3-axis accelerometer + 3-axis gyroscope). Pretraining objective: masked reconstruction (regression) of normalized IMU signals; lightweight (~<1MB, deployable on mobile). Reference config in official repo is '20_120': downsampled to 20 Hz sampling rate, window size 120 samples (6 s). Evaluated on four public HAR datasets: HHAR, UCI-HAR, MotionSense, and Shoaib. Downstream classifiers (GRU) trained on frozen/limited-label representations. Authors: Nanyang Technological University (NTU), Singapore + Alibaba Group. NOTE: task seed author list ('Xu, Zhou, Zhang, Qiu, Zhao, Wang') was INCORRECT; corrected from the PDF title page. No arXiv version exists; PDF is the author's institutional copy (Rui Tan, tanrui.github.io). ACM DOI page returns 403 to curl but resolves in browser."
+}

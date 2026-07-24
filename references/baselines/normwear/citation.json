@@ -1,0 +1,18 @@
+{
+  "name": "normwear",
+  "category": "baselines",
+  "paper_title": "Toward Foundation Model for Multivariate Wearable Sensing of Physiological Signals",
+  "authors": "Yunfei Luo, Yuliang Chen, Asif Salekin, Tauhidur Rahman",
+  "year": "2024",
+  "venue": "ACM Transactions on Computing for Healthcare (2025). Preprint: arXiv:2412.09758 (Dec 2024, rev. May 2025)",
+  "doi": "10.1145/3803808",
+  "arxiv": "2412.09758",
+  "paper_url": "https://arxiv.org/abs/2412.09758",
+  "pdf_url": "https://arxiv.org/pdf/2412.09758",
+  "acm_url": "https://dl.acm.org/doi/10.1145/3803808",
+  "openreview_url": "https://openreview.net/forum?id=XhdckVyXKg",
+  "data_or_code_url": "https://github.com/Mobile-Sensing-and-UbiComp-Laboratory/NormWear",
+  "license": "verify in repo/ACM",
+  "role": "baseline (cosine/text-aligned tier) — the released open-vocab foundation model whose CWT-scalogram tokenizer most directly contests HALO's physical-Hz filterbank; must-have head-to-head.",
+  "notes": "First multimodal wearable-sensing foundation model. Tokenization: continuous wavelet transform (CWT) scalograms per channel; channel-aware attention with a shared [CLS] liaison token (intra- + inter-sensor). Pretrained on ~2.5M multivariate segments / 14,943 h of PPG/ECG/EEG/GSR/IMU. Evaluated zero/partial/full-shot on 11 public datasets, 18 applications. Released code + weights. For HALO cross-check: rate/length-flexible via CWT (not physical-Hz-invariant by construction); physiological focus (not phone/watch HAR) — verify exact rate handling + IMU input format at adapter build."
+}

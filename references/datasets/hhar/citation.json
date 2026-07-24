@@ -1,0 +1,15 @@
+{
+  "name": "hhar",
+  "category": "datasets",
+  "paper_title": "Smart Devices are Different: Assessing and Mitigating Mobile Sensing Heterogeneities for Activity Recognition",
+  "authors": "Allan Stisen, Henrik Blunck, Sourav Bhattacharya, Thor Siiger Prentow, Mikkel Baun Kjaergaard, Anind Dey, Tobias Sonne, Mads Moller Jensen",
+  "year": "2015",
+  "venue": "Proceedings of the 13th ACM Conference on Embedded Networked Sensor Systems (SenSys '15), Seoul, Republic of Korea, pp. 127-140",
+  "doi": "10.1145/2809695.2809718",
+  "paper_url": "https://dl.acm.org/doi/10.1145/2809695.2809718",
+  "pdf_url": "https://web.archive.org/web/20170808185128id_/https://pure.au.dk/portal/files/93103132/sen099_stisenAT3.pdf",
+  "data_or_code_url": "https://archive.ics.uci.edu/dataset/344/heterogeneity+activity+recognition",
+  "license": "Dataset: CC BY 4.0 (UCI ML Repository, DOI 10.24432/C5689X). Paper: (c) 2015 ACM; accepted manuscript openly available via Aarhus University Pure.",
+  "bibtex": "@inproceedings{stisen2015smart,\n  title     = {Smart Devices are Different: Assessing and Mitigating Mobile Sensing Heterogeneities for Activity Recognition},\n  author    = {Stisen, Allan and Blunck, Henrik and Bhattacharya, Sourav and Prentow, Thor Siiger and Kj{\\ae}rgaard, Mikkel Baun and Dey, Anind and Sonne, Tobias and Jensen, Mads M{\\o}ller},\n  booktitle = {Proceedings of the 13th ACM Conference on Embedded Networked Sensor Systems (SenSys '15)},\n  pages     = {127--140},\n  year      = {2015},\n  address   = {Seoul, Republic of Korea},\n  publisher = {ACM},\n  doi       = {10.1145/2809695.2809718}\n}",
+  "notes": "This is the ORIGINAL paper for the HHAR (Heterogeneity Human Activity Recognition) dataset. Data collected with 36 smartphones/smartwatches spanning 13 device models from 4 manufacturers. Sensors: accelerometer + gyroscope, sampled at each device's HIGHEST available rate (rates therefore differ across devices, a deliberate 'heterogeneity' feature of the dataset; commonly ~50-200 Hz depending on device). 6 activities: Biking, Sitting, Standing, Walking, Stair Up, Stair Down. 9 subjects performed a scripted 5-min-per-activity workload with phones (8 phones) in a waist pouch and watches (4 watches) on the arms. Total ~43.9M sensor readings. Raw CSV columns: Index, Arrival_Time, Creation_Time, x, y, z, User, Model, Device, gt(=activity label). UCI dataset DOI: 10.24432/C5689X. PDF is the accepted manuscript captured from Aarhus University Pure via the Wayback Machine (2017-08-08 snapshot, full 5.35MB, ends in %%EOF); the live pure.au.dk copy is behind a Cloudflare challenge and the 2019 Wayback snapshot is truncated at 1MB."
+}

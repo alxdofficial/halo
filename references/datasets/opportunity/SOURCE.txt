@@ -1,0 +1,2 @@
+https://archive.ics.uci.edu/dataset/226/opportunity+activity+recognition
+https://doi.org/10.1109/INSS.2010.5573462

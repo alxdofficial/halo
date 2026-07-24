@@ -1,0 +1,15 @@
+{
+  "name": "deepconvlstm",
+  "category": "baselines",
+  "paper_title": "Deep Convolutional and LSTM Recurrent Neural Networks for Multimodal Wearable Activity Recognition",
+  "authors": "Francisco Javier Ordonez, Daniel Roggen",
+  "year": "2016",
+  "venue": "Sensors, 16(1):115 (MDPI)",
+  "doi": "10.3390/s16010115",
+  "paper_url": "https://www.mdpi.com/1424-8220/16/1/115",
+  "pdf_url": "https://www.mdpi.com/1424-8220/16/1/115/pdf",
+  "data_or_code_url": "https://github.com/sussexwearlab/DeepConvLSTM",
+  "license": "CC BY 4.0 (paper); code MIT-style (Sussex Wearlab)",
+  "role": "baseline — supervised from-scratch few-shot floor (no zero-shot; closed softmax)",
+  "notes": "Canonical CNN+LSTM HAR architecture. Used as the from-scratch supervised lower bound at 1%/10% subject-disjoint few-shot; not run zero-shot."
+}

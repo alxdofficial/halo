@@ -1,0 +1,15 @@
+{
+  "name": "moment",
+  "category": "baselines",
+  "paper_title": "MOMENT: A Family of Open Time-series Foundation Models",
+  "authors": "Mononito Goswami, Konrad Szafer, Arjun Choudhry, Yifu Cai, Shuo Li, Artur Dubrawski",
+  "year": "2024",
+  "venue": "International Conference on Machine Learning (ICML 2024), PMLR Vol. 235",
+  "doi": "10.48550/arXiv.2402.03885",
+  "paper_url": "https://arxiv.org/abs/2402.03885",
+  "pdf_url": "https://arxiv.org/pdf/2402.03885",
+  "data_or_code_url": "https://github.com/moment-timeseries-foundation-model/moment",
+  "license": "Code: MIT (repo). Paper: arXiv CC BY 4.0. Weights: on HuggingFace (AutonLab/MOMENT-1-large/base/small).",
+  "bibtex": "@inproceedings{goswami2024moment,\n  title={MOMENT: A Family of Open Time-series Foundation Models},\n  author={Goswami, Mononito and Szafer, Konrad and Choudhry, Arjun and Cai, Yifu and Li, Shuo and Dubrawski, Artur},\n  booktitle={International Conference on Machine Learning (ICML)},\n  year={2024},\n  organization={PMLR},\n  eprint={2402.03885},\n  archivePrefix={arXiv},\n  primaryClass={cs.LG}\n}",
+  "notes": "Time-series foundation model (T5-style masked-reconstruction transformer, patch tokenization). Pre-trained on the 'Time series Pile' corpus. Three sizes: small/base/large (weights on HuggingFace under AutonLab/MOMENT-1-*). General-purpose across forecasting, classification, anomaly detection, imputation. In HALO this is a DROPPED baseline (too slow per data/baseline strategy memo) \u2014 kept only for related-work citation. arXiv v1 Feb 2024, v3 Oct 2024; accepted at ICML 2024. PDF verified: 38 pages, title/authors match seed."
+}

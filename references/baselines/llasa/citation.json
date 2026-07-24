@@ -1,0 +1,15 @@
+{
+  "name": "llasa",
+  "category": "baselines",
+  "paper_title": "LLaSA: A Sensor-Aware LLM for Natural Language Reasoning of Human Activity from IMU Data",
+  "authors": "Sheikh Asif Imran, Mohammad Nur Hossain Khan, Subrata Biswas, Bashima Islam",
+  "year": "2024",
+  "venue": "arXiv preprint arXiv:2406.14498 (cs.CL); also appeared in Companion of the 2025 ACM Int'l Joint Conference on Pervasive and Ubiquitous Computing (UbiComp/ISWC 2025 Companion)",
+  "doi": "10.48550/arXiv.2406.14498",
+  "paper_url": "https://arxiv.org/abs/2406.14498",
+  "pdf_url": "https://arxiv.org/pdf/2406.14498",
+  "data_or_code_url": "https://github.com/BASHLab/LLaSA",
+  "license": "Project website CC BY-SA 4.0; code repo license unknown (not verified)",
+  "bibtex": "@article{imran2024llasa,\n  title={LLaSA: A Sensor-Aware LLM for Natural Language Reasoning of Human Activity from IMU Data},\n  author={Imran, Sheikh Asif and Khan, Mohammad Nur Hossain and Biswas, Subrata and Islam, Bashima},\n  journal={arXiv preprint arXiv:2406.14498},\n  year={2024},\n  doi={10.48550/arXiv.2406.14498},\n  url={https://arxiv.org/abs/2406.14498}\n}",
+  "notes": "From BASH Lab, Worcester Polytechnic Institute. Compact sensor-aware LLM family (7B and 13B) that ingests raw IMU (accelerometer/gyroscope) data and produces natural-language, context-rich explanations / open-ended QA about human activity. Introduces two datasets: SensorCap (35,960 IMU-caption pairs) and OpenSQA (199,701 QA pairs, with a Tune-OpenSQA split). Reports outperforming GPT-3.5 and GPT-4o-mini on sensor-reasoning benchmarks. Earlier arXiv versions (v1/v2) titled 'LLaSA: Large Multimodal Agent...' / 'A Multimodal LLM for Human Activity Analysis Through Wearable and Smartphone Sensors'; current canonical title is the v3/v4 'Sensor-Aware LLM for Natural Language Reasoning...'. Datasets also mirrored on Google Drive: https://drive.google.com/drive/folders/1128HH_idfgmZnDeqQV2rjFhm4-yW7HK7 . Published ACM version DOI: 10.1145/3714394.3756187. In HALO this is a DROPPED baseline (related work only; noted as slow in the data/baseline strategy)."
+}

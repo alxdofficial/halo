@@ -63,3 +63,8 @@ training/tokenizer/outputs/**/*.log
 
 # agent worktrees / session scratch
 .claude/
+
+# Dataset/baseline reference PDFs: kept locally for code-vs-paper verification, never redistributed
+# (copyright). The provenance that MATTERS is versioned: SOURCE.txt / citation.json / VERIFIED.md.
+references/**/*.pdf
+references/**/webpage.html

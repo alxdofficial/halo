@@ -1,0 +1,15 @@
+{
+  "name": "unimib_shar",
+  "category": "datasets",
+  "paper_title": "UniMiB SHAR: A Dataset for Human Activity Recognition Using Acceleration Data from Smartphones",
+  "authors": "Daniela Micucci, Marco Mobilio, Paolo Napoletano",
+  "year": "2017",
+  "venue": "Applied Sciences (MDPI), Vol. 7, Issue 10, Article 1101",
+  "doi": "10.3390/app7101101",
+  "paper_url": "https://www.mdpi.com/2076-3417/7/10/1101",
+  "pdf_url": "https://arxiv.org/pdf/1611.07688",
+  "data_or_code_url": "http://www.sal.disco.unimib.it/technologies/unimib-shar/",
+  "license": "CC BY 4.0 (article, per Crossref/MDPI); dataset distributed for research use from the SAL lab page",
+  "bibtex": "@article{micucci2017unimib,\n  title={{UniMiB SHAR}: A Dataset for Human Activity Recognition Using Acceleration Data from Smartphones},\n  author={Micucci, Daniela and Mobilio, Marco and Napoletano, Paolo},\n  journal={Applied Sciences},\n  volume={7},\n  number={10},\n  pages={1101},\n  year={2017},\n  publisher={MDPI},\n  doi={10.3390/app7101101},\n  url={https://www.mdpi.com/2076-3417/7/10/1101}\n}",
+  "notes": "Smartphone accelerometer HAR dataset (UniMiB = University of Milano-Bicocca). Data collected with a Samsung Galaxy Nexus I9250 (Android 5.1.1) held in the trouser front pockets (left and right). Accelerometer sampled at ~50 Hz. 30 subjects (24 female, 6 male), ages 18-60. 11,771 samples/windows split into 17 fine-grained classes = 9 activities of daily living (ADL) + 8 types of falls; can be aggregated into coarser groupings (e.g. 2-class fall vs no-fall, 9 ADL). Windows are 3 s (151 samples) centered on the acceleration-magnitude peak. Signals provided as raw 3-axis acceleration (x,y,z). Verify exact sampling rate / window length against the paper when cross-checking code, since preprocessing (e.g. window size, class subset) varies by benchmark. arXiv preprint id 1611.07688; canonical published version DOI 10.3390/app7101101. Crossref confirms authors, venue (Applied Sciences 7(10):1101), 2017-10-24, CC BY 4.0."
+}

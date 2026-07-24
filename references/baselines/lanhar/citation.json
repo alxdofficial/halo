@@ -1,0 +1,15 @@
+{
+  "name": "lanhar",
+  "category": "baselines",
+  "paper_title": "Large Language Model-Guided Semantic Alignment for Human Activity Recognition",
+  "authors": "Hua Yan, Heng Tan, Yi Ding, Pengfei Zhou, Vinod Namboodiri, Yu Yang",
+  "year": "2024",
+  "venue": "arXiv preprint (cs.CV); latest v4 Oct 2025",
+  "doi": "10.48550/arXiv.2410.00003",
+  "paper_url": "https://arxiv.org/abs/2410.00003",
+  "pdf_url": "https://arxiv.org/pdf/2410.00003",
+  "data_or_code_url": "https://github.com/DASHLab/LanHAR",
+  "license": "arXiv.org perpetual non-exclusive license / CC BY 4.0 (arXiv listing)",
+  "bibtex": "@misc{yan2024lanhar,\n  title={Large Language Model-Guided Semantic Alignment for Human Activity Recognition},\n  author={Hua Yan and Heng Tan and Yi Ding and Pengfei Zhou and Vinod Namboodiri and Yu Yang},\n  year={2024},\n  eprint={2410.00003},\n  archivePrefix={arXiv},\n  primaryClass={cs.CV},\n  doi={10.48550/arXiv.2410.00003},\n  note={System named LanHAR; earlier versions titled \"Language-centered Human Activity Recognition\"},\n  url={https://arxiv.org/abs/2410.00003}\n}",
+  "notes": "System name = LanHAR. Title changed across arXiv versions: v1-v3 'Language-centered Human Activity Recognition' -> v4 (Oct 20 2025) 'Large Language Model-Guided Semantic Alignment for Human Activity Recognition'. Cross-dataset IMU HAR: uses an LLM to generate semantic interpretations (text) of both raw sensor readings and activity labels, with an iterative re-generation step for interpretation quality and a two-stage training framework aligning sensor-reading text embeddings with activity-label text embeddings; distills a lightweight sensor encoder for mobile deployment. Text encoder is a pretrained language model (BERT-family; SciBERT-style label embeddings per seed). Evaluated on five public HAR datasets; reports +7.35% accuracy and +13.16% F1 over SOTA in cross-dataset HAR and supports new/unseen activities. DROPPED baseline (kept in related work only, per HALO plan: slow to run). Code: github.com/DASHLab/LanHAR."
+}

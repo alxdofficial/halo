@@ -1,0 +1,15 @@
+{
+  "name": "capture24",
+  "category": "datasets",
+  "paper_title": "CAPTURE-24: A large dataset of wrist-worn activity tracker data collected in the wild for human activity recognition",
+  "authors": "Shing Chan, Yuan Hang, Catherine Tong, Aidan Acquah, Andrew Schonfeldt, Jonathan Gershuny, Aiden Doherty",
+  "year": "2024",
+  "venue": "Scientific Data, vol. 11, Article no. 1135 (Nature Portfolio)",
+  "doi": "10.1038/s41597-024-03960-3",
+  "paper_url": "https://www.nature.com/articles/s41597-024-03960-3",
+  "pdf_url": "https://www.nature.com/articles/s41597-024-03960-3.pdf",
+  "data_or_code_url": "https://ora.ox.ac.uk/objects/uuid:99d7c092-d865-4a19-b096-cc16440cd001",
+  "license": "CC BY 4.0",
+  "bibtex": "@article{chan2024capture24,\n  title   = {CAPTURE-24: A large dataset of wrist-worn activity tracker data collected in the wild for human activity recognition},\n  author  = {Chan, Shing and Hang, Yuan and Tong, Catherine and Acquah, Aidan and Schonfeldt, Andrew and Gershuny, Jonathan and Doherty, Aiden},\n  journal = {Scientific Data},\n  volume  = {11},\n  number  = {1},\n  pages   = {1135},\n  year    = {2024},\n  publisher = {Nature Publishing Group},\n  doi     = {10.1038/s41597-024-03960-3},\n  url     = {https://www.nature.com/articles/s41597-024-03960-3}\n}",
+  "notes": "Free-living human activity recognition dataset. 151 participants, ~24h each; 3883 hours total wrist-worn accelerometer data, 2562 hours annotated. Device: Axivity AX3 tri-axial accelerometer worn on the DOMINANT WRIST, sampled at 100 Hz, +-8g range. Ground-truth labels derived from a wearable camera (Vicon Autographer / body camera worn during daytime) plus sleep diaries, annotated at 30-second resolution. Collected 2014-2016 (Oxford). Two-to-three orders of magnitude larger than prior public HAR datasets. Label sets: fine-grained (~200 activities via CompendiumOfPhysicalActivities/MET codes) plus coarse Willetts (6-class) and Walmsley (4-class: sleep, sedentary, light, MVPA) schemes. Dataset DOI: 10.5287/bodleian:NGx0JOMP5 (ORA), download capture24.zip ~6.4GB of .csv files. Analysis/loader code: https://github.com/OxWearables/capture24 (formerly activityMonitoring/capture24). An arXiv preprint (arXiv:2402.19229, 4 pages) also exists; paper.pdf here is the full 11-page published Scientific Data version. Verified 2026-07-02."
+}

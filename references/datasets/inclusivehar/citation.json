@@ -1,0 +1,15 @@
+{
+  "name": "inclusivehar",
+  "category": "datasets",
+  "paper_title": "InclusiveHAR: A Smartphone-Based Dataset for Human Activity Recognition Across Diverse Physical Abilities",
+  "authors": "Seyed Reza Kamel Tabbakh Farizani, Iman Naeimi, Kosar Naghavi, Fatemeh Majidi Nasab, Mehran Ghaffarian, Mahdieh Sadat Sharifi Moghaddam Kakhki",
+  "year": "2026",
+  "venue": "Mendeley Data (v4)",
+  "doi": "10.17632/r78dn3f6nc.4",
+  "paper_url": "https://data.mendeley.com/datasets/r78dn3f6nc/4",
+  "pdf_url": "",
+  "data_or_code_url": "https://data.mendeley.com/datasets/r78dn3f6nc/4",
+  "license": "CC BY 4.0",
+  "bibtex": "@misc{kameltabbakh2026inclusivehar,\n  author       = {Kamel Tabbakh Farizani, Seyed Reza and Naeimi, Iman and Naghavi, Kosar and Majidi Nasab, Fatemeh and Ghaffarian, Mehran and Sharifi Moghaddam Kakhki, Mahdieh Sadat},\n  title        = {{InclusiveHAR: A Smartphone-Based Dataset for Human Activity Recognition Across Diverse Physical Abilities}},\n  year         = {2026},\n  publisher    = {Mendeley Data},\n  version      = {V4},\n  doi          = {10.17632/r78dn3f6nc.4},\n  url          = {https://data.mendeley.com/datasets/r78dn3f6nc/4},\n  note         = {Dataset}\n}",
+  "notes": "Dataset only; no Data-in-Brief or companion journal paper found (verified via WebSearch). 20 participants (10 non-disabled, 10 with disabilities). Data recorded with an iPhone 14 Pro worn vertically in a waist pouch. Sensors: accelerometer, gyroscope, magnetometer, motion sensors, GPS-derived data. Sampling rate 50 Hz. Six activities: walking, standing, sitting, jogging, ramp ascent, ramp descent. For wheelchair users, 'walking' labels denote manual propulsion. CSV time-series table: 30 feature columns + activity label + binary 'disabled' indicator (0=non-disabled, 1=disabled) + UserID. Version 4 published 2026-02-18. Landing page saved as webpage.html (Mendeley is a JS SPA; default <title> is 'FAQ' but embedded metadata incl. DOI/authors/license/description is present in the HTML)."
+}

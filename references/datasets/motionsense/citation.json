@@ -1,0 +1,15 @@
+{
+  "name": "motionsense",
+  "category": "datasets",
+  "paper_title": "Mobile Sensor Data Anonymization",
+  "authors": "Mohammad Malekzadeh, Richard G. Clegg, Andrea Cavallaro, Hamed Haddadi",
+  "year": "2019",
+  "venue": "Proceedings of the International Conference on Internet of Things Design and Implementation (IoTDI '19), ACM, pp. 49-58",
+  "doi": "10.1145/3302505.3310068",
+  "paper_url": "https://arxiv.org/abs/1810.11546",
+  "pdf_url": "https://arxiv.org/pdf/1810.11546",
+  "data_or_code_url": "https://github.com/mmalekzadeh/motion-sense",
+  "license": "MIT (code/data repository)",
+  "bibtex": "@inproceedings{Malekzadeh2019MobileSensor,\n  author    = {Malekzadeh, Mohammad and Clegg, Richard G. and Cavallaro, Andrea and Haddadi, Hamed},\n  title     = {Mobile Sensor Data Anonymization},\n  booktitle = {Proceedings of the International Conference on Internet of Things Design and Implementation (IoTDI '19)},\n  series    = {IoTDI '19},\n  year      = {2019},\n  pages     = {49--58},\n  publisher = {ACM},\n  doi       = {10.1145/3302505.3310068},\n  eprint    = {1810.11546},\n  archivePrefix = {arXiv},\n  primaryClass  = {cs.LG}\n}",
+  "notes": "MotionSense dataset. Collected with an Apple iPhone 6s kept in the participant's front trouser pocket using the Core Motion framework. Sensors: accelerometer (userAcceleration) and gyroscope (rotationRate); also attitude and gravity are provided. Sampling rate 50 Hz. 24 participants (differing gender, age, weight, height). 6 activities: downstairs, upstairs, walking, jogging, sitting, standing, recorded over 15 trials per subject (short and long trials) in the same environment/conditions. The paper's main contribution is a privacy/anonymization autoencoder (Guardian-Estimator-Neutralizer); the dataset is the standard HAR benchmark released with it. Repo also references an earlier workshop paper (W-P2DS'18 / MobiSys workshop) 'Protecting Sensory Data against Sensitive Inferences'."
+}

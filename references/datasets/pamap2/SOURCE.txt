@@ -1,0 +1,2 @@
+https://archive.ics.uci.edu/dataset/231/pamap2+physical+activity+monitoring
+https://doi.org/10.1109/ISWC.2012.13

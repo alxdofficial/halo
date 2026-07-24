@@ -1,0 +1,2 @@
+https://archive.ics.uci.edu/dataset/341/smartphone+based+recognition+of+human+activities+and+postural+transitions
+https://www.sciencedirect.com/science/article/abs/pii/S0925231215010930

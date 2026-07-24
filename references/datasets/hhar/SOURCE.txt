@@ -1,0 +1,2 @@
+https://archive.ics.uci.edu/dataset/344/heterogeneity+activity+recognition
+https://dl.acm.org/doi/10.1145/2809695.2809718

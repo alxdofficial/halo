@@ -1,0 +1,2 @@
+https://archive.ics.uci.edu/dataset/256/daily+and+sports+activities
+https://academic.oup.com/comjnl/article-abstract/57/11/1649/411286

@@ -1,0 +1,2 @@
+https://archive.ics.uci.edu/dataset/507/wisdm+smartphone+and+smartwatch+activity+and+biometrics+dataset
+https://ieeexplore.ieee.org/document/8835065

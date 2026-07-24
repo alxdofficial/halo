@@ -1,0 +1,15 @@
+{
+  "name": "ssl-wearables",
+  "category": "baselines",
+  "paper_title": "Self-supervised learning for human activity recognition using 700,000 person-days of wearable data",
+  "authors": "Hang Yuan, Shing Chan, Andrew P. Creagh, Catherine Tong, Aidan Acquah, David A. Clifton, Aiden Doherty",
+  "year": "2024",
+  "venue": "npj Digital Medicine, 7:91 (2024). Preprint: arXiv:2206.02909",
+  "doi": "10.1038/s41746-024-01062-3",
+  "paper_url": "https://www.nature.com/articles/s41746-024-01062-3",
+  "pdf_url": "https://arxiv.org/pdf/2206.02909",
+  "data_or_code_url": "https://github.com/OxWearables/ssl-wearables",
+  "license": "Custom academic/non-commercial license (Oxford University Innovation); code under this license, commercial use requires contacting enquiries@innovation.ox.ac.uk. The npj Digital Medicine article itself is open access CC BY 4.0.",
+  "bibtex": "@article{yuan2024selfsupervised,\n  title={Self-supervised learning for human activity recognition using 700,000 person-days of wearable data},\n  author={Yuan, Hang and Chan, Shing and Creagh, Andrew P. and Tong, Catherine and Acquah, Aidan and Clifton, David A. and Doherty, Aiden},\n  journal={npj Digital Medicine},\n  volume={7},\n  number={1},\n  pages={91},\n  year={2024},\n  publisher={Nature Publishing Group},\n  doi={10.1038/s41746-024-01062-3},\n  note={Preprint: arXiv:2206.02909}\n}",
+  "notes": "SSL foundation model for wrist-worn accelerometry. Pretrained on UK-Biobank accelerometer data (>700,000 person-days, ~100k subjects) via multi-task self-supervision (arrow-of-time, permutation, time-warping pretext tasks). Backbone is a ResNet-V2-style 1D CNN feature extractor. Input: tri-axial accelerometer resampled to 30Hz; standard window 10s = 300 samples. Released weights loadable via torch.hub: torch.hub.load('OxWearables/ssl-wearables','harnet5'/'harnet10'/'harnet30', class_num=N, pretrained=True) where 5/10/30 = window length in seconds at 30Hz. Feature extractor is pretrained; classifier head is untrained and requires fine-tuning. Evaluated on seven downstream HAR benchmarks (F1 relative improvement 2.5%-100%, median 18.4%). ACTIVE HALO baseline: released pretrained weights available. arXiv PDF (18pp (~8pp main body)) downloaded is the condensed preprint; the full peer-reviewed version is the npj Digital Medicine article. Additional pretrained variants (Capture-24, Rowlands, 1k-subject subsets) hosted on project server."
+}

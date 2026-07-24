@@ -1,0 +1,15 @@
+{
+  "name": "unimts",
+  "category": "baselines",
+  "paper_title": "UniMTS: Unified Pre-training for Motion Time Series",
+  "authors": "Xiyuan Zhang, Diyan Teng, Ranak Roy Chowdhury, Shuheng Li, Dezhi Hong, Rajesh K. Gupta, Jingbo Shang",
+  "year": "2024",
+  "venue": "Advances in Neural Information Processing Systems (NeurIPS) 2024",
+  "doi": "10.48550/arXiv.2410.19818",
+  "paper_url": "https://arxiv.org/abs/2410.19818",
+  "pdf_url": "https://arxiv.org/pdf/2410.19818",
+  "data_or_code_url": "https://github.com/xiyuanzh/UniMTS",
+  "license": "Paper: CC BY 4.0 (arXiv). Code repo: no LICENSE file present (unknown).",
+  "bibtex": "@inproceedings{zhang2024unimts,\n  title={UniMTS: Unified Pre-training for Motion Time Series},\n  author={Zhang, Xiyuan and Teng, Diyan and Chowdhury, Ranak Roy and Li, Shuheng and Hong, Dezhi and Gupta, Rajesh K. and Shang, Jingbo},\n  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},\n  year={2024},\n  eprint={2410.19818},\n  archivePrefix={arXiv},\n  primaryClass={eess.SP},\n  url={https://arxiv.org/abs/2410.19818}\n}",
+  "notes": "First unified pre-training procedure for motion (IMU) time series that generalizes across device positions/orientations and activities. Method: contrastive learning aligning motion time series with LLM-enriched text descriptions; pre-trained ONLY on synthetic data generated from HumanML3D skeleton motion (converted to BVH then to IMU signals via IMUSim), avoiding need for real labeled sensor data. Uses a spatio-temporal graph encoder for device-location invariance and rotation-invariant augmentation for mounting-orientation robustness. IMU input is 6-dim (acc x/y/z, gyro x/y/z); test uses 10-second windows. Evaluated on 18 real-world HAR benchmark datasets. Reported gains vs baselines: zero-shot +340%, few-shot +16.3%, full-shot +9.2%. Pre-trained model WEIGHTS are on HuggingFace at https://huggingface.co/xiyuanz/UniMTS (note the HF username 'xiyuanz' differs from the GitHub username 'xiyuanzh'). NOTE: original SEED code URL github.com/xiyuanz/UniMTS is a typo and 404s; correct repo is github.com/xiyuanzh/UniMTS. OpenReview: https://openreview.net/forum?id=DpByqSbdhI . For HALO cross-check: this is the 'cosine tier' zero-shot/contrastive baseline; note it consumes both accel AND gyro, whereas many HAR datasets/HALO settings may be accel-only."
+}
