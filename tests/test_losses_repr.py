@@ -16,6 +16,7 @@ from training.tokenizer.losses_repr import (
     make_mask_plan,
     make_multiresolution_mask_plan,
     masked_latent_loss,
+    nt_xent,
     supcon_config_conditional,
     transform_cadence_for_timewarp,
 )
@@ -170,6 +171,45 @@ def test_supcon_gradient_flows():
     labels = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3])
     supcon_config_conditional(z, labels).backward()
     assert z.grad is not None and torch.isfinite(z.grad).all()
+
+
+# ----------------------------------------------------------------------- nt_xent (SimCLR)
+def test_nt_xent_finite_and_symmetric():
+    torch.manual_seed(0)
+    z_a, z_b = torch.randn(8, 16), torch.randn(8, 16)
+    la, lb = nt_xent(z_a, z_b, 0.1), nt_xent(z_b, z_a, 0.1)
+    assert torch.isfinite(la)
+    assert torch.allclose(la, lb, atol=1e-6), "NT-Xent must be symmetric in its two views"
+
+
+def test_nt_xent_minimized_for_aligned_orthogonal_views():
+    z = torch.eye(6, 8)                                   # 6 mutually-orthogonal samples
+    aligned = nt_xent(z, z.clone(), 0.1)                  # identical views == perfect positives
+    # misaligned: shuffle view B so each anchor's positive is a DIFFERENT sample -> higher loss
+    perm = torch.tensor([1, 2, 3, 4, 5, 0])
+    misaligned = nt_xent(z, z[perm].clone(), 0.1)
+    assert aligned < misaligned
+    # collapsed: all vectors identical -> negatives no longer orthogonal -> higher loss than
+    # the aligned-orthogonal optimum (so nt_xent prefers orthogonal negatives)
+    collapsed = z.new_ones(6, 8)
+    assert aligned < nt_xent(collapsed, collapsed.clone(), 0.1)
+
+
+def test_nt_xent_analytic_value_for_aligned_orthonormal():
+    B, T = 5, 0.1
+    z = torch.eye(B, B)                                   # orthonormal aligned views
+    loss = nt_xent(z, z.clone(), T)
+    # each anchor: positive logit 1/T (cosine 1), 2B-2 orthogonal negatives at logit 0
+    expected = -(1.0 / T) + math.log(math.exp(1.0 / T) + 2 * B - 2)
+    assert abs(float(loss) - expected) < 1e-4
+
+
+def test_nt_xent_gradient_flows():
+    z_a = torch.randn(8, 16, requires_grad=True)
+    z_b = torch.randn(8, 16, requires_grad=True)
+    nt_xent(z_a, z_b, 0.1).backward()
+    assert z_a.grad is not None and torch.isfinite(z_a.grad).all()
+    assert z_b.grad is not None and torch.isfinite(z_b.grad).all()
 
 
 # ------------------------------------------------------------------------ grounding

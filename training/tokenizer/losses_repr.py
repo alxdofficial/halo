@@ -6,9 +6,11 @@ Exactly three objectives, deliberately not a menu:
       dropping the gyro triad = the real deployment shift) AND temporal blocks
       (random-block for representation; causal/future = the world-model variant whose
       prediction error later feeds abstention). Prediction in latent space.
-  A2  config-conditional supervised contrastive — window-level sensor<->sensor SupCon;
-      same-activity windows across DIFFERENT configs are positives (the config is an
-      input, not a nuisance to blind-invariate away). No CLIP sensor<->text term (label
+  A2  window-level instance contrastive. DEFAULT is self-supervised SimCLR (NT-Xent over
+      two independent augmentations of the same window — `nt_xent`, no labels). The
+      original label-SupCon (`supcon_config_conditional`: same-activity windows across
+      DIFFERENT configs are positives, config as input not nuisance) is kept selectable
+      for the do-no-harm ablation (a2_mode='supcon'). No CLIP sensor<->text term (label
       transfer is text->text in the evidence head).
   A3  physical-primitive grounding — regress the M1 primitives (cadence log2-Hz,
       eigen-ratios) from the representation. Targets are computed on the AUGMENTED view
@@ -36,6 +38,7 @@ GYRO_DROP_BIAS = 0.7         # within channel-mask events, P(drop the whole gyro
 CAUSAL_FRACTION = 0.3        # fraction of batches using the causal/future (world-model) mask
 MIN_VISIBLE_TIME = 2         # never mask below this many visible time steps (floor on T)
 SUPCON_TEMPERATURE = 0.1
+SIMCLR_TEMPERATURE = 0.1     # NT-Xent temperature for the self-supervised A2 (SimCLR default)
 A3_WEIGHT = 0.1              # grounding rail, not a driver
 HUBER_DELTA = 1.0
 
@@ -298,6 +301,28 @@ def supcon_config_conditional(
     return -(pos_log_prob[has_pos]).mean()
 
 
+def nt_xent(z_a: torch.Tensor, z_b: torch.Tensor,
+            temperature: float = SIMCLR_TEMPERATURE) -> torch.Tensor:
+    """Self-supervised SimCLR NT-Xent over two augmented views (Chen et al. 2020).
+
+    z_a, z_b: (B, d_proj) projections of the SAME B windows under two INDEPENDENT
+    augmentations. Both are L2-normalized. Stacking to (2B, d), the positive for anchor
+    z_a[i] is z_b[i] (row i and row i+B) and symmetrically; the negatives are every other
+    sample across BOTH views (2B-2 of them). The self-similarity diagonal is masked to
+    -inf so it never enters the denominator. Returns the symmetric mean NT-Xent (the mean
+    over all 2B anchors — each view serves as anchor once). No labels: this is the
+    self-supervised replacement for the label-SupCon A2 term.
+    """
+    B = z_a.shape[0]
+    z = torch.cat([F.normalize(z_a, dim=1), F.normalize(z_b, dim=1)], dim=0)   # (2B, d)
+    sim = (z @ z.t()) / temperature                                            # (2B, 2B)
+    self_mask = torch.eye(2 * B, dtype=torch.bool, device=z.device)
+    sim = sim.masked_fill(self_mask, float("-inf"))
+    # positive of row i is its view-partner: i<B -> i+B ; i>=B -> i-B
+    targets = (torch.arange(2 * B, device=z.device) + B) % (2 * B)
+    return F.cross_entropy(sim, targets)
+
+
 # ================================================================================================
 # A3 — physical-primitive grounding (aug-aware targets, validity-masked)
 # ================================================================================================
@@ -378,15 +403,23 @@ def elite3_loss(
     weights: EliteLossWeights = EliteLossWeights(),
     a1_feature_valid: Optional[torch.Tensor] = None,
     a1_token_groups: Optional[torch.Tensor] = None,
+    a2_loss: Optional[torch.Tensor] = None,
+    a2_key: str = "a2_supcon",
 ) -> EliteLossOutput:
-    """Weighted sum of the elite 3. Exactly these; additions go through an ablation."""
+    """Weighted sum of the elite 3. Exactly these; additions go through an ablation.
+
+    A2 is pluggable: pass a precomputed ``a2_loss`` (e.g. the self-supervised
+    ``nt_xent`` over two views, labelled by ``a2_key='a2_simclr'``) to use it directly and
+    SKIP the label-based supcon; leave it None to compute the label-SupCon here (the
+    ablation path). Either way it is scaled by ``weights.a2_supcon``.
+    """
     l1 = masked_latent_loss(a1_pred, a1_target, a1_mask, feature_valid=a1_feature_valid,
                             token_groups=a1_token_groups)
-    l2 = supcon_config_conditional(a2_embeddings, a2_labels)
+    l2 = a2_loss if a2_loss is not None else supcon_config_conditional(a2_embeddings, a2_labels)
     l3 = grounding_loss(a3_cadence_pred, a3_eigen_pred, a3_targets)
     total = weights.a1_masked * l1 + weights.a2_supcon * l2 + weights.a3_grounding * l3
     return EliteLossOutput(
         total=total,
-        parts={"a1_masked": float(l1.detach()), "a2_supcon": float(l2.detach()),
+        parts={"a1_masked": float(l1.detach()), a2_key: float(l2.detach()),
                "a3_grounding": float(l3.detach())},
     )
