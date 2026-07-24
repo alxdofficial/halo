@@ -212,6 +212,7 @@ def masked_latent_loss(
     token_mask: torch.Tensor,
     feature_valid: Optional[torch.Tensor] = None,
     token_groups: Optional[torch.Tensor] = None,
+    token_durations: Optional[torch.Tensor] = None,   # (B,T) represented seconds per patch (F1)
 ) -> torch.Tensor:
     """A1: regression in LATENT space on masked tokens only.
 
@@ -233,18 +234,29 @@ def masked_latent_loss(
     predicted = F.normalize(predicted, dim=-1)
     per_token = 2.0 - 2.0 * (predicted * target).sum(dim=-1)            # cosine loss
     masked = token_mask & torch.isfinite(per_token)
+
+    def _reduce(sel_mask):
+        """Mean over selected tokens, optionally weighted by represented duration (F1): a partial
+        tail patch contributes proportionally, not as a full-length patch. Uniform when absent."""
+        if not bool(sel_mask.any()):
+            return None
+        if token_durations is None:
+            return per_token[sel_mask].mean()
+        w = token_durations.to(per_token.dtype).unsqueeze(2).clamp(min=0.0) * sel_mask.to(per_token.dtype)
+        pt = torch.where(sel_mask, per_token, torch.zeros_like(per_token))   # zero (finite) elsewhere
+        return (pt * w).sum() / w.sum().clamp(min=1e-6)
+
     if token_groups is None:
-        if not bool(masked.any()):
-            return predicted.new_zeros(())
-        return per_token[masked].mean()
+        out = _reduce(masked)
+        return out if out is not None else predicted.new_zeros(())
 
     # Reduce within each resolution before reducing across resolutions. Otherwise a
     # 12-token short grid contributes three times the weight of a 4-token long grid.
     group_losses = []
     for group in (0, 1):
-        group_mask = masked & token_groups.eq(group).unsqueeze(2)
-        if bool(group_mask.any()):
-            group_losses.append(per_token[group_mask].mean())
+        out = _reduce(masked & token_groups.eq(group).unsqueeze(2))
+        if out is not None:
+            group_losses.append(out)
     return (torch.stack(group_losses).mean() if group_losses
             else predicted.new_zeros(()))
 
@@ -403,6 +415,7 @@ def elite3_loss(
     weights: EliteLossWeights = EliteLossWeights(),
     a1_feature_valid: Optional[torch.Tensor] = None,
     a1_token_groups: Optional[torch.Tensor] = None,
+    a1_token_durations: Optional[torch.Tensor] = None,
     a2_loss: Optional[torch.Tensor] = None,
     a2_key: str = "a2_supcon",
 ) -> EliteLossOutput:
@@ -414,7 +427,7 @@ def elite3_loss(
     ablation path). Either way it is scaled by ``weights.a2_supcon``.
     """
     l1 = masked_latent_loss(a1_pred, a1_target, a1_mask, feature_valid=a1_feature_valid,
-                            token_groups=a1_token_groups)
+                            token_groups=a1_token_groups, token_durations=a1_token_durations)
     l2 = a2_loss if a2_loss is not None else supcon_config_conditional(a2_embeddings, a2_labels)
     l3 = grounding_loss(a3_cadence_pred, a3_eigen_pred, a3_targets)
     total = weights.a1_masked * l1 + weights.a2_supcon * l2 + weights.a3_grounding * l3

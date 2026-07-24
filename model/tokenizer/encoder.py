@@ -273,7 +273,13 @@ class SetTokenizerEncoder(nn.Module):
             # tokens merely because their temporal grid is denser.
             valid_r = (resolution_ids >= 0) & (resolution_ids < 2) & (patch_w > 0)
             one_hot = F.one_hot(resolution_ids.clamp(0, 1), num_classes=2).to(per_patch.dtype)
-            scale_w = one_hot * valid_r.unsqueeze(-1).to(per_patch.dtype)  # (B,P,2)
+            # Within a resolution, weight each patch by its REPRESENTED duration so a partial tail
+            # patch (a short window-crop remainder) contributes proportionally, not as a full-length
+            # patch (F1). When every patch in a resolution has equal duration (e.g. eval's evenly
+            # divided window) the constant factor cancels — this reduces to the uniform mean.
+            dur_w = (patch_durations.to(per_patch.dtype) if patch_durations is not None
+                     else patch_w.to(per_patch.dtype))
+            scale_w = one_hot * (valid_r.to(per_patch.dtype) * dur_w).unsqueeze(-1)  # (B,P,2)
             denom = scale_w.sum(dim=1)                                    # (B,2)
             summaries = torch.einsum("bpd,bps->bsd", per_patch, scale_w) \
                 / denom.clamp(min=1.0).unsqueeze(-1)

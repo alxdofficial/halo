@@ -103,12 +103,15 @@ class Rotation3dCfg:
     accel signal, so the model learns 'gravity can point any direction' rather than
     memorizing each dataset's fixed orientation. Principled ONLY because the filterbank
     now carries a signed DC feature (else full SO(3) scrambles an unrepresented gravity
-    cue — the reason plain rotation was originally disabled). Gated on a gravity-present
-    acc triad so normalized / gravity-removed data (recgym, iOS userAcceleration) is not
-    rotated destructively."""
+    cue — the reason plain rotation was originally disabled). Applies to ANY real triad: a
+    gravity-removed accel is still a proper 3-vector and rotates correctly (its DC≈0, so
+    nothing is scrambled), so gravity-removed streams are NOT excluded (F12). The only
+    genuinely non-rotatable case — per-axis min-max normalized data — is excluded at curation
+    time (recgym was dropped), not here."""
     enabled: bool = False
     p: float = 0.5
-    require_gravity: bool = True   # skip locations whose acc triad is gravity-removed/normalized
+    require_gravity: bool = False  # False (default): rotate any real triad — a gravity-removed accel
+                                   # is a valid vector. True: legacy gate that also skipped it (F12).
 
 
 @dataclass
@@ -236,8 +239,9 @@ class AugmentationConfig:
 
     # Application order: metadata/physics-changing first, then value-space, then TEXT last
     # (so channel-text augs see the final, physics-mutated channel set/descriptions).
-    # rotation_3d runs BEFORE gravity (it needs gravity present in the acc to gate on);
-    # rate runs after gravity/rotation.
+    # rotation_3d runs BEFORE gravity so a gravity-carrying accel is rotated with its gravity DC
+    # intact (teaching gravity-direction augmentation) before gravity may be removed; rate runs
+    # after gravity/rotation.
     ORDER = ("window_crop", "channel_dropout", "rotation_3d", "gravity", "rate",
              "time_warp", "time_shift", "magnitude_warp", "scale", "jitter",
              "channel_text_phrase", "channel_text_dropout", "label_text")
@@ -536,8 +540,9 @@ class IMUAugmenter:
             return False
 
         for _loc, triads in triloc.items():
-            # Only rotate locations whose accel still carries gravity — rotating
-            # normalized / gravity-removed data would be a meaningless mixing of axes.
+            # require_gravity is a legacy ablation gate (default OFF, F12): a gravity-removed accel
+            # is still a valid 3-vector, so rotating it is a correct orientation augmentation. When
+            # ON, skip locations whose accel no longer carries gravity.
             if spec.require_gravity and not loc_has_gravity(triads):
                 continue
             R = _random_so3().to(x.dtype).to(x.device)

@@ -929,6 +929,7 @@ def main() -> None:
                 a3_targets=targets, weights=weights,
                 a1_feature_valid=a1_feature_valid,
                 a1_token_groups=resolution_ids,
+                a1_token_durations=patch_durations,   # weight A1 by represented duration (F1)
                 a2_loss=a2_loss, a2_key=a2_key,
             )
             # Total = a1 + simclr + tfc (A3 is off by default). TF-C scaled by cfg.tfc_weight;
