@@ -68,6 +68,9 @@ PATCH_SECONDS_CHOICES = (0.5, 0.75, 1.0, 1.5)
 SHORT_PATCH_SECONDS_CHOICES = (0.4, 0.5, 0.6, 0.7, 0.8)
 LONG_PATCH_SECONDS_CHOICES = (1.0, 1.1, 1.2, 1.3, 1.4, 1.5)
 MIN_RESOLUTION_RATIO = 1.75
+MIN_TAIL_FRACTION = 0.25          # F7: drop a resolution's tail patch if it covers < this fraction of
+                                 # a full patch (and it isn't the only patch) — avoids degenerate
+                                 # 1-sample tokens whose duration is clamped to the embedding floor.
 VAL_RESOLUTION_PAIR = (0.5, 1.5)
 DFT_SIZE = 256                   # must cover max NATIVE rate (100 Hz) x max patch (1.5 s) = 150;
                                  # the rate aug caps at 100 Hz too, so 256 keeps ample headroom
@@ -756,10 +759,19 @@ class MultiResolutionCollate:
                     raise ValueError(
                         f"patch length {nominal_n} exceeds dft_size {self.dft_size}"
                     )
+                min_tail = max(4, int(MIN_TAIL_FRACTION * nominal_n))   # F7 tail floor
+                res_start = len(entries)
                 for start in range(0, data.shape[0], nominal_n):
                     end = min(start + nominal_n, data.shape[0])
                     n = end - start
                     if n <= 0:
+                        continue
+                    # F7: a sub-fraction TAIL patch (e.g. UniMiB's 1-sample remainder) is a degenerate
+                    # token — its ~0.02 s duration is clamped to the duration-embedding floor and it
+                    # still joins self-attention. Drop it rather than feed a physically meaningless
+                    # token; but never drop the ONLY patch of a resolution (a window shorter than one
+                    # patch keeps its single partial). Duration-weighting (F1) handles the rest.
+                    if n < min_tail and len(entries) > res_start:
                         continue
                     start_s, end_s = start / rate, end / rate
                     entries.append((

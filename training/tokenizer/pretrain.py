@@ -137,13 +137,17 @@ class PretrainConfig:
     # (reproduced with --a2-mode supcon --a3-weight 0.1 --sampler balanced).
     a2_mode: str = "simclr"
     simclr_temperature: float = 0.1       # NT-Xent temperature (SimCLR default)
-    # TF-C (time-frequency consistency): a THIRD self-supervised term summed alongside A1 + A2,
-    # ON by default whenever the SSL recipe is active (a2_mode='simclr'). It pulls together the
-    # frequency-domain embedding (the main encoder's pooled output) and a time-domain embedding
-    # (an auxiliary TimeEncoder over the raw samples) of the SAME window; NT-Xent, augmentation-free.
-    # tfc_weight==0 cleanly skips the TimeEncoder forward + the TF-C term (a free hygiene knob, NOT
-    # a separate arm); a2_mode='supcon' (the old label recipe) also skips it — TF-C is SSL-only.
-    tfc_weight: float = 1.0
+    # TF-C-INSPIRED cross-domain consistency: a THIRD self-supervised term alongside A1 + A2, ON with
+    # the SSL recipe (a2_mode='simclr'). It pulls the frequency-domain embedding (the main encoder's
+    # pooled output) toward a time-domain embedding (an auxiliary rate/position-aware TimeEncoder over
+    # the raw samples) of the SAME window; NT-Xent, augmentation-free. NOTE this is NOT faithful TF-C
+    # (Zhang et al. 2022): there is no time/time contrastive term and the time encoder is discarded at
+    # inference — it is a one-directional cross-domain REGULARIZER (see time_encoder.py). Default weight
+    # 0.25, NOT 1.0: at weight 1 the raw NT-Xent magnitude (~13) dwarfed A1 (~2) and SimCLR (~4) and
+    # drove training; 0.25 makes the three objectives comparable at init. The {0, 0.1, 0.25, 1} weight
+    # ablation is still a required pre-retrain GPU experiment (audit F5). tfc_weight==0 cleanly skips the
+    # TimeEncoder forward + the term; a2_mode='supcon' also skips it — TF-C is SSL-only.
+    tfc_weight: float = 0.25
     tfc_temperature: float = 0.1          # NT-Xent temperature for the time<->freq contrast
     # Corpus sampler. NEW DEFAULT 'temperature' = per-window draw with P(dataset) ∝ n^alpha, NO
     # class balancing. 'balanced' = the label-balanced BalancedBatchSampler (needed for supcon).
