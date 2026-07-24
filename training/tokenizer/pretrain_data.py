@@ -116,13 +116,17 @@ def stream_channel_descriptions(dataset: str, stream: str) -> list[str]:
             + [f"gyroscope {a}-axis worn at {where}" for a in "xyz"])
 
 
-# Fixed intra-sensor channel ROLE text (axis + modality ONLY — never placement/device). One entry
-# per CHANNELS slot; constant across the whole corpus. This is the trivial, positional half of the
-# factorization in docs/design/TEXT_CONDITIONING.md — the load-bearing device/placement/gravity
-# identity lives in the per-sensor text below.
+# Fixed intra-sensor channel ROLE text (AXIS ONLY — never modality/placement/device). One entry per
+# CHANNELS slot; constant across the whole corpus. Modality (accel vs gyro) is NOT a role fact — it
+# moved to the per-sensor text below, because accel and gyro are now modelled as two distinct
+# modality-level SENSORS (docs/design/TEXT_CONDITIONING.md). Role is the purely positional x/y/z axis.
+# NOTE: axis is encoded as TEXT ("x"/"y"/"z") so it flows through the same frozen-LM pooler as every
+# other text source. A tiny LEARNED 3-way role embedding would be cleaner (only three axes; SBERT-
+# embedding single letters is wasteful) but that is a model-side change to FactoredChannelTextFusion —
+# kept as text here to avoid over-engineering the data path.
 _CHANNEL_ROLE_TEXT = {
-    "acc_x": "accelerometer x-axis", "acc_y": "accelerometer y-axis", "acc_z": "accelerometer z-axis",
-    "gyro_x": "gyroscope x-axis", "gyro_y": "gyroscope y-axis", "gyro_z": "gyroscope z-axis",
+    "acc_x": "x", "acc_y": "y", "acc_z": "z",
+    "gyro_x": "x", "gyro_y": "y", "gyro_z": "z",
 }
 
 
@@ -136,16 +140,20 @@ def stream_sensor_texts(
 ) -> tuple[list[str], list[str], list[int]]:
     """Factored config text for a stream (docs/design/TEXT_CONDITIONING.md).
 
-    Returns ``(role_texts, sensor_texts, sensor_id)``:
-      * ``role_texts``  — one string per CHANNELS slot, axis+modality ONLY ("accelerometer x-axis").
-      * ``sensor_texts``— one string per SENSOR, device+placement (+gravity convention), NO axis
-                          ("a smartwatch on the left wrist; accelerometer includes gravity").
-      * ``sensor_id``   — length-6 map: which sensor each channel belongs to. The corpus is
-                          single-sensor per stream today, so this is all-zeros and ``sensor_texts``
-                          has one entry; the multi-sensor path (simultaneous streams) is future work.
+    Accel and gyro are modelled as two distinct modality-level SENSORS, so a stream factors as:
+      * ``role_texts``  — one string per CHANNELS slot, AXIS ONLY ("x"/"y"/"z"); corpus-constant.
+      * ``sensor_texts``— one string per PRESENT modality: ``[accel_sensor, gyro_sensor]`` when the
+                          stream carries both, each with device + modality + placement (the gravity
+                          convention rides on the ACCEL sensor only — the gyroscope has no gravity
+                          component). An accel-only stream (capture24, unimib_shar) emits just
+                          ``[accel_sensor]`` — no phantom gyroscope; the ragged sensor count is padded
+                          by encode_texts_factored.
+      * ``sensor_id``   — length-6 map: accel channels -> the accel sensor's index, gyro channels ->
+                          the gyro sensor's index. Absent-modality channels are ``channel_mask``-masked
+                          and pool to nothing, so their id only needs to be a valid index.
 
-    Placement/device/gravity appear ONLY in the sensor text and axis ONLY in the role text, so no
-    config fact is injected twice when the two are summed (the compounding hazard of §6).
+    Placement/device/modality live ONLY in the sensor text and axis ONLY in the role text, so no config
+    fact is injected twice when the two are summed (the compounding hazard of §6).
     """
     role_texts = [_CHANNEL_ROLE_TEXT[c] for c in CHANNELS]
     try:
@@ -161,14 +169,24 @@ def stream_sensor_texts(
         place = next((PLACEMENT_WORDS[w] for w in tokens if w in PLACEMENT_WORDS), "the body")
         stream_gravity_removed = False
     removed = stream_gravity_removed if gravity_removed is None else bool(gravity_removed)
-    modality = ("accelerometer and gyroscope" if has_accel and has_gyro
-                else "accelerometer only" if has_accel
-                else "gyroscope only" if has_gyro else "inertial sensor")
-    grav = ("accelerometer gravity removed" if removed
-            else "accelerometer includes gravity" if has_accel else "no accelerometer")
-    sensor_text = f"a {device} on {place}; {modality}; {grav}"
-    sensor_id = [0] * len(CHANNELS)          # single sensor per stream (current corpus)
-    return role_texts, [sensor_text], sensor_id
+    grav = "gravity removed" if removed else "includes gravity"
+    accel_sensor = f"a {device} accelerometer on {place}; {grav}"
+    gyro_sensor = f"a {device} gyroscope on {place}"
+    # Emit only the modalities actually present. Absent-modality channels are channel_mask-masked, so
+    # their sensor_id just needs to stay a valid index into sensor_texts.
+    sensor_texts: list[str] = []
+    accel_id = gyro_id = 0
+    if has_accel:
+        accel_id = len(sensor_texts)
+        sensor_texts.append(accel_sensor)
+    if has_gyro:
+        gyro_id = len(sensor_texts)
+        sensor_texts.append(gyro_sensor)
+    if not sensor_texts:                     # defensive: neither modality flagged present
+        sensor_texts.append(accel_sensor)
+        accel_id = gyro_id = 0
+    sensor_id = [accel_id if c.startswith("acc") else gyro_id for c in CHANNELS]
+    return role_texts, sensor_texts, sensor_id
 
 
 _GRAVITY_STATE_CACHE: dict[tuple[str, str], str | None] = {}

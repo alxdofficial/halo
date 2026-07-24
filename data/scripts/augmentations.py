@@ -350,20 +350,6 @@ def _mark_gravity_removed(desc: str) -> str:
     return d
 
 
-def _mark_sensor_modality(desc: str, has_accel: bool, has_gyro: bool) -> str:
-    """Keep a factored sensor description consistent after channel-group dropout."""
-    modality = ("accelerometer and gyroscope" if has_accel and has_gyro
-                else "accelerometer only" if has_accel
-                else "gyroscope only" if has_gyro else "inertial sensor")
-    pattern = re.compile(
-        r"\b(?:accelerometer and gyroscope|accelerometer only|gyroscope only|inertial sensor)\b",
-        flags=re.I,
-    )
-    if pattern.search(desc):
-        return pattern.sub(modality, desc, count=1)
-    return f"{desc.rstrip(' ;')}; {modality}"
-
-
 def _random_so3() -> "torch.Tensor":
     """Uniform-random rotation matrix (3x3, float32) from SO(3) (Haar measure).
 
@@ -605,27 +591,26 @@ class IMUAugmenter:
         # require at least one full x/y/z triad to survive the drop
         if not any(len(v) == 3 for v in group_channels_by_sensor(kept_names).values()):
             return s
-        if s.sensor_descriptions is not None:
-            ids = s.sensor_id if s.sensor_id is not None else [0] * len(names)
-            cm = s.channel_mask if s.channel_mask is not None else [True] * len(names)
-            sensor_desc = list(s.sensor_descriptions)
-            for sid in range(len(sensor_desc)):
-                kept_real = [i for i in keep if ids[i] == sid and cm[i]]
-                has_accel = any("acc" in names[i].lower() for i in kept_real)
-                has_gyro = any("gyro" in names[i].lower() for i in kept_real)
-                sensor_desc[sid] = _mark_sensor_modality(
-                    sensor_desc[sid], has_accel=has_accel, has_gyro=has_gyro
-                )
-            s.sensor_descriptions = sensor_desc
         s.data = s.data[:, keep]
         s.channel_names = kept_names
         s.channel_descriptions = [s.channel_descriptions[i] for i in keep]
         if s.role_descriptions is not None:
             s.role_descriptions = [s.role_descriptions[i] for i in keep]
-        if s.sensor_id is not None:
-            s.sensor_id = [s.sensor_id[i] for i in keep]
         if s.channel_mask is not None:
             s.channel_mask = [s.channel_mask[i] for i in keep]
+        # Factored sensors: accel and gyro are separate modality-level SENSORS, so dropping a channel
+        # group REMOVES that modality's sensor entirely (rather than rewriting a modality phrase in a
+        # single shared description). Keep only sensors that still own a surviving channel and compact
+        # sensor_id to a dense [0..n) index into the pruned sensor_descriptions.
+        if s.sensor_id is not None:
+            kept_ids = [s.sensor_id[i] for i in keep]
+            if s.sensor_descriptions is not None:
+                used = sorted(set(kept_ids))
+                remap = {old: new for new, old in enumerate(used)}
+                s.sensor_descriptions = [s.sensor_descriptions[sid] for sid in used]
+                s.sensor_id = [remap[sid] for sid in kept_ids]
+            else:
+                s.sensor_id = kept_ids
         return s
 
     # ---------- text: channel-description phrase paraphrase ----------

@@ -18,17 +18,20 @@ from training.tokenizer.pretrain_data import CHANNELS, stream_sensor_texts
 
 
 # ----------------------------------------------------------------------------- data-side factoring
-def test_role_text_has_no_placement_and_sensor_text_has_no_axis():
-    """The compounding hazard (§6): a config fact must live in exactly ONE source."""
+def test_role_text_is_axis_only_and_sensor_text_carries_device_placement():
+    """The compounding hazard (§6): a config fact lives in exactly ONE source. Accel and gyro are
+    two modality-level sensors; role text is the positional axis only."""
     role, sensor, sensor_id = stream_sensor_texts("wisdm", "watch_wrist")
-    assert len(role) == len(CHANNELS) and len(sensor) == 1
-    assert sensor_id == [0] * len(CHANNELS)
+    assert len(role) == len(CHANNELS) and len(sensor) == 2      # accel + gyro sensors
+    assert sensor_id == [0, 0, 0, 1, 1, 1]
     for r in role:
-        assert "wrist" not in r and "watch" not in r and "gravity" not in r, f"placement leaked into role: {r!r}"
-        assert ("accelerometer" in r or "gyroscope" in r) and "axis" in r
-    (s,) = sensor
-    assert "wrist" in s and "watch" in s          # placement + device present
-    assert "x-axis" not in s and "y-axis" not in s  # axis absent
+        assert r in {"x", "y", "z"}, f"role must be axis-only, got {r!r}"
+    accel_s, gyro_s = sensor
+    assert "accelerometer" in accel_s and "gyroscope" in gyro_s
+    for s in sensor:
+        assert "wrist" in s and "watch" in s          # placement + device on each sensor
+        assert "axis" not in s                        # axis lives only in the role text
+    assert "gravity" in accel_s and "gravity" not in gyro_s   # gravity rides on accel only
 
 
 def test_role_text_is_constant_across_streams_sensor_text_is_not():
@@ -38,14 +41,15 @@ def test_role_text_is_constant_across_streams_sensor_text_is_not():
     assert s1 != s2, "sensor text must vary with device/placement"
 
 
-def test_sensor_text_reports_actual_modality_and_gravity_state():
-    _, sensor, _ = stream_sensor_texts(
+def test_accel_only_stream_advertises_one_sensor_with_gravity_state():
+    _, sensor, sensor_id = stream_sensor_texts(
         "capture24", "watch_wrist", has_accel=True, has_gyro=False,
         gravity_removed=True,
     )
-    assert "accelerometer only" in sensor[0]
-    assert "gyroscope" not in sensor[0]
+    assert len(sensor) == 1                            # no phantom gyroscope sensor
+    assert "accelerometer" in sensor[0] and "gyroscope" not in sensor[0]
     assert "gravity removed" in sensor[0]
+    assert sensor_id == [0, 0, 0, 0, 0, 0]             # every slot -> the single accel sensor
 
 
 def test_eval_encoding_builds_factored_text_from_actual_channel_mask():
@@ -75,8 +79,9 @@ def test_eval_encoding_builds_factored_text_from_actual_channel_mask():
         stream="watch_wrist",
     )
     text = enc.sensor_texts[0][0]
-    assert "accelerometer only" in text and "gyroscope" not in text
+    assert "accelerometer" in text and "gyroscope" not in text
     assert "gravity removed" in text
+    assert len(enc.sensor_texts[0]) == 1               # acc-only mask -> one advertised sensor
 
 
 # ------------------------------------------------------------------------------------ the pooler

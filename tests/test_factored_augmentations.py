@@ -43,14 +43,17 @@ def test_gravity_removal_updates_factored_sensor_text_and_state():
     assert out.data[:, :3].mean(0).norm() < 0.1
 
 
-def test_gyro_dropout_updates_sensor_modality_text():
+def test_gyro_dropout_drops_the_gyro_sensor():
     cfg = AugmentationConfig.none()
     cfg.channel_dropout.enabled = True
     cfg.channel_dropout.p = 1.0
     out = IMUAugmenter(cfg)(_sample())
-    assert out.channel_names == list(CHANNELS[:3])
+    assert out.channel_names == list(CHANNELS[:3])          # only the accel triad survives
     assert out.sensor_id == [0, 0, 0]
-    assert "accelerometer only" in out.sensor_descriptions[0].lower()
+    # accel & gyro are separate modality-level sensors: dropping the gyro group REMOVES the gyro
+    # sensor entirely (no phantom "accelerometer only" phrase on a shared description).
+    assert len(out.sensor_descriptions) == 1
+    assert "accelerometer" in out.sensor_descriptions[0].lower()
     assert "gyroscope" not in out.sensor_descriptions[0].lower()
 
 
@@ -91,4 +94,6 @@ def test_padding_only_accelerometer_is_not_treated_as_physical_gravity():
     )
     out = IMUAugmenter(cfg)(sample)
     assert out.gravity_state is None
-    assert "no accelerometer" in out.sensor_descriptions[0]
+    # has_accel=False -> only a gyroscope sensor is advertised; no phantom accelerometer sensor.
+    assert not any("accelerometer" in s.lower() for s in out.sensor_descriptions)
+    assert any("gyroscope" in s.lower() for s in out.sensor_descriptions)
