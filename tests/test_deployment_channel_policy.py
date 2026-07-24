@@ -4,6 +4,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from training.tokenizer.pretrain_data import TRAIN_DATASETS
+
+
+def test_primary_train_datasets_matches_trainer_roster():
+    """F11: the deployment-policy roster and the trainer's TRAIN_DATASETS are ONE manifest —
+    they must not drift (hapt was in one and not the other, double-counting 13 vs 12)."""
+    from data.scripts.curate.deployment_policy import PRIMARY_TRAIN_DATASETS as _ptd
+    assert set(_ptd) == set(TRAIN_DATASETS), (
+        f"roster drift: deployment_policy has {sorted(set(_ptd) - set(TRAIN_DATASETS))} extra, "
+        f"missing {sorted(set(TRAIN_DATASETS) - set(_ptd))}")
+    assert len(_ptd) == len(TRAIN_DATASETS) == 12
+
 from data.scripts.curate.deployment_policy import (
     EXCLUDED_PRIMARY_DATASETS,
     PRIMARY_EVAL_DATASETS,

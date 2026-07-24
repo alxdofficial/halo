@@ -21,6 +21,10 @@ STANDARD_CHANNEL_ORDER = (
     "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
 )
 
+# The 12 primary training datasets. This MUST stay in sync with the trainer's source of truth,
+# training.tokenizer.pretrain_data.TRAIN_DATASETS (test_deployment_channel_policy enforces the match).
+# hapt was REMOVED (F11): it is a near-exact duplicate of uci_har (same 30 subjects, NCC 0.98) and was
+# never in the trained corpus — listing it here double-counted the roster (13 vs the real 12).
 PRIMARY_TRAIN_DATASETS = (
     "uci_har",
     "hhar",
@@ -28,7 +32,6 @@ PRIMARY_TRAIN_DATASETS = (
     "wisdm",
     "kuhar",
     "unimib_shar",
-    "hapt",
     "mhealth",
     "capture24",
     "sp_sw_har",
@@ -109,9 +112,10 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                _xyz("total_acc_"), _gyro("body_gyro_"), "present"),
     StreamSpec("hhar", "phone_waist", "phone", "waist",
                _GENERIC_ACC, _GENERIC_GYRO, "present"),
-    StreamSpec("pamap2", "watch_wrist", "watch", "wrist-mounted hand",
+    StreamSpec("pamap2", "watch_wrist", "watch", "the dominant wrist",
                _xyz("hand_acc16_"), _gyro("hand_gyro_"), "present",
-               note="Uses the +/-16g wrist IMU; chest, ankle, 6g, mag, temperature, HR, and invalid orientation are pruned."),
+               note="Colibri wireless IMU on the dominant wrist; uses the +/-16g range. Chest, ankle, "
+                    "6g, mag, temperature, HR, and invalid orientation are pruned."),
     StreamSpec("wisdm", "phone_pocket", "phone", "pocket",
                _xyz("phone_accel_"), _gyro("phone_gyro_"), "present",
                session_contains=("phone_",), session_excludes=("_gyro_",),
@@ -138,9 +142,11 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                     "(gravity present); gyro rad/s. Left-wrist Puck.js excluded (unrecoverable gyro)."),
     # XRF V2 (WWADL): five-position body IMU + AirPods ear IMU; 34 indoor ADLs, 3 volunteers.
     # Device->placement per repo imu.py name_to_id (NOT the newer Plus README order). Acc g, gyro rad/s.
-    StreamSpec("xrf_v2", "glasses", "device", "smart glasses on the head",
+    StreamSpec("xrf_v2", "glasses", "device", "smart glasses",
                _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_glasses_",),
-               note="Head-worn glasses IMU — a placement absent elsewhere in the corpus."),
+               note="Head-worn smart-glasses IMU — a placement absent elsewhere in the corpus. "
+                    "Placement is 'smart glasses' (not 'smart glasses on the head') so the rendered "
+                    "sensor text reads 'on smart glasses', not a double 'on ... on the head'."),
     StreamSpec("xrf_v2", "left_wrist", "watch", "the left wrist",
                _GENERIC_ACC, _GENERIC_GYRO, "present", session_contains=("_left_wrist_",)),
     StreamSpec("xrf_v2", "right_wrist", "watch", "the right wrist",
