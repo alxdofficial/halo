@@ -16,6 +16,25 @@ ONLY in that axis, then push both through ONE shared measurement function:
 Axes: rate, channel, orientation, gravity, placement, subject, label-novelty, plus a
 compound (placement+orientation+rate) additivity check.
 
+FAIL-LOUD METHODOLOGY GUARDS (see the per-axis docstrings for the exact contracts):
+  * subject axis     — the shifted (held-out) query subjects are asserted DISJOINT from the
+                       support subjects, so the probe never sees the "unseen" people. A support
+                       that shared a single subject with the shifted query used to make the axis
+                       trivially "robust ~1.0"; that is now impossible (it raises / marks INVALID).
+  * label-novelty    — labels absent from Phase-A training are scored ZERO-SHOT: their labeled
+                       examples are EXCLUDED from the ConSE probe fit and they are reached only
+                       through the SBERT label-text prototype. An assertion forbids any novel-label
+                       example from entering the probe support.
+  * placement        — pairing is DATA-DETERMINED, never assumed. If the two placement grids are
+                       row-aligned (identical per-window subject+label arrays, e.g. xrf_v2's
+                       video-aligned body IMU), the matched vs shifted query are the SAME rows
+                       (genuine same-subject-same-instant, device the only difference). Otherwise
+                       the axis is relabelled an "unpaired cross-device distribution shift" and the
+                       weaker control (A-support and B-query share subject + label set) is asserted.
+Any axis whose control cannot be met with the available data emits an explicit
+``verdict="AXIS INVALID"`` row with an ``invalid_reason`` instead of a misleading retention value.
+The exact per-window transform axes (rate/channel/orientation/gravity) are unaffected.
+
 Every metric primitive is REUSED from the training code:
   training.tokenizer.eval_transfer  -> build_encoder, encode_dataset, knn_balanced_acc
   training.tokenizer.pretrain       -> conse_probe_predict (ConSE text-cosine ZS head)
@@ -64,8 +83,13 @@ DEFAULT_EVAL_STREAMS = (
     ("shoaib", "phone_right_pocket"),
     ("inclusivehar", "phone_waist"),
 )
-# Simultaneous multi-placement dataset (same subject, same instant, two body locations).
-DEFAULT_PLACEMENT = ("wisdm", "watch_wrist", "phone_pocket")
+# Multi-placement dataset for the placement axis. xrf_v2's body IMU streams are cut from ONE
+# video-aligned recording at the SAME sample index per placement, so their grids are row-aligned
+# (window i is the same subject+instant across placements) -> genuine same-subject-same-instant
+# pairing. Any (dataset, A, B) works; pairing is auto-detected from the grids at run time, and if
+# the two grids are NOT row-aligned the axis degrades to an honest "unpaired cross-device" shift.
+# Both defaults are body IMU with gravity present, so the pair isolates placement alone.
+DEFAULT_PLACEMENT = ("xrf_v2", "left_wrist", "left_pocket")
 KNN_K = 5
 VERDICT_T = 0.9   # retention below this = "low"
 
@@ -109,8 +133,7 @@ def _stratified_subset(ref: GridRef, max_windows: int, seed: int) -> np.ndarray:
     return np.sort(np.asarray(chosen[:max_windows], dtype=np.int64))
 
 
-def load_windowset(ref: GridRef, max_windows: int, seed: int) -> WindowSet:
-    idx = _stratified_subset(ref, max_windows, seed)
+def _build_windowset(ref: GridRef, idx: np.ndarray) -> WindowSet:
     data = np.asarray(ref.load_data()[idx], dtype=np.float32)
     return WindowSet(
         data=data,
@@ -124,6 +147,26 @@ def load_windowset(ref: GridRef, max_windows: int, seed: int) -> WindowSet:
         stream=ref.stream,
         tag=f"{ref.dataset}/{ref.stream}",
     )
+
+
+def load_windowset(ref: GridRef, max_windows: int, seed: int) -> WindowSet:
+    return _build_windowset(ref, _stratified_subset(ref, max_windows, seed))
+
+
+def load_placement_pair(ref_a: GridRef, ref_b: GridRef, max_windows: int, seed: int):
+    """Load two placement grids for the placement axis. If the FULL grids are ROW-ALIGNED (equal
+    length and identical per-window subject+label arrays — as for a video-aligned multi-placement
+    capture like xrf_v2), apply ONE shared stratified subset to BOTH so the returned windows stay
+    paired (row i is the same subject at the same instant in A and B). Otherwise subset each grid
+    independently, and the placement axis degrades to the honest unpaired cross-device control.
+    Returns (wa, wb, row_aligned)."""
+    aligned = (len(ref_a.labels) == len(ref_b.labels)
+               and ref_a.labels == ref_b.labels and ref_a.subjects == ref_b.subjects)
+    if aligned:
+        idx = _stratified_subset(ref_a, max_windows, seed)
+        return _build_windowset(ref_a, idx), _build_windowset(ref_b, idx), True
+    return (load_windowset(ref_a, max_windows, seed),
+            load_windowset(ref_b, max_windows, seed), False)
 
 
 # ======================================================================================
@@ -287,11 +330,24 @@ def measure(name, enc, protos, lab2id, device, *,
     verdict = ("both" if enc_low and br_low else
                "encoder-limited" if enc_low else
                "bridge-limited" if br_low else "robust")
-    return dict(axis=name, mmd=_r(mmd),
+    return dict(axis=name, invalid=False, mmd=_r(mmd),
                 knn_ba_matched=_r(ba_m), knn_ba_shifted=_r(ba_s), enc_retention=_r(enc_ret),
                 zs_f1_matched=_r(f1_m), zs_f1_shifted=_r(f1_s), bridge_retention=_r(br_ret),
                 verdict=verdict, n_support=int(len(y_sup)),
                 n_query_matched=int(len(yq_m)), n_query_shifted=int(len(yq_s)))
+
+
+def _invalid_row(axis: str, reason: str, **extra) -> dict:
+    """A methodologically-invalid axis: emit an explicit AXIS INVALID marker with the reason
+    instead of a misleading retention value. All metric fields are None so it is excluded from the
+    attribution ranking and printed as INVALID rather than silently scoring as 'robust'."""
+    print(f"  [AXIS INVALID] {axis}: {reason}", flush=True)
+    row = dict(axis=axis, invalid=True, invalid_reason=reason, mmd=None,
+               knn_ba_matched=None, knn_ba_shifted=None, enc_retention=None,
+               zs_f1_matched=None, zs_f1_shifted=None, bridge_retention=None,
+               verdict="AXIS INVALID", n_support=0, n_query_matched=0, n_query_shifted=0)
+    row.update(extra)
+    return row
 
 
 def _r(x, nd=4):
@@ -334,84 +390,258 @@ def run_aligned_axis(name, enc, base: WindowSet, shifted: WindowSet, device, see
 
 
 def run_subject_axis(name, enc, ws: WindowSet, device, seed):
-    """Subject axis: matched = within-subject split (support & query share people),
-    shifted = LOSO (subject-disjoint). SAME config/embeddings, different split."""
+    """Subject axis (FINDING 4 fix): ONE support drawn only from SEEN subjects; the shift is
+    whether the query subjects are in that support.
+
+      * support       = SEEN subjects (half of each seen subject's windows)
+      * matched query = the OTHER half of the SEEN subjects' windows (same people as the support)
+      * shifted query = ALL windows of the HELD-OUT (unseen) subjects, DISJOINT from the support
+
+    The previous version fit the shifted-subject probe on a random split whose support already
+    contained the held-out subjects (empirically 100% overlap), so no subject shift was isolated
+    and the axis read a meaningless "robust ~1.0". Here the support-subject set is asserted to be
+    disjoint from the shifted-query-subject set (fail loud / mark INVALID otherwise), and every
+    matched-query subject is asserted to appear in the support (a genuine "seen subject" control)."""
+    subjects = np.asarray(ws.subjects)
+    seen_subj, unseen_subj = subject_split(subjects, seed)
+    if not seen_subj or not unseen_subj:
+        return _invalid_row(name, f"cannot form a seen/unseen subject split from "
+                            f"{len(set(subjects.tolist()))} subject(s) on {ws.tag}")
     lab2id, id2lab = _local_labmap(ws.labels)
     protos = build_label_protos(enc, id2lab, device)
     z = embed(enc, ws, device)
     y = _ids(ws.labels, lab2id)
-    n = len(y)
+
+    # Within SEEN subjects, split each subject's windows ~50/50 into support vs matched-query so
+    # every matched-query subject is guaranteed to also appear in the support (seen condition).
     rng = np.random.default_rng(seed)
-    # matched: random within-subject 50/50 (subjects appear on both sides)
-    perm = rng.permutation(n)
-    m_sup = np.zeros(n, bool)
-    m_sup[perm[: n // 2]] = True
-    # shifted: subject-disjoint
-    sup_subj, held_subj = subject_split(ws.subjects, seed)
-    s_sup = np.array([s in sup_subj for s in ws.subjects])
-    return measure(name, enc, protos, lab2id, device,
-                   z_sup=z[m_sup], y_sup=y[m_sup],
-                   zq_m=z[~m_sup], yq_m=y[~m_sup],
-                   zq_s=z[~s_sup], yq_s=y[~s_sup],
-                   z_mmd_m=z[m_sup], z_mmd_s=z[~s_sup])
+    sup_idx, mq_idx = [], []
+    for subj in sorted(seen_subj):
+        idx = np.where(subjects == subj)[0]
+        rng.shuffle(idx)
+        if len(idx) == 1:                                # single window -> keep the subject "seen"
+            sup_idx.append(int(idx[0]))
+        else:
+            h = len(idx) // 2
+            sup_idx.extend(int(i) for i in idx[:h])
+            mq_idx.extend(int(i) for i in idx[h:])
+    sq_idx = np.where(np.isin(subjects, list(unseen_subj)))[0]
+    sup_idx = np.asarray(sorted(sup_idx), dtype=np.int64)
+    mq_idx = np.asarray(sorted(mq_idx), dtype=np.int64)
+
+    if len(sup_idx) == 0 or len(mq_idx) == 0 or len(sq_idx) == 0:
+        return _invalid_row(name, f"empty support/matched/shifted partition on {ws.tag} "
+                            f"(|sup|={len(sup_idx)} |matched|={len(mq_idx)} |shifted|={len(sq_idx)})")
+
+    sup_subjects = set(subjects[sup_idx].tolist())
+    mq_subjects = set(subjects[mq_idx].tolist())
+    sq_subjects = set(subjects[sq_idx].tolist())
+    # FINDING 4 assertion: the held-out (shifted) query subjects must NOT be in the support.
+    leak = sup_subjects & sq_subjects
+    if leak:
+        raise AssertionError(f"[subject axis/{ws.tag}] support and shifted-query share subjects "
+                             f"{sorted(leak)} — this is NOT a held-out-subject test.")
+    # matched query must be drawn from subjects the support has actually seen.
+    unseen_in_support = mq_subjects - sup_subjects
+    if unseen_in_support:
+        raise AssertionError(f"[subject axis/{ws.tag}] matched-query subjects {sorted(unseen_in_support)} "
+                             f"are absent from the support — the matched condition is not 'seen subject'.")
+    # metrics require some shared labels between support and each query
+    if not (set(y[sup_idx].tolist()) & set(y[sq_idx].tolist())):
+        return _invalid_row(name, f"support and shifted-query share no labels on {ws.tag}")
+
+    row = measure(name, enc, protos, lab2id, device,
+                  z_sup=z[sup_idx], y_sup=y[sup_idx],
+                  zq_m=z[mq_idx], yq_m=y[mq_idx],
+                  zq_s=z[sq_idx], yq_s=y[sq_idx],
+                  z_mmd_m=z[sup_idx], z_mmd_s=z[sq_idx])
+    row.update(n_support_subjects=len(sup_subjects), n_shifted_subjects=len(sq_subjects),
+               subjects_disjoint=True)
+    return row
+
+
+def _rows_aligned(wa: WindowSet, wb: WindowSet) -> bool:
+    """True iff A and B grids are row-aligned: same length and element-wise identical per-window
+    subject AND label arrays. For a video-aligned multi-placement capture (e.g. xrf_v2) this holds
+    because every placement is cut from ONE recording at the same sample index, so window i is the
+    SAME subject at the SAME instant across placements — a genuine same-instant join key."""
+    return (len(wa.labels) == len(wb.labels)
+            and np.array_equal(np.asarray(wa.labels), np.asarray(wb.labels))
+            and np.array_equal(np.asarray(wa.subjects), np.asarray(wb.subjects)))
 
 
 def run_placement_axis(name, enc, wa: WindowSet, wb: WindowSet, device, seed):
-    """Placement axis (cleanest — same subject, same instant): support & matched query from
-    placement A; shifted query = placement B on the HELD-OUT subjects. Isolates placement from
-    subject/activity/session."""
+    """Placement axis (FINDING 6 fix). Pairing is DATA-DETERMINED, never assumed:
+
+    PAIRED (row-aligned grids, e.g. xrf_v2 body IMU): the matched and shifted query are the SAME
+      rows (identical held-out-subject indices), so they are genuinely the same subject at the same
+      instant with the same label and the DEVICE PLACEMENT is the only difference. Support = A on a
+      DISJOINT set of (seen) subjects. Asserts row-alignment, matched==shifted pairing, and
+      support/query subject-disjointness.
+
+    UNPAIRED (grids not row-aligned, e.g. WISDM phone vs watch — different lengths, ~7% same-subject
+      / ~4% same-label at equal index): there is NO instant-level join, so the axis is RELABELLED an
+      "unpaired cross-device distribution shift". The weaker but valid control asserted here is that
+      the A-support and the B-query share the same subject set and the same label set (device is the
+      systematic difference; instant pairing is explicitly NOT claimed)."""
     lab2id, id2lab = _local_labmap(wa.labels, wb.labels)
     protos = build_label_protos(enc, id2lab, device)
     z_a = embed(enc, wa, device)
     z_b = embed(enc, wb, device)
-    sup_subj, held_subj = subject_split(wa.subjects, seed)
-    a_sup = np.array([s in sup_subj for s in wa.subjects])
-    a_qry = np.array([s in held_subj for s in wa.subjects])
-    b_qry = np.array([s in held_subj for s in wb.subjects])
     ya = _ids(wa.labels, lab2id)
     yb = _ids(wb.labels, lab2id)
-    return measure(name, enc, protos, lab2id, device,
-                   z_sup=z_a[a_sup], y_sup=ya[a_sup],
-                   zq_m=z_a[a_qry], yq_m=ya[a_qry],
-                   zq_s=z_b[b_qry], yq_s=yb[b_qry],
-                   z_mmd_m=z_a, z_mmd_s=z_b)
+    sa = np.asarray(wa.subjects)
+    sb = np.asarray(wb.subjects)
+
+    if _rows_aligned(wa, wb):
+        # ---- genuine same-subject-same-instant pairing ----
+        seen_subj, held_subj = subject_split(sa, seed)
+        if not seen_subj or not held_subj:
+            return _invalid_row(name, f"cannot form seen/held subject split on {wa.tag} (paired)")
+        a_sup = np.isin(sa, list(seen_subj))
+        held = np.isin(sa, list(held_subj))              # SAME rows drive matched (A) and shifted (B)
+        if not a_sup.any() or not held.any():
+            return _invalid_row(name, f"empty support/held partition on {wa.tag} (paired)")
+        # assertions: pairing is real and support is subject-disjoint from the query
+        assert np.array_equal(ya[held], yb[held]), \
+            f"[placement/{wa.tag}] paired rows disagree on label — alignment broken"
+        assert np.array_equal(sa[held], sb[held]), \
+            f"[placement/{wa.tag}] paired rows disagree on subject — alignment broken"
+        leak = set(sa[a_sup].tolist()) & set(sa[held].tolist())
+        assert not leak, f"[placement/{wa.tag}] support and query share subjects {sorted(leak)}"
+        if not (set(ya[a_sup].tolist()) & set(ya[held].tolist())):
+            return _invalid_row(name, f"support and query share no labels on {wa.tag} (paired)")
+        row = measure(name, enc, protos, lab2id, device,
+                      z_sup=z_a[a_sup], y_sup=ya[a_sup],
+                      zq_m=z_a[held], yq_m=ya[held],
+                      zq_s=z_b[held], yq_s=yb[held],
+                      z_mmd_m=z_a[held], z_mmd_s=z_b[held])
+        row.update(pairing="same-subject-same-instant (row-aligned grids)", paired=True,
+                   placement_a=wa.tag, placement_b=wb.tag,
+                   n_paired_query=int(held.sum()), n_support_subjects=len(seen_subj))
+        return row
+
+    # ---- no instant-level join: honest unpaired cross-device distribution shift ----
+    name = "placement_unpaired"
+    shared_subj = sorted(set(sa.tolist()) & set(sb.tolist()))
+    shared_lab = sorted(set(wa.labels) & set(wb.labels))
+    if not shared_subj or not shared_lab:
+        return _invalid_row(name, f"{wa.tag} vs {wb.tag} share no subjects/labels — no cross-device "
+                            f"control possible", pairing="none", paired=False)
+    a_keep = np.isin(sa, shared_subj) & np.isin(np.asarray(wa.labels), shared_lab)
+    b_keep = np.isin(sb, shared_subj) & np.isin(np.asarray(wb.labels), shared_lab)
+    # per-subject split of A into support/matched so EVERY shared subject stays in the A-support
+    a_idx = np.where(a_keep)[0]
+    rng = np.random.default_rng(seed)
+    a_sup_idx, a_mq_idx = [], []
+    for subj in shared_subj:
+        idx = a_idx[sa[a_idx] == subj]
+        rng.shuffle(idx)
+        if len(idx) == 1:
+            a_sup_idx.append(int(idx[0]))
+        elif len(idx) >= 2:
+            h = len(idx) // 2
+            a_sup_idx.extend(int(i) for i in idx[:h])
+            a_mq_idx.extend(int(i) for i in idx[h:])
+    a_sup_idx = np.asarray(sorted(a_sup_idx), dtype=np.int64)
+    a_mq_idx = np.asarray(sorted(a_mq_idx), dtype=np.int64)
+    b_q_idx = np.where(b_keep)[0]
+    if len(a_sup_idx) == 0 or len(a_mq_idx) == 0 or len(b_q_idx) == 0:
+        return _invalid_row(name, f"empty partition for the unpaired control on {wa.tag}/{wb.tag}",
+                            pairing="unpaired", paired=False)
+    # FINDING 6 weaker control: A-support and B-query must share subject set and label set.
+    sup_subjects = set(sa[a_sup_idx].tolist())
+    b_subjects = set(sb[b_q_idx].tolist())
+    if sup_subjects != b_subjects:
+        return _invalid_row(name, f"A-support subjects {sorted(sup_subjects)} != B-query subjects "
+                            f"{sorted(b_subjects)} — cross-device control not met", pairing="unpaired",
+                            paired=False)
+    sup_labels = set(ya[a_sup_idx].tolist())
+    b_labels = set(yb[b_q_idx].tolist())
+    if not (sup_labels & b_labels):
+        return _invalid_row(name, f"A-support and B-query share no labels on {wa.tag}/{wb.tag}",
+                            pairing="unpaired", paired=False)
+    row = measure(name, enc, protos, lab2id, device,
+                  z_sup=z_a[a_sup_idx], y_sup=ya[a_sup_idx],
+                  zq_m=z_a[a_mq_idx], yq_m=ya[a_mq_idx],
+                  zq_s=z_b[b_q_idx], yq_s=yb[b_q_idx],
+                  z_mmd_m=z_a[a_keep], z_mmd_s=z_b[b_keep])
+    row.update(pairing="UNPAIRED cross-device distribution shift (no instant-level join; subject+"
+               "label sets matched, instants NOT paired)", paired=False,
+               placement_a=wa.tag, placement_b=wb.tag,
+               n_shared_subjects=len(shared_subj), n_shared_labels=len(shared_lab))
+    return row
+
+
+def _probe_support_mask(subjects, seen_subj, y, novel_ids) -> np.ndarray:
+    """Bool mask selecting the ConSE probe-fit support: SEEN-subject windows whose label is NOT
+    novel. Novel labels are excluded from the fit so they are scored genuinely zero-shot (FINDING 5).
+    Isolated as a helper so the fail-loud assertion in ``run_label_novelty`` has a testable seam."""
+    return np.isin(subjects, list(seen_subj)) & ~np.isin(np.asarray(y), list(novel_ids))
 
 
 def run_label_novelty(enc, eval_sets: list[WindowSet], train_labels: set, device, seed):
-    """Semantic reachability horizon: per held-out label, ZS accuracy vs (a) text-cosine distance
-    to the nearest TRAINING label prototype, (b) a coarse/fine granularity flag. Returns the
-    per-label scatter (list), NOT a scalar."""
-    # training-label prototypes (frozen SBERT) for the text-distance axis
+    """Semantic reachability horizon (FINDING 5 fix): per eval label, ZS accuracy vs (a) text-cosine
+    distance to the nearest TRAINING label prototype, (b) a coarse/fine granularity flag.
+
+    Labels absent from Phase-A training (``novel=True``) are scored GENUINELY ZERO-SHOT: their
+    labeled examples are EXCLUDED from the ConSE probe fit, so they are reachable only through their
+    SBERT label-text prototype. The previous version fit the probe on support examples of EVERY eval
+    label — including the "novel" ones — which measured supervised cross-subject transfer, not
+    zero-shot semantic reachability. An assertion here forbids any novel-label example from entering
+    the probe support. (Non-novel/seen labels keep their support examples — that IS the seen
+    condition.) Returns the per-label scatter (list), NOT a scalar."""
     tl = sorted(train_labels)
     tl_id2lab = {i: l for i, l in enumerate(tl)}
-    train_protos = build_label_protos(enc, tl_id2lab, device)          # (Ltrain, 384)
+    train_protos = build_label_protos(enc, tl_id2lab, device) if tl else None    # (Ltrain, 384)
     scatter = []
     for ws in eval_sets:
         lab2id, id2lab = _local_labmap(ws.labels)
         protos = build_label_protos(enc, id2lab, device)
         z = embed(enc, ws, device)
         y = _ids(ws.labels, lab2id)
-        sup_subj, held_subj = subject_split(ws.subjects, seed)
-        sup = np.array([s in sup_subj for s in ws.subjects])
-        qry = ~sup
-        pred = conse_probe_predict(z[sup], y[sup], z[qry], y[qry], protos)
-        yq = y[qry]
+        subjects = np.asarray(ws.subjects)
+        seen_subj, held_subj = subject_split(subjects, seed)
+        novel_ids = {lid for lid, lab in id2lab.items() if lab not in train_labels}
+
+        # Probe support = SEEN-subject windows of NON-novel labels only (novel labels are held out
+        # of the fit entirely -> genuine zero-shot). Query = held-out-subject windows (all labels).
+        sup = _probe_support_mask(subjects, seen_subj, y.numpy(), novel_ids)
+        qry = np.isin(subjects, list(held_subj))
+        # FINDING 5 assertion: no novel-label example may enter the probe-fitting support.
+        assert not (set(y[torch.from_numpy(sup)].tolist()) & novel_ids), \
+            f"[label-novelty/{ws.tag}] a novel-label example leaked into the probe support"
+        if int(sup.sum()) == 0 or int(qry.sum()) == 0:
+            print(f"  [warn] label-novelty on {ws.tag}: empty probe support or query "
+                  f"(|sup|={int(sup.sum())} |qry|={int(qry.sum())}) — skipped", flush=True)
+            continue
+
+        z_sup = z[torch.from_numpy(sup)]
+        y_sup = y[torch.from_numpy(sup)]
+        z_qry = z[torch.from_numpy(qry)]
+        yq = y[torch.from_numpy(qry)]
+        pred = conse_probe_predict(z_sup, y_sup, z_qry, yq, protos)
         for lid, lab in id2lab.items():
             mask = yq == lid
             if int(mask.sum()) == 0:
                 continue
+            is_novel = lid in novel_ids
             zs_acc = float((pred[mask] == lid).float().mean())
             # text distance = 1 - max cosine to any TRAINING label prototype (clamp fp noise >1)
-            lp = build_label_protos(enc, {0: lab}, device)[0]
-            text_dist = float(1.0 - (train_protos @ lp).max().clamp(max=1.0))
+            if train_protos is not None:
+                lp = build_label_protos(enc, {0: lab}, device)[0]
+                text_dist = round(float(1.0 - (train_protos @ lp).max().clamp(max=1.0)), 4)
+            else:
+                text_dist = None
             granularity = "fine" if ("_" in lab or " " in lab.strip()) else "coarse"
             scatter.append(dict(label=lab, dataset=ws.dataset, stream=ws.stream,
-                                text_dist=round(text_dist, 4),
+                                text_dist=text_dist,
                                 granularity=granularity,
-                                novel=bool(lab not in train_labels),
+                                novel=bool(is_novel),
+                                scored_zero_shot=bool(is_novel),   # novel => no support examples used
                                 zs_acc=round(zs_acc, 4),
                                 n_query=int(mask.sum())))
-    scatter.sort(key=lambda d: d["text_dist"])
+    scatter.sort(key=lambda d: (d["text_dist"] is None, d["text_dist"] or 0.0))
     return scatter
 
 
@@ -524,7 +754,8 @@ def main() -> None:
     ap.add_argument("--eval-streams", nargs="+", type=parse_stream_arg, default=None,
                     help="dataset:stream held-out streams for the per-window transform axes")
     ap.add_argument("--placement", nargs=3, metavar=("DATASET", "A", "B"), default=None,
-                    help="simultaneous multi-placement dataset + two streams")
+                    help="multi-placement dataset + two streams (same-instant pairing is "
+                         "auto-detected from row-alignment; else axis = unpaired cross-device)")
     ap.add_argument("--rate-hz", type=float, default=20.0, help="target rate for the rate axis")
     ap.add_argument("--seed", type=int, default=20260723)
     ap.add_argument("--out", type=Path, default=None)
@@ -592,13 +823,17 @@ def main() -> None:
     per_stream["subject"] = subj_rows
     axis_rows.append(_aggregate("subject", subj_rows))
 
-    # ---- placement axis (single multi-placement dataset) ----
+    # ---- placement axis (single multi-placement dataset; pairing auto-detected from the grids) ----
     placement_row = None
     pa = (placement[0], placement[1])
     pb = (placement[0], placement[2])
+    wa = wb = None
     if pa in refs and pb in refs:
-        wa = load_windowset(refs[pa], args.max_windows, args.seed)
-        wb = load_windowset(refs[pb], args.max_windows, args.seed)
+        wa, wb, row_aligned = load_placement_pair(refs[pa], refs[pb], args.max_windows, args.seed)
+        print(f"  placement pair {pa[0]}: {placement[1]} vs {placement[2]} -> "
+              f"row_aligned={row_aligned} "
+              f"({'genuine same-subject-same-instant' if row_aligned else 'UNPAIRED cross-device'})",
+              flush=True)
         placement_row = run_placement_axis("placement", enc, wa, wb, device, args.seed)
         axis_rows.append(placement_row)
     else:
@@ -609,7 +844,7 @@ def main() -> None:
 
     # ---- compound additivity (on the placement dataset) ----
     compound = None
-    if pa in refs and pb in refs:
+    if wa is not None and wb is not None:
         compound = run_compound(enc, wa, wb, device, args.seed, args.rate_hz)
 
     # ---- attribution summary ----
@@ -653,14 +888,21 @@ def main() -> None:
 
 
 def _aggregate(axis: str, rows: list[dict]) -> dict:
-    """Average the per-stream metric rows into one axis row (retention from averaged values)."""
+    """Average the per-stream metric rows into one axis row (retention from averaged values).
+    INVALID per-stream rows are excluded; if none remain valid the whole axis is marked INVALID
+    rather than silently averaging to a misleading value."""
     if not rows:
-        return dict(axis=axis, mmd=None, knn_ba_matched=None, knn_ba_shifted=None,
+        return dict(axis=axis, invalid=False, mmd=None, knn_ba_matched=None, knn_ba_shifted=None,
                     enc_retention=None, zs_f1_matched=None, zs_f1_shifted=None,
                     bridge_retention=None, verdict="n/a", n_streams=0)
+    valid = [r for r in rows if not r.get("invalid")]
+    if not valid:
+        reasons = "; ".join(sorted({r.get("invalid_reason", "?") for r in rows}))
+        return _invalid_row(axis, f"all {len(rows)} per-stream row(s) invalid: {reasons}",
+                            n_streams=len(rows))
 
     def mean(key):
-        vals = [r[key] for r in rows if r[key] is not None]
+        vals = [r[key] for r in valid if r[key] is not None]
         return float(np.mean(vals)) if vals else None
     ba_m, ba_s = mean("knn_ba_matched"), mean("knn_ba_shifted")
     f1_m, f1_s = mean("zs_f1_matched"), mean("zs_f1_shifted")
@@ -670,10 +912,10 @@ def _aggregate(axis: str, rows: list[dict]) -> dict:
     br_low = br_ret is not None and br_ret < VERDICT_T
     verdict = ("both" if enc_low and br_low else "encoder-limited" if enc_low else
                "bridge-limited" if br_low else "robust")
-    return dict(axis=axis, mmd=_r(mean("mmd")),
+    return dict(axis=axis, invalid=False, mmd=_r(mean("mmd")),
                 knn_ba_matched=_r(ba_m), knn_ba_shifted=_r(ba_s), enc_retention=_r(enc_ret),
                 zs_f1_matched=_r(f1_m), zs_f1_shifted=_r(f1_s), bridge_retention=_r(br_ret),
-                verdict=verdict, n_streams=len(rows))
+                verdict=verdict, n_streams=len(valid), n_streams_invalid=len(rows) - len(valid))
 
 
 def print_report(result: dict, out: Path) -> None:
@@ -688,16 +930,24 @@ def print_report(result: dict, out: Path) -> None:
     def cell(v, w=8):
         return (f"{'--':>{w}}" if v is None else f"{v:>{w}.3f}")
     for r in result["axes"]:
+        if r.get("invalid"):
+            print(f"{r['axis']:<13}{'--':>8}{'--':>8}{'--':>8}{'--':>9}{'--':>8}{'--':>8}{'--':>8}"
+                  f"  AXIS INVALID: {r.get('invalid_reason', '?')}")
+            continue
         print(f"{r['axis']:<13}{cell(r['mmd'])}{cell(r['knn_ba_matched'])}{cell(r['knn_ba_shifted'])}"
               f"{cell(r['enc_retention'],9)}{cell(r['zs_f1_matched'])}{cell(r['zs_f1_shifted'])}"
               f"{cell(r['bridge_retention'])}  {r['verdict']}")
+        if r.get("pairing"):
+            print(f"{'':<13}   pairing: {r['pairing']}")
     print("-" * 100)
 
-    print("\nLABEL-NOVELTY SCATTER (semantic reachability horizon; sorted by text distance):")
-    print(f"  {'label':<22}{'dataset':<14}{'text_dist':>10}{'gran':>7}{'novel':>7}{'zs_acc':>8}")
+    print("\nLABEL-NOVELTY SCATTER (semantic reachability horizon; sorted by text distance;"
+          " novel labels scored ZERO-SHOT = no support examples in the probe fit):")
+    print(f"  {'label':<22}{'dataset':<14}{'text_dist':>10}{'gran':>7}{'novel':>7}{'zeroshot':>9}{'zs_acc':>8}")
     for s in result["label_novelty"]:
-        print(f"  {s['label']:<22}{s['dataset']:<14}{s['text_dist']:>10.3f}{s['granularity']:>7}"
-              f"{str(s['novel']):>7}{s['zs_acc']:>8.3f}")
+        td = "--" if s["text_dist"] is None else f"{s['text_dist']:.3f}"
+        print(f"  {s['label']:<22}{s['dataset']:<14}{td:>10}{s['granularity']:>7}"
+              f"{str(s['novel']):>7}{str(s.get('scored_zero_shot', False)):>9}{s['zs_acc']:>8.3f}")
 
     c = result.get("compound")
     if c:
