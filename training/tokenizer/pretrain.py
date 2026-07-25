@@ -235,9 +235,23 @@ def corpus_fingerprint(index) -> str:
     meta.json carries no raw fingerprint; audit #10: two subset runs with different cap/seed must
     NOT collide, so the sampling knobs and realised split sizes are part of the identity)."""
     import hashlib
-    sig = [f"{r.dataset}/{r.stream}:{r.rate_hz}:{tuple(r.shape)}:{len(set(r.labels))}"
-           for r in sorted(index.refs, key=lambda r: (r.dataset, r.stream))]
+
+    import numpy as _np
+    sig = []
+    for r in sorted(index.refs, key=lambda r: (r.dataset, r.stream)):
+        # CONTENT-sensitive (audit F5): shape+rate+label-COUNT alone collided for two corpora that
+        # differed in their per-window label/subject assignment. Hash the actual per-window labels
+        # and subjects (small, exact) plus a deterministic strided digest of the signal itself, so a
+        # regenerated or re-ordered grid cannot silently reuse an earlier run's identity.
+        lab = ",".join(map(str, r.labels)).encode()
+        sub = ",".join(map(str, r.subjects)).encode()
+        arr = _np.ascontiguousarray(r.load_data()[::97, ::13, :], dtype=_np.float32)
+        sig.append(f"{r.dataset}/{r.stream}:{r.rate_hz}:{tuple(r.shape)}"
+                   f":{hashlib.sha256(lab).hexdigest()[:12]}"
+                   f":{hashlib.sha256(sub).hexdigest()[:12]}"
+                   f":{hashlib.sha256(arr.tobytes()).hexdigest()[:12]}")
     sig.append("labels=" + ",".join(sorted(index.label_ids)))
+    sig.append("implausible=" + str(getattr(index, "n_implausible_dropped", 0)))
     sig.append(f"cap={getattr(index, 'max_per_stream', None)}:seed={getattr(index, 'seed', None)}"
                f":ntrain={len(index.train)}:nval={len(index.val)}")
     return hashlib.sha256("|".join(sig).encode()).hexdigest()[:16]
@@ -591,7 +605,8 @@ def main() -> None:
             sampler=TemperatureSampler(index.train, index.stream_datasets,
                                        num_samples=cfg.steps * cfg.batch_size,
                                        alpha=cfg.sampler_alpha, seed=cfg.seed,
-                                       batch_size=cfg.batch_size),   # within-batch no-replacement (F11)
+                                       batch_size=cfg.batch_size,    # within-batch no-replacement (F11)
+                                       event_ids=index.train_event_ids),  # no same-event negatives
             batch_size=cfg.batch_size, drop_last=True, **loader_kwargs)
     # val: no aug, fixed 1.0 s patches, plain order. compute_targets=False skips the per-window
     # A3 DSP (unused by embedding), and parallel persistent workers cut the collate time — together
@@ -825,7 +840,9 @@ def main() -> None:
         cmask_b = batch["channel_mask_b"].to(device)
         ppad_b = batch["patch_padding_mask_b"].to(device)
         with torch.amp.autocast(device.type, enabled=False):
-            tokens_b = model.encoder.tokenize(p_b, r_b, pl_b)
+            tokens_b = model.encoder.tokenize(
+                p_b, r_b, pl_b,
+                source_rate_hz=batch.get("source_rates_b", r_b).to(device))
         if cfg.text_conditioning == "factored":
             te_b, tm_b, ste_b, stm_b = model.encoder.encode_texts_factored(
                 batch["role_texts_b"], batch["sensor_texts_b"], device)
@@ -880,11 +897,15 @@ def main() -> None:
             with torch.amp.autocast(device.type, enabled=False):
                 if compute_a1:
                     with torch.no_grad():
-                        a1_target = target_tok(patches.float(), rates, patch_len)[..., signal_idx]
-                        o, _ = target_tok.masks(rates, patch_len)            # (B, K) Nyquist-observable
+                        _src = batch.get("source_rates", rates).to(device)
+                        a1_target = target_tok(patches.float(), rates, patch_len,
+                                               source_rate_hz=_src)[..., signal_idx]
+                        o, _ = target_tok.masks(rates, patch_len, source_rate_hz=_src)  # (B,K) observable
                         extra = o.new_ones(B, len(signal_idx) - o.shape[1])
                         a1_feature_valid = torch.cat([o, extra], dim=1).view(B, 1, 1, -1)
-                sensor_tokens = model.encoder.tokenize(patches.float(), rates, patch_len)
+                sensor_tokens = model.encoder.tokenize(
+                    patches.float(), rates, patch_len,
+                    source_rate_hz=batch.get("source_rates", rates).to(device))
                 enc_channel_mask = channel_mask
                 enc_texts = batch["texts"]
             # Config-text conditioning, built ONCE and reused by the clean and masked encode passes.

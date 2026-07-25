@@ -74,6 +74,15 @@ MIN_TAIL_FRACTION = 0.25          # F7: drop a resolution's tail patch if it cov
 VAL_RESOLUTION_PAIR = (0.5, 1.5)
 DFT_SIZE = 256                   # must cover max NATIVE rate (100 Hz) x max patch (1.5 s) = 150;
                                  # the rate aug caps at 100 Hz too, so 256 keeps ample headroom
+# Streams whose SOURCE (acquisition) rate differs from the rate the grid is stored at, because a
+# converter resampled them onto the dataset-wide grid rate. Upsampling cannot create information, so
+# the filterbank must take its Nyquist/observability bound from the ACQUISITION rate while the DFT
+# bin->frequency mapping keeps using the true array rate. Without this, xrf_v2's AirPods stream
+# (captured at 25 Hz, stored at 50 Hz) was advertised as having all 32 bands observable when only
+# ~27 carry real signal — the rest is interpolation artifact. Authority: each dataset's convert.py.
+STREAM_SOURCE_RATE_HZ = {
+    "xrf_v2/airpods_ear": 25.0,      # AirPods Pro ear IMU @25 Hz, upsampled 25->50 in convert.py
+}
 CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
 SEED = 20260718
 
@@ -303,6 +312,33 @@ class CorpusIndex:
                 else:
                     self.train.append(key)
         self.label_ids = label_ids
+        # EVENT ids for SimCLR batch hygiene. Some datasets record several placements of the SAME
+        # physical event simultaneously and store them as row-aligned streams (xrf_v2: 6 placements,
+        # nfi_fared: back + forearm). Indexed as separate examples they are DIFFERENT windows but the
+        # SAME event, so NT-Xent would treat one placement as a negative for another — a false
+        # negative, and one that argues directly against the cross-placement behaviour we want.
+        # Streams that merely share a dataset (wisdm phone/watch, sp_sw_har) are NOT row-aligned and
+        # get distinct ids.
+        aligned: dict[str, list[int]] = {}
+        for i, ref in enumerate(self.refs):
+            aligned.setdefault(ref.dataset, []).append(i)
+        row_aligned: set[str] = set()
+        for ds, sis in aligned.items():
+            if len(sis) < 2:
+                continue
+            a = self.refs[sis[0]]
+            if all(self.refs[j].n_windows == a.n_windows
+                   and list(map(str, self.refs[j].labels)) == list(map(str, a.labels))
+                   and list(map(str, self.refs[j].subjects)) == list(map(str, a.subjects))
+                   for j in sis[1:]):
+                row_aligned.add(ds)
+        self.row_aligned_datasets = sorted(row_aligned)
+        ev: dict[tuple, int] = {}
+        self.train_event_ids: list[int] = []
+        for k in self.train:
+            ds = self.refs[k.stream_i].dataset
+            key = (ds, k.window_i) if ds in row_aligned else (ds, k.stream_i, k.window_i)
+            self.train_event_ids.append(ev.setdefault(key, len(ev)))
         # Which labels the VAL split can actually score. best.pt is selected on val_knn_ba, so a
         # label with zero val windows is silently unscored — surface it instead of claiming
         # "all classes are scored" (audit F1).
@@ -417,9 +453,16 @@ class PretrainDataset(Dataset):
                 role_texts6[i] = sample.role_descriptions[j]
             if sample.sensor_id is not None:
                 sensor_id6[i] = int(sample.sensor_id[j])
+        # Acquisition rate: the grid's stored rate unless a converter resampled this stream. The
+        # augmenter's rate aug rescales the STORED rate, so scale the source rate by the same factor
+        # to keep "what the hardware could observe" consistent with the augmented array.
+        src0 = STREAM_SOURCE_RATE_HZ.get(f"{ref.dataset}/{ref.stream}")
+        source_rate = (float(sample.sampling_rate) if src0 is None
+                       else src0 * float(sample.sampling_rate) / float(ref.rate_hz))
         return {
             "data": data6,                                # (T', 6) canonical slots
             "rate": float(sample.sampling_rate),
+            "source_rate": source_rate,
             "texts": texts6,
             # Factored text (docs/design/TEXT_CONDITIONING.md §4b): carried per-VIEW so the SimCLR
             # second view gets its OWN independently-augmented role/sensor text. label_id is
@@ -545,7 +588,8 @@ class TemperatureSampler(Sampler[int]):
     Unlike ``BalancedBatchSampler`` there is no per-class structure — labels are unused (SimCLR)."""
 
     def __init__(self, keys: list[WindowKey], stream_datasets: list[str], num_samples: int,
-                 alpha: float = 0.5, seed: int = SEED, batch_size: int = 0):
+                 alpha: float = 0.5, seed: int = SEED, batch_size: int = 0,
+                 event_ids: Sequence[int] | None = None):
         from collections import Counter
         datasets = [stream_datasets[k.stream_i] for k in keys]
         counts = Counter(datasets)
@@ -558,6 +602,9 @@ class TemperatureSampler(Sampler[int]):
         # duplicate window (an exact duplicate is an NT-Xent false negative for SimCLR); replacement
         # still holds ACROSS batches (F11). 0 => legacy per-window with-replacement draw.
         self.batch_size = int(batch_size)
+        # Per-window EVENT id; two windows sharing one id are simultaneous recordings of the same
+        # physical event (different placements) and must not co-occur in a SimCLR batch.
+        self.event_ids = None if event_ids is None else np.asarray(event_ids)
         self.epoch = 0
 
     def __len__(self) -> int:
@@ -574,6 +621,24 @@ class TemperatureSampler(Sampler[int]):
             # false negative), WITH replacement across batches. num_samples is a multiple of bs.
             for _ in range(self.num_samples // bs):
                 idx = torch.multinomial(self.weights, bs, replacement=False, generator=gen)
+                if self.event_ids is not None:
+                    # Drop same-event duplicates and top up from an oversample, so the batch stays
+                    # full while never containing two placements of one event (false negatives).
+                    take, seen = [], set()
+                    for i in idx.tolist():
+                        e = int(self.event_ids[i])
+                        if e not in seen:
+                            seen.add(e); take.append(i)
+                    if len(take) < bs:
+                        extra = torch.multinomial(self.weights, min(4 * bs, self.weights.numel()),
+                                                  replacement=False, generator=gen).tolist()
+                        for i in extra:
+                            if len(take) >= bs:
+                                break
+                            e = int(self.event_ids[i])
+                            if e not in seen:
+                                seen.add(e); take.append(i)
+                    idx = torch.tensor(take[:bs])
                 yield from idx.tolist()
         else:
             idx = torch.multinomial(self.weights, self.num_samples, replacement=True, generator=gen)
@@ -633,7 +698,7 @@ class MultiScaleCollate:
         if self.two_view and batch and "view_b" in batch[0]:
             # Second SimCLR view: same patch_seconds, no A3 targets needed (A1/A3 use view A).
             out_b = self._collate_impl([item["view_b"] for item in batch], ps, compute_targets=False)
-            for k in ("patches", "patch_len", "rates", "positions", "texts",
+            for k in ("patches", "patch_len", "rates", "source_rates", "positions", "texts",
                       "role_texts", "sensor_texts", "sensor_id",
                       "channel_mask", "patch_padding_mask"):
                 out[f"{k}_b"] = out_b[k]
@@ -646,6 +711,7 @@ class MultiScaleCollate:
         patch_len = torch.zeros(B, dtype=torch.long)
         patch_pad = torch.zeros(B, P, dtype=torch.bool)     # True = real patch
         rates = torch.zeros(B)
+        source_rates = torch.zeros(B)
         cadence_t = torch.zeros(B)
         cadence_v = torch.zeros(B, dtype=torch.bool)
         eigen_t = torch.full((B, 4, 3), float("nan"))
@@ -702,10 +768,12 @@ class MultiScaleCollate:
             patch_pad[b, :usable] = True
             patch_len[b] = per_patch
             rates[b] = rate
+            source_rates[b] = float(item.get("source_rate", rate))
         return {
             "patches": patches,
             "patch_len": patch_len,
             "rates": rates,
+            "source_rates": source_rates,
             "positions": positions,
             "patch_seconds": ps,
             "texts": [item["texts"] for item in batch],
@@ -786,7 +854,7 @@ class MultiResolutionCollate:
             # Second SimCLR view: same resolution pair, no A3 targets needed (A1/A3 use view A).
             out_b = self._collate_impl([item["view_b"] for item in batch], pair,
                                        compute_targets=False)
-            for k in ("patches", "patch_len", "rates", "positions", "patch_durations",
+            for k in ("patches", "patch_len", "rates", "source_rates", "positions", "patch_durations",
                       "resolution_ids", "texts", "role_texts", "sensor_texts", "sensor_id",
                       "channel_mask", "patch_padding_mask"):
                 out[f"{k}_b"] = out_b[k]
@@ -796,6 +864,7 @@ class MultiResolutionCollate:
                       compute_targets: bool) -> dict:
         B = len(batch)
         rates = torch.zeros(B)
+        source_rates = torch.zeros(B)
         channel_mask = torch.stack([item["channel_mask"] for item in batch])
         cadence_t = torch.zeros(B)
         cadence_v = torch.zeros(B, dtype=torch.bool)
@@ -806,6 +875,7 @@ class MultiResolutionCollate:
         for b, item in enumerate(batch):
             data, rate = item["data"], float(item["rate"])
             rates[b] = rate
+            source_rates[b] = float(item.get("source_rate", rate))
             if compute_targets:
                 acc = data[:, :3].unsqueeze(0)
                 cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
@@ -874,6 +944,7 @@ class MultiResolutionCollate:
             "patches": patches,
             "patch_len": patch_len,
             "rates": rates,
+            "source_rates": source_rates,
             "positions": positions,
             "patch_durations": patch_durations,
             "patch_starts": patch_starts,

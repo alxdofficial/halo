@@ -403,11 +403,17 @@ class PhysicalFilterbankTokenizer(nn.Module):
                                    self._filter_shape(adaptive=True).to(dtype))
         return E, centers, sigma, dc
 
-    def _observability_masks(self, r, N, centers, sigma
+    def _observability_masks(self, r, N, centers, sigma, source_r=None
                              ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Nyquist observability o (B,K) and low-freq resolution flag res (B,K)."""
+        """Nyquist observability o (B,K) and low-freq resolution flag res (B,K).
+
+        ``source_r`` (optional, (B,)) is the rate the signal was ACQUIRED at, when that differs from
+        the rate the array is stored at. Upsampling cannot create information: a stream captured at
+        25 Hz and stored at 50 Hz has nothing above 12.5 Hz except interpolation artifact, so the
+        Nyquist bound must come from the SOURCE rate while the DFT bin->frequency mapping keeps
+        using the true array rate. Defaults to ``r`` (no resampling)."""
         dtype = r.dtype
-        nyq = self.nyquist_margin * (r * 0.5)                            # (B,)
+        nyq = self.nyquist_margin * ((r if source_r is None else source_r) * 0.5)   # (B,)
         o = (centers.view(1, -1) + 2.0 * sigma.view(1, -1)
              <= nyq.view(-1, 1)).to(dtype)                              # (B,K)
         if N.ndim == 1:
@@ -420,7 +426,7 @@ class PhysicalFilterbankTokenizer(nn.Module):
                    / self.resolution_min_cycles).clamp(0.0, 1.0)
         return o, res
 
-    def masks(self, sampling_rate_hz, patch_len_samples=None
+    def masks(self, sampling_rate_hz, patch_len_samples=None, source_rate_hz=None
               ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Public: (nyquist observability o, resolution flag res), each (B, K)."""
         device, dtype = self.norm_mu.device, self.norm_mu.dtype
@@ -430,7 +436,10 @@ class PhysicalFilterbankTokenizer(nn.Module):
         r, N = self._prep_rate_len(sampling_rate_hz, patch_len_samples, B, device, dtype, P=P)
         centers = self.centers.to(device=device, dtype=dtype)
         sigma = centers / (2.0 * self.Q)
-        return self._observability_masks(r, N, centers, sigma)
+        src_r = None
+        if source_rate_hz is not None:
+            src_r, _ = self._prep_rate_len(source_rate_hz, patch_len_samples, B, device, dtype, P=P)
+        return self._observability_masks(r, N, centers, sigma, source_r=src_r)
 
     # ---------------------------------------------------------------- calibration
     def reset_norm_accumulator(self):
@@ -531,7 +540,8 @@ class PhysicalFilterbankTokenizer(nn.Module):
         self.finalize_norm_stats(eps)
 
     # --------------------------------------------------------------------- forward
-    def forward(self, patches, sampling_rate_hz, patch_len_samples=None) -> torch.Tensor:
+    def forward(self, patches, sampling_rate_hz, patch_len_samples=None,
+                source_rate_hz=None) -> torch.Tensor:
         B, P, S, C = patches.shape
         assert S == self.S, (
             f"patch time dim {S} != dft_size {self.S}; zero-pad patches to S before the tokenizer"
@@ -573,7 +583,10 @@ class PhysicalFilterbankTokenizer(nn.Module):
         # since e_hat is standardized). Resolution flag (res) is the low-freq mirror:
         # a band at f_k needs ~resolution_min_cycles cycles within D=N/r to be resolved;
         # below that the value is present-but-blurry, so we *flag* it rather than zero it.
-        o, res = self._observability_masks(r, N, fixed_centers, fixed_sigma)
+        src_r = None
+        if source_rate_hz is not None:
+            src_r, _ = self._prep_rate_len(source_rate_hz, patch_len_samples, B, device, dtype, P=P)
+        o, res = self._observability_masks(r, N, fixed_centers, fixed_sigma, source_r=src_r)
         o_bpck = o.view(B, 1, 1, self.n_bands).expand(B, P, C, self.n_bands)
         e_hat = e_hat * o_bpck
 
