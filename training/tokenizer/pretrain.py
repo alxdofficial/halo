@@ -1310,11 +1310,18 @@ def main() -> None:
                 batch["event_ids"], batch["event_verified"], batch["streams"], device
             )
             if cfg.placement_weight > 0 and len(pair_left) >= 2:
+                # INVARIANCE-ONLY (2026-07-26). The variance/covariance terms estimate a
+                # d_proj x d_proj covariance, but this rail only ever sees the verified-pair
+                # quota: 13 pairs at batch 256, 26 at batch 512, against a 128-d projection —
+                # so the covariance has rank <= n_pairs-1 and those terms fit noise. They are
+                # also redundant: `z` is the SAME a2_proj output whose collapse A2's VICReg
+                # already prevents over all 256 rows. What is unique here is the invariance
+                # term — two real devices recording the same instant — so keep only that.
                 placement_vr = vicreg(
                     z[pair_left], z[pair_right],
                     invariance_weight=cfg.vicreg_invariance_weight,
-                    variance_weight=cfg.vicreg_variance_weight,
-                    covariance_weight=cfg.vicreg_covariance_weight,
+                    variance_weight=0.0,
+                    covariance_weight=0.0,
                     target_std=cfg.vicreg_target_std,
                 )
                 placement_loss = placement_vr.total
@@ -1419,6 +1426,14 @@ def main() -> None:
                     a1_pw = masked_latent_per_window(a1_pred.float(), a1_target, a1_loss_mask,
                                                      feature_valid=a1_feature_valid)
                 rec["a1_by_source"] = per_source_mean(a1_pw, batch["sources"])
+                # Windows that get NO masked A1 token at all. The mask planner correctly
+                # refuses to mask when every real token overlaps the interval (there is no
+                # honest visible/masked split), but that is silent, and it is systematic on
+                # the short-window sources: sp_sw_har is 1.00 s windows and loses ~30-50% of
+                # its A1 supervision, uci_har (2.56 s) ~10%, unimib_shar (3.02 s) ~1%.
+                # Surface it per source so the loss is attributable rather than invisible.
+                rec["a1_unmasked_frac_by_source"] = per_source_mean(
+                    torch.isnan(a1_pw).float(), batch["sources"])
             if len(lrs) > 1:
                 rec["lr_frontend"] = lrs[1]
             if model.encoder.filterbank.learnable:

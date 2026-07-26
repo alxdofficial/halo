@@ -19,7 +19,6 @@ from training.tokenizer.losses_repr import (
     masked_latent_loss,
     nt_xent,
     supcon_config_conditional,
-    transform_cadence_for_timewarp,
     vicreg,
 )
 from training.tokenizer.pretrain import update_ema_encoder
@@ -306,16 +305,7 @@ def test_grounding_nan_target_entries_are_skipped():
     assert torch.isfinite(loss)
 
 
-def test_timewarp_cadence_transform():
-    base = torch.tensor([1.0])                            # 2 Hz
-    warped = transform_cadence_for_timewarp(base, alpha=2.0)
-    assert torch.allclose(warped, torch.tensor([2.0]))    # 4 Hz -> log2 = 2
-    assert torch.allclose(
-        transform_cadence_for_timewarp(base, 1.0), base
-    )
 
-
-# ------------------------------------------------------------------------- combined
 def test_elite3_combined_finite_and_weighted():
     B, T, C, D = 6, 8, 6, 16
     t = _targets()

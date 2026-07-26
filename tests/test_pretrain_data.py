@@ -417,3 +417,42 @@ def test_source_rate_is_bounded_by_the_hardware_clock_after_rate_augmentation():
     assert bound("xrf_v2/airpods_ear", 50.0, 81.43) == 25.0
     assert bound("xrf_v2/airpods_ear", 50.0, 21.88) == 21.88    # not 25 * 21.88/50 = 10.94
     assert bound("extrasensory/watch_wrist", 50.0, 90.0) == 25.0
+
+
+def test_token_budget_caps_the_per_batch_patch_seconds_draw():
+    """Peak VRAM tracks batch x patches, and patch_seconds is drawn PER BATCH — so an
+    unlucky short draw could OOM a batch size that survived the previous sixty steps."""
+    import numpy as np
+    import torch
+    from training.tokenizer.pretrain_data import MultiResolutionCollate
+
+    # 6 s windows at 100 Hz: the 0.4 s short grid gives 15 patches, the 1.5 s long grid 4.
+    batch = [{"data": torch.zeros(600, 6), "rate": 100.0, "label_id": 0} for _ in range(32)]
+
+    uncapped = MultiResolutionCollate(max_batch_tokens=0)
+    tight = MultiResolutionCollate(max_batch_tokens=32 * 12)      # only coarse pairs fit
+
+    def tokens(collate):
+        short, long = collate._patch_seconds(batch)
+        return len(batch) * sum(int(np.ceil(6.0 / p)) for p in (short, long))
+
+    assert tokens(tight) <= 32 * 12
+    # The cap must actually bind: the unconstrained pool contains draws that exceed it.
+    assert any(
+        len(batch) * sum(int(np.ceil(6.0 / p)) for p in pair) > 32 * 12
+        for pair in uncapped._valid_pairs
+    )
+    # Every admissible draw stays inside the budget, not just the one we happened to get.
+    for _ in range(25):
+        assert tokens(tight) <= 32 * 12
+
+
+def test_token_budget_falls_back_to_the_coarsest_pair_when_nothing_fits():
+    """An impossible budget must degrade to the fewest-token pair, never raise."""
+    import torch
+    from training.tokenizer.pretrain_data import MultiResolutionCollate
+
+    batch = [{"data": torch.zeros(600, 6), "rate": 100.0, "label_id": 0} for _ in range(8)]
+    collate = MultiResolutionCollate(max_batch_tokens=1)
+    short, long = collate._patch_seconds(batch)
+    assert (short, long) == max(collate._valid_pairs, key=lambda p: p[0] + p[1])

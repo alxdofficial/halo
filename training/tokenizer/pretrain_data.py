@@ -80,6 +80,12 @@ MIN_TAIL_FRACTION = 0.25          # F7: drop a resolution's tail patch if it cov
                                  # a full patch (and it isn't the only patch) — avoids degenerate
                                  # 1-sample tokens whose duration is clamped to the embedding floor.
 VAL_RESOLUTION_PAIR = (0.5, 1.5)
+# Hard ceiling on the per-batch TOKEN count (batch x patches). Peak VRAM tracks tokens, not
+# windows, and patch_seconds is drawn PER BATCH — so without this, memory is a random variable:
+# measured P swings 12->22 at fixed batch, and batch 64 ran 60 steps before an unlucky 0.4 s
+# draw OOMed it. 6144 admits every draw at batch 256 (worst case 22 patches -> 5,632) while
+# forcing batch 512 onto the coarser pairs it can actually afford. Set 0 to disable.
+MAX_BATCH_TOKENS = 6144
 DFT_SIZE = 256                   # must cover max NATIVE rate (100 Hz) x max patch (1.5 s) = 150;
                                  # the rate aug caps at 100 Hz too, so 256 keeps ample headroom
 # Streams whose SOURCE (acquisition) rate differs from the rate the grid is stored at, because a
@@ -1019,6 +1025,7 @@ class MultiResolutionCollate:
         short_choices: Sequence[float] = SHORT_PATCH_SECONDS_CHOICES,
         long_choices: Sequence[float] = LONG_PATCH_SECONDS_CHOICES,
         fixed_patch_seconds: tuple[float, float] | None = None,
+        max_batch_tokens: int = MAX_BATCH_TOKENS,
         min_resolution_ratio: float = MIN_RESOLUTION_RATIO,
         seed: int = SEED,
         align_gravity: bool = False,
@@ -1029,6 +1036,7 @@ class MultiResolutionCollate:
         self.short_choices = tuple(float(x) for x in short_choices)
         self.long_choices = tuple(float(x) for x in long_choices)
         self.fixed = fixed_patch_seconds
+        self.max_batch_tokens = int(max_batch_tokens)
         self.min_resolution_ratio = float(min_resolution_ratio)
         self.seed = int(seed)
         self.align_gravity = bool(align_gravity)
@@ -1054,7 +1062,23 @@ class MultiResolutionCollate:
             return self.fixed
         key = hash(tuple(item["label_id"] for item in batch)) ^ self.seed
         rng = np.random.default_rng(key & 0xFFFFFFFF)
-        return self._valid_pairs[int(rng.integers(len(self._valid_pairs)))]
+        pairs = self._valid_pairs
+        if self.max_batch_tokens:
+            # Peak VRAM scales with the TOKEN count B x P, and P is a function of the
+            # patch_seconds drawn for THIS batch: short draws tile the window more finely.
+            # Measured, P swings 12 -> 22 at a fixed batch size, so memory was a random
+            # variable and an unlucky draw could OOM a batch size that had survived the
+            # previous sixty steps. Restrict the draw to pairs whose token count fits the
+            # budget; if none do, take the coarsest pair (fewest tokens) rather than fail.
+            n = len(batch)
+            max_seconds = max(
+                float(item["data"].shape[0]) / max(float(item["rate"]), 1e-9) for item in batch
+            )
+            def _tokens(pair: tuple[float, float]) -> int:
+                return n * sum(int(np.ceil(max_seconds / p)) for p in pair)
+            affordable = [p for p in pairs if _tokens(p) <= self.max_batch_tokens]
+            pairs = affordable or [max(pairs, key=lambda p: p[0] + p[1])]
+        return pairs[int(rng.integers(len(pairs)))]
 
     def __call__(self, batch: list[dict]) -> dict:
         pair = self._patch_seconds(batch)

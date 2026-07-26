@@ -41,6 +41,14 @@ MIN_VISIBLE_TIME = 2         # never mask below this many visible time steps (fl
 SUPCON_TEMPERATURE = 0.1
 SIMCLR_TEMPERATURE = 0.1     # NT-Xent temperature for the self-supervised A2 (SimCLR default)
 A3_WEIGHT = 0.1              # grounding rail, not a driver
+# Per-primitive A3 weights. Eigen-ratios are valid on ~100% of windows in every corpus and
+# carry CROSS-CHANNEL motion geometry that the A1 target (per-channel band energies +
+# amplitude + DC) does not contain, so they are the substantive half at weight 1.0. Cadence
+# is largely recoverable from the band energies and is valid on only 7-15% of windows in the
+# free-living majority (nhanes 0.07, extrasensory 0.09, capture24 0.10 — measured), so it
+# keeps the 0.5 it effectively had and is independently zeroable.
+A3_CADENCE_WEIGHT = 0.5
+A3_EIGEN_WEIGHT = 1.0
 HUBER_DELTA = 1.0
 
 
@@ -227,14 +235,21 @@ def masked_latent_loss(
     only supervises OBSERVABLE signal (refinement to the signal-only-target fix).
     """
     target = target.detach()
+    has_signal = None
     if feature_valid is not None:
         fv = feature_valid.to(target.dtype)
         target = target * fv
         predicted = predicted * fv
+        # A token whose every feature was masked out has an all-zero target: F.normalize
+        # returns zeros, the cosine is 0, and the loss is a CONSTANT 2.0 carrying no
+        # gradient. Including it inflated the reported A1 loss with un-learnable tokens.
+        has_signal = target.abs().sum(dim=-1) > 0                       # (B, T, C)
     target = F.normalize(target, dim=-1)
     predicted = F.normalize(predicted, dim=-1)
     per_token = 2.0 - 2.0 * (predicted * target).sum(dim=-1)            # cosine loss
     masked = token_mask & torch.isfinite(per_token)
+    if has_signal is not None:
+        masked = masked & has_signal
 
     def _reduce(sel_mask):
         """Mean over selected tokens, optionally weighted by represented duration (F1): a partial
@@ -267,14 +282,19 @@ def masked_latent_per_window(predicted, target, token_mask, feature_valid=None) 
     per window instead of globally, so it can be grouped by data source. Windows with no masked token
     return NaN (caller filters). Pure diagnostic; not part of the training gradient."""
     target = target.detach()
+    has_signal = None
     if feature_valid is not None:
         fv = feature_valid.to(target.dtype)
         target = target * fv
         predicted = predicted * fv
+        has_signal = target.abs().sum(dim=-1) > 0        # mirrors masked_latent_loss
     target = F.normalize(target, dim=-1)
     predicted = F.normalize(predicted, dim=-1)
     per_token = 2.0 - 2.0 * (predicted * target).sum(dim=-1)            # (B, T, C)
-    m = (token_mask & torch.isfinite(per_token)).to(per_token.dtype)
+    keep = token_mask & torch.isfinite(per_token)
+    if has_signal is not None:
+        keep = keep & has_signal
+    m = keep.to(per_token.dtype)
     denom = m.sum(dim=(1, 2))
     win = (per_token.nan_to_num(0.0) * m).sum(dim=(1, 2)) / denom.clamp(min=1)
     return torch.where(denom > 0, win, torch.full_like(win, float("nan")))
@@ -431,12 +451,14 @@ def masked_ema_latent_loss(
 # ================================================================================================
 @dataclass
 class GroundingTargets:
-    """Targets computed on the AUGMENTED view (or analytically transformed).
+    """Targets computed on the FINAL augmented view.
 
-    cadence_log2hz: (B,) — if built from a cached CLEAN cadence under a time-warp with
-    factor alpha, transform it: log2(alpha * hz) = log2(hz) + log2(alpha). Rotation /
-    gain / rate leave every target here invariant (nothing to do) — that invariance is
-    the primitive-selection criterion.
+    The collate calls `cadence(acc, rate)` / `eigen_ratios(acc, rate)` on the augmented
+    signal at the augmented rate, so a time-warp's effect on physical cadence is MEASURED
+    directly. (An earlier design cached a clean cadence and transformed it analytically by
+    log2(alpha); that path was removed 2026-07-26 — it was never wired into training.)
+    Rotation, gain and rate resampling leave every target here invariant, which is the
+    primitive-selection criterion.
     """
 
     cadence_log2hz: torch.Tensor      # (B,)
@@ -445,16 +467,13 @@ class GroundingTargets:
     eigen_valid: torch.Tensor         # (B,) bool
 
 
-def transform_cadence_for_timewarp(cadence_log2hz: torch.Tensor, alpha: float) -> torch.Tensor:
-    """Analytic target transform under a uniform time-warp y(t)=x(alpha*t)."""
-    return cadence_log2hz + torch.log2(torch.tensor(float(alpha)))
-
-
 def grounding_loss(
     cadence_pred: torch.Tensor,
     eigen_pred: torch.Tensor,
     targets: GroundingTargets,
     delta: float = HUBER_DELTA,
+    cadence_weight: float = A3_CADENCE_WEIGHT,
+    eigen_weight: float = A3_EIGEN_WEIGHT,
 ) -> torch.Tensor:
     """A3: Huber regression per primitive, masked by per-primitive validity.
 
@@ -462,20 +481,28 @@ def grounding_loss(
     onto the simplex upstream or raw (targets live on the simplex; Huber on the three
     descriptors is the M2 baseline, a simplex-aware head is an ablation).
     Loss is 0 (not NaN) when nothing is valid — aggregation-safe.
+
+    FIXED per-primitive weights, NOT a mean over whichever primitives happen to be valid.
+    The previous `total / max(terms, 1)` coupled two unrelated quantities: eigen's effective
+    weight was 1.0 when cadence was invalid and 0.5 when it was valid, so identical eigen
+    supervision counted twice as much on capture24 (cadence valid ~10% of windows) as on
+    hhar (~62%). Eigen is valid on essentially every window, so it keeps weight 1.0; cadence
+    keeps the 0.5 it effectively had when present, and can now be zeroed independently on
+    corpora where it is mostly invalid.
     """
-    total, terms = cadence_pred.new_zeros(()), 0
-    if bool(targets.cadence_valid.any()):
+    total = cadence_pred.new_zeros(())
+    if cadence_weight and bool(targets.cadence_valid.any()):
         v = targets.cadence_valid
-        total = total + F.huber_loss(cadence_pred[v], targets.cadence_log2hz[v], delta=delta)
-        terms += 1
-    if bool(targets.eigen_valid.any()):
+        total = total + float(cadence_weight) * F.huber_loss(
+            cadence_pred[v], targets.cadence_log2hz[v], delta=delta)
+    if eigen_weight and bool(targets.eigen_valid.any()):
         v = targets.eigen_valid
         pred, tgt = eigen_pred[v], targets.eigen_ratios[v]
         finite = torch.isfinite(tgt)
         if bool(finite.any()):
-            total = total + F.huber_loss(pred[finite], tgt[finite], delta=delta)
-            terms += 1
-    return total / max(terms, 1)
+            total = total + float(eigen_weight) * F.huber_loss(
+                pred[finite], tgt[finite], delta=delta)
+    return total
 
 
 # ================================================================================================
