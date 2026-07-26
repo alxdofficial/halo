@@ -1,0 +1,85 @@
+{
+  "_baseline": "harnet_matched",
+  "_dataset": "ut_complex",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.harnet.adapter",
+    "class": "HarnetAdapter",
+    "tier": "conse"
+  },
+  "_timing": {
+    "setup_s": 36.127,
+    "cell_s": 0.275
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 45.4999631577824,
+    "balanced_accuracy": 48.384615384615394,
+    "accuracy": 48.38461538461539,
+    "f1_weighted": 45.4999631577824,
+    "n_samples": 3900,
+    "n_gt_classes": 13,
+    "n_scored_classes": 13,
+    "f1_macro_ci_lo": 43.27165463889593,
+    "f1_macro_ci_hi": 47.728271676668875,
+    "n_subjects": 10,
+    "n_folds": 10,
+    "ci_method": "subject_groupkfold_loso",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "biking": 87.5,
+      "drinking_coffee": 21.791767554479417,
+      "eating": 22.170900692840647,
+      "jogging": 83.63636363636363,
+      "sitting": 33.67231638418079,
+      "smoking": 17.616580310880828,
+      "standing": 40.16260162601626,
+      "talking": 2.2598870056497176,
+      "typing": 29.901960784313726,
+      "walking": 61.79196704428425,
+      "walking_downstairs": 70.73684210526315,
+      "walking_upstairs": 54.78927203065134,
+      "writing": 65.46906187624751
+    },
+    "reachable_nn_lb": [
+      "biking",
+      "drinking_coffee",
+      "eating",
+      "jogging",
+      "sitting",
+      "smoking",
+      "standing",
+      "talking",
+      "typing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs",
+      "writing"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "biking",
+      "drinking_coffee",
+      "eating",
+      "jogging",
+      "sitting",
+      "smoking",
+      "standing",
+      "talking",
+      "typing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs",
+      "writing"
+    ],
+    "n_predicted_classes": 13,
+    "top_T": 10
+  }
+}

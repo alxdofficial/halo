@@ -1,0 +1,56 @@
+{
+  "_baseline": "halo_evidence",
+  "_dataset": "realworld",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.halo_evidence.adapter",
+    "class": "HALOEvidenceAdapter",
+    "tier": "retrieval"
+  },
+  "_timing": {
+    "setup_s": 5.445,
+    "cell_s": 24.108
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 45.86482639428302,
+    "balanced_accuracy": 51.701737090618806,
+    "accuracy": 52.024561715760434,
+    "f1_weighted": 43.954435549859284,
+    "n_samples": 11237,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": 42.52970375383256,
+    "f1_macro_ci_hi": 49.653175194965236,
+    "bootstrap_B": 1000,
+    "n_subjects": 15,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "climbingdown": 0.0,
+      "climbingup": 0.0,
+      "jumping": 79.38931297709924,
+      "lying": 24.77014602487831,
+      "running": 83.13802083333334,
+      "sitting": 62.922353994182146,
+      "standing": 66.03721188558734,
+      "walking": 50.66156543918381
+    },
+    "predicted_classes": [
+      "jumping",
+      "lying",
+      "running",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "mechanism": "untrained-retrieval+text-ensemble"
+  }
+}

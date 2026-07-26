@@ -1,0 +1,64 @@
+{
+  "_baseline": "halo",
+  "_dataset": "motionsense",
+  "_stream": "phone_front_pocket",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.halo.adapter",
+    "class": "HALOAdapter",
+    "tier": "conse"
+  },
+  "_timing": {
+    "setup_s": 56.012,
+    "cell_s": 11.564
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 46.23311487141013,
+    "balanced_accuracy": 48.354455997694664,
+    "accuracy": 59.68239964711072,
+    "f1_weighted": 52.58728930998148,
+    "n_samples": 4534,
+    "n_gt_classes": 6,
+    "n_scored_classes": 6,
+    "f1_macro_ci_lo": 42.121996487367824,
+    "f1_macro_ci_hi": 50.24795752864933,
+    "bootstrap_B": 1000,
+    "n_subjects": 24,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "jogging": 52.03938115330521,
+      "sitting": 72.55172413793105,
+      "standing": 37.842064112587956,
+      "walking": 71.63601161665053,
+      "walking_downstairs": 29.57486136783734,
+      "walking_upstairs": 13.754646840148698
+    },
+    "reachable_nn_lb": [
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ],
+    "n_predicted_classes": 6,
+    "top_T": 10
+  }
+}

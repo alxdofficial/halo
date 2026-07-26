@@ -126,7 +126,7 @@ def main() -> None:
     torch.manual_seed(SEED)
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
-    from training.evidence.bank_guard import assert_bank_current
+    from training.evidence.bank_guard import assert_bank_current, bank_fingerprint
     assert_bank_current(bank, context="train_head")
     Z = bank["Z"].float().to(device)                    # (N, d)
     y = bank["y"].to(device)                            # (N,)
@@ -228,7 +228,8 @@ def main() -> None:
     torch.save({"head": {k: v.cpu() for k, v in head.state_dict().items()},
                 "proj": args.proj, "d_model": d, "vocab": vocab,
                 "best_val_bal_acc": best_val,
-                "bank": str(args.bank), "backbone": bank["backbone"]}, str(args.out))
+                "bank": str(args.bank), "bank_fp": bank.get("bank_fp") or bank_fingerprint(bank),
+                "backbone": bank["backbone"]}, str(args.out))
     print(f"[m4a] done: best held-out-subject balanced acc {best_val:.4f} -> {args.out}", flush=True)
 
 

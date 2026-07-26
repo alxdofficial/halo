@@ -27,6 +27,144 @@ def vocab_fingerprint(labels: Sequence[str]) -> str:
     return hashlib.sha256(json.dumps(list(labels)).encode()).hexdigest()[:16]
 
 
+def bank_fingerprint(bank: dict) -> str:
+    """Identity of the bank an evidence artifact was trained against.
+
+    Hash metadata that determines the vector population plus the fixed embedding-path probe. The
+    full ``Z`` tensor is intentionally not re-hashed on every consumer startup; the corpus,
+    checkpoint, caps and behavioral probe are the reproducible identity of a deterministic build.
+    """
+    probe = bank.get("embed_probe")
+    if probe is None:
+        probe_fp = None
+    else:
+        import torch
+        tensor = torch.as_tensor(probe).detach().cpu().contiguous()
+        probe_fp = hashlib.sha256(tensor.numpy().tobytes()).hexdigest()
+    corpus = bank.get("corpus") or {}
+    payload = {
+        "vocab_fp": bank.get("vocab_fp") or vocab_fingerprint(bank.get("vocab", [])),
+        "backbone_fp": (bank.get("backbone") or {}).get("fingerprint"),
+        "phase_a_corpus_fp": corpus.get("phase_a_corpus_fp"),
+        "datasets": sorted(corpus.get("datasets") or []),
+        "streams": sorted((corpus.get("streams") or {}).items()),
+        "n_encoded_windows": corpus.get("n_encoded_windows"),
+        "max_per_stream": bank.get("max_per_stream"),
+        "max_per_label": bank.get("max_per_label"),
+        "d_model": bank.get("d_model"),
+        "embed_probe_fp": probe_fp,
+    }
+    if "balance_policy" in bank:
+        payload["balance_policy"] = bank["balance_policy"]
+    # Schema-v2 extends (rather than replaces) the historical pooled bank with a patch table. Keep
+    # the exact v1 fingerprint payload for existing banks/artifacts; otherwise merely upgrading
+    # this guard would invalidate a valid old pooled control.
+    if int(bank.get("schema_version", 1)) >= 2:
+        patch = bank.get("patch") or {}
+        patch_probe = bank.get("patch_embed_probe")
+        if patch_probe is None:
+            patch_probe_fp = None
+        else:
+            import torch
+            tensor = torch.as_tensor(patch_probe).detach().cpu().contiguous()
+            patch_probe_fp = hashlib.sha256(tensor.numpy().tobytes()).hexdigest()
+        payload.update({
+            "schema_version": int(bank["schema_version"]),
+            "n_patches": len(patch.get("Z", [])),
+            "patch_fields": sorted(patch),
+            "n_events": len(bank.get("event_names", {})),
+            "patch_embed_probe_fp": patch_probe_fp,
+            "cfg_rate_hz": sorted((bank.get("cfg_rate_hz") or {}).items()),
+        })
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def assert_patch_bank(bank: dict, *, context: str = "") -> None:
+    """Validate the schema-v2 patch evidence table and its foreign-key invariants."""
+    import torch
+
+    where = f" ({context})" if context else ""
+    if int(bank.get("schema_version", 1)) < 2 or "patch" not in bank:
+        raise SystemExit(
+            f"\n[bank_guard] PATCH BANK REQUIRED{where}: this bank only contains the legacy "
+            "pooled evidence table. Rebuild it with the current build_memory.\n"
+        )
+    if "patch_embed_probe" not in bank:
+        raise SystemExit(
+            f"\n[bank_guard] PATCH BANK LACKS EMBEDDING-PATH PROVENANCE{where}. "
+            "Rebuild it with the current build_memory.\n"
+        )
+    if "cfg_rate_hz" not in bank:
+        raise SystemExit(
+            f"\n[bank_guard] PATCH BANK LACKS CONFIG RATE METADATA{where}. Rebuild it.\n"
+        )
+    patch = bank["patch"]
+    required = {
+        "Z", "y", "subj", "cfg", "sensor", "window", "event", "event_verified",
+        "time", "duration", "resolution",
+    }
+    missing = sorted(required - set(patch))
+    if missing:
+        raise SystemExit(f"\n[bank_guard] MALFORMED PATCH BANK{where}: missing {missing}.\n")
+    n = len(patch["Z"])
+    bad_lengths = {key: len(patch[key]) for key in required if len(patch[key]) != n}
+    if bad_lengths:
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED PATCH BANK{where}: expected {n} rows, "
+            f"mismatched fields {bad_lengths}.\n"
+        )
+    if n == 0:
+        raise SystemExit(f"\n[bank_guard] EMPTY PATCH BANK{where}.\n")
+    window = torch.as_tensor(patch["window"])
+    if window.dtype not in (torch.int32, torch.int64) or int(window.min()) < 0 \
+            or int(window.max()) >= len(bank["Z"]):
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED PATCH BANK{where}: patch.window contains an invalid "
+            "pooled-window foreign key.\n"
+        )
+    for key in ("y", "subj", "cfg", "event", "event_verified"):
+        expected = torch.as_tensor(bank[key])[window]
+        actual = torch.as_tensor(patch[key])
+        if not torch.equal(actual.cpu(), expected.cpu()):
+            raise SystemExit(
+                f"\n[bank_guard] MALFORMED PATCH BANK{where}: patch.{key} disagrees with its "
+                "parent pooled window.\n"
+            )
+    sensor = torch.as_tensor(patch["sensor"])
+    if sensor.dtype not in (torch.int32, torch.int64) or int(sensor.min()) < 0:
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED PATCH BANK{where}: patch.sensor must contain "
+            "nonnegative integer structural sensor ids.\n"
+        )
+    duration = torch.as_tensor(patch["duration"])
+    time = torch.as_tensor(patch["time"])
+    if not bool(torch.isfinite(duration).all() and torch.isfinite(time).all()) \
+            or not bool((duration > 0).all()) or not bool((time >= 0).all()):
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED PATCH BANK{where}: non-finite/non-physical time metadata.\n"
+        )
+
+
+def assert_artifact_matches_bank(artifact: dict, bank: dict, *, context: str,
+                                 artifact_name: str) -> None:
+    """Fail if a learned evidence artifact was trained against a different bank."""
+    expected = bank.get("bank_fp") or bank_fingerprint(bank)
+    recorded = artifact.get("bank_fp")
+    if recorded != expected:
+        raise SystemExit(
+            f"\n[bank_guard] {artifact_name.upper()} / BANK MISMATCH ({context}).\n"
+            f"  artifact bank fp : {recorded!r}\n"
+            f"  current bank fp  : {expected!r}\n"
+            f"  The artifact was not trained against this exact vector population. Re-train "
+            f"{artifact_name} against the current bank before evaluating it.\n"
+        )
+    if list(artifact.get("vocab", [])) != list(bank.get("vocab", [])):
+        raise SystemExit(
+            f"\n[bank_guard] {artifact_name.upper()} VOCABULARY MISMATCH ({context}): "
+            f"{len(artifact.get('vocab', []))} vs {len(bank.get('vocab', []))} labels.\n"
+        )
+
+
 def _assert_build_params_recorded(bank: dict, context: str) -> None:
     """A matching vocabulary is NOT sufficient to call a bank 'current'.
 
@@ -39,12 +177,22 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
     enforceable guarantee is that they ARE recorded; consumers that know the expected backbone
     (eval_decoder, halo_evidence) additionally compare the checkpoint hash themselves.
     """
-    missing = [k for k in ("vocab_fp", "backbone", "corpus") if k not in bank]
+    missing = [
+        k for k in ("vocab_fp", "backbone", "corpus", "embed_probe", "bank_fp")
+        if k not in bank
+    ]
     if "backbone" in bank and not bank["backbone"].get("fingerprint"):
         missing.append("backbone.fingerprint")
     if "corpus" in bank and not bank["corpus"].get("streams"):
         missing.append("corpus.streams")               # which streams the bank was encoded over (F3)
     if not missing:
+        calculated = bank_fingerprint(bank)
+        if bank["bank_fp"] != calculated:
+            raise SystemExit(
+                f"\n[bank_guard] BANK FINGERPRINT MISMATCH ({context}): stored "
+                f"{bank['bank_fp']!r} != calculated {calculated!r}. The bank metadata was modified "
+                "after it was built; rebuild it before evaluation.\n"
+            )
         return
     where = f" ({context})" if context else ""
     raise SystemExit(
@@ -126,6 +274,32 @@ def assert_embedding_path_current(bank: dict, enc, device, *, context: str = "")
             f"  not reproduce the vectors stored in this bank (e.g. pooling or tail handling\n"
             f"  changed since it was built). Rebuild the bank against the current code:\n\n"
             f"      python -m training.evidence.build_memory --checkpoint <ckpt> --device cuda\n")
+
+
+def assert_patch_embedding_path_current(bank: dict, enc, device, *, context: str = "") -> None:
+    """Raise if live per-patch export no longer reproduces the schema-v2 bank."""
+    import torch
+    from training.tokenizer.eval_transfer import patch_embedding_fingerprint
+
+    where = f" ({context})" if context else ""
+    stored = bank.get("patch_embed_probe")
+    if stored is None:
+        raise SystemExit(
+            f"\n[bank_guard] PATCH BANK PREDATES THE PATCH-PATH PROBE{where}. Rebuild it.\n"
+        )
+    live = patch_embedding_fingerprint(enc, device)
+    stored = torch.as_tensor(stored).float().cpu()
+    if live.shape != stored.shape:
+        raise SystemExit(
+            f"\n[bank_guard] PATCH EMBEDDING-PATH MISMATCH{where}: probe shape "
+            f"{tuple(live.shape)} != stored {tuple(stored.shape)}. Rebuild the bank.\n"
+        )
+    drift = float((live - stored).norm() / stored.norm().clamp(min=1e-12))
+    if drift > EMBED_PROBE_TOL:
+        raise SystemExit(
+            f"\n[bank_guard] PATCH EMBEDDING-PATH CHANGED{where}: relative drift "
+            f"{drift:.2e} exceeds {EMBED_PROBE_TOL:.0e}. Rebuild the bank.\n"
+        )
 
 
 def assert_bank_matches_backbone(bank: dict, ckpt: dict, *, context: str = "") -> None:

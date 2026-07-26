@@ -27,7 +27,7 @@ from typing import Optional
 
 # Bump MANUALLY when something changes that the vocabulary and split hashes do not capture:
 # a preprocessing contract, a metric definition, the ConSE bridge, the probe architecture.
-PROTOCOL_VERSION = 3        # 3 = 93-label vocab + aliased-cohort split + seeded 2-layer probe
+PROTOCOL_VERSION = 4        # 4 = current grids + anti-aliased UniMTS resampling + diagnostic guards
 
 
 def protocol_fingerprint() -> dict:

@@ -1,6 +1,5 @@
-"""HALO evidence engine — T2.0: the UNTRAINED retrieval + text-ensemble mechanism, wired
-as a first-class baseline so its 47.5 macro-F1 sits in the official ZS-XD table beside
-ConSE (42.7) and harnet (47.3).
+"""HALO evidence engine — T2.0: the untrained retrieval + text-ensemble mechanism, wired
+as a first-class baseline in the official ZS-XD table.
 
 NO learning. Raw frozen fixed+MR encoder features + frozen SBERT text bridge, using the
 exact best config from the tier-1 sweep (`training.evidence.tier1_sweep`):
@@ -72,7 +71,10 @@ class HALOEvidenceAdapter(BaselineAdapter):
                 "python -m training.evidence.build_memory --device cuda")
 
         bank = torch.load(str(_BANK), map_location="cpu", weights_only=True)
-        from training.evidence.bank_guard import assert_bank_current   # lazy
+        from training.evidence.bank_guard import (                    # lazy
+            assert_bank_current, assert_bank_matches_backbone,
+            assert_embedding_path_current,
+        )
         assert_bank_current(bank, context="halo_evidence adapter")
         fp = hashlib.sha256(_BACKBONE_CKPT.read_bytes()).hexdigest()
         bank_fp = bank["backbone"].get("fingerprint")
@@ -83,7 +85,9 @@ class HALOEvidenceAdapter(BaselineAdapter):
 
         from training.tokenizer.eval_transfer import build_encoder   # lazy (loads HALO model pkg)
         ckpt = torch.load(str(_BACKBONE_CKPT), map_location="cpu", weights_only=False)
+        assert_bank_matches_backbone(bank, ckpt, context="halo_evidence adapter")
         enc = build_encoder(ckpt, device)
+        assert_embedding_path_current(bank, enc, device, context="halo_evidence adapter")
         for p in enc.parameters():
             p.requires_grad_(False)
 
@@ -112,8 +116,10 @@ class HALOEvidenceAdapter(BaselineAdapter):
         ml_ens, sbert = state["ml_ens"], state["sbert"]
         labels = list(stream.eval_labels)
 
-        texts = stream_channel_descriptions(stream.dataset, stream.stream)
-        gs = _stream_gravity_state(stream.dataset, stream.stream)
+        texts = (stream.channel_descriptions if getattr(stream, "channel_descriptions", None) is not None
+                 else stream_channel_descriptions(stream.dataset, stream.stream))
+        gs = (stream.gravity_state if getattr(stream, "gravity_state", None) is not None
+              else _stream_gravity_state(stream.dataset, stream.stream))
         z = encode_dataset(enc, np.asarray(stream.windows), texts, device,
                            float(stream.rate_hz), gs,
                            channel_mask=stream.mask, dataset=stream.dataset,

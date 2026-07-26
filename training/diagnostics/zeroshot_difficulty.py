@@ -31,6 +31,8 @@ FAIL-LOUD METHODOLOGY GUARDS (see the per-axis docstrings for the exact contract
                        (genuine same-subject-same-instant, device the only difference). Otherwise
                        the axis is relabelled an "unpaired cross-device distribution shift" and the
                        weaker control (A-support and B-query share subject + label set) is asserted.
+                       The default xrf_v2 pair is in the Phase-A corpus, so it is an in-corpus,
+                       subject-disjoint control rather than a held-out placement estimate.
 Any axis whose control cannot be met with the available data emits an explicit
 ``verdict="AXIS INVALID"`` row with an ``invalid_reason`` instead of a misleading retention value.
 The exact per-window transform axes (rate/channel/orientation/gravity) are unaffected.
@@ -56,9 +58,12 @@ verdicts are the signal. Do NOT commit outputs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
+import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,6 +74,8 @@ from scipy import signal as sps
 
 from data.scripts.eda.grid_io import GridRef, discover_grids
 from data.scripts.augmentations import _random_so3
+from data.scripts.curate import deployment_policy as policy
+from eval.protocol import protocol_fingerprint
 from training.tokenizer.eval_transfer import (build_encoder, encode_dataset,
                                               knn_balanced_acc)
 from training.tokenizer.pretrain import conse_probe_predict
@@ -76,13 +83,6 @@ from training.tokenizer.pretrain_data import (CHANNELS, stream_channel_descripti
                                               _stream_gravity_state)
 
 DEFAULT_CKPT = Path("training/tokenizer/outputs/pretrain_native/best.pt")
-# Held-out eval datasets (never in TRAIN_DATASETS) for the per-window transform axes.
-DEFAULT_EVAL_STREAMS = (
-    ("motionsense", "phone_front_pocket"),
-    ("realworld", "phone_waist"),
-    ("shoaib", "phone_right_pocket"),
-    ("inclusivehar", "phone_waist"),
-)
 # Multi-placement dataset for the placement axis. xrf_v2's body IMU streams are cut from ONE
 # video-aligned recording at the SAME sample index per placement, so their grids are row-aligned
 # (window i is the same subject+instant across placements) -> genuine same-subject-same-instant
@@ -92,6 +92,15 @@ DEFAULT_EVAL_STREAMS = (
 DEFAULT_PLACEMENT = ("xrf_v2", "left_wrist", "left_pocket")
 KNN_K = 5
 VERDICT_T = 0.9   # retention below this = "low"
+
+
+def default_eval_streams() -> tuple[tuple[str, str], ...]:
+    """Current primary evaluation roster, derived from the authoritative deployment policy."""
+    return tuple(
+        (dataset, spec.stream_id)
+        for dataset in policy.PRIMARY_EVAL_DATASETS
+        for spec in policy.stream_specs(dataset, "primary")
+    )
 
 
 # ======================================================================================
@@ -175,7 +184,12 @@ def load_placement_pair(ref_a: GridRef, ref_b: GridRef, max_windows: int, seed: 
 def shift_rate(ws: WindowSet, target_hz: float) -> WindowSet:
     """Anti-aliased polyphase resample of the SAME windows to a lower rate (exact control)."""
     native = ws.rate
-    tgt = target_hz if target_hz < native else native / 2.0
+    if not 0 < target_hz < native:
+        raise ValueError(
+            f"rate shift requires 0 < target_hz < native_hz; got {target_hz} vs {native} "
+            f"for {ws.tag}"
+        )
+    tgt = target_hz
     frac = (np.array([tgt / native])).item()
     from fractions import Fraction
     f = Fraction(frac).limit_denominator(50)
@@ -374,6 +388,15 @@ def _local_labmap(*label_arrays):
 
 def run_aligned_axis(name, enc, base: WindowSet, shifted: WindowSet, device, seed):
     """Axes where matched & shifted are the SAME windows (rate/channel/orientation/gravity)."""
+    if len(set(base.subjects.tolist())) < 2:
+        return _invalid_row(
+            name,
+            f"subject-disjoint support/query requires >=2 subjects; {base.tag} has "
+            f"{len(set(base.subjects.tolist()))}",
+            dataset=base.dataset,
+            stream=base.stream,
+            tag=base.tag,
+        )
     lab2id, id2lab = _local_labmap(base.labels, shifted.labels)
     protos = build_label_protos(enc, id2lab, device)
     z_m = embed(enc, base, device)
@@ -382,11 +405,13 @@ def run_aligned_axis(name, enc, base: WindowSet, shifted: WindowSet, device, see
     sup = np.array([s in sup_subj for s in base.subjects])
     qry = ~sup
     y_all = _ids(base.labels, lab2id)
-    return measure(name, enc, protos, lab2id, device,
-                   z_sup=z_m[sup], y_sup=y_all[sup],
-                   zq_m=z_m[qry], yq_m=y_all[qry],
-                   zq_s=z_s[qry], yq_s=y_all[qry],
-                   z_mmd_m=z_m, z_mmd_s=z_s)
+    row = measure(name, enc, protos, lab2id, device,
+                  z_sup=z_m[sup], y_sup=y_all[sup],
+                  zq_m=z_m[qry], yq_m=y_all[qry],
+                  zq_s=z_s[qry], yq_s=y_all[qry],
+                  z_mmd_m=z_m, z_mmd_s=z_s)
+    row.update(dataset=base.dataset, stream=base.stream, tag=base.tag)
+    return row
 
 
 def run_subject_axis(name, enc, ws: WindowSet, device, seed):
@@ -456,7 +481,7 @@ def run_subject_axis(name, enc, ws: WindowSet, device, seed):
                   zq_s=z[sq_idx], yq_s=y[sq_idx],
                   z_mmd_m=z[sup_idx], z_mmd_s=z[sq_idx])
     row.update(n_support_subjects=len(sup_subjects), n_shifted_subjects=len(sq_subjects),
-               subjects_disjoint=True)
+               subjects_disjoint=True, dataset=ws.dataset, stream=ws.stream, tag=ws.tag)
     return row
 
 
@@ -711,7 +736,7 @@ def build_synthetic(tmp: Path, seed: int):
             lab = labels[i % len(labels)]
             t = np.arange(T) / rate
             freq = 1.0 + labels.index(lab)
-            acc = np.stack([np.sin(2 * np.pi * freq * t) + (0 if k else 9.8)  # z carries gravity DC
+            acc = np.stack([np.sin(2 * np.pi * freq * t) + (0 if k else 1.0)  # x carries 1 g DC
                             for k in range(3)], axis=-1)
             gyr = 0.3 * np.cos(2 * np.pi * freq * t)[:, None] * np.ones((1, 3))
             w = np.concatenate([acc, gyr], axis=-1) + 0.05 * mr.standard_normal((T, 6))
@@ -745,7 +770,70 @@ def parse_stream_arg(s: str):
     return (ds, st)
 
 
+def _git_state() -> dict:
+    """Best-effort source identity without making the diagnostic depend on Git."""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short=12", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
+        ).strip())
+        return {"commit": commit, "dirty": dirty}
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": None, "dirty": None}
+
+
+def _checkpoint_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _windowset_meta(ws: WindowSet) -> dict:
+    return {
+        "dataset": ws.dataset,
+        "stream": ws.stream,
+        "n_windows": int(len(ws.labels)),
+        "n_subjects": int(len(set(ws.subjects.tolist()))),
+        "n_labels": int(len(set(ws.labels.tolist()))),
+        "rate_hz": float(ws.rate),
+        "channel_mask": list(map(bool, ws.channel_mask)),
+        "gravity_state": ws.gravity_state,
+    }
+
+
+def summarize_label_novelty(rows: list[dict]) -> dict:
+    """Compact seen/novel summary; per-label rows remain the auditable source."""
+    summary = {}
+    for key, predicate in (
+        ("seen", lambda row: not row["novel"]),
+        ("novel", lambda row: row["novel"]),
+    ):
+        selected = [row for row in rows if predicate(row)]
+        weights = np.asarray([row["n_query"] for row in selected], dtype=np.float64)
+        accs = np.asarray([row["zs_acc"] for row in selected], dtype=np.float64)
+        summary[key] = {
+            "n_dataset_labels": len(selected),
+            "n_query": int(weights.sum()) if len(weights) else 0,
+            "macro_label_accuracy": _r(float(accs.mean())) if len(accs) else None,
+            "micro_query_accuracy": _r(float(np.average(accs, weights=weights)))
+            if len(accs) and weights.sum() > 0 else None,
+        }
+    return summary
+
+
+def _atomic_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_suffix(path.suffix + ".partial")
+    partial.write_text(json.dumps(payload, indent=2))
+    partial.replace(path)
+
+
 def main() -> None:
+    started = time.time()
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", type=Path, default=DEFAULT_CKPT)
@@ -760,12 +848,16 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=20260723)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--synthetic", action="store_true",
-                    help="force the synthetic runs-only fallback (no real assets needed)")
+                    help="use a random encoder + temporary synthetic grids; numbers are meaningless")
     args = ap.parse_args()
+    if args.max_windows < 2:
+        ap.error("--max-windows must be >= 2")
+    if args.rate_hz <= 0:
+        ap.error("--rate-hz must be positive")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     tmpdir = None
-    synthetic = args.synthetic or not args.checkpoint.exists()
+    synthetic = args.synthetic
     if synthetic:
         tmpdir = Path(tempfile.mkdtemp(prefix="zsdiff_synth_"))
         enc, ds_root, plan = build_synthetic(tmpdir, args.seed)
@@ -776,23 +868,44 @@ def main() -> None:
         train_labels = plan["train_labels"]
         provenance = "SYNTHETIC (random encoder + tiny synthetic grids) — RUNS-ONLY, NUMBERS MEANINGLESS"
     else:
+        if not args.checkpoint.exists():
+            raise SystemExit(
+                f"checkpoint not found: {args.checkpoint}. Pass a real Phase-A checkpoint, or "
+                "--synthetic explicitly for a runs-only smoke test."
+            )
         ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
         enc = build_encoder(ckpt, device)
         refs = {(r.dataset, r.stream): r for r in discover_grids("native")}
-        eval_streams = args.eval_streams or list(DEFAULT_EVAL_STREAMS)
+        eval_streams = args.eval_streams or list(default_eval_streams())
         placement = tuple(args.placement) if args.placement else DEFAULT_PLACEMENT
         train_labels = set(ckpt.get("label_ids", {}).keys())
-        provenance = (f"REAL checkpoint {args.checkpoint} (val_ba {ckpt.get('val_ba'):.3f}, "
+        val_ba = ckpt.get("val_ba")
+        val_text = f"{float(val_ba):.3f}" if val_ba is not None else "unknown"
+        provenance = (f"REAL checkpoint {args.checkpoint} (val_ba {val_text}, "
                       f"step {ckpt.get('step')}) + real native grids")
 
-    eval_streams = [tuple(s) for s in eval_streams if tuple(s) in refs]
-    if not eval_streams:
-        raise SystemExit("no requested eval streams found among the discovered grids")
+    requested_streams = [tuple(s) for s in eval_streams]
+    missing_streams = [s for s in requested_streams if s not in refs]
+    if missing_streams:
+        raise SystemExit(
+            f"requested eval streams are missing from native grids: {missing_streams}. "
+            "Refusing a silently partial diagnostic."
+        )
+    eval_streams = requested_streams
     print(f"provenance: {provenance}", flush=True)
     print(f"device={device}  max_windows={args.max_windows}  eval_streams={eval_streams}  "
           f"placement={placement}", flush=True)
 
     eval_sets = [load_windowset(refs[s], args.max_windows, args.seed) for s in eval_streams]
+    if synthetic:
+        # Synthetic streams are intentionally absent from deployment_policy; declare their known
+        # construction explicitly so the gravity-removal smoke path is exercised.
+        for ws in eval_sets:
+            ws.gravity_state = "present"
+            ws.texts = [
+                text + ("; includes gravity" if i < 3 else "")
+                for i, text in enumerate(ws.texts)
+            ]
 
     # ---- per-window transform axes (aggregate across eval streams) ----
     axis_rows = []
@@ -806,10 +919,29 @@ def main() -> None:
     for axis, fn in transform_axes.items():
         rows = []
         for ws in eval_sets:
+            if axis == "channel" and not any(ws.channel_mask[3:]):
+                rows.append(_invalid_row(
+                    axis, f"{ws.tag} is already accelerometer-only", dataset=ws.dataset,
+                    stream=ws.stream, tag=ws.tag
+                ))
+                continue
+            if axis == "gravity" and ws.gravity_state != "present":
+                rows.append(_invalid_row(
+                    axis, f"{ws.tag} gravity_state={ws.gravity_state!r}; cannot remove gravity "
+                    "from a stream that is not declared gravity-present",
+                    dataset=ws.dataset, stream=ws.stream, tag=ws.tag
+                ))
+                continue
             try:
-                rows.append(run_aligned_axis(axis, enc, ws, fn(ws), device, args.seed))
+                row = run_aligned_axis(axis, enc, ws, fn(ws), device, args.seed)
+                row.update(dataset=ws.dataset, stream=ws.stream, tag=ws.tag)
+                rows.append(row)
             except Exception as e:                       # keep the harness robust per-stream
                 print(f"  [warn] {axis} on {ws.tag} failed: {e}", flush=True)
+                rows.append(_invalid_row(
+                    axis, f"{type(e).__name__}: {e}", dataset=ws.dataset,
+                    stream=ws.stream, tag=ws.tag
+                ))
         per_stream[axis] = rows
         axis_rows.append(_aggregate(axis, rows))
 
@@ -817,9 +949,15 @@ def main() -> None:
     subj_rows = []
     for ws in eval_sets:
         try:
-            subj_rows.append(run_subject_axis("subject", enc, ws, device, args.seed))
+            row = run_subject_axis("subject", enc, ws, device, args.seed)
+            row.update(dataset=ws.dataset, stream=ws.stream, tag=ws.tag)
+            subj_rows.append(row)
         except Exception as e:
             print(f"  [warn] subject on {ws.tag} failed: {e}", flush=True)
+            subj_rows.append(_invalid_row(
+                "subject", f"{type(e).__name__}: {e}", dataset=ws.dataset,
+                stream=ws.stream, tag=ws.tag
+            ))
     per_stream["subject"] = subj_rows
     axis_rows.append(_aggregate("subject", subj_rows))
 
@@ -835,12 +973,22 @@ def main() -> None:
               f"({'genuine same-subject-same-instant' if row_aligned else 'UNPAIRED cross-device'})",
               flush=True)
         placement_row = run_placement_axis("placement", enc, wa, wb, device, args.seed)
+        corpus_overlap = placement[0] in policy.PRIMARY_TRAIN_DATASETS
+        placement_row.update(
+            corpus_overlap=corpus_overlap,
+            held_out_dataset=not corpus_overlap,
+            valid_for_cross_dataset_robustness=not corpus_overlap,
+        )
         axis_rows.append(placement_row)
     else:
-        print(f"  [warn] placement streams {pa}/{pb} not both present — axis skipped", flush=True)
+        reason = f"placement streams {pa}/{pb} not both present"
+        print(f"  [warn] {reason} — axis invalid", flush=True)
+        placement_row = _invalid_row("placement", reason)
+        axis_rows.append(placement_row)
 
     # ---- label-novelty scatter ----
     scatter = run_label_novelty(enc, eval_sets, train_labels, device, args.seed)
+    novelty_summary = summarize_label_novelty(scatter)
 
     # ---- compound additivity (on the placement dataset) ----
     compound = None
@@ -866,16 +1014,39 @@ def main() -> None:
         headline.append(f"=> zero-shot HAR is most {w['verdict'].split('-')[0].upper()}-limited "
                         f"on the {w['axis']} axis.")
 
-    result = dict(provenance=provenance, device=str(device), seed=args.seed,
+    artifact = {
+        "schema_version": 2,
+        "protocol": protocol_fingerprint() if not synthetic else None,
+        "git": _git_state(),
+        "checkpoint": None if synthetic else {
+            "path": str(args.checkpoint),
+            "sha256": _checkpoint_sha256(args.checkpoint),
+            "step": ckpt.get("step"),
+            "val_ba": ckpt.get("val_ba"),
+            "corpus_fingerprint": ckpt.get("corpus_fingerprint"),
+            "label_count": len(train_labels),
+        },
+        "elapsed_s": None,
+    }
+    result = dict(provenance=provenance, artifact=artifact, device=str(device), seed=args.seed,
                   max_windows=args.max_windows, eval_streams=[list(s) for s in eval_streams],
-                  placement=list(placement), verdict_threshold=VERDICT_T,
-                  axes=axis_rows, per_stream=per_stream,
-                  label_novelty=scatter, compound=compound, headline=headline)
+                  stream_metadata=[_windowset_meta(ws) for ws in eval_sets],
+                  placement=list(placement), rate_target_hz=args.rate_hz,
+                  placement_interpretation=(
+                      "The requested placement pair is in the primary Phase-A corpus. The "
+                      "subject-disjoint result is a controlled in-corpus placement test, not a "
+                      "held-out cross-dataset robustness estimate."
+                      if placement[0] in policy.PRIMARY_TRAIN_DATASETS
+                      else "The requested placement pair is outside the primary Phase-A corpus."
+                  ),
+                  verdict_threshold=VERDICT_T, axes=axis_rows, per_stream=per_stream,
+                  label_novelty=scatter, label_novelty_summary=novelty_summary,
+                  compound=compound, headline=headline)
 
     out = args.out or (args.checkpoint.parent / "zeroshot_difficulty.json"
                        if not synthetic else tmpdir / "zeroshot_difficulty.json")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(result, indent=2))
+    result["artifact"]["elapsed_s"] = round(time.time() - started, 3)
+    _atomic_json(out, result)
 
     print_report(result, out)
 

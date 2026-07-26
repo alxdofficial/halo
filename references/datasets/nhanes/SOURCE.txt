@@ -1,0 +1,3 @@
+https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAX80_G.htm
+https://wwwn.cdc.gov/nchs/data/nhanes/public/2011/manuals/2012-Physicial-Activity-Monitor-Procedures-Manual-508.pdf
+https://ftp.cdc.gov/pub/pax_g/

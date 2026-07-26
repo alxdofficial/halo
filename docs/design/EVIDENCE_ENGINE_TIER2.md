@@ -1,8 +1,10 @@
 # Evidence Engine — Tier-2 improvement plan
 
-Status: plan, 2026-07-20. Supersedes nothing; extends `EVIDENCE_ENGINE.md` (§4.2 head, §5 objectives)
-and `EVIDENCE_ENGINE_BUILD_PLAN.md` (M4–M6) with the concrete Tier-2 architecture + loss, informed by
-the M4a diagnostic ([[halo-phaseB-m4a-results]]) and a literature pass.
+Status: historical plan with T2.4/T2.5 implemented but not empirically gated, updated 2026-07-25.
+Supersedes nothing; extends `EVIDENCE_ENGINE.md` (§4.2 head, §5 objectives) and
+`EVIDENCE_ENGINE_BUILD_PLAN.md` (M4–M6) with the concrete Tier-2 architecture + loss, informed by the
+M4a diagnostic ([[halo-phaseB-m4a-results]]) and a literature pass. The authoritative implementation
+contract is `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`.
 
 ## 0. Where we are (the facts this plan is built on)
 
@@ -287,25 +289,32 @@ Train **episodically** with the encoder frozen (Lever A), the decoder/refiner as
   vacuous → abstain), θ calibrated on val. Apply FIX-A/B/C.
 - **Checkpoint selection = held-out-config transfer.**
 
-### Current EDL implementation boundary (2026-07-24)
+### Current implementation boundary (2026-07-25)
 
-`training/evidence/train_decoder.py --loss edl` now implements the **transfer/KNOWN-style**
-Dirichlet objective: expected CE grows target evidence and an annealed KL term removes wrong-class
-evidence. A positive monotonic gate scales evidence from top-neighbour density. Its threshold is
-initialized from deterministic training-fold class-holdout retrieval rather than a fixed cosine
-constant; validation retrieval is restricted to the training fold; decoder and gate are selected and
-saved as one checkpoint.
+There are now two attributable Phase-B paths:
 
-Episode candidate budgets are sampled uniformly from `--episode-labels` (default 12–24). Holding out
-more candidate labels correspondingly leaves fewer training labels in memory. This is **variable, not
-an annealed curriculum**.
+- `training/evidence/train_decoder.py` is the historical pooled-window control. Its EDL option remains
+  the transfer/KNOWN-style objective described in the earlier findings.
+- `training/evidence/train_patch_decoder.py` is the schema-v2 patch experiment. It uses candidate
+  tokens, query/evidence/candidate roles, candidate self/cross-attention, physical-time/duration/
+  resolution metadata, same-window and same-sensor relation biases, and independently retrieved
+  learned subspaces. `training/evidence/eval_patch_decoder.py` is its matching ZS-XD evaluator.
 
-This is not yet the two-regime open-set objective described above: every training query's true label
-remains in the candidate set, there are no out-of-candidate novelty episodes that drive all evidence
-to the uniform prior, and no abstention threshold is calibrated. AURC/accuracy-at-coverage currently
-measure selective prediction on in-scope labels only. Do not report this arm as a trained open-set
-rejector until the NOVEL regime, held-out calibration split, threshold, and OSCR/OpenAUC evaluation
-are implemented.
+The patch trainer varies candidate budgets (10/25/50/100%), true and other-candidate support
+(0/1/2/4/8/all source windows), and same/cross/query-absent configuration modes. Distractors are
+random, language-near, canonical-motion-family-near, physically near, or mixed. Complete activity
+families from `data/labels/activity_families.json` are absent from every decoder-training role and
+reserved for model selection.
+
+Truth-absent episodes omit the real label from the candidate set and train a separate confidence
+head low; truth-present episodes train it high and apply CE or Dirichlet evidence loss. There is no
+`UNKNOWN` candidate. Confidence uses absolute support, retrieval density, candidate-count-normalized
+entropy, margin, evidence agreement, and sensor agreement. Classification risk/coverage is measured
+on truth-present episodes; truth-present-vs-absent AUROC measures answerability detection.
+
+This is implemented and smoke-tested, not empirically validated. It must not be described as an
+effective open-set rejector until the real schema-v2 bank is rebuilt, the full run is trained, and
+ZS-XD risk/coverage improves against the pooled identity control.
 
 ## 4. Milestones + gates (each must beat the prior / the 47.5 floor on held-out configs)
 
@@ -328,16 +337,17 @@ are implemented.
   tests incl. **identity-at-init ≡ untrained mechanism** and set-permutation invariance — which is what
   makes `--untrained` in `eval_decoder.py` an exact control. *Open: usc_had (−4.1) and ut_complex (−2.8)
   regress; diagnose before T2.4 (both are the cells where untrained retrieval was strongest).*
-- **T2.4 — Per-patch evidence + attention accumulation (MIL).** Patch-level memory + patch retrieval;
-  decoder attends over patches×evidence; soft accumulation (not majority vote). *Gate: beats T2.3, esp.
-  on fine-grained/free-living cells. Open risk: per-patch encoder features may be weaker than pooled —
-  test first.*
-- **T2.4b — Multi-sensor fusion (capability axis).** Build joint multi-sensor sessions from paired
-  datasets (SP-SW-HAR phone+watch; xrf_v2 6-placement); per-sensor retrieval → union → decoder. *Gate:
+- **T2.4 — Per-patch evidence + attention accumulation (MIL).** ✅ **IMPLEMENTED, GATE NOT RUN.**
+  Schema-v2 bank, per-query-patch/per-subspace retrieval, capped duration/resolution-balanced evidence,
+  and candidate-aware decoder. *Gate: beats T2.3, especially on fine-grained/free-living cells.*
+- **T2.4b — Multi-sensor fusion (capability axis).** ✅ **IMPLEMENTED FOR VERIFIED EVENTS, GATE NOT
+  RUN.** Explicit simultaneous event IDs combine sensor streams into one query set; unverified row
+  alignment is never used. *Gate:
   phone+watch fusion beats phone-alone and watch-alone on shared activities; graceful degradation when a
   device is dropped. A capability harnet/ConSE structurally lack (fixed-input).*
-- **T2.5 — Evidential head + abstention (M5).** Density gate + Dirichlet + candidate-set-invariant reject
-  + class-holdout novelty. *Gate: ECE/OSCR sane; macro-F1 ≥ T2.4; abstains on novelty, answers on conflict.*
+- **T2.5 — Evidential head + abstention (M5).** ✅ **IMPLEMENTED, GATE NOT RUN.** Dirichlet task loss
+  plus a separate candidate-size-aware confidence head and truth-absent episodes. *Gate: calibration/
+  risk-coverage sane; macro-F1 ≥ T2.4; abstains on novelty, answers on conflict.*
 - **T2.6 — End-to-end tokenizer refinement (Lever B).** Unfreeze the tokenizer under the transfer-aligned
   loss with a momentum/slow memory encoder (avoid drift/collapse); warm-start from T2.3–T2.5. The only
   lever that lifts purity above 0.68. *Gate: purity ↑, beats T2.5. Kill if it degrades transfer.*

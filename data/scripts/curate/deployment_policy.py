@@ -40,6 +40,15 @@ PRIMARY_TRAIN_DATASETS = (
     "xrf_v2",
 )
 
+# Optional scale sources are fully specified and buildable, but are not silently
+# mixed into the paper's frozen 12-source corpus. They must be requested
+# explicitly in build_grids and with pretrain.py --datasets so an expanded-data
+# experiment remains attributable.
+OPTIONAL_PHASE_A_DATASETS = (
+    "extrasensory",
+    "nhanes",
+)
+
 PRIMARY_EVAL_DATASETS = (
     "motionsense",
     "realworld",
@@ -179,6 +188,31 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
     StreamSpec("capture24", "watch_wrist", "watch", "dominant wrist",
                _GENERIC_ACC, {}, "present"),
 
+    # Optional Phase-A scale sources. ExtraSensory has per-example phone placement
+    # labels; the converter prunes unknown/bag/table examples before assigning one
+    # of these streams. NHANES has no activity labels and is never a Phase-B bank
+    # source.
+    StreamSpec("extrasensory", "phone_pocket", "phone", "a trouser pocket",
+               _GENERIC_ACC, {}, "present", role="phase_a_scale",
+               session_contains=("_phone_pocket_",),
+               note="Free-living personal-phone raw acceleration; the authors' subject/platform "
+                    "split controls unit conversion and real clocks control resampling to 50 Hz. "
+                    "Explicit pocket label required."),
+    StreamSpec("extrasensory", "phone_hand", "phone", "the hand",
+               _GENERIC_ACC, {}, "present", role="phase_a_scale",
+               session_contains=("_phone_hand_",),
+               note="Free-living personal-phone raw acceleration; explicit in-hand label required."),
+    StreamSpec("extrasensory", "watch_wrist", "watch", "the wrist",
+               _GENERIC_ACC, {}, "present", role="phase_a_scale",
+               session_contains=("_watch_wrist_",),
+               note="Pebble watch acceleration at a 25 Hz acquisition clock, stored at 50 Hz; "
+                    "accelerometer only."),
+    StreamSpec("nhanes", "watch_wrist", "watch", "the non-dominant wrist",
+               _GENERIC_ACC, {}, "present", role="phase_a_scale",
+               session_contains=("_watch_wrist",),
+               note="NHANES PAX80_G ActiGraph acceleration at 80 Hz; unlabeled Phase-A-only "
+                    "bounded subset with released QC intervals applied."),
+
     # Primary evaluation datasets.
     StreamSpec("motionsense", "phone_front_pocket", "phone", "front pocket",
                _total_acc("acc_", "gravity_"), _GENERIC_GYRO, "present",
@@ -248,7 +282,10 @@ def stream_specs(dataset: str, role: Optional[str] = "primary") -> Tuple[StreamS
     return specs if role is None else tuple(spec for spec in specs if spec.role == role)
 
 
-def deployment_streams(placement_strict: bool = False, role: str = "primary") -> Tuple[StreamSpec, ...]:
+def deployment_streams(
+    placement_strict: bool = False,
+    role: Optional[str] = "primary",
+) -> Tuple[StreamSpec, ...]:
     """Every device stream in the corpus, for the harmonised/deployment build.
 
     - ``placement_strict=True``  → **phone streams only** ("harmonised-strict"). Watch-placement
@@ -261,7 +298,10 @@ def deployment_streams(placement_strict: bool = False, role: str = "primary") ->
     ``watch_proxy`` / ``non_deployment`` streams are excluded — they are diagnostic/stress, not primary.
     """
     keep = {"phone"} if placement_strict else {"phone", "watch", "device"}
-    return tuple(s for s in STREAM_SPECS if s.role == role and s.device_profile in keep)
+    return tuple(
+        s for s in STREAM_SPECS
+        if (role is None or s.role == role) and s.device_profile in keep
+    )
 
 
 def get_stream_spec(dataset: str, stream_id: str) -> StreamSpec:

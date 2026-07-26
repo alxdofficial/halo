@@ -38,6 +38,7 @@ from model.evidence.multisubspace import MultiSubspaceHead
 
 ROLE_QUERY = 0
 ROLE_EVIDENCE = 1
+ROLE_CANDIDATE = 2
 
 
 @dataclass
@@ -54,6 +55,9 @@ class DecoderConfig:
     out_scale_init: float = 10.0
     n_subspaces: int = 0        # D2: multi-subspace pooling re-weighting (0 = off, byte-identical)
     subspace_dim: int = 64      # per-subspace projection dim for the multi-subspace head
+    candidate_tokens: bool = False
+    candidate_layers: int = 2
+    structural_metadata: bool = False
 
 
 def _fourier_time(t: torch.Tensor, n_freqs: int, time_max: float) -> torch.Tensor:
@@ -102,6 +106,46 @@ class _Block(nn.Module):
         return x
 
 
+class _CandidateBlock(nn.Module):
+    """Permutation-equivariant candidate self-attention followed by physical cross-attention."""
+
+    def __init__(self, cfg: DecoderConfig):
+        super().__init__()
+        d = cfg.d_model
+        self.ln_self = nn.LayerNorm(d)
+        self.self_attn = nn.MultiheadAttention(
+            d, cfg.n_heads, dropout=cfg.dropout, batch_first=True
+        )
+        self.ls_self = nn.Parameter(cfg.layerscale_init * torch.ones(d))
+        self.ln_cross = nn.LayerNorm(d)
+        self.ln_memory = nn.LayerNorm(d)
+        self.cross_attn = nn.MultiheadAttention(
+            d, cfg.n_heads, dropout=cfg.dropout, batch_first=True
+        )
+        self.ls_cross = nn.Parameter(cfg.layerscale_init * torch.ones(d))
+        self.ln_ffn = nn.LayerNorm(d)
+        self.ffn = nn.Sequential(
+            nn.Linear(d, cfg.ffn_mult * d), nn.GELU(),
+            nn.Dropout(cfg.dropout), nn.Linear(cfg.ffn_mult * d, d),
+        )
+        self.ls_ffn = nn.Parameter(cfg.layerscale_init * torch.ones(d))
+
+    def forward(self, candidate, memory, memory_key_padding_mask):
+        h = self.ln_self(candidate)
+        attended, _ = self.self_attn(h, h, h, need_weights=False)
+        candidate = candidate + self.ls_self * attended
+        attended, _ = self.cross_attn(
+            self.ln_cross(candidate),
+            self.ln_memory(memory),
+            self.ln_memory(memory),
+            key_padding_mask=memory_key_padding_mask,
+            need_weights=False,
+        )
+        candidate = candidate + self.ls_cross * attended
+        candidate = candidate + self.ls_ffn * self.ffn(self.ln_ffn(candidate))
+        return candidate
+
+
 class EvidenceDecoder(nn.Module):
     def __init__(self, cfg: DecoderConfig | None = None, **kw):
         super().__init__()
@@ -114,19 +158,40 @@ class EvidenceDecoder(nn.Module):
         self.proj_cfg = nn.Linear(cfg.text_dim, d)       # text-keyed config/placement (frozen SBERT)
         self.proj_lab = nn.Linear(cfg.text_dim, d)       # evidence known-label text (frozen SBERT)
         self.proj_time = nn.Linear(2 * cfg.n_time_freqs, d)
-        self.role_emb = nn.Embedding(2, d)               # QUERY | EVIDENCE
+        n_roles = 3 if cfg.candidate_tokens else 2
+        self.role_emb = nn.Embedding(n_roles, d)         # QUERY | EVIDENCE | optional CANDIDATE
         self.q_nolabel = nn.Parameter(torch.zeros(d))    # query stands in for "no label text"
         self.in_ln = nn.LayerNorm(d)
+
+        # Acquisition values already shaped the frozen Phase-A vector. These optional fields encode
+        # only structural relationships needed by Phase B: represented support and resolution
+        # identity. Sensor membership is encoded as a relation bias below, never as a global ID.
+        if cfg.structural_metadata:
+            self.proj_duration = nn.Linear(1, d)
+            self.resolution_emb = nn.Embedding(3, d)     # 0=unknown/pad, 1=short/single, 2=long
 
         self.blocks = nn.ModuleList(_Block(cfg) for _ in range(cfg.n_layers))
         self.final_ln = nn.LayerNorm(d)
         self.same_window_bias = nn.Parameter(torch.zeros(()))   # learned; init 0 (no bias)
+        if cfg.structural_metadata:
+            self.same_sensor_bias = nn.Parameter(torch.zeros(()))
 
         # --- output heads (zero-init last layer => identity at init) ---
         self.refiner = nn.Sequential(nn.Linear(d, d), nn.GELU(), nn.Linear(d, cfg.text_dim))
         self.pool_phi = nn.Linear(d, 1)
         self.log_out_scale = nn.Parameter(torch.tensor(math.log(cfg.out_scale_init)))
         self._zero_init_heads()
+
+        self.candidate_blocks = None
+        if cfg.candidate_tokens:
+            self.candidate_in_ln = nn.LayerNorm(d)
+            self.candidate_blocks = nn.ModuleList(
+                _CandidateBlock(cfg) for _ in range(cfg.candidate_layers)
+            )
+            self.candidate_final_ln = nn.LayerNorm(d)
+            self.candidate_refiner = nn.Linear(d, cfg.text_dim)
+            nn.init.zeros_(self.candidate_refiner.weight)
+            nn.init.zeros_(self.candidate_refiner.bias)
 
         # --- D2: multi-subspace pooling residual (opt-in; identity-at-init via gamma_ms=0) ---
         # When n_subspaces == 0 (default) neither the head nor gamma_ms exist, so the state_dict
@@ -142,7 +207,8 @@ class EvidenceDecoder(nn.Module):
         nn.init.zeros_(self.pool_phi.weight); nn.init.zeros_(self.pool_phi.bias)
 
     # ------------------------------------------------------------------ #
-    def _embed(self, z, role, label_text, config_text, time_sec):
+    def _embed(self, z, role, label_text, config_text, time_sec, duration_sec=None,
+               resolution_id=None):
         """Assemble a token embedding. z:(...,d_model); role:(...,) long; label_text/config_text:
         (...,text_dim) or None; time_sec:(...,) or None."""
         e = self.proj_z(z) + self.role_emb(role)
@@ -153,44 +219,92 @@ class EvidenceDecoder(nn.Module):
                                                  self.cfg.time_max_sec))
         if label_text is not None:
             e = e + self.proj_lab(label_text)
+        if self.cfg.structural_metadata:
+            if duration_sec is not None:
+                duration_feature = torch.tanh(
+                    duration_sec.to(dtype=e.dtype).clamp_min(1e-4).log() / 2.0
+                ).unsqueeze(-1)
+                e = e + self.proj_duration(duration_feature)
+            if resolution_id is not None:
+                resolution_index = resolution_id.to(dtype=torch.long).clamp(-1, 1) + 1
+                e = e + self.resolution_emb(resolution_index)
         return e
 
     def forward(
         self,
-        zq,                 # (B, d)         query pooled/patch vector (single query token)
+        zq,                 # (B, d) or (B, q, d) query pooled/patch vector(s)
         zev,                # (B, k, d)      evidence vectors (retrieved)
         ev_label_text,      # (B, k, text)   frozen SBERT (ensembled) label text per evidence
         w_retr,             # (B, k)         retrieval weights (normalized over valid evidence)
         cand_text,          # (B, C, text) or (C, text)  frozen SBERT target label text
         ev_mask=None,       # (B, k) bool    True = valid evidence (else padding)
+        q_mask=None,        # (B, q) bool    True = valid query patch
         q_config_text=None, ev_config_text=None,    # (B,text) / (B,k,text)  frozen SBERT config
-        q_time=None, ev_time=None,                  # (B,) / (B,k)  window-relative seconds
-        window_id=None,     # (B, 1+k) long  co-membership groups for the same-window bias
+        q_time=None, ev_time=None,                  # (B,q) / (B,k) window-relative seconds
+        q_duration=None, ev_duration=None,          # (B,q) / (B,k) represented seconds
+        q_resolution=None, ev_resolution=None,      # (B,q) / (B,k), -1/0/1
+        q_sensor_id=None, ev_sensor_id=None,        # (B,q) / (B,k) structural sensor group
+        window_id=None,     # (B, q+k) long  co-membership groups for the same-window bias
         return_aux=False,
     ):
         B, k, d = zev.shape
         dev = zev.device
-        # ---- build the token set: [query] + [k evidence] ----
-        q_tok = self._embed(zq, torch.full((B,), ROLE_QUERY, device=dev, dtype=torch.long),
-                            None, q_config_text, q_time)                          # (B, d)
+        single_query = zq.dim() == 2
+        if single_query:
+            zq = zq.unsqueeze(1)
+            if q_config_text is not None and q_config_text.dim() == 2:
+                q_config_text = q_config_text.unsqueeze(1)
+            for name in ("q_time", "q_duration", "q_resolution", "q_sensor_id"):
+                value = locals()[name]
+                if value is not None and value.dim() == 1:
+                    if name == "q_time":
+                        q_time = value.unsqueeze(1)
+                    elif name == "q_duration":
+                        q_duration = value.unsqueeze(1)
+                    elif name == "q_resolution":
+                        q_resolution = value.unsqueeze(1)
+                    else:
+                        q_sensor_id = value.unsqueeze(1)
+        elif zq.dim() != 3:
+            raise ValueError(f"zq must have shape (B,d) or (B,q,d), got {tuple(zq.shape)}")
+        if zq.shape[0] != B or zq.shape[2] != d:
+            raise ValueError(f"zq and zev batch/feature dimensions disagree: {zq.shape} vs {zev.shape}")
+        q = zq.shape[1]
+        if q_mask is None:
+            q_mask = torch.ones(B, q, dtype=torch.bool, device=dev)
+        elif q_mask.shape != (B, q):
+            raise ValueError(f"q_mask must have shape {(B, q)}, got {tuple(q_mask.shape)}")
+
+        # ---- build the token set: [q query patches] + [k evidence patches] ----
+        q_tok = self._embed(
+            zq, torch.full((B, q), ROLE_QUERY, device=dev, dtype=torch.long),
+            None, q_config_text, q_time, q_duration, q_resolution,
+        )
         q_tok = q_tok + self.q_nolabel
         ev_role = torch.full((B, k), ROLE_EVIDENCE, device=dev, dtype=torch.long)
-        ev_tok = self._embed(zev, ev_role, ev_label_text, ev_config_text, ev_time)   # (B, k, d)
-        x = torch.cat([q_tok.unsqueeze(1), ev_tok], dim=1)                       # (B, 1+k, d)
+        ev_tok = self._embed(
+            zev, ev_role, ev_label_text, ev_config_text, ev_time,
+            ev_duration, ev_resolution,
+        )
+        x = torch.cat([q_tok, ev_tok], dim=1)                                   # (B, q+k, d)
         x = self.in_ln(x)
 
         # ---- masks ----
-        T = k + 1
+        T = q + k
         if ev_mask is None:
             ev_mask = torch.ones(B, k, dtype=torch.bool, device=dev)
-        # key-padding: query (col 0) always valid; padded evidence keys ignored.
-        key_pad = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=dev), ~ev_mask], dim=1)
-        attn_bias = self._same_window_bias(window_id, T, B, key_pad, dev)
+        # key-padding: invalid query/evidence patches are ignored as keys.
+        key_pad = torch.cat([~q_mask, ~ev_mask], dim=1)
+        sensor_id = (
+            torch.cat([q_sensor_id, ev_sensor_id], dim=1)
+            if q_sensor_id is not None and ev_sensor_id is not None else None
+        )
+        attn_bias = self._structural_bias(window_id, sensor_id, T, B, key_pad, dev)
 
         for blk in self.blocks:
             x = blk(x, key_padding_mask=key_pad, attn_bias=attn_bias)
         x = self.final_ln(x)
-        ev_state = x[:, 1:, :]                                                    # (B, k, d)
+        ev_state = x[:, q:, :]                                                    # (B, k, d)
 
         # ---- (a) refine evidence label text (residual, evidence side, frozen target) ----
         delta = self.refiner(ev_state)                                           # (B, k, text) — 0 @ init
@@ -199,6 +313,19 @@ class EvidenceDecoder(nn.Module):
         # ---- vote against FROZEN target text ----
         if cand_text.dim() == 2:
             cand_text = cand_text.unsqueeze(0).expand(B, -1, -1)                 # (B, C, text)
+        candidate_delta = None
+        if self.candidate_blocks is not None:
+            cand_role = torch.full(
+                cand_text.shape[:2], ROLE_CANDIDATE, device=dev, dtype=torch.long
+            )
+            candidate_state = self.candidate_in_ln(
+                self.proj_lab(cand_text) + self.role_emb(cand_role)
+            )
+            for block in self.candidate_blocks:
+                candidate_state = block(candidate_state, x, key_pad)
+            candidate_state = self.candidate_final_ln(candidate_state)
+            candidate_delta = self.candidate_refiner(candidate_state)
+            cand_text = cand_text + candidate_delta
         cand = F.normalize(cand_text, dim=-1)
         votes = torch.relu(torch.einsum("bkt,bct->bkc", t_ref, cand))           # (B, k, C)
 
@@ -209,7 +336,10 @@ class EvidenceDecoder(nn.Module):
         # a/e/logits stay byte-identical to the untrained mechanism). psi is finite (bounded
         # cosines) so 0*psi is exactly 0 — no NaN — and padded/dead rows are masked below as before.
         if self.ms_head is not None:
-            psi = self.ms_head(zq, zev)                                          # (B, k)
+            q_weight = q_mask.to(zq.dtype)
+            pooled_zq = (zq * q_weight.unsqueeze(-1)).sum(1) \
+                / q_weight.sum(1, keepdim=True).clamp_min(1.0)
+            psi = self.ms_head(pooled_zq, zev)                                   # (B, k)
             a_logit = a_logit + self.gamma_ms * psi
         a_logit = a_logit.masked_fill(~ev_mask, float("-inf"))
         # A row with NO valid evidence would be all -inf -> softmax = NaN -> one bad row silently
@@ -221,25 +351,41 @@ class EvidenceDecoder(nn.Module):
         e = torch.einsum("bk,bkc->bc", a, votes)                                 # (B, C) evidence
         logits = self.log_out_scale.exp() * e
         if return_aux:
-            aux = {"evidence": e, "pool_weights": a, "delta": delta,
+            aux = {"evidence": e, "votes": votes, "pool_weights": a, "delta": delta,
                    "delta_norm": float(delta.detach().norm(dim=-1).mean())}
+            if candidate_delta is not None:
+                aux["candidate_delta"] = candidate_delta
+                aux["candidate_delta_norm"] = float(
+                    candidate_delta.detach().norm(dim=-1).mean()
+                )
             if self.ms_head is not None:
                 # abs value so the trainer can reg-to-identity it (L1) like Δ/pool; keeps grad.
                 aux["gamma_ms"] = self.gamma_ms.abs()
             return logits, aux
         return logits
 
-    def _same_window_bias(self, window_id, T, B, key_pad, dev):
-        """Additive (B*n_heads, T, T) bias: +γ where two tokens share a window; permutation-safe."""
+    def _structural_bias(self, window_id, sensor_id, T, B, key_pad, dev):
+        """Permutation-safe learned biases for same-window and same-sensor co-membership."""
         # Do NOT gate on the parameter's VALUE. It is initialised to exactly 0.0, so a value test
         # short-circuits on every forward, the bias never enters the autograd graph, and the
         # parameter is frozen at zero for all time (verified: .grad stays None). Gate on whether
         # the caller supplied window ids. (float(param) also forced a CUDA->CPU sync per forward
         # and emitted a requires_grad-to-scalar warning.)
-        if window_id is None:
+        if window_id is None and sensor_id is None:
             return None
-        same = (window_id.unsqueeze(1) == window_id.unsqueeze(2)).float()        # (B, T, T)
-        bias = self.same_window_bias * same                                      # (B, T, T)
+        bias = torch.zeros(B, T, T, device=dev)
+        if window_id is not None:
+            if window_id.shape != (B, T):
+                raise ValueError(f"window_id must have shape {(B, T)}, got {tuple(window_id.shape)}")
+            same = (window_id.unsqueeze(1) == window_id.unsqueeze(2)).float()
+            bias = bias + self.same_window_bias * same
+        if sensor_id is not None:
+            if not self.cfg.structural_metadata:
+                raise ValueError("sensor_id requires structural_metadata=True")
+            if sensor_id.shape != (B, T):
+                raise ValueError(f"sensor_id must have shape {(B, T)}, got {tuple(sensor_id.shape)}")
+            same = (sensor_id.unsqueeze(1) == sensor_id.unsqueeze(2)).float()
+            bias = bias + self.same_sensor_bias * same
         return bias.repeat_interleave(self.cfg.n_heads, dim=0)                   # (B*nh, T, T)
 
     # -- convenience: split params for weight-decay grouping (exclude LN/bias/γ/embeddings) --
@@ -252,7 +398,8 @@ class EvidenceDecoder(nn.Module):
             if not p.requires_grad:
                 continue
             if p.ndim <= 1 or "ls1" in name or "ls2" in name or "emb" in name \
-                    or "same_window_bias" in name or name.endswith("q_nolabel"):
+                    or "same_window_bias" in name or "same_sensor_bias" in name \
+                    or name.endswith("q_nolabel"):
                 no_decay.append(p)
             else:
                 decay.append(p)

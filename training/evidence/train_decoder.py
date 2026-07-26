@@ -1,7 +1,7 @@
 """T2.2 + T2.3 — episodic class-holdout trainer for the evidence decoder.
 
-The M4a diagnostic proved the *loss* was the bug: closed-vocab CE over the fixed 59-way vocab
-overfits the seen-label geometry and the untrained mechanism wins (40.9 vs 47.5). This trainer
+The historical M4a diagnostic showed that closed-vocab CE over the then-59-way vocabulary
+overfit the seen-label geometry and lost to the untrained mechanism. This trainer
 replaces that with a **transfer-aligned episodic loss** and trains the §2.2 decoder as a residual
 on the untrained mechanism (docs/design/EVIDENCE_ENGINE_TIER2.md §3):
 
@@ -43,7 +43,7 @@ import torch.nn.functional as F
 from eval.scoring import get_sbert_encoder
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.edl import DensityGate, acc_at_coverage, aurc, edl_loss
-from training.evidence.bank_guard import assert_bank_current
+from training.evidence.bank_guard import assert_bank_current, bank_fingerprint
 from training.evidence.labeltext import build_label_variants, ensemble_text
 
 _DIR = Path(__file__).resolve().parent / "outputs"
@@ -543,6 +543,7 @@ def main() -> None:
                "vocab": vocab, "best_val_transfer_ba": best_val, "init_val_transfer_ba": init_val,
                "best_step": best_step, "best_calibration": best_calibration,
                "loss": args.loss, "bank": str(args.bank), "backbone": bank["backbone"],
+               "bank_fp": bank.get("bank_fp") or bank_fingerprint(bank),
                "episode_labels": [lo, hi]}
     if gate is not None:
         payload["gate"] = {k_: v.cpu() for k_, v in gate.state_dict().items()}

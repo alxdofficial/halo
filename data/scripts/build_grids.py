@@ -28,8 +28,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import mmap
+import os
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -84,6 +86,7 @@ def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
     datas: List[np.ndarray] = []
     labels: List = []
     subjects: List = []
+    event_ids: List[str] = []
     channels: Optional[Tuple[str, ...]] = None
     mask = None
     rate_out = float(resample_to) if resample_to is not None else None
@@ -110,6 +113,13 @@ def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
         else:
             labels.extend(g.labels)                            # native labels for the non-harmonised view
         subjects.extend([subject] * len(g.data))
+        # Converters may map several device-specific session ids onto one verified physical event
+        # through events.json. The local-window ordinal then identifies simultaneous windows within
+        # that event. Fall back to the stream-local session id for ordinary single-stream datasets.
+        event_id = frame.attrs.get("halo_event_id") or frame.attrs.get("halo_session_id")
+        if event_id is None:
+            event_id = f"{spec.stream_id}:anonymous:{len(datas) - 1}"
+        event_ids.extend(f"{dataset}:{event_id}:{i}" for i in range(len(g.data)))
 
     if not datas:  # nothing assembled — return a well-formed empty grid at the right width
         declared = tuple(c for c in STANDARD_CHANNEL_ORDER
@@ -119,7 +129,7 @@ def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
         return Grid(np.zeros((0, 0, len(out_channels)), np.float32), empty_mask, out_channels, [],
                     alignment, dataset, float(resample_to) if resample_to is not None else 0.0), []
     return Grid(np.concatenate(datas, axis=0), mask, channels, labels, alignment, dataset,
-                float(rate_out)), subjects
+                float(rate_out), event_ids), subjects
 
 
 # --------------------------------------------------------------------------------------------------
@@ -142,6 +152,12 @@ def iter_sessions(dataset: str, spec: StreamSpec,
     # Converters write per-session activity to labels.json (session_id -> [activity]); the parquet has
     # only sensor channels, so inject `activity` here for the assembler to majority-vote.
     labels_map = json.loads((ds_dir / "labels.json").read_text()) if (ds_dir / "labels.json").exists() else {}
+    # Optional converter-authored map: device-specific session id -> shared physical event id.
+    # Only datasets with verified simultaneous placements provide it.
+    events_map = (
+        json.loads((ds_dir / "events.json").read_text())
+        if (ds_dir / "events.json").exists() else {}
+    )
     # One session per subdir: sessions/<session_id>/data.parquet.
     for pq in sorted((ds_dir / "sessions").glob("*/data.parquet")):
         sid = pq.parent.name
@@ -153,6 +169,10 @@ def iter_sessions(dataset: str, spec: StreamSpec,
         if "activity" not in frame.columns and sid in labels_map:
             act = labels_map[sid]
             frame = frame.assign(activity=act[0] if isinstance(act, list) else act)
+        # Set this AFTER DataFrame transformations: pandas does not make attrs propagation part of
+        # the assign/copy contract. Losing it would silently disable verified placement positives.
+        frame.attrs["halo_session_id"] = sid
+        frame.attrs["halo_event_id"] = events_map.get(sid, sid)
         # Subject for subject-disjoint splits: a `subject` column if present, else the session-id
         # prefix (converters encode the subject in the id, e.g. "sub01_..." / "subject3_...").
         subject = frame["subject"].iloc[0] if "subject" in frame.columns else sid.split("_")[0]
@@ -172,6 +192,17 @@ def _max_hours_per_class(dataset: str) -> Optional[float]:
         return None
     v = json.loads(meta.read_text()).get("max_hours_per_class")
     return float(v) if v else None
+
+
+def _streaming_grid_enabled(dataset: str) -> bool:
+    """Whether grids for this source must be written incrementally.
+
+    Large free-living sources can fit on disk while exceeding RAM during the
+    final concatenate. This flag is authored in metadata.json and affects only
+    the write strategy, never corpus membership or sample selection.
+    """
+    meta = REPO / "data" / "datasets" / dataset / "metadata.json"
+    return bool(meta.exists() and json.loads(meta.read_text()).get("streaming_grid", False))
 
 
 def _greedy_class_cap(per_class: dict, max_hours: float) -> set:
@@ -214,6 +245,211 @@ def _capped_session_ids(dataset: str, spec: StreamSpec, max_hours: float) -> set
     return _greedy_class_cap(per_class, max_hours)
 
 
+def _forced_window_for_factory(
+    sessions_factory: Callable[[], Iterable[Session]],
+    pre_windowed: bool,
+    resample_to: Optional[float],
+) -> Optional[int]:
+    if not pre_windowed:
+        return None
+    first = next(iter(sessions_factory()), None)
+    if first is None:
+        return None
+    frame, native_rate, _ = first
+    if resample_to is None:
+        return len(frame)
+    return len(
+        resample_signal(
+            np.zeros((len(frame), 1), np.float32),
+            native_rate,
+            resample_to,
+        )
+    )
+
+
+def _session_grid(
+    dataset: str,
+    spec: StreamSpec,
+    frame: pd.DataFrame,
+    native_rate: float,
+    *,
+    resample_to: Optional[float],
+    view: str,
+    forced_window: Optional[int],
+    window_seconds: float = WINDOW_SECONDS,
+) -> Grid:
+    out_rate = resample_to if resample_to is not None else native_rate
+    window = (
+        forced_window
+        if forced_window is not None
+        else max(1, round(window_seconds * out_rate))
+    )
+    return assemble(
+        frame,
+        dataset,
+        spec,
+        alignment=view,
+        window=window,
+        rate_hz=native_rate,
+        resample_to=resample_to,
+    )
+
+
+def _write_streaming_grid(
+    out_root: Path,
+    dataset: str,
+    spec: StreamSpec,
+    sessions_factory: Callable[[], Iterable[Session]],
+    *,
+    alignment: str,
+    resample_to: Optional[float],
+    canonical_labels: bool,
+    view: str,
+    pre_windowed: bool = False,
+) -> None:
+    """Two-pass, constant-signal-memory grid writer.
+
+    Pass one computes the exact output shape one session at a time. Pass two
+    writes directly into an ``open_memmap`` NPY file and retains only compact
+    labels/subjects/event metadata in memory. The resulting on-disk schema is
+    byte-for-byte compatible with ``GridRef.load_data()``.
+    """
+    forced_window = _forced_window_for_factory(
+        sessions_factory, pre_windowed, resample_to
+    )
+    total = 0
+    sample_shape: tuple[int, int] | None = None
+    mask: np.ndarray | None = None
+    channels: tuple[str, ...] | None = None
+    rate_out = float(resample_to) if resample_to is not None else 0.0
+
+    for frame, native_rate, _ in sessions_factory():
+        grid = _session_grid(
+            dataset,
+            spec,
+            frame,
+            native_rate,
+            resample_to=resample_to,
+            view=view,
+            forced_window=forced_window,
+        )
+        if not len(grid.data):
+            continue
+        shape = (int(grid.data.shape[1]), int(grid.data.shape[2]))
+        if sample_shape is None:
+            sample_shape = shape
+            mask = grid.mask
+            channels = grid.channels
+            rate_out = float(grid.rate_hz)
+        elif shape != sample_shape or grid.channels != channels:
+            raise ValueError(
+                f"{dataset}/{spec.stream_id}/{alignment}: inconsistent session grid "
+                f"shape/channels: first={sample_shape, channels}, got={shape, grid.channels}"
+            )
+        total += len(grid.data)
+
+    if sample_shape is None or mask is None or channels is None:
+        # Preserve the ordinary empty-grid behavior without adding a second
+        # parallel definition of channel padding.
+        empty, subjects = stream_grid(
+            dataset,
+            spec,
+            [],
+            alignment=alignment,
+            resample_to=resample_to,
+            canonical_labels=canonical_labels,
+            view=view,
+            pre_windowed=pre_windowed,
+        )
+        _save(out_root, spec, empty, subjects)
+        return
+
+    destination = out_root / dataset / "grids" / alignment / spec.stream_id
+    destination.mkdir(parents=True, exist_ok=True)
+    temp_data = destination / "data.npy.part"
+    if temp_data.exists():
+        temp_data.unlink()
+    mapped = np.lib.format.open_memmap(
+        temp_data,
+        mode="w+",
+        dtype=np.float32,
+        shape=(total, *sample_shape),
+    )
+    labels: list[str] = []
+    subjects: list[str] = []
+    event_ids: list[str] = []
+    cursor = 0
+    release_cursor = 0
+    committed = False
+    try:
+        for frame, native_rate, subject in sessions_factory():
+            grid = _session_grid(
+                dataset,
+                spec,
+                frame,
+                native_rate,
+                resample_to=resample_to,
+                view=view,
+                forced_window=forced_window,
+            )
+            count = len(grid.data)
+            if not count:
+                continue
+            mapped[cursor : cursor + count] = grid.data
+            if canonical_labels:
+                labels.extend(canonicalize(label) for label in grid.labels)
+            else:
+                labels.extend(map(str, grid.labels))
+            subjects.extend([str(subject)] * count)
+            event = frame.attrs.get("halo_event_id") or frame.attrs.get("halo_session_id")
+            if event is None:
+                event = f"{spec.stream_id}:anonymous:{cursor}"
+            event_ids.extend(f"{dataset}:{event}:{index}" for index in range(count))
+            cursor += count
+            # np.memmap is disk-backed, but Linux charges dirty mapped pages to
+            # process RSS until writeback. Flush and release them in ~1 GB
+            # signal chunks so a 20+ GB grid remains practical on smaller pods.
+            if cursor - release_cursor >= 65_536:
+                mapped.flush()
+                try:
+                    mapped._mmap.madvise(mmap.MADV_DONTNEED)
+                except (AttributeError, OSError):
+                    pass
+                release_cursor = cursor
+        if cursor != total:
+            raise RuntimeError(
+                f"{dataset}/{spec.stream_id}/{alignment}: pass count changed "
+                f"from {total} to {cursor}"
+            )
+        mapped.flush()
+        os.replace(temp_data, destination / "data.npy")
+        committed = True
+    finally:
+        del mapped
+        if not committed:
+            temp_data.unlink(missing_ok=True)
+
+    np.save(destination / "mask.npy", mask)
+    (destination / "meta.json").write_text(
+        json.dumps(
+            {
+                "dataset": dataset,
+                "stream_id": spec.stream_id,
+                "alignment": alignment,
+                "rate_hz": rate_out,
+                "channels": list(channels),
+                "labels": labels,
+                "subjects": subjects,
+                "event_ids": event_ids,
+            }
+        )
+    )
+    print(
+        f"  {dataset}/{spec.stream_id}/{alignment}: "
+        f"{(total, *sample_shape)} [streaming]"
+    )
+
+
 def build(out_root: Optional[Path] = None, datasets: Optional[Sequence[str]] = None,
           alignments: Optional[Sequence[str]] = None) -> None:
     """Assemble + save the grid regimes for EVERY device stream (phone + watch + body).
@@ -226,7 +462,14 @@ def build(out_root: Optional[Path] = None, datasets: Optional[Sequence[str]] = N
     out_root = out_root or (REPO / "data" / "datasets")
     want = set(datasets) if datasets else None
     regimes = [a for a in _ALIGNMENTS if alignments is None or a[0] in set(alignments)]
-    for spec in deployment_streams(placement_strict=False):
+    # Optional scale streams are considered only when explicitly named. A plain
+    # all-primary build must not make the frozen paper corpus depend on whether a
+    # researcher happened to download a multi-hundred-GB optional source.
+    specs = deployment_streams(
+        placement_strict=False,
+        role=None if want else "primary",
+    )
+    for spec in specs:
         if want and spec.dataset not in want:
             continue
         pw = _pre_windowed(spec.dataset)
@@ -234,12 +477,35 @@ def build(out_root: Optional[Path] = None, datasets: Optional[Sequence[str]] = N
         keep_ids = _capped_session_ids(spec.dataset, spec, cap) if cap else None
         if keep_ids is not None:
             print(f"  {spec.dataset}/{spec.stream_id}: class-balanced cap {cap}h/class → {len(keep_ids)} sessions")
-        sessions = list(iter_sessions(spec.dataset, spec, keep_ids=keep_ids))
+        sessions_factory = lambda s=spec, ids=keep_ids: iter_sessions(
+            s.dataset, s, keep_ids=ids
+        )
         for name, resample_to, canonical, view in regimes:
-            grid, subjects = stream_grid(spec.dataset, spec, sessions, alignment=name,
-                                         resample_to=resample_to, canonical_labels=canonical,
-                                         view=view, pre_windowed=pw)
-            _save(out_root, spec, grid, subjects)
+            if _streaming_grid_enabled(spec.dataset):
+                _write_streaming_grid(
+                    out_root,
+                    spec.dataset,
+                    spec,
+                    sessions_factory,
+                    alignment=name,
+                    resample_to=resample_to,
+                    canonical_labels=canonical,
+                    view=view,
+                    pre_windowed=pw,
+                )
+            else:
+                sessions = list(sessions_factory())
+                grid, subjects = stream_grid(
+                    spec.dataset,
+                    spec,
+                    sessions,
+                    alignment=name,
+                    resample_to=resample_to,
+                    canonical_labels=canonical,
+                    view=view,
+                    pre_windowed=pw,
+                )
+                _save(out_root, spec, grid, subjects)
 
 
 def _save(out_root: Path, spec: StreamSpec, grid: Grid, subjects: List) -> None:
@@ -251,6 +517,7 @@ def _save(out_root: Path, spec: StreamSpec, grid: Grid, subjects: List) -> None:
         "dataset": grid.dataset, "stream_id": spec.stream_id, "alignment": grid.alignment,
         "rate_hz": grid.rate_hz, "channels": list(grid.channels),
         "labels": list(map(str, grid.labels)), "subjects": list(map(str, subjects)),
+        "event_ids": list(map(str, grid.event_ids or [])),
     }))
     print(f"  {spec.dataset}/{spec.stream_id}/{grid.alignment}: {grid.data.shape}")
 

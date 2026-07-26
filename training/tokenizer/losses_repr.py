@@ -6,8 +6,9 @@ Exactly three objectives, deliberately not a menu:
       dropping the gyro triad = the real deployment shift) AND temporal blocks
       (random-block for representation; causal/future = the world-model variant whose
       prediction error later feeds abstention). Prediction in latent space.
-  A2  window-level instance contrastive. DEFAULT is self-supervised SimCLR (NT-Xent over
-      two independent augmentations of the same window — `nt_xent`, no labels). The
+  A2  window-level augmentation agreement. DEFAULT is self-supervised VICReg over two
+      independent augmentations of the same window (no negatives and no labels). SimCLR/NT-Xent
+      remains a historical control. The
       original label-SupCon (`supcon_config_conditional`: same-activity windows across
       DIFFERENT configs are positives, config as input not nuisance) is kept selectable
       for the do-no-harm ablation (a2_mode='supcon'). No CLIP sensor<->text term (label
@@ -335,6 +336,96 @@ def nt_xent(z_a: torch.Tensor, z_b: torch.Tensor,
     return F.cross_entropy(sim, targets)
 
 
+@dataclass
+class VICRegOutput:
+    """VICReg total plus its independently auditable components."""
+
+    total: torch.Tensor
+    invariance: torch.Tensor
+    variance: torch.Tensor
+    covariance: torch.Tensor
+    min_std: torch.Tensor
+
+
+def _off_diagonal(x: torch.Tensor) -> torch.Tensor:
+    n, m = x.shape
+    if n != m:
+        raise ValueError("covariance matrix must be square")
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+
+def vicreg(
+    z_a: torch.Tensor,
+    z_b: torch.Tensor,
+    *,
+    invariance_weight: float = 25.0,
+    variance_weight: float = 25.0,
+    covariance_weight: float = 1.0,
+    target_std: float = 1.0,
+    eps: float = 1e-4,
+) -> VICRegOutput:
+    """Variance-invariance-covariance regularization over aligned positive pairs.
+
+    Unlike NT-Xent this loss has no negative-pair concept: row ``i`` in each view is the positive,
+    while other rows only estimate per-feature variance/covariance. Inputs remain unnormalized because
+    their per-dimension scale is part of the collapse-prevention objective. Computation is promoted to
+    fp32 so AMP cannot underflow covariance statistics.
+    """
+    if z_a.shape != z_b.shape or z_a.ndim != 2:
+        raise ValueError(
+            f"VICReg expects matching (B,D) tensors, got {tuple(z_a.shape)} and {tuple(z_b.shape)}"
+        )
+    if z_a.shape[0] < 2:
+        raise ValueError("VICReg needs at least two pairs to estimate variance/covariance")
+    a, b = z_a.float(), z_b.float()
+    inv = F.mse_loss(a, b)
+
+    std_a = torch.sqrt(a.var(dim=0, unbiased=False) + eps)
+    std_b = torch.sqrt(b.var(dim=0, unbiased=False) + eps)
+    var = 0.5 * (
+        F.relu(float(target_std) - std_a).mean()
+        + F.relu(float(target_std) - std_b).mean()
+    )
+
+    a = a - a.mean(dim=0)
+    b = b - b.mean(dim=0)
+    denom = float(max(z_a.shape[0] - 1, 1))
+    cov_a = (a.T @ a) / denom
+    cov_b = (b.T @ b) / denom
+    d = max(z_a.shape[1], 1)
+    cov = (_off_diagonal(cov_a).pow(2).sum() + _off_diagonal(cov_b).pow(2).sum()) / d
+    total = float(invariance_weight) * inv + float(variance_weight) * var \
+        + float(covariance_weight) * cov
+    return VICRegOutput(
+        total=total,
+        invariance=inv,
+        variance=var,
+        covariance=cov,
+        min_std=torch.minimum(std_a.min(), std_b.min()),
+    )
+
+
+def masked_ema_latent_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Cosine prediction of stop-gradient EMA latents at valid masked token positions."""
+    if prediction.shape != target.shape:
+        raise ValueError(
+            f"EMA prediction/target shapes differ: {tuple(prediction.shape)} vs {tuple(target.shape)}"
+        )
+    if mask.shape != prediction.shape[:-1]:
+        raise ValueError(
+            f"EMA mask must have shape {tuple(prediction.shape[:-1])}, got {tuple(mask.shape)}"
+        )
+    if not bool(mask.any()):
+        return prediction.new_zeros(())
+    pred = F.normalize(prediction[mask].float(), dim=-1)
+    tgt = F.normalize(target.detach()[mask].float(), dim=-1)
+    return (1.0 - (pred * tgt).sum(dim=-1)).mean()
+
+
 # ================================================================================================
 # A3 — physical-primitive grounding (aug-aware targets, validity-masked)
 # ================================================================================================
@@ -401,6 +492,7 @@ class EliteLossWeights:
 class EliteLossOutput:
     total: torch.Tensor
     parts: dict[str, float] = field(default_factory=dict)
+    terms: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 def elite3_loss(
@@ -435,4 +527,7 @@ def elite3_loss(
         total=total,
         parts={"a1_masked": float(l1.detach()), a2_key: float(l2.detach()),
                "a3_grounding": float(l3.detach())},
+        terms={"a1_masked": weights.a1_masked * l1,
+               a2_key: weights.a2_supcon * l2,
+               "a3_grounding": weights.a3_grounding * l3},
     )

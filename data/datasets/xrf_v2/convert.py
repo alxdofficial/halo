@@ -79,7 +79,7 @@ def _upsample_25_to_50(arr: np.ndarray) -> np.ndarray:
                     axis=1).astype(np.float32)
 
 
-def _emit(sessions_dir, sid, acc, gyro, subject, labels, canon, dist):
+def _emit(sessions_dir, sid, acc, gyro, subject, labels, events, event_id, canon, dist):
     n = acc.shape[0]
     out = pd.DataFrame({
         "timestamp_sec": np.arange(n, dtype=np.float64) / IMU_RATE,
@@ -91,6 +91,7 @@ def _emit(sessions_dir, sid, acc, gyro, subject, labels, canon, dist):
     seg.mkdir()
     out.to_parquet(seg / "data.parquet", index=False)
     labels[sid] = [canon]
+    events[sid] = event_id
     dist[canon] += 1
 
 
@@ -102,6 +103,7 @@ def main() -> None:
 
     tal = json.loads((RAW / "activitynet_tal_853.json").read_text())["database"]
     labels: dict[str, list[str]] = {}
+    events: dict[str, str] = {}
     dist: Counter = Counter()
     dropped_short = 0
 
@@ -118,10 +120,12 @@ def main() -> None:
             subject = f"v{meta['volunteer_id']}"
             imu = np.asarray(imu_samples[name]["imu"])                      # (T, 5, 6)
             ap = np.asarray(ap_samples[name][list(ap_samples[name].keys())[0]]) if name in ap_samples else None
-            for ann in meta["annotations"]:
+            for ann_i, ann in enumerate(meta["annotations"]):
                 canon = CN2CANON.get(ann["label"])
                 if canon is None:
                     continue
+                # Stable across all six devices and independent of their 50/25 Hz sample clocks.
+                event_id = f"{subject}_{name}_annotation{ann_i}"
                 s, e = float(ann["segment"][0]), float(ann["segment"][1])
                 # body IMU (50 Hz, gravity present)
                 si, ei = int(round(s * IMU_RATE)), int(round(e * IMU_RATE))
@@ -130,7 +134,7 @@ def main() -> None:
                         acc = imu[si:ei, dev, :3].astype(np.float32)
                         gyro = imu[si:ei, dev, 3:].astype(np.float32) * DEG2RAD
                         _emit(sessions_dir, f"{subject}_{name}_{tok}_{canon}_a{si}",
-                              acc, gyro, subject, labels, canon, dist)
+                              acc, gyro, subject, labels, events, event_id, canon, dist)
                 else:
                     dropped_short += 1
                 # AirPods ear (25 Hz native -> upsample to 50 Hz; gravity removed)
@@ -140,9 +144,10 @@ def main() -> None:
                         acc = _upsample_25_to_50(ap[sa:ea, :3].astype(np.float32))
                         gyro = _upsample_25_to_50(ap[sa:ea, 3:6].astype(np.float32))
                         _emit(sessions_dir, f"{subject}_{name}_airpods_ear_{canon}_a{sa}",
-                              acc, gyro, subject, labels, canon, dist)
+                              acc, gyro, subject, labels, events, event_id, canon, dist)
 
     (HERE / "labels.json").write_text(json.dumps(labels, indent=2))
+    (HERE / "events.json").write_text(json.dumps(events, indent=2))
     (HERE / "metadata.json").write_text(json.dumps(
         {"dataset": "xrf_v2", "sampling_rate_hz": IMU_RATE, "pre_windowed": False}, indent=2))
     (HERE / "manifest.json").write_text(json.dumps(create_manifest(), indent=2))

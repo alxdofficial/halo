@@ -4,7 +4,7 @@ LiMU-BERT is a self-supervised IMU method (masked reconstruction, ~62K params) â
 it ships NO released weights, so its backbone is pretrained ON OUR CORPUS by
 ``baselines/limubert/train.py`` (see that file for the full-run command). This
 adapter loads that self-pretrained backbone and, exactly like the harnet adapter,
-fits a softmax head over OUR 59-way global training vocabulary for the zero-shot
+fits a softmax head over our current global training vocabulary for the zero-shot
 ConSE bridge.
 
 Ported from the working legacy adapter + ``evaluate_limubert.py``. Carried over:

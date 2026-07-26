@@ -1,4 +1,4 @@
-"""ZS-XD gate for the trained evidence decoder (T2.3) — score it against the 47.5 floor.
+"""ZS-XD gate for the trained evidence decoder (T2.3).
 
 Harness-identical to the T2.0 adapter, but each eval window's top-k retrieved evidence is run
 through the trained decoder before voting (docs/design/EVIDENCE_ENGINE_TIER2.md milestone T2.3):
@@ -39,8 +39,8 @@ from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.edl import DensityGate, acc_at_coverage, aurc
 from training.evidence.bank_guard import (
-    assert_bank_current, assert_bank_matches_backbone, assert_embedding_path_current,
-    vocab_fingerprint)
+    assert_artifact_matches_bank, assert_bank_current, assert_bank_matches_backbone,
+    assert_embedding_path_current, vocab_fingerprint)
 from training.evidence.labeltext import ensemble_text
 from training.tokenizer.eval_transfer import build_encoder, encode_dataset
 from training.tokenizer.pretrain_data import _stream_gravity_state, stream_channel_descriptions
@@ -122,6 +122,9 @@ def main() -> None:
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
     assert_bank_current(bank, context="eval_decoder")
     blob = torch.load(str(args.decoder), map_location="cpu", weights_only=True)
+    assert_artifact_matches_bank(
+        blob, bank, context="eval_decoder", artifact_name="evidence decoder"
+    )
     fp = hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()
     if bank["backbone"].get("fingerprint") and fp != bank["backbone"]["fingerprint"]:
         raise SystemExit("[eval_dec] checkpoint != bank backbone")

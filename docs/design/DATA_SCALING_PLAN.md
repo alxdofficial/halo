@@ -1,229 +1,235 @@
-# Data scaling plan (2026-07-20)
+# Phase-A data scaling plan (authoritative, 2026-07-26)
 
-Written because the measured evidence says HALO is **data-limited, not parameter-limited**: a 7.17 M
-encoder, ~50 epochs, retrieval purity plateaued at 0.68 with fine-grained classes at ~0 F1.
+This replaces the historical acquisition survey. It records what is actually accessible, implemented,
+materialised, and allowed into each experiment.
 
-## 0. The real baseline (measured, replaces earlier estimates)
+## Experimental rule
 
-| quantity | value |
-|---|---|
-| train windows | 305,049 (+38,186 val), 93 labels, 20 streams |
-| materialised native-grid hours | **547.3 h** |
-| hours **reachable in training** — `MAX_PER_STREAM` is DEAD CODE (default `None`), so all materialised hours enter | **547.3 h** |
-| harnet / UK-Biobank pretraining | ~1.7 × 10⁷ h |
-| ratio | **~31,000×** |
+Keep two claims separate:
 
-> **B1 correction:** `MAX_PER_STREAM=20_000` is referenced nowhere and never applied (default `None`),
-> so the earlier "290 h reachable" was stale — all 547.3 materialised hours reach the loader. The real
-> throttles are (1) the build-time capture24 grid cap (only ~9.4% of its 2,562 annotated hours are
-> gridded) and (2) the source-balanced / temperature sampler, under which capture24 is 41% of windows
-> but a much smaller share of the gradient. See the 2026-07-24 data audit.
+1. **Technique comparison:** the frozen 12-source corpus is the default for HALO and corpus-matched
+   baselines. ExtraSensory and NHANES are absent. This is the arm used to argue that the method, rather
+   than extra data, improves results.
+2. **Data-scaling ablation:** explicitly add ExtraSensory and a versioned, bounded NHANES subset. This
+   tests whether more free-living variation raises HALO's ceiling. It must be reported as an expanded
+   data result, never substituted for the matched technique comparison.
 
-> Corrects `EVIDENCE_ENGINE_TIER2.md` §0.1, which estimated "≈10³ h assuming ~10 s windows". The
-> measured figure is **290 h reachable / 547 h materialised**. The ~4-orders-of-magnitude framing stands.
+Optional datasets require both `build_grids --dataset ...` and an explicit `pretrain --datasets ...`
+roster. Missing requested grids fail fast. The exact roster and subset manifest are persisted.
 
-## 1. Which objectives can consume UNLABELED data (verified in code)
+**The scaling arm also shifts composition, so read a null result carefully.** Both optional sources
+are accelerometer-only wrist free-living, so adding them dilutes capture24 but also cuts the
+multi-placement, gyro-bearing share. "More free-living data did not help" and "the batch got less
+heterogeneous" are not distinguishable from the headline number alone; report the per-source val
+breakdown alongside it.
 
-- **A1 masked-latent — self-supervised.** Targets are the frozen tokenizer's own output. **No labels.**
-- **A3 primitive grounding — self-supervised.** Targets computed analytically in the collate. **No labels.**
-- **A2 config-conditional SupCon — labels ARE the objective.** `losses_repr.py:289`:
-  `positives = (labels.unsqueeze(0) == labels.unsqueeze(1))`.
+Draw shares must be measured from `TemperatureSampler`, not computed as `n^α / Σn^α`. The α=0.5
+weights are only half the story: `placement_pair_fraction=0.1` reserves ~10% of every batch for
+*verified simultaneous* events, which exist **only** in nfi_fared and xrf_v2, so those two are
+oversampled on top of their temperature weight. Measured over 10 batches of 512 on the primary
+corpus:
 
-**The blocker is the sampler, not the loss.** `BalancedBatchSampler` is built entirely on `label_id`
-(`pretrain_data.py:143,177-193`): it groups by label and excludes labels with <8 windows, so an
-unlabeled window **cannot enter a batch at all**. The draw is also *source-balanced*, so a 100× larger
-single dataset does not get proportionally more gradient — it only reduces repetition in its existing
-slots. (Note this for step 1: naively raising a cap will not shift the gradient mix.)
+| dataset | pair_fraction=0 | **actual (0.1)** |
+|---|---:|---:|
+| capture24 | 47.4% | **43.3%** |
+| nfi_fared | 6.5% | **13.4%** ← 2× |
+| wisdm | 10.5% | 9.6% |
+| xrf_v2 | 8.1% | **9.2%** |
+| harmes | 5.8% | 4.8% |
+| uci_har | 4.1% | 3.1% |
+| others | — | ≤4% each |
 
-⇒ Unlabeled data helps (2 of 3 objectives, including the representation driver), but **requires an
-unlabeled branch**: a second sampler ignoring `label_id`, a `labels is None` guard, and a mix ratio.
-**~1–2 days.** A middle path worth trying: run A2 in **SimCLR mode** on unlabeled data (two augmented
-views of one window as positives) — arguably *more* on-thesis, since two rate/rotation configs of the
-same motion is exactly the config-conditional framing.
+nfi_fared has 12,263 eligible paired events against xrf_v2's 5,124, so the quota lands mostly on
+nfi_fared. An earlier revision of this table quoted the analytic `n^α` shares (capture24 33.5%,
+extrasensory 22.0%) and was wrong on two counts: it ignored the pair quota and mixed the expanded
+roster into a primary-corpus claim.
 
-## 2. ⚡ The cheapest win is already on disk: we use ~1% of Capture-24
+## Measured local corpus
 
-**Verified:** `data/datasets/capture24/sessions/` holds **13,120 converted sessions, 6.4 GB, 151
-subjects** — the complete corpus (full Capture-24 is 3,883 h total / **2,562 h annotated**, CC BY 4.0,
-distributed as one 6.4 GB zip; our size matches, so we hold 100% of it).
+| Corpus | Streams | Materialised windows | Materialised hours | Train / val at the default data seed 20260718 | Semantic labels |
+|---|---:|---:|---:|---:|---:|
+| Primary 12 sources | 20 | 1,729,885 | 2,858.34 | 1,542,518 / 186,269 (95 implausible + 1,003 duplicate dropped) | 93 |
+| Expanded (+ExtraSensory + NHANES pilot) | 24 | 2,504,001 | 4,148.53 | 2,212,911 / 256,247 (95 implausible + 34,748 duplicate dropped) | 93 + reserved `__unlabeled__` |
 
-Two caps throttle it:
-1. `capture24/metadata.json`: `"max_hours_per_class": 25` → 10 classes × 25 h = **250 h materialised**.
-2. `pretrain_data.py:53`: `MAX_PER_STREAM = 20_000` → **~33 h actually reaches training**, out of 2,562 h.
+The seed is `pretrain.py`'s `data_seed` default; an earlier revision of this table quoted 20260726,
+which no default command reproduces. Materialised counts are what `build_grids` wrote; the train/val
+counts are what `CorpusIndex` admits after the quality screens below.
 
-The cap exists for a real but narrow reason: `build_grids.py:121` concatenates all sessions in RAM, so a
-full build OOMs. The fix is a **chunked/appending grid writer**, not less data — grids are already read
-`mmap_mode="r"` (`grid_io.py:47`), so training-time memory is not the constraint.
+### Quality screens applied at index time
 
-This is **labelled, free-living, wrist, 100 Hz, gravity-present, Axivity AX3 — the same device and wear
-protocol as UK Biobank**, and it feeds A1, A2 *and* A3. Unlocking it is a ~8–10× corpus increase for
-**zero acquisition cost and zero licence risk**.
+Both screens cache window indices to `data/quality/` and are applied by `CorpusIndex` **and** by
+`build_memory` (which reads grids directly, so it must exclude the same windows the encoder never
+trained on).
 
-## 3. UK Biobank: not on the critical path
+- `scan_implausible` — accelerometer beyond ±16 g or gyroscope beyond ±2000 dps, i.e. outside any
+  consumer full-scale range. 95 windows corpus-wide (kuhar 91, wisdm 4). The accelerometer half was
+  added after an audit found accel-only streams were skipped entirely; it currently catches nothing
+  (peak observed |accel| is 8.0 g on wisdm) but the streams are no longer unscreened.
+- `scan_duplicates` — byte-identical repeated windows, i.e. a device re-emitting a stale buffer
+  rather than sampling. 34,814 windows corpus-wide: **extrasensory/watch_wrist 18,421 (3.3%)**,
+  nhanes 15,324 (13.3%), unimib_shar 940 (8.0%), kuhar 75, motionsense 34, xrf_v2/airpods_ear 20.
+  Where a duplicate group carries one label, one member is kept; where members disagree, the whole
+  group is dropped because the label is unknowable (97 such groups on ExtraSensory's wrist, 5 on
+  xrf_v2's ear stream).
 
-**Applications are paused.** Verbatim from the UKB access page: *"Applications are currently paused
-whilst necessary changes are made to the UK Biobank Research Analysis Platform… We intend to accept new
-applications in late 2026."* The RAP was shut in April 2026 after participant data was found offered for
-sale; download exemptions are frozen (*"not accepting any requests for exemptions at this time"*).
+  Inspecting the groups turned up three pre-existing source properties worth recording, all
+  independent of the new datasets. unimib_shar's 443 groups are same-subject, same-label repeated
+  trial exports of real fall motion. motionsense's 34 are near-static sitting. **kuhar's 75 groups
+  are same-label but 20 of them span *different subjects*** — byte-identical vigorous motion
+  attributed to two people, which would otherwise put the same window on both sides of a
+  subject-disjoint split. Dropping the repeat closes that leak. xrf_v2's ear stream contributes 5
+  all-zero groups: the gravity-removed earbud reported nothing and the label varied, so all 20
+  windows go.
 
-Even reopened, the economics are hostile: cost is *not* the barrier (raw `.cwa` field 90001 is Tier 1,
-£3,000/3 yr, or £500 student tier) — **egress is**. Individual-level data cannot be downloaded from RAP;
-an exemption re-prices to Tier 3 £9,000, needs proof of ~£50k unavoidable cloud cost, and goes to a
-quarterly committee. Derived fields don't substitute: field 90004 is **5-second-epoch ENMO**, single
-channel, **gravity subtracted**, 20 Hz low-passed — a 6 s window is 1.2 samples, useless for a filterbank
-tokenizer whose whole point is per-axis structure plus the gravity DC term.
+Window count is not converted to hours by multiplying by six: UCI HAR has 2.56 s pre-windowed records
+and SP-SW-HAR uses 1 s windows. Hours above use each grid's actual samples/rate.
 
-The only viable pattern is **train inside RAP, export weights** — exactly what OxWearables did for
-harnet. **Verdict: ≥12-month side project, different compute story. Do not schedule around it.**
+Capture-24 is now uncapped: 1,530,792 native windows / 2,551.32 h. Its full harmonised baseline view
+was also rebuilt (1,530,795 windows), so HALO and compatible baselines no longer see different
+Capture-24 subsets.
 
-## 4. Ranked acquisition targets
+## Access decisions
 
-### Tier 0 — open, raw, gravity-present, no application
-| # | source | scale | placement | rate | access |
-|---|---|---|---|---|---|
-| 1 | **Capture-24 (unlock local)** | **2,562 annotated h**, 151 subj | dominant wrist (AX3) | 100 Hz | **already on disk** |
-| 2 | **NHANES 2011–2014 PAX80** | **14,693 subj × 7 d ≈ 2.47 M h** | non-dominant wrist | **80 Hz** | open CDC download, **no DUA**; ~2.2 TB |
-| 3 | **PAAWS** (Release 2, Jun 2026) | **6,450 h free-living / 237 subj** + 718 h lab @ 21 locations | wrists, waist, thighs, ankles, chest, phone | 80–100 Hz | direct download |
-| 4 | **ExtraSensory** | 60 users, 308k labelled 20 s examples | phone + **watch** | 25/40 Hz | free — **use `http://`, HTTPS refuses** |
+| Candidate | Access test | Real bytes inspected | Decision |
+|---|---|---|---|
+| Capture-24 | Already local, full 6.4 GB source release | All 151 subjects; random raw/session/grid samples | **Enabled in primary, uncapped** |
+| ExtraSensory | Official HTTP archives return 200 with stable sizes; 7.54 GB already local | Full phone, watch, labels, and author CV/platform split | **Enabled as optional labelled Phase A** |
+| NHANES PAX80_G | Live CDC index exposes 6,917 archives; individual HEAD/download works | Eight deterministic participants (1.37 GB compressed), 24 spread hours each | **Enabled as optional label-free Phase A pilot** |
+| PAAWS Release 2 | Official website and GitHub parser are public, but Northeastern collection returns HTTP 403 from this machine | Official sample file only; no released participant archive | **Not integrated** |
 
-NHANES is the volume play (~5,000× current corpus, zero paperwork); Inertia-1 ships **MIT-licensed
-NHANES preprocessing** we can reuse. PAAWS is the best *labelled* prize — second-by-second video-annotated
-free-living at 6 simultaneous placements, essentially unmined.
+The PAAWS sample confirms ActiGraph CSV headers, 80 Hz acceleration in g, 100 Hz IMU in the lab, and
+interval annotation tables. If access becomes possible, begin with free-living accelerometer-only
+left/right wrist, right waist, and phone-back streams. Do not use thigh/ankle/chest placements for the
+phone/watch deployment claim. A sample file cannot establish archive naming, missingness, subject
+grouping, release-wide units, or download reproducibility, so no converter is committed yet.
 
-### Tier 1 — gated, long lead, start the emails now
-**HUNT4** (**821,700 unlabelled h**, thigh + lower back, 50 Hz — best reward/effort of anything gated;
-`kontakt@hunt.ntnu.no`), **NAKO** (440,000 person-days, **hip** — the placement our wrist-heavy corpus
-most lacks), China Kadoorie (22,511 × 7 d, wrist).
+## Source-specific plumbing
 
-### Tier 2 — egocentric IMU **with language** (on-thesis for the evidence engine)
-**Nymeria** (264 subj, **300 h**, head + **both wrists**, plus **310,500 narration sentences / 8.64 M
-words**) — the single best fit for HALO's language interface. Ego-Exo4D (221 h). Ego4D only if needed
-(just 836 of 3,670 h have IMU, documented as uncalibrated).
+### Capture-24
 
-### Tier 3 — placement diversity, cheap
-**RealWorld-HAR** (15 subj × **7 simultaneous positions** — we already have it converted as an *eval* set
-at waist only, so the other 6 positions are free), **OxWalk** (wrist+hip at 100 *and* 25 Hz — a free
-sampling-rate ablation), RealDisp, HARTH/HAR70+ (already downloaded), WEAR 2024.
+- Dominant-wrist Axivity acceleration, 100 Hz, g, gravity present; accelerometer only.
+- All 13,120 converted sessions are included. The two-pass writer avoids an in-RAM concatenate.
+- Native and harmonised grids use the same sessions. Gyroscope slots are zero-padded and masked.
+- Local source: `references/datasets/capture24/paper.pdf`.
 
-### Explicitly NOT usable
-NHANES 2003–2006 PAXRAW (1-min **uniaxial counts**), All of Us Fitbit (minute summaries), MESA/NSRR/OAI
-(30 s counts), UKB 5 s ENMO. Also **Google SensorFM/SensorLM/LSM-2 and Apple AHMS are not public — and
-none of them see a waveform** (all train on per-minute engineered summaries). That is a *differentiation
-point for our paper*, not a scale gap to apologise for.
-⚠️ **Inertia-1's headline "18.2 M hours" is 86% UK Biobank served as 0.2 Hz gravity-removed
-single-channel ENMO.** Only its NHANES portion (~2.47 M h) is real triaxial. Expect it cited against us;
-the rebuttal is that most of it is not IMU data.
+### ExtraSensory
 
-## 5. Synthetic IMU from mocap: NOT a scale multiplier
+- Streams: explicit phone-in-pocket, explicit phone-in-hand, and Pebble watch-at-wrist.
+- Phone unit conversion uses the authors' 26-Android / 34-iPhone subject split. Android is m/s2;
+  iPhone is g. This avoids misclassifying one corrupted Android user's low-magnitude files.
+- Phone timestamps are used directly; observed clocks vary by device. Measured over 1,500 sampled
+  raw examples the per-example clock runs p01 30.3 / p50 34.1 / p75 49.6 / p99 119.2 Hz — the paper's
+  40 Hz is nominal, and 60.7% of examples are delivered below it. `STREAM_SOURCE_RATE_HZ` therefore
+  declares 30 Hz, the observed floor (min per-subject median 30.1 Hz), so no band above 15 Hz is ever
+  claimed observable. That is deliberately conservative: it also discards real 15-20 Hz content on
+  the faster examples. Storing a per-window source rate would recover it and is the natural next
+  step, since the converter already computes each example's true clock and then throws it away.
+- Watch files are 25 Hz (measured: exactly 25.0) and milli-g (measured: median raw ‖a‖ 1020, no file
+  anywhere near the ÷1000 decision threshold). Each example is independently resampled to 50 Hz.
+- **Source defect — the Pebble re-emits stale buffers.** 3.3% of wrist windows are byte-identical
+  repeats, verified in the raw archive rather than inferred: subject `0A986513` has one group of 178
+  identical recordings spanning 10,620 s, and `3600D531` is 87.7% duplicates. 29 of 56 subjects are
+  affected. This is upstream, not a converter bug — the phone archives have zero duplicate files.
+  Because the phone kept labelling those minutes independently, 36.9% of duplicate pairs carry
+  contradictory labels (lying↔sitting 4,413 pairs, lying↔standing 1,110). `scan_duplicates` removes
+  them; anything reading grids outside `CorpusIndex` must apply that screen too.
+- Examples are truncated to complete 6 s blocks before same-subject/stream/activity aggregation, so
+  grid windows never cross raw example boundaries.
+- One unambiguous observable movement is required. A single stair direction supersedes a co-occurring
+  generic walking tag; both directions or conflicting movements are dropped. Phone bag/table/unknown
+  placements are pruned rather than assigned false deployment text.
+- Materialised: 62,691 pocket + 39,502 hand + 556,744 wrist windows = 1,098.23 h.
+- Local source: `references/datasets/extrasensory/paper.pdf`.
 
-The arithmetic ends the argument before quality does. **AMASS ≈ 40 h. HumanML3D = 28.59 h. Motion-X ≈
-144 h.** The *entire* text-motion mocap universe is ~150–200 h — **less than our corpus reaches once
-Capture-24 is unlocked.** UniMTS pretrained on HumanML3D alone (28.6 h). No large simulated corpus is
-downloadable (AMASS licence forbids redistributing derivatives), so we'd burn compute regenerating it.
+### NHANES PAX80_G
 
-The decisive negative result comes from Doherty/Yuan's own group — Darwish et al., *"Motion Capture is
-Not the Target Domain"* (arXiv 2602.11064), using the exact UniMTS framework: purely synthetic
-pretraining scores **0.246–0.274 zero-shot macro-F1 vs 0.307 for real**, and scaling synthetic **8×
-makes it worse** (0.212). Failure modes are worst exactly where we are strongest: mocap contains **no
-sedentary behaviour at all** — no sleep, no desk sitting, no non-wear — i.e. free-living, where HALO
-currently ranks #1, is structurally absent.
+- ActiGraph GT3X+, non-dominant wrist, 80 Hz, calibrated g, gravity present; accelerometer only.
+- Fetching requires a positive deterministic subject count or explicit SEQN list. There is no
+  full-corpus mode: the official 2011-2012 release is about 1.04 TB compressed.
+- The pilot has eight hash-selected participants and up to 24 hours per participant, selected across
+  the wear interval rather than taking only the first day.
+- Released QC intervals, non-finite records, and clock gaps are hard window boundaries.
+- There are no activity diaries. `__unlabeled__` may feed label-free Phase A objectives, but is excluded
+  from global semantic vocabulary, validation, label-text probes, and Phase B.
+- Materialised: 115,179 windows / 191.97 h. One subject lost 21 six-second windows to QC/gap handling.
+- **The pilot is mostly stillness, and no non-wear detector is applied.** 43.0% of windows have
+  max-axis std below 0.003 g and 13.3% are byte-identical repeats of a motionless posture (all with
+  std ≈ 3e-6 — benign, unlike ExtraSensory's). The published QC file only covers sensor malfunction
+  (~0.26% of the release), not off-body time, so the usual Choi/Troiano non-wear step is absent.
+  `scan_duplicates` removes the exact repeats; the remaining near-static mass is real free-living
+  sedentary/sleep time and is left in deliberately.
+- **Eight subjects is few for the weight it carries.** Under the default α=0.5 temperature sampler
+  the pilot draws 9.2% of every batch from 8 people (capture24 draws 33.5% from 151). Widen the
+  subject count before reading anything into a NHANES-driven result.
+- Local sources: `references/datasets/nhanes/procedures_manual.pdf` and
+  `references/datasets/nhanes/pax80_g_documentation.html`.
 
-**Where it IS useful:** synthetic is the only source with ground-truth **placement, orientation and
-gravity by construction** — precisely our acquisition-config axis. Use it as a **controlled probe /
-config-conditioning augmentation, never as corpus.**
-Two correctness notes if we ever generate it: (a) sample the virtual sensor from the SMPL **surface mesh
-with placement offsets**, not the joint centre (UniMTS and IMUGPT both sample joints — an unforced
-error); (b) **the field has two incompatible gravity conventions** — TransPose/DIP/PIP are gravity-free,
-UniMTS-via-IMUSim is gravity-inclusive. Since UniMTS is one of our baselines, this is a **live
-correctness question about how we interpret it**.
+## Augmentation and conditioning compatibility
 
-## 6. Recommended sequence
+All optional streams are accelerometer-only. Their native grids use the standard six-slot layout
+`[acc_xyz, gyro_xyz]`; absent gyro channels are zero and masked. Real end-to-end samples verified that
+signal/rate/crop/rotation/gravity/text augmentations preserve those zeros and masks through both
+independent views and multi-resolution collate.
 
-**Step 1 — unlock what we already own (~1 week, zero risk). DO THIS FIRST.**
-1. Make `build_grids` write **incrementally** instead of `np.concatenate` (`build_grids.py:121`). 1–2 d.
-2. Raise `max_hours_per_class` in `capture24/metadata.json`; make `MAX_PER_STREAM` per-*dataset* and
-   source-balance-aware (a naive raise won't shift the gradient mix — see §1). 1 d.
-3. Add the 6 unused RealWorld placements + HARTH/HAR70+ for placement diversity. 1 d.
+Configuration text is distinct:
 
-⇒ **290 h → ~2,800 h (≈10×)**, all labelled, all three objectives fed, no new licences. Re-tune the step
-budget (30k steps was set for a 96k-window corpus and is already flagged stale) and **re-measure
-retrieval purity. This is the experiment that tells us whether data moves the 0.68 ceiling** — run it
-before anything below.
+- ExtraSensory: phone + hand, phone + trouser pocket, watch + wrist.
+- NHANES: watch + non-dominant wrist.
 
-**Step 2 — unlabeled branch + NHANES (~3–4 weeks).** Add the unlabeled sampler + `labels=None` guard
-(+ optional SimCLR-mode A2). Convert a **subject subset** of NHANES (~500 of 14,693 ≈ 84,000 h) rather
-than the full 2.2 TB — already 30× Step 1 and settles the scaling question cheaply. Verify static
-|acc| ≈ 1 g. ExtraSensory in parallel (labelled, so it also feeds A2).
+Acquisition-rate metadata remains distinct from storage rate: ExtraSensory watch is observed at 25 Hz
+although stored at 50 Hz; phone observability uses a conservative 30 Hz source floor; NHANES remains
+80 Hz. This prevents the filterbank from claiming unobservable high-frequency bands.
 
-**Step 3 — long-lead, start now, payoff in months.** Email HUNT4; apply to NAKO; pull PAAWS Release 2 and
-Nymeria. **Do not** open a UKB application until it reopens, and scope it as "train in RAP, export
-weights" if we ever do.
+## Sampling implications
 
-## 7. Corroboration + licence warnings (second independent survey)
+The default temperature sampler uses `P(dataset) proportional to n_dataset^0.5`, not raw proportional
+sampling. Expected primary shares are:
 
-A second survey agreed on every major point (Capture-24 held in full; NHANES as the volume play; UKB
-paused verbatim; HUNT4 by email; PAAWS; ExtraSensory HTTP-only). Extra verified detail:
+| Dataset | Primary draw share |
+|---|---:|
+| Capture-24 | 48.65% |
+| WISDM | 10.42% |
+| XRF V2 | 7.33% |
+| NFI-FARED | 6.40% |
+| HARMES | 5.36% |
+| all other primary datasets combined | 21.84% |
 
-- **NHANES PAX80 file-level:** 2011-12 `PAX80_G` = 6,917 participants (~1.04 TB compressed);
-  2013-14 `PAX80_H` = 7,776 (~1.17 TB). ActiGraph GT3X+, non-dominant wrist (~99% compliance), 80 Hz,
-  units **g**, range ±6.006, **static gravity retained**; one `.tar.bz2` per participant on CDC FTP,
-  scriptable. Ages 3–5 restricted to the NCHS RDC. Bonus children's sample: NNYFS 2012 `Y_PAX80`.
-  The two surveys' totals differ (~1–2 M h vs ~2.47 M h) — order-of-magnitude consistent either way.
-- **Ignore** NHANES `PAXMIN`/`PAXHR`/`PAXDAY` (MIMS minute/hour/day summaries) — go straight to PAX80.
-- **harnet has larger siblings:** ssl-wearables ships **harnet10 and harnet30**, not just harnet5.
-  Free, no UKB application. Worth adding as baselines and/or as retrieval-control backbones.
-- **HARTH** (UCI 779) is the open, labelled window into the HUNT4 world: 22 subj free-living, dual AX3
-  thigh + lower back, 50 Hz, **units g**, frame-by-frame video annotation. Direct download.
-- **MotionSense gravity is reconstructible** — it ships gravity-removed `userAcceleration` *plus*
-  separate `gravity.xyz`; total = sum. Relevant since it is one of our eval sets.
-- **OxWalk** records wrist+hip at **100 Hz and 25 Hz simultaneously** — a free, controlled
-  rate-invariance ablation for our core claim. 290 MB, CC BY 4.0.
-- **Nymeria** detail: 264 participants, 300 h, Aria (2 IMUs) + **miniAria wristbands** + XSens 17-IMU
-  full-body suit, all in one coordinate frame, with **230 h carrying natural-language descriptions**.
+Expanded shares put Capture-24 at 33.49%, ExtraSensory at 21.97%, and NHANES at 9.19%. Within
+ExtraSensory, raw window-proportional drawing makes the watch 84.5% of that dataset's samples. Thus the
+expanded run is intentionally a free-living wrist-heavy scale experiment, not a balanced placement
+experiment. Per-source and per-stream telemetry should be inspected before changing the sampler.
 
-⚠️ **Licence hazards — check before any corpus release:**
-- **WEAR is CC BY-NC-SA**: non-commercial **and** share-alike.
-- **MMAct**'s licence is **revocable on breach** — risky to build on.
-- **ssl-wearables weights** are academic-research-only, not commercial.
-- **Ego4D IMU is documented as defective**: uncalibrated with "likely measurement bias", missing
-  samples, non-monotonic/out-of-range timestamps, IMU absent from many components, ambiguous units.
-  **Skip, or only after heavy QC.**
+At batch 512 and 30,000 steps, training draws 15.36 million windows with replacement: about 8.9 raw
+corpus equivalents for primary and 6.1 for expanded, but exposure differs by source. To preserve
+approximately the primary run's Capture-24 exposure in the expanded arm requires about 45,000 steps.
+Report both data roster and optimizer steps; “epochs” alone is not well-defined under temperature
+sampling.
 
-### 7b. Additional verified detail + what was NOT surveyed
+## Launch sequence
 
-- **SHL ships both conventions**: `Accelerometer` in m/s² (**gravity included**) *and* `Linear
-  acceleration` (**gravity removed**) as separate channels, 4 positions (hand/torso/hips/bag), 2,812 h
-  but only **3 subjects**. We dropped it for subject diversity — but the raw+linear pairing is a **free
-  gravity ablation** if we ever want one.
-- **Ego-Exo4D**: 740 wearers / 1,286 h, Aria 800 Hz + 1000 Hz IMUs. A prior **Ego4D licence does not
-  carry over** — it must be signed separately.
-- **Opportunity**: only 4 users, but 7 IMUs + 12 body-worn 3-D accelerometers, 4-level annotation.
-  An eval set for fine-grained gestures, not pretraining fuel.
-- **Useful index to close gaps cheaply**: [Awesome-IMU-Sensing](https://github.com/rh20624/Awesome-IMU-Sensing),
-  a maintained catalogue (it surfaced PAAWS and **OctoNet** — 41 subjects, 10+ modalities, 2025).
+1. Run the matched 12-source Phase A at the frozen 30,000-step recipe.
+2. Run the 14-source expanded pilot at the same 30,000 steps as a fixed-compute ablation.
+3. If the pilot moves transfer/retrieval metrics, run a predeclared approximately 45,000-step
+   exposure-matched arm.
+4. Only then expand NHANES subject count. Prefer more subjects over more hours per subject; 64 subjects
+   at 24 selected hours would add roughly 1,536 h while remaining a modest download.
+5. Do not delay the current Phase A for another dataset. The corpus is large enough to test the model;
+   its remaining weakness is wrist/config imbalance and scale relative to industrial foundation
+   corpora, not a lack of trainable signal.
 
-⚠️ **This survey is NOT exhaustive.** The web-search budget was exhausted; the following were assigned
-but **never researched** — do not assume they were rejected: MESA/NSRR actigraphy (raw vs epoch is the
-key open question), All of Us Fitbit granularity, Whitehall II, Osteoarthritis Initiative, China
-Kadoorie, Netherlands Lifelines, Pelotas birth cohorts, Fenland/EPIC-Norfolk, ALSPAC, Canadian Health
-Measures Survey, DOMINO (2022), Wear-ME, DHARMA, Skoda, Daphnet, LARa, SisFall/MobiAct family, and
-HuggingFace-hosted IMU corpora. Prior expectation: most large cohort studies release **epoch/count
-summaries, not waveform**, which would disqualify them regardless of access friction — but that is a
-prior, not a finding. Worth one focused follow-up session; **do not block Step 1 on it.**
+## Verification
 
-When that follow-up happens, **start with these two** (flagged as the highest expected value):
-1. **Fenland / EPIC-Norfolk** — Cambridge collected **raw wrist Axivity/GENEActiv at Biobank-adjacent
-   scale**; if raw is exportable this is the closest available substitute for the closed UKB.
-2. **NSRR (National Sleep Research Resource)** — comparatively **low access friction**; the whole
-   question is raw-waveform vs epoch/count. One page-read settles it, and if any NSRR study ships
-   waveform it is cheap volume.
+- 84 focused converter/grid/policy/data-loader tests pass.
+- Full expanded-roster CPU smoke completed one optimization step with finite A1, VICReg, TF-C,
+  placement, EMA, and A3 losses. ExtraSensory and NHANES both appeared in per-source A1 telemetry;
+  13 of 14 total sources appeared in that single stochastic batch.
+- The optional-only smoke also completed; NHANES correctly has no validation or semantic probe rows.
+- No GPU training was launched.
 
-## 8. Uncertainty flags
-- UKB reopening date / incident cause are secondary sources; **the pause itself is confirmed verbatim**.
-- PAAWS licence unconfirmed (403); gravity convention for PAAWS, Nymeria/Aria, DOMINO is **inferred from
-  hardware, not documented** — probe a static clip before trusting.
-- NAKO / China Kadoorie cost and raw-export policy unpublished.
-- arXiv 2602.11064 and 2607.06617 are 2026 preprints surfaced by search — read directly before citing.
-  Inertia-1 overlaps our tokenizer redesign and ablates placement/rate/window; worth a close read.
-- Whether UniMTS's pretraining signal actually carries a DC gravity component is **unverified** and
-  changes how we interpret it as a baseline.
+Primary online sources:
+
+- ExtraSensory: http://extrasensory.ucsd.edu/
+- NHANES PAX80_G documentation:
+  https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAX80_G.htm
+- Capture-24: https://www.nature.com/articles/s41597-024-03960-3
+- PAAWS release status and formats: https://www.paawsstudy.org/data.html

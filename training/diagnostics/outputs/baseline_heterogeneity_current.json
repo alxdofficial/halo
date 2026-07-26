@@ -1,0 +1,3814 @@
+{
+  "schema_version": 2,
+  "protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "git": {
+    "commit": "396f5e07859d",
+    "dirty": true
+  },
+  "device": "cuda",
+  "seed": 20260725,
+  "max_windows": 400,
+  "rate_target_hz": 20.0,
+  "datasets": [
+    "motionsense",
+    "realworld",
+    "shoaib",
+    "inclusivehar",
+    "usc_had",
+    "tnda_har",
+    "ut_complex"
+  ],
+  "axes": [
+    "rate",
+    "channel",
+    "orientation",
+    "gravity"
+  ],
+  "placement": [
+    "xrf_v2",
+    "left_wrist",
+    "left_pocket"
+  ],
+  "models": {
+    "halo": {
+      "status": "complete",
+      "tier": "conse",
+      "rows": [
+        {
+          "axis": "rate",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 41.541,
+          "shifted_f1": 42.797,
+          "absolute_drop": -1.256,
+          "retention": 1.0302,
+          "prediction_consistency": 0.85,
+          "matched_balanced_accuracy": 47.06181658552158,
+          "shifted_balanced_accuracy": 50.4005152490666,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 41.541,
+          "shifted_f1": 36.39,
+          "absolute_drop": 5.152,
+          "retention": 0.876,
+          "prediction_consistency": 0.7925,
+          "matched_balanced_accuracy": 47.06181658552158,
+          "shifted_balanced_accuracy": 46.9211429483598,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 41.541,
+          "shifted_f1": 42.083,
+          "absolute_drop": -0.541,
+          "retention": 1.013,
+          "prediction_consistency": 0.8525,
+          "matched_balanced_accuracy": 47.06181658552158,
+          "shifted_balanced_accuracy": 47.050731192522235,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 41.541,
+          "shifted_f1": 51.758,
+          "absolute_drop": -10.217,
+          "retention": 1.2459,
+          "prediction_consistency": 0.8625,
+          "matched_balanced_accuracy": 47.06181658552158,
+          "shifted_balanced_accuracy": 54.681915733276576,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 40.25,
+          "shifted_f1": 39.889,
+          "absolute_drop": 0.361,
+          "retention": 0.991,
+          "prediction_consistency": 0.9275,
+          "matched_balanced_accuracy": 47.0,
+          "shifted_balanced_accuracy": 47.0,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 40.25,
+          "shifted_f1": 22.888,
+          "absolute_drop": 17.361,
+          "retention": 0.5687,
+          "prediction_consistency": 0.7725,
+          "matched_balanced_accuracy": 47.0,
+          "shifted_balanced_accuracy": 32.75,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 40.25,
+          "shifted_f1": 25.528,
+          "absolute_drop": 14.722,
+          "retention": 0.6342,
+          "prediction_consistency": 0.715,
+          "matched_balanced_accuracy": 47.0,
+          "shifted_balanced_accuracy": 34.25,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 40.25,
+          "shifted_f1": 35.566,
+          "absolute_drop": 4.684,
+          "retention": 0.8836,
+          "prediction_consistency": 0.7675,
+          "matched_balanced_accuracy": 47.0,
+          "shifted_balanced_accuracy": 42.75,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 35.284,
+          "shifted_f1": 42.363,
+          "absolute_drop": -7.079,
+          "retention": 1.2006,
+          "prediction_consistency": 0.88,
+          "matched_balanced_accuracy": 43.88125486129116,
+          "shifted_balanced_accuracy": 50.63952985913058,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 35.284,
+          "shifted_f1": 38.125,
+          "absolute_drop": -2.841,
+          "retention": 1.0805,
+          "prediction_consistency": 0.815,
+          "matched_balanced_accuracy": 43.88125486129116,
+          "shifted_balanced_accuracy": 48.383890761386226,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 35.284,
+          "shifted_f1": 30.045,
+          "absolute_drop": 5.24,
+          "retention": 0.8515,
+          "prediction_consistency": 0.835,
+          "matched_balanced_accuracy": 43.88125486129116,
+          "shifted_balanced_accuracy": 41.37066804943393,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 35.284,
+          "shifted_f1": 32.123,
+          "absolute_drop": 3.161,
+          "retention": 0.9104,
+          "prediction_consistency": 0.855,
+          "matched_balanced_accuracy": 43.88125486129116,
+          "shifted_balanced_accuracy": 40.627430645579466,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 22.869,
+          "shifted_f1": 22.257,
+          "absolute_drop": 0.612,
+          "retention": 0.9732,
+          "prediction_consistency": 0.9125,
+          "matched_balanced_accuracy": 30.71385496758631,
+          "shifted_balanced_accuracy": 30.977687320970904,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 22.869,
+          "shifted_f1": 17.104,
+          "absolute_drop": 5.765,
+          "retention": 0.7479,
+          "prediction_consistency": 0.7625,
+          "matched_balanced_accuracy": 30.71385496758631,
+          "shifted_balanced_accuracy": 24.178350670887983,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 22.869,
+          "shifted_f1": 22.475,
+          "absolute_drop": 0.394,
+          "retention": 0.9828,
+          "prediction_consistency": 0.8425,
+          "matched_balanced_accuracy": 30.71385496758631,
+          "shifted_balanced_accuracy": 31.256595808834618,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 22.869,
+          "shifted_f1": 21.335,
+          "absolute_drop": 1.533,
+          "retention": 0.933,
+          "prediction_consistency": 0.8975,
+          "matched_balanced_accuracy": 30.71385496758631,
+          "shifted_balanced_accuracy": 31.022915724408257,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 7.207,
+          "shifted_f1": 13.252,
+          "absolute_drop": -6.045,
+          "retention": 1.8387,
+          "prediction_consistency": 0.845,
+          "matched_balanced_accuracy": 17.156862745098035,
+          "shifted_balanced_accuracy": 21.420083184789064,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 7.207,
+          "shifted_f1": 18.47,
+          "absolute_drop": -11.263,
+          "retention": 2.5627,
+          "prediction_consistency": 0.6575,
+          "matched_balanced_accuracy": 17.156862745098035,
+          "shifted_balanced_accuracy": 24.041889483065955,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 7.207,
+          "shifted_f1": 9.341,
+          "absolute_drop": -2.133,
+          "retention": 1.296,
+          "prediction_consistency": 0.8875,
+          "matched_balanced_accuracy": 17.156862745098035,
+          "shifted_balanced_accuracy": 18.4194890077243,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 7.207,
+          "shifted_f1": 12.972,
+          "absolute_drop": -5.765,
+          "retention": 1.7998,
+          "prediction_consistency": 0.8625,
+          "matched_balanced_accuracy": 17.156862745098035,
+          "shifted_balanced_accuracy": 20.922459893048128,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 45.163,
+          "shifted_f1": 30.557,
+          "absolute_drop": 14.605,
+          "retention": 0.6766,
+          "prediction_consistency": 0.7325,
+          "matched_balanced_accuracy": 53.0,
+          "shifted_balanced_accuracy": 39.75,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 45.163,
+          "shifted_f1": 42.027,
+          "absolute_drop": 3.136,
+          "retention": 0.9306,
+          "prediction_consistency": 0.7325,
+          "matched_balanced_accuracy": 53.0,
+          "shifted_balanced_accuracy": 51.24999999999999,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 45.163,
+          "shifted_f1": 43.139,
+          "absolute_drop": 2.023,
+          "retention": 0.9552,
+          "prediction_consistency": 0.78,
+          "matched_balanced_accuracy": 53.0,
+          "shifted_balanced_accuracy": 50.5,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 45.163,
+          "shifted_f1": 42.545,
+          "absolute_drop": 2.618,
+          "retention": 0.942,
+          "prediction_consistency": 0.78,
+          "matched_balanced_accuracy": 53.0,
+          "shifted_balanced_accuracy": 49.75000000000001,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 37.95,
+          "shifted_f1": 28.892,
+          "absolute_drop": 9.058,
+          "retention": 0.7613,
+          "prediction_consistency": 0.76,
+          "matched_balanced_accuracy": 42.46071133167907,
+          "shifted_balanced_accuracy": 33.205128205128204,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 37.95,
+          "shifted_f1": 37.332,
+          "absolute_drop": 0.618,
+          "retention": 0.9837,
+          "prediction_consistency": 0.685,
+          "matched_balanced_accuracy": 42.46071133167907,
+          "shifted_balanced_accuracy": 41.474358974358964,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 37.95,
+          "shifted_f1": 33.583,
+          "absolute_drop": 4.367,
+          "retention": 0.8849,
+          "prediction_consistency": 0.7275,
+          "matched_balanced_accuracy": 42.46071133167907,
+          "shifted_balanced_accuracy": 38.41449545078577,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 37.95,
+          "shifted_f1": 36.563,
+          "absolute_drop": 1.387,
+          "retention": 0.9634,
+          "prediction_consistency": 0.7775,
+          "matched_balanced_accuracy": 42.46071133167907,
+          "shifted_balanced_accuracy": 40.95533498759305,
+          "status": "complete"
+        }
+      ],
+      "aggregate": {
+        "rate": {
+          "n_streams": 7,
+          "mean_matched_f1": 32.895,
+          "mean_shifted_f1": 31.43,
+          "mean_absolute_drop": 1.465,
+          "retention_from_mean_f1": 0.9555,
+          "mean_per_stream_retention_unstable": 1.0674,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.8439
+        },
+        "channel": {
+          "n_streams": 7,
+          "mean_matched_f1": 32.895,
+          "mean_shifted_f1": 30.334,
+          "mean_absolute_drop": 2.561,
+          "retention_from_mean_f1": 0.9221,
+          "mean_per_stream_retention_unstable": 1.1072,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.7454
+        },
+        "orientation": {
+          "n_streams": 7,
+          "mean_matched_f1": 32.895,
+          "mean_shifted_f1": 29.456,
+          "mean_absolute_drop": 3.439,
+          "retention_from_mean_f1": 0.8955,
+          "mean_per_stream_retention_unstable": 0.9454,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.8057
+        },
+        "gravity": {
+          "n_streams": 7,
+          "mean_matched_f1": 32.895,
+          "mean_shifted_f1": 33.266,
+          "mean_absolute_drop": -0.371,
+          "retention_from_mean_f1": 1.0113,
+          "mean_per_stream_retention_unstable": 1.0969,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.8289
+        }
+      },
+      "matched": {
+        "motionsense/phone_front_pocket": {
+          "f1_macro": 41.541279575610915,
+          "balanced_accuracy": 47.06181658552158,
+          "accuracy": 47.0,
+          "f1_weighted": 41.50571395593454,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "realworld/phone_waist": {
+          "f1_macro": 40.24980566458176,
+          "balanced_accuracy": 47.0,
+          "accuracy": 47.0,
+          "f1_weighted": 40.24980566458175,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jumping",
+            "lying",
+            "running",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "shoaib/phone_right_pocket": {
+          "f1_macro": 35.2842947452569,
+          "balanced_accuracy": 43.88125486129116,
+          "accuracy": 44.0,
+          "f1_weighted": 35.37635611723729,
+          "n_samples": 400,
+          "n_gt_classes": 7,
+          "n_scored_classes": 7,
+          "n_windows": 400,
+          "predicted_classes": [
+            "cycling",
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "inclusivehar/phone_waist": {
+          "f1_macro": 22.86860574060576,
+          "balanced_accuracy": 30.71385496758631,
+          "accuracy": 30.5,
+          "f1_weighted": 22.744961700006428,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "usc_had/phone_hip": {
+          "f1_macro": 7.207293239536688,
+          "balanced_accuracy": 17.156862745098035,
+          "accuracy": 17.0,
+          "f1_weighted": 7.1596105510437615,
+          "n_samples": 400,
+          "n_gt_classes": 12,
+          "n_scored_classes": 12,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jumping_up",
+            "running_forward",
+            "sitting",
+            "sleeping",
+            "standing",
+            "walking_right"
+          ],
+          "reachability_lb": 1.0
+        },
+        "tnda_har/watch_wrist": {
+          "f1_macro": 45.162530038803936,
+          "balanced_accuracy": 53.0,
+          "accuracy": 53.0,
+          "f1_weighted": 45.16253003880393,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "ascending_stairs",
+            "jogging",
+            "lying_down",
+            "riding",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "ut_complex/watch_wrist": {
+          "f1_macro": 37.949949418169524,
+          "balanced_accuracy": 42.46071133167907,
+          "accuracy": 42.75,
+          "f1_weighted": 38.030481419591915,
+          "n_samples": 400,
+          "n_gt_classes": 13,
+          "n_scored_classes": 13,
+          "n_windows": 400,
+          "predicted_classes": [
+            "biking",
+            "drinking_coffee",
+            "eating",
+            "jogging",
+            "sitting",
+            "smoking",
+            "standing",
+            "talking",
+            "typing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs",
+            "writing"
+          ],
+          "reachability_lb": 1.0
+        }
+      },
+      "subject_variability": {
+        "motionsense/phone_front_pocket": {
+          "n_subjects": 24,
+          "mean_subject_f1": 34.908,
+          "std_subject_f1": 14.23,
+          "worst_subject_f1": 6.667,
+          "best_subject_f1": 66.476
+        },
+        "realworld/phone_waist": {
+          "n_subjects": 15,
+          "mean_subject_f1": 40.243,
+          "std_subject_f1": 11.991,
+          "worst_subject_f1": 25.48,
+          "best_subject_f1": 69.846
+        },
+        "shoaib/phone_right_pocket": {
+          "n_subjects": 10,
+          "mean_subject_f1": 33.711,
+          "std_subject_f1": 6.239,
+          "worst_subject_f1": 24.762,
+          "best_subject_f1": 45.161
+        },
+        "inclusivehar/phone_waist": {
+          "n_subjects": 20,
+          "mean_subject_f1": 22.074,
+          "std_subject_f1": 10.06,
+          "worst_subject_f1": 4.167,
+          "best_subject_f1": 40.351
+        },
+        "usc_had/phone_hip": {
+          "n_subjects": 14,
+          "mean_subject_f1": 7.595,
+          "std_subject_f1": 3.858,
+          "worst_subject_f1": 2.381,
+          "best_subject_f1": 15.417
+        },
+        "tnda_har/watch_wrist": {
+          "n_subjects": 1,
+          "mean_subject_f1": 45.163,
+          "std_subject_f1": 0.0,
+          "worst_subject_f1": 45.163,
+          "best_subject_f1": 45.163
+        },
+        "ut_complex/watch_wrist": {
+          "n_subjects": 10,
+          "mean_subject_f1": 35.204,
+          "std_subject_f1": 8.179,
+          "worst_subject_f1": 18.651,
+          "best_subject_f1": 46.25
+        }
+      },
+      "label_novelty": {
+        "motionsense/phone_front_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 6,
+            "balanced_accuracy": 47.06181658552158,
+            "macro_f1": 41.541279575610915
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "realworld/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 300,
+            "n_labels": 6,
+            "balanced_accuracy": 62.66666666666666,
+            "macro_f1": 58.92582809270064
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 100,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "shoaib/phone_right_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 7,
+            "balanced_accuracy": 43.88125486129116,
+            "macro_f1": 35.2842947452569
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "inclusivehar/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 265,
+            "n_labels": 4,
+            "balanced_accuracy": 46.070782451379465,
+            "macro_f1": 41.10992118522212
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 135,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "usc_had/phone_hip": {
+          "seen_in_halo_corpus": {
+            "n_windows": 233,
+            "n_labels": 7,
+            "balanced_accuracy": 13.41991341991342,
+            "macro_f1": 4.539007092198582
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 167,
+            "n_labels": 5,
+            "balanced_accuracy": 22.388591800356505,
+            "macro_f1": 10.803706097823746
+          }
+        },
+        "tnda_har/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 59.5,
+            "macro_f1": 46.405033946017554
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 46.5,
+            "macro_f1": 25.35437004810413
+          }
+        },
+        "ut_complex/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 246,
+            "n_labels": 8,
+            "balanced_accuracy": 44.18010752688172,
+            "macro_f1": 29.562554759962534
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 154,
+            "n_labels": 5,
+            "balanced_accuracy": 39.70967741935484,
+            "macro_f1": 23.239968055128397
+          }
+        }
+      },
+      "placement": {
+        "axis": "placement",
+        "dataset": "xrf_v2",
+        "stream": "left_wrist->left_pocket",
+        "n_windows": 400,
+        "matched_f1": 91.348,
+        "shifted_f1": 80.068,
+        "absolute_drop": 11.28,
+        "retention": 0.8765,
+        "prediction_consistency": 0.7525,
+        "matched_balanced_accuracy": 91.34065934065934,
+        "shifted_balanced_accuracy": 79.84004884004884,
+        "status": "complete",
+        "row_aligned": true,
+        "paired_same_instant": true,
+        "corpus_overlap": true,
+        "held_out_dataset": false,
+        "valid_for_cross_dataset_robustness": false,
+        "exact_memory_overlap_possible": false
+      },
+      "elapsed_s": 10.061
+    },
+    "halo_evidence": {
+      "status": "complete",
+      "tier": "retrieval",
+      "rows": [
+        {
+          "axis": "rate",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 65.638,
+          "shifted_f1": 66.61,
+          "absolute_drop": -0.972,
+          "retention": 1.0148,
+          "prediction_consistency": 0.9175,
+          "matched_balanced_accuracy": 67.37712950399518,
+          "shifted_balanced_accuracy": 68.39077783985599,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 65.638,
+          "shifted_f1": 58.672,
+          "absolute_drop": 6.966,
+          "retention": 0.8939,
+          "prediction_consistency": 0.7175,
+          "matched_balanced_accuracy": 67.37712950399518,
+          "shifted_balanced_accuracy": 61.72557444506522,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 65.638,
+          "shifted_f1": 66.037,
+          "absolute_drop": -0.399,
+          "retention": 1.0061,
+          "prediction_consistency": 0.87,
+          "matched_balanced_accuracy": 67.37712950399518,
+          "shifted_balanced_accuracy": 66.70502212644442,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 65.638,
+          "shifted_f1": 62.297,
+          "absolute_drop": 3.34,
+          "retention": 0.9491,
+          "prediction_consistency": 0.895,
+          "matched_balanced_accuracy": 67.37712950399518,
+          "shifted_balanced_accuracy": 63.9161589556673,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 43.939,
+          "shifted_f1": 44.811,
+          "absolute_drop": -0.873,
+          "retention": 1.0199,
+          "prediction_consistency": 0.945,
+          "matched_balanced_accuracy": 51.74999999999999,
+          "shifted_balanced_accuracy": 52.5,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 43.939,
+          "shifted_f1": 28.121,
+          "absolute_drop": 15.817,
+          "retention": 0.64,
+          "prediction_consistency": 0.7525,
+          "matched_balanced_accuracy": 51.74999999999999,
+          "shifted_balanced_accuracy": 37.25,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 43.939,
+          "shifted_f1": 35.008,
+          "absolute_drop": 8.931,
+          "retention": 0.7967,
+          "prediction_consistency": 0.75,
+          "matched_balanced_accuracy": 51.74999999999999,
+          "shifted_balanced_accuracy": 41.75,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 43.939,
+          "shifted_f1": 41.674,
+          "absolute_drop": 2.265,
+          "retention": 0.9485,
+          "prediction_consistency": 0.805,
+          "matched_balanced_accuracy": 51.74999999999999,
+          "shifted_balanced_accuracy": 48.0,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 37.173,
+          "shifted_f1": 43.878,
+          "absolute_drop": -6.706,
+          "retention": 1.1804,
+          "prediction_consistency": 0.8025,
+          "matched_balanced_accuracy": 45.130066545674524,
+          "shifted_balanced_accuracy": 52.89084780917811,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 37.173,
+          "shifted_f1": 51.211,
+          "absolute_drop": -14.039,
+          "retention": 1.3777,
+          "prediction_consistency": 0.6925,
+          "matched_balanced_accuracy": 45.130066545674524,
+          "shifted_balanced_accuracy": 56.909515167228406,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 37.173,
+          "shifted_f1": 31.197,
+          "absolute_drop": 5.975,
+          "retention": 0.8393,
+          "prediction_consistency": 0.815,
+          "matched_balanced_accuracy": 45.130066545674524,
+          "shifted_balanced_accuracy": 41.362025754040275,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 37.173,
+          "shifted_f1": 27.863,
+          "absolute_drop": 9.31,
+          "retention": 0.7496,
+          "prediction_consistency": 0.8475,
+          "matched_balanced_accuracy": 45.130066545674524,
+          "shifted_balanced_accuracy": 37.86189611960937,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 25.614,
+          "shifted_f1": 25.393,
+          "absolute_drop": 0.221,
+          "retention": 0.9914,
+          "prediction_consistency": 0.94,
+          "matched_balanced_accuracy": 34.96532489069803,
+          "shifted_balanced_accuracy": 34.46781245288708,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 25.614,
+          "shifted_f1": 19.198,
+          "absolute_drop": 6.416,
+          "retention": 0.7495,
+          "prediction_consistency": 0.84,
+          "matched_balanced_accuracy": 34.96532489069803,
+          "shifted_balanced_accuracy": 29.37961706618423,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 25.614,
+          "shifted_f1": 22.767,
+          "absolute_drop": 2.847,
+          "retention": 0.8888,
+          "prediction_consistency": 0.9,
+          "matched_balanced_accuracy": 34.96532489069803,
+          "shifted_balanced_accuracy": 31.987788331071915,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 25.614,
+          "shifted_f1": 23.711,
+          "absolute_drop": 1.904,
+          "retention": 0.9257,
+          "prediction_consistency": 0.9225,
+          "matched_balanced_accuracy": 34.96532489069803,
+          "shifted_balanced_accuracy": 33.250414593698174,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 19.656,
+          "shifted_f1": 16.198,
+          "absolute_drop": 3.458,
+          "retention": 0.8241,
+          "prediction_consistency": 0.915,
+          "matched_balanced_accuracy": 27.020202020202017,
+          "shifted_balanced_accuracy": 24.494949494949495,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 19.656,
+          "shifted_f1": 34.707,
+          "absolute_drop": -15.051,
+          "retention": 1.7657,
+          "prediction_consistency": 0.6375,
+          "matched_balanced_accuracy": 27.020202020202017,
+          "shifted_balanced_accuracy": 42.42424242424242,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 19.656,
+          "shifted_f1": 18.932,
+          "absolute_drop": 0.724,
+          "retention": 0.9632,
+          "prediction_consistency": 0.9325,
+          "matched_balanced_accuracy": 27.020202020202017,
+          "shifted_balanced_accuracy": 25.5050505050505,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 19.656,
+          "shifted_f1": 20.509,
+          "absolute_drop": -0.853,
+          "retention": 1.0434,
+          "prediction_consistency": 0.965,
+          "matched_balanced_accuracy": 27.020202020202017,
+          "shifted_balanced_accuracy": 27.525252525252526,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 54.846,
+          "shifted_f1": 54.119,
+          "absolute_drop": 0.727,
+          "retention": 0.9867,
+          "prediction_consistency": 0.9075,
+          "matched_balanced_accuracy": 60.5,
+          "shifted_balanced_accuracy": 58.5,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 54.846,
+          "shifted_f1": 57.059,
+          "absolute_drop": -2.213,
+          "retention": 1.0404,
+          "prediction_consistency": 0.7425,
+          "matched_balanced_accuracy": 60.5,
+          "shifted_balanced_accuracy": 60.25,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 54.846,
+          "shifted_f1": 45.419,
+          "absolute_drop": 9.427,
+          "retention": 0.8281,
+          "prediction_consistency": 0.865,
+          "matched_balanced_accuracy": 60.5,
+          "shifted_balanced_accuracy": 52.5,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 54.846,
+          "shifted_f1": 48.883,
+          "absolute_drop": 5.963,
+          "retention": 0.8913,
+          "prediction_consistency": 0.895,
+          "matched_balanced_accuracy": 60.5,
+          "shifted_balanced_accuracy": 55.00000000000001,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 45.862,
+          "shifted_f1": 43.909,
+          "absolute_drop": 1.952,
+          "retention": 0.9574,
+          "prediction_consistency": 0.9025,
+          "matched_balanced_accuracy": 51.78349875930521,
+          "shifted_balanced_accuracy": 49.55076509511993,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 45.862,
+          "shifted_f1": 46.218,
+          "absolute_drop": -0.356,
+          "retention": 1.0078,
+          "prediction_consistency": 0.8025,
+          "matched_balanced_accuracy": 51.78349875930521,
+          "shifted_balanced_accuracy": 51.542597187758474,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 45.862,
+          "shifted_f1": 42.297,
+          "absolute_drop": 3.565,
+          "retention": 0.9223,
+          "prediction_consistency": 0.9,
+          "matched_balanced_accuracy": 51.78349875930521,
+          "shifted_balanced_accuracy": 48.74017783291977,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 45.862,
+          "shifted_f1": 44.515,
+          "absolute_drop": 1.347,
+          "retention": 0.9706,
+          "prediction_consistency": 0.885,
+          "matched_balanced_accuracy": 51.78349875930521,
+          "shifted_balanced_accuracy": 51.023056244830435,
+          "status": "complete"
+        }
+      ],
+      "aggregate": {
+        "rate": {
+          "n_streams": 7,
+          "mean_matched_f1": 41.818,
+          "mean_shifted_f1": 42.131,
+          "mean_absolute_drop": -0.313,
+          "retention_from_mean_f1": 1.0075,
+          "mean_per_stream_retention_unstable": 0.9964,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.9043
+        },
+        "channel": {
+          "n_streams": 7,
+          "mean_matched_f1": 41.818,
+          "mean_shifted_f1": 42.169,
+          "mean_absolute_drop": -0.351,
+          "retention_from_mean_f1": 1.0084,
+          "mean_per_stream_retention_unstable": 1.0679,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.7407
+        },
+        "orientation": {
+          "n_streams": 7,
+          "mean_matched_f1": 41.818,
+          "mean_shifted_f1": 37.38,
+          "mean_absolute_drop": 4.439,
+          "retention_from_mean_f1": 0.8939,
+          "mean_per_stream_retention_unstable": 0.8921,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.8618
+        },
+        "gravity": {
+          "n_streams": 7,
+          "mean_matched_f1": 41.818,
+          "mean_shifted_f1": 38.493,
+          "mean_absolute_drop": 3.325,
+          "retention_from_mean_f1": 0.9205,
+          "mean_per_stream_retention_unstable": 0.9255,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.8879
+        }
+      },
+      "matched": {
+        "motionsense/phone_front_pocket": {
+          "f1_macro": 65.63770612217785,
+          "balanced_accuracy": 67.37712950399518,
+          "accuracy": 67.5,
+          "f1_weighted": 65.72932043206818,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ]
+        },
+        "realworld/phone_waist": {
+          "f1_macro": 43.938702170414345,
+          "balanced_accuracy": 51.74999999999999,
+          "accuracy": 51.74999999999999,
+          "f1_weighted": 43.938702170414345,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jumping",
+            "lying",
+            "running",
+            "sitting",
+            "standing",
+            "walking"
+          ]
+        },
+        "shoaib/phone_right_pocket": {
+          "f1_macro": 37.17266678176802,
+          "balanced_accuracy": 45.130066545674524,
+          "accuracy": 45.25,
+          "f1_weighted": 37.20590333911267,
+          "n_samples": 400,
+          "n_gt_classes": 7,
+          "n_scored_classes": 7,
+          "n_windows": 400,
+          "predicted_classes": [
+            "cycling",
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ]
+        },
+        "inclusivehar/phone_waist": {
+          "f1_macro": 25.61419031891608,
+          "balanced_accuracy": 34.96532489069803,
+          "accuracy": 34.75,
+          "f1_weighted": 25.49758329944785,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking"
+          ]
+        },
+        "usc_had/phone_hip": {
+          "f1_macro": 19.65595287131432,
+          "balanced_accuracy": 27.020202020202017,
+          "accuracy": 27.0,
+          "f1_weighted": 19.671893342601173,
+          "n_samples": 400,
+          "n_gt_classes": 12,
+          "n_scored_classes": 12,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jumping_up",
+            "running_forward",
+            "sitting",
+            "standing",
+            "walking_forward",
+            "walking_right"
+          ]
+        },
+        "tnda_har/watch_wrist": {
+          "f1_macro": 54.84595576420854,
+          "balanced_accuracy": 60.5,
+          "accuracy": 60.5,
+          "f1_weighted": 54.84595576420854,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "ascending_stairs",
+            "descending_stairs",
+            "jogging",
+            "lying_down",
+            "riding",
+            "sitting",
+            "walking"
+          ]
+        },
+        "ut_complex/watch_wrist": {
+          "f1_macro": 45.86170107641086,
+          "balanced_accuracy": 51.78349875930521,
+          "accuracy": 52.0,
+          "f1_weighted": 45.81993466313415,
+          "n_samples": 400,
+          "n_gt_classes": 13,
+          "n_scored_classes": 13,
+          "n_windows": 400,
+          "predicted_classes": [
+            "biking",
+            "drinking_coffee",
+            "eating",
+            "jogging",
+            "sitting",
+            "smoking",
+            "standing",
+            "talking",
+            "typing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs",
+            "writing"
+          ]
+        }
+      },
+      "subject_variability": {
+        "motionsense/phone_front_pocket": {
+          "n_subjects": 24,
+          "mean_subject_f1": 60.118,
+          "std_subject_f1": 14.62,
+          "worst_subject_f1": 38.59,
+          "best_subject_f1": 90.476
+        },
+        "realworld/phone_waist": {
+          "n_subjects": 15,
+          "mean_subject_f1": 44.198,
+          "std_subject_f1": 9.196,
+          "worst_subject_f1": 29.792,
+          "best_subject_f1": 59.107
+        },
+        "shoaib/phone_right_pocket": {
+          "n_subjects": 10,
+          "mean_subject_f1": 34.222,
+          "std_subject_f1": 7.811,
+          "worst_subject_f1": 20.449,
+          "best_subject_f1": 46.444
+        },
+        "inclusivehar/phone_waist": {
+          "n_subjects": 20,
+          "mean_subject_f1": 24.323,
+          "std_subject_f1": 8.916,
+          "worst_subject_f1": 11.625,
+          "best_subject_f1": 40.351
+        },
+        "usc_had/phone_hip": {
+          "n_subjects": 14,
+          "mean_subject_f1": 17.527,
+          "std_subject_f1": 6.434,
+          "worst_subject_f1": 4.818,
+          "best_subject_f1": 28.486
+        },
+        "tnda_har/watch_wrist": {
+          "n_subjects": 1,
+          "mean_subject_f1": 54.846,
+          "std_subject_f1": 0.0,
+          "worst_subject_f1": 54.846,
+          "best_subject_f1": 54.846
+        },
+        "ut_complex/watch_wrist": {
+          "n_subjects": 10,
+          "mean_subject_f1": 39.939,
+          "std_subject_f1": 6.829,
+          "worst_subject_f1": 30.02,
+          "best_subject_f1": 55.495
+        }
+      },
+      "label_novelty": {
+        "motionsense/phone_front_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 6,
+            "balanced_accuracy": 67.37712950399518,
+            "macro_f1": 65.63770612217785
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "realworld/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 300,
+            "n_labels": 6,
+            "balanced_accuracy": 69.0,
+            "macro_f1": 65.02459210677293
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 100,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "shoaib/phone_right_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 7,
+            "balanced_accuracy": 45.130066545674524,
+            "macro_f1": 37.17266678176802
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "inclusivehar/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 265,
+            "n_labels": 4,
+            "balanced_accuracy": 52.44798733604704,
+            "macro_f1": 45.00321310116085
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 135,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "usc_had/phone_hip": {
+          "seen_in_halo_corpus": {
+            "n_windows": 233,
+            "n_labels": 7,
+            "balanced_accuracy": 9.523809523809524,
+            "macro_f1": 4.734848484848484
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 167,
+            "n_labels": 5,
+            "balanced_accuracy": 51.515151515151516,
+            "macro_f1": 34.927298978393864
+          }
+        },
+        "tnda_har/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 70.5,
+            "macro_f1": 51.227651899920815
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 50.5,
+            "macro_f1": 39.21256212922879
+          }
+        },
+        "ut_complex/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 246,
+            "n_labels": 8,
+            "balanced_accuracy": 58.5752688172043,
+            "macro_f1": 42.779224878121305
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 154,
+            "n_labels": 5,
+            "balanced_accuracy": 40.91666666666667,
+            "macro_f1": 17.906279287722583
+          }
+        }
+      },
+      "placement": {
+        "axis": "placement",
+        "dataset": "xrf_v2",
+        "stream": "left_wrist->left_pocket",
+        "n_windows": 400,
+        "matched_f1": 93.135,
+        "shifted_f1": 93.242,
+        "absolute_drop": -0.106,
+        "retention": 1.0011,
+        "prediction_consistency": 0.9475,
+        "matched_balanced_accuracy": 94.17338217338217,
+        "shifted_balanced_accuracy": 94.42735042735043,
+        "status": "complete",
+        "row_aligned": true,
+        "paired_same_instant": true,
+        "corpus_overlap": true,
+        "held_out_dataset": false,
+        "valid_for_cross_dataset_robustness": false,
+        "exact_memory_overlap_possible": true
+      },
+      "elapsed_s": 11.796
+    },
+    "crosshar": {
+      "status": "complete",
+      "tier": "conse",
+      "rows": [
+        {
+          "axis": "rate",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 59.726,
+          "shifted_f1": 59.726,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 62.98332313477177,
+          "shifted_balanced_accuracy": 62.98332313477177,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 59.726,
+          "shifted_f1": 62.996,
+          "absolute_drop": -3.269,
+          "retention": 1.0547,
+          "prediction_consistency": 0.5025,
+          "matched_balanced_accuracy": 62.98332313477177,
+          "shifted_balanced_accuracy": 63.59180035650623,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 59.726,
+          "shifted_f1": 47.764,
+          "absolute_drop": 11.962,
+          "retention": 0.7997,
+          "prediction_consistency": 0.5975,
+          "matched_balanced_accuracy": 62.98332313477177,
+          "shifted_balanced_accuracy": 50.252414398595256,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 59.726,
+          "shifted_f1": 53.826,
+          "absolute_drop": 5.9,
+          "retention": 0.9012,
+          "prediction_consistency": 0.7975,
+          "matched_balanced_accuracy": 62.98332313477177,
+          "shifted_balanced_accuracy": 57.14930250707248,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 36.009,
+          "shifted_f1": 36.009,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 42.75,
+          "shifted_balanced_accuracy": 42.75,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 36.009,
+          "shifted_f1": 21.301,
+          "absolute_drop": 14.708,
+          "retention": 0.5915,
+          "prediction_consistency": 0.6325,
+          "matched_balanced_accuracy": 42.75,
+          "shifted_balanced_accuracy": 31.0,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 36.009,
+          "shifted_f1": 30.843,
+          "absolute_drop": 5.166,
+          "retention": 0.8565,
+          "prediction_consistency": 0.665,
+          "matched_balanced_accuracy": 42.75,
+          "shifted_balanced_accuracy": 38.49999999999999,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 36.009,
+          "shifted_f1": 29.257,
+          "absolute_drop": 6.752,
+          "retention": 0.8125,
+          "prediction_consistency": 0.8075,
+          "matched_balanced_accuracy": 42.75,
+          "shifted_balanced_accuracy": 35.25,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 52.1,
+          "shifted_f1": 52.1,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 54.19151326592343,
+          "shifted_balanced_accuracy": 54.19151326592343,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 52.1,
+          "shifted_f1": 56.751,
+          "absolute_drop": -4.65,
+          "retention": 1.0893,
+          "prediction_consistency": 0.52,
+          "matched_balanced_accuracy": 54.19151326592343,
+          "shifted_balanced_accuracy": 61.67574107683001,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 52.1,
+          "shifted_f1": 38.294,
+          "absolute_drop": 13.806,
+          "retention": 0.735,
+          "prediction_consistency": 0.63,
+          "matched_balanced_accuracy": 54.19151326592343,
+          "shifted_balanced_accuracy": 42.394780053582224,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 52.1,
+          "shifted_f1": 50.374,
+          "absolute_drop": 1.726,
+          "retention": 0.9669,
+          "prediction_consistency": 0.84,
+          "matched_balanced_accuracy": 54.19151326592343,
+          "shifted_balanced_accuracy": 53.13715322789733,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 21.973,
+          "shifted_f1": 21.973,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 30.171114126338004,
+          "shifted_balanced_accuracy": 30.171114126338004,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 21.973,
+          "shifted_f1": 31.133,
+          "absolute_drop": -9.16,
+          "retention": 1.4169,
+          "prediction_consistency": 0.61,
+          "matched_balanced_accuracy": 30.171114126338004,
+          "shifted_balanced_accuracy": 36.97045077642093,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 21.973,
+          "shifted_f1": 25.629,
+          "absolute_drop": -3.656,
+          "retention": 1.1664,
+          "prediction_consistency": 0.7025,
+          "matched_balanced_accuracy": 30.171114126338004,
+          "shifted_balanced_accuracy": 33.92507161163878,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 21.973,
+          "shifted_f1": 22.884,
+          "absolute_drop": -0.912,
+          "retention": 1.0415,
+          "prediction_consistency": 0.765,
+          "matched_balanced_accuracy": 30.171114126338004,
+          "shifted_balanced_accuracy": 31.426202321724713,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 33.677,
+          "shifted_f1": 33.677,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 41.39928698752229,
+          "shifted_balanced_accuracy": 41.39928698752229,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 33.677,
+          "shifted_f1": 21.77,
+          "absolute_drop": 11.907,
+          "retention": 0.6464,
+          "prediction_consistency": 0.345,
+          "matched_balanced_accuracy": 41.39928698752229,
+          "shifted_balanced_accuracy": 28.89928698752228,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 33.677,
+          "shifted_f1": 27.931,
+          "absolute_drop": 5.746,
+          "retention": 0.8294,
+          "prediction_consistency": 0.5025,
+          "matched_balanced_accuracy": 41.39928698752229,
+          "shifted_balanced_accuracy": 32.1078431372549,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 33.677,
+          "shifted_f1": 31.503,
+          "absolute_drop": 2.174,
+          "retention": 0.9355,
+          "prediction_consistency": 0.7275,
+          "matched_balanced_accuracy": 41.39928698752229,
+          "shifted_balanced_accuracy": 38.17587641117053,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 57.052,
+          "shifted_f1": 57.052,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 60.24999999999999,
+          "shifted_balanced_accuracy": 60.24999999999999,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 57.052,
+          "shifted_f1": 37.095,
+          "absolute_drop": 19.958,
+          "retention": 0.6502,
+          "prediction_consistency": 0.6225,
+          "matched_balanced_accuracy": 60.24999999999999,
+          "shifted_balanced_accuracy": 43.49999999999999,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 57.052,
+          "shifted_f1": 43.782,
+          "absolute_drop": 13.27,
+          "retention": 0.7674,
+          "prediction_consistency": 0.6275,
+          "matched_balanced_accuracy": 60.24999999999999,
+          "shifted_balanced_accuracy": 48.00000000000001,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 57.052,
+          "shifted_f1": 41.028,
+          "absolute_drop": 16.024,
+          "retention": 0.7191,
+          "prediction_consistency": 0.71,
+          "matched_balanced_accuracy": 60.24999999999999,
+          "shifted_balanced_accuracy": 45.24999999999999,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 38.228,
+          "shifted_f1": 38.228,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 45.54177005789909,
+          "shifted_balanced_accuracy": 45.54177005789909,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 38.228,
+          "shifted_f1": 12.65,
+          "absolute_drop": 25.579,
+          "retention": 0.3309,
+          "prediction_consistency": 0.3825,
+          "matched_balanced_accuracy": 45.54177005789909,
+          "shifted_balanced_accuracy": 23.058312655086848,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 38.228,
+          "shifted_f1": 38.52,
+          "absolute_drop": -0.291,
+          "retention": 1.0076,
+          "prediction_consistency": 0.535,
+          "matched_balanced_accuracy": 45.54177005789909,
+          "shifted_balanced_accuracy": 43.24855252274607,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 38.228,
+          "shifted_f1": 32.826,
+          "absolute_drop": 5.402,
+          "retention": 0.8587,
+          "prediction_consistency": 0.5825,
+          "matched_balanced_accuracy": 45.54177005789909,
+          "shifted_balanced_accuracy": 38.98211331679073,
+          "status": "complete"
+        }
+      ],
+      "aggregate": {
+        "rate": {
+          "n_streams": 7,
+          "mean_matched_f1": 42.681,
+          "mean_shifted_f1": 42.681,
+          "mean_absolute_drop": 0.0,
+          "retention_from_mean_f1": 1.0,
+          "mean_per_stream_retention_unstable": 1.0,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 1.0
+        },
+        "channel": {
+          "n_streams": 7,
+          "mean_matched_f1": 42.681,
+          "mean_shifted_f1": 34.814,
+          "mean_absolute_drop": 7.867,
+          "retention_from_mean_f1": 0.8157,
+          "mean_per_stream_retention_unstable": 0.8257,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.5164
+        },
+        "orientation": {
+          "n_streams": 7,
+          "mean_matched_f1": 42.681,
+          "mean_shifted_f1": 36.109,
+          "mean_absolute_drop": 6.572,
+          "retention_from_mean_f1": 0.846,
+          "mean_per_stream_retention_unstable": 0.8803,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.6086
+        },
+        "gravity": {
+          "n_streams": 7,
+          "mean_matched_f1": 42.681,
+          "mean_shifted_f1": 37.385,
+          "mean_absolute_drop": 5.295,
+          "retention_from_mean_f1": 0.8759,
+          "mean_per_stream_retention_unstable": 0.8908,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.7471
+        }
+      },
+      "matched": {
+        "motionsense/phone_front_pocket": {
+          "f1_macro": 59.726347480026035,
+          "balanced_accuracy": 62.98332313477177,
+          "accuracy": 63.0,
+          "f1_weighted": 59.68799470069468,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "realworld/phone_waist": {
+          "f1_macro": 36.00899963799387,
+          "balanced_accuracy": 42.75,
+          "accuracy": 42.75,
+          "f1_weighted": 36.00899963799387,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jumping",
+            "lying",
+            "running",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "shoaib/phone_right_pocket": {
+          "f1_macro": 52.100271010944354,
+          "balanced_accuracy": 54.19151326592343,
+          "accuracy": 54.25,
+          "f1_weighted": 52.14443893806815,
+          "n_samples": 400,
+          "n_gt_classes": 7,
+          "n_scored_classes": 7,
+          "n_windows": 400,
+          "predicted_classes": [
+            "cycling",
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "inclusivehar/phone_waist": {
+          "f1_macro": 21.972758948368707,
+          "balanced_accuracy": 30.171114126338004,
+          "accuracy": 30.0,
+          "f1_weighted": 21.86666772252138,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "usc_had/phone_hip": {
+          "f1_macro": 33.67671243729364,
+          "balanced_accuracy": 41.39928698752229,
+          "accuracy": 41.25,
+          "f1_weighted": 33.61883313189036,
+          "n_samples": 400,
+          "n_gt_classes": 12,
+          "n_scored_classes": 12,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jumping_up",
+            "running_forward",
+            "sitting",
+            "sleeping",
+            "standing",
+            "walking_downstairs",
+            "walking_forward",
+            "walking_right",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "tnda_har/watch_wrist": {
+          "f1_macro": 57.052487792618145,
+          "balanced_accuracy": 60.24999999999999,
+          "accuracy": 60.25,
+          "f1_weighted": 57.052487792618145,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "ascending_stairs",
+            "descending_stairs",
+            "jogging",
+            "lying_down",
+            "riding",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "ut_complex/watch_wrist": {
+          "f1_macro": 38.228430566999975,
+          "balanced_accuracy": 45.54177005789909,
+          "accuracy": 45.5,
+          "f1_weighted": 38.08550429920867,
+          "n_samples": 400,
+          "n_gt_classes": 13,
+          "n_scored_classes": 13,
+          "n_windows": 400,
+          "predicted_classes": [
+            "biking",
+            "eating",
+            "jogging",
+            "sitting",
+            "smoking",
+            "standing",
+            "talking",
+            "typing",
+            "walking",
+            "walking_upstairs",
+            "writing"
+          ],
+          "reachability_lb": 1.0
+        }
+      },
+      "subject_variability": {
+        "motionsense/phone_front_pocket": {
+          "n_subjects": 24,
+          "mean_subject_f1": 53.04,
+          "std_subject_f1": 13.623,
+          "worst_subject_f1": 29.167,
+          "best_subject_f1": 83.333
+        },
+        "realworld/phone_waist": {
+          "n_subjects": 15,
+          "mean_subject_f1": 30.63,
+          "std_subject_f1": 10.068,
+          "worst_subject_f1": 12.284,
+          "best_subject_f1": 52.035
+        },
+        "shoaib/phone_right_pocket": {
+          "n_subjects": 10,
+          "mean_subject_f1": 47.052,
+          "std_subject_f1": 11.765,
+          "worst_subject_f1": 30.853,
+          "best_subject_f1": 69.291
+        },
+        "inclusivehar/phone_waist": {
+          "n_subjects": 20,
+          "mean_subject_f1": 22.327,
+          "std_subject_f1": 11.289,
+          "worst_subject_f1": 2.083,
+          "best_subject_f1": 44.444
+        },
+        "usc_had/phone_hip": {
+          "n_subjects": 14,
+          "mean_subject_f1": 28.954,
+          "std_subject_f1": 9.047,
+          "worst_subject_f1": 10.0,
+          "best_subject_f1": 39.329
+        },
+        "tnda_har/watch_wrist": {
+          "n_subjects": 1,
+          "mean_subject_f1": 57.052,
+          "std_subject_f1": 0.0,
+          "worst_subject_f1": 57.052,
+          "best_subject_f1": 57.052
+        },
+        "ut_complex/watch_wrist": {
+          "n_subjects": 10,
+          "mean_subject_f1": 34.047,
+          "std_subject_f1": 9.316,
+          "worst_subject_f1": 20.459,
+          "best_subject_f1": 52.107
+        }
+      },
+      "label_novelty": {
+        "motionsense/phone_front_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 6,
+            "balanced_accuracy": 62.98332313477177,
+            "macro_f1": 59.726347480026035
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "realworld/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 300,
+            "n_labels": 6,
+            "balanced_accuracy": 56.99999999999999,
+            "macro_f1": 53.4902531313793
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 100,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "shoaib/phone_right_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 7,
+            "balanced_accuracy": 54.19151326592343,
+            "macro_f1": 52.100271010944354
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "inclusivehar/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 265,
+            "n_labels": 4,
+            "balanced_accuracy": 45.25667118950701,
+            "macro_f1": 40.33474703411346
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 135,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "usc_had/phone_hip": {
+          "seen_in_halo_corpus": {
+            "n_windows": 233,
+            "n_labels": 7,
+            "balanced_accuracy": 46.51133180544945,
+            "macro_f1": 29.23321093534887
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 167,
+            "n_labels": 5,
+            "balanced_accuracy": 34.24242424242424,
+            "macro_f1": 17.631781065567143
+          }
+        },
+        "tnda_har/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 75.0,
+            "macro_f1": 44.05251206056035
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 45.49999999999999,
+            "macro_f1": 27.272661097346628
+          }
+        },
+        "ut_complex/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 246,
+            "n_labels": 8,
+            "balanced_accuracy": 51.86827956989247,
+            "macro_f1": 32.743394159870135
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 154,
+            "n_labels": 5,
+            "balanced_accuracy": 35.41935483870968,
+            "macro_f1": 12.85967678360268
+          }
+        }
+      },
+      "placement": {
+        "axis": "placement",
+        "dataset": "xrf_v2",
+        "stream": "left_wrist->left_pocket",
+        "n_windows": 400,
+        "matched_f1": 48.492,
+        "shifted_f1": 43.195,
+        "absolute_drop": 5.297,
+        "retention": 0.8908,
+        "prediction_consistency": 0.2775,
+        "matched_balanced_accuracy": 48.761904761904766,
+        "shifted_balanced_accuracy": 42.776556776556774,
+        "status": "complete",
+        "row_aligned": true,
+        "paired_same_instant": true,
+        "corpus_overlap": true,
+        "held_out_dataset": false,
+        "valid_for_cross_dataset_robustness": false,
+        "exact_memory_overlap_possible": false
+      },
+      "elapsed_s": 3.396
+    },
+    "harnet": {
+      "status": "complete",
+      "tier": "conse",
+      "rows": [
+        {
+          "axis": "rate",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 80.0,
+          "shifted_f1": 63.58,
+          "absolute_drop": 16.42,
+          "retention": 0.7947,
+          "prediction_consistency": 0.7175,
+          "matched_balanced_accuracy": 80.0257846241165,
+          "shifted_balanced_accuracy": 67.4348844015218,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 80.0,
+          "shifted_f1": 80.0,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 80.0257846241165,
+          "shifted_balanced_accuracy": 80.0257846241165,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 80.0,
+          "shifted_f1": 69.348,
+          "absolute_drop": 10.652,
+          "retention": 0.8669,
+          "prediction_consistency": 0.785,
+          "matched_balanced_accuracy": 80.0257846241165,
+          "shifted_balanced_accuracy": 69.59110419382588,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 80.0,
+          "shifted_f1": 42.119,
+          "absolute_drop": 37.881,
+          "retention": 0.5265,
+          "prediction_consistency": 0.555,
+          "matched_balanced_accuracy": 80.0257846241165,
+          "shifted_balanced_accuracy": 47.93589982352055,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 30.497,
+          "shifted_f1": 28.877,
+          "absolute_drop": 1.62,
+          "retention": 0.9469,
+          "prediction_consistency": 0.79,
+          "matched_balanced_accuracy": 38.5,
+          "shifted_balanced_accuracy": 38.75,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 30.497,
+          "shifted_f1": 30.497,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 38.5,
+          "shifted_balanced_accuracy": 38.5,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 30.497,
+          "shifted_f1": 28.652,
+          "absolute_drop": 1.845,
+          "retention": 0.9395,
+          "prediction_consistency": 0.8,
+          "matched_balanced_accuracy": 38.5,
+          "shifted_balanced_accuracy": 36.25,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 30.497,
+          "shifted_f1": 17.868,
+          "absolute_drop": 12.629,
+          "retention": 0.5859,
+          "prediction_consistency": 0.535,
+          "matched_balanced_accuracy": 38.5,
+          "shifted_balanced_accuracy": 23.5,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 70.282,
+          "shifted_f1": 48.674,
+          "absolute_drop": 21.608,
+          "retention": 0.6926,
+          "prediction_consistency": 0.6725,
+          "matched_balanced_accuracy": 70.2013654826722,
+          "shifted_balanced_accuracy": 55.898366606170605,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 70.282,
+          "shifted_f1": 70.282,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 70.2013654826722,
+          "shifted_balanced_accuracy": 70.2013654826722,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 70.282,
+          "shifted_f1": 69.026,
+          "absolute_drop": 1.256,
+          "retention": 0.9821,
+          "prediction_consistency": 0.76,
+          "matched_balanced_accuracy": 70.2013654826722,
+          "shifted_balanced_accuracy": 68.9655172413793,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 70.282,
+          "shifted_f1": 36.727,
+          "absolute_drop": 33.555,
+          "retention": 0.5226,
+          "prediction_consistency": 0.4325,
+          "matched_balanced_accuracy": 70.2013654826722,
+          "shifted_balanced_accuracy": 43.11641171895255,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 20.534,
+          "shifted_f1": 27.478,
+          "absolute_drop": -6.944,
+          "retention": 1.3382,
+          "prediction_consistency": 0.6775,
+          "matched_balanced_accuracy": 28.90094979647218,
+          "shifted_balanced_accuracy": 34.40373888135082,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 20.534,
+          "shifted_f1": 20.534,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 28.90094979647218,
+          "shifted_balanced_accuracy": 28.90094979647218,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 20.534,
+          "shifted_f1": 25.139,
+          "absolute_drop": -4.604,
+          "retention": 1.2242,
+          "prediction_consistency": 0.825,
+          "matched_balanced_accuracy": 28.90094979647218,
+          "shifted_balanced_accuracy": 33.66500829187396,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 20.534,
+          "shifted_f1": 23.728,
+          "absolute_drop": -3.194,
+          "retention": 1.1555,
+          "prediction_consistency": 0.6825,
+          "matched_balanced_accuracy": 28.90094979647218,
+          "shifted_balanced_accuracy": 32.869742198100404,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 32.421,
+          "shifted_f1": 30.572,
+          "absolute_drop": 1.849,
+          "retention": 0.943,
+          "prediction_consistency": 0.5975,
+          "matched_balanced_accuracy": 38.6660724896019,
+          "shifted_balanced_accuracy": 38.38383838383839,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 32.421,
+          "shifted_f1": 32.421,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 38.6660724896019,
+          "shifted_balanced_accuracy": 38.6660724896019,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 32.421,
+          "shifted_f1": 35.38,
+          "absolute_drop": -2.959,
+          "retention": 1.0913,
+          "prediction_consistency": 0.7425,
+          "matched_balanced_accuracy": 38.6660724896019,
+          "shifted_balanced_accuracy": 42.71390374331551,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 32.421,
+          "shifted_f1": 20.503,
+          "absolute_drop": 11.918,
+          "retention": 0.6324,
+          "prediction_consistency": 0.42,
+          "matched_balanced_accuracy": 38.6660724896019,
+          "shifted_balanced_accuracy": 26.990493166963752,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 52.623,
+          "shifted_f1": 47.292,
+          "absolute_drop": 5.331,
+          "retention": 0.8987,
+          "prediction_consistency": 0.625,
+          "matched_balanced_accuracy": 58.00000000000001,
+          "shifted_balanced_accuracy": 53.75,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 52.623,
+          "shifted_f1": 52.623,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 58.00000000000001,
+          "shifted_balanced_accuracy": 58.00000000000001,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 52.623,
+          "shifted_f1": 50.354,
+          "absolute_drop": 2.27,
+          "retention": 0.9569,
+          "prediction_consistency": 0.8425,
+          "matched_balanced_accuracy": 58.00000000000001,
+          "shifted_balanced_accuracy": 55.50000000000001,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 52.623,
+          "shifted_f1": 32.563,
+          "absolute_drop": 20.061,
+          "retention": 0.6188,
+          "prediction_consistency": 0.455,
+          "matched_balanced_accuracy": 58.00000000000001,
+          "shifted_balanced_accuracy": 40.25,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 29.852,
+          "shifted_f1": 39.509,
+          "absolute_drop": -9.657,
+          "retention": 1.3235,
+          "prediction_consistency": 0.3275,
+          "matched_balanced_accuracy": 37.65095119933829,
+          "shifted_balanced_accuracy": 47.43538047973532,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 29.852,
+          "shifted_f1": 29.852,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 37.65095119933829,
+          "shifted_balanced_accuracy": 37.65095119933829,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 29.852,
+          "shifted_f1": 33.542,
+          "absolute_drop": -3.69,
+          "retention": 1.1236,
+          "prediction_consistency": 0.69,
+          "matched_balanced_accuracy": 37.65095119933829,
+          "shifted_balanced_accuracy": 39.155810587262195,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 29.852,
+          "shifted_f1": 13.533,
+          "absolute_drop": 16.319,
+          "retention": 0.4533,
+          "prediction_consistency": 0.4825,
+          "matched_balanced_accuracy": 37.65095119933829,
+          "shifted_balanced_accuracy": 22.33767576509512,
+          "status": "complete"
+        }
+      ],
+      "aggregate": {
+        "rate": {
+          "n_streams": 7,
+          "mean_matched_f1": 45.173,
+          "mean_shifted_f1": 40.855,
+          "mean_absolute_drop": 4.318,
+          "retention_from_mean_f1": 0.9044,
+          "mean_per_stream_retention_unstable": 0.9911,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.6296
+        },
+        "channel": {
+          "n_streams": 7,
+          "mean_matched_f1": 45.173,
+          "mean_shifted_f1": 45.173,
+          "mean_absolute_drop": 0.0,
+          "retention_from_mean_f1": 1.0,
+          "mean_per_stream_retention_unstable": 1.0,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 1.0
+        },
+        "orientation": {
+          "n_streams": 7,
+          "mean_matched_f1": 45.173,
+          "mean_shifted_f1": 44.492,
+          "mean_absolute_drop": 0.681,
+          "retention_from_mean_f1": 0.9849,
+          "mean_per_stream_retention_unstable": 1.0264,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.7779
+        },
+        "gravity": {
+          "n_streams": 7,
+          "mean_matched_f1": 45.173,
+          "mean_shifted_f1": 26.72,
+          "mean_absolute_drop": 18.453,
+          "retention_from_mean_f1": 0.5915,
+          "mean_per_stream_retention_unstable": 0.6421,
+          "n_near_floor_streams": 0,
+          "mean_prediction_consistency": 0.5089
+        }
+      },
+      "matched": {
+        "motionsense/phone_front_pocket": {
+          "f1_macro": 80.0000711248106,
+          "balanced_accuracy": 80.0257846241165,
+          "accuracy": 80.0,
+          "f1_weighted": 79.97398790343772,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "realworld/phone_waist": {
+          "f1_macro": 30.49690547592211,
+          "balanced_accuracy": 38.5,
+          "accuracy": 38.5,
+          "f1_weighted": 30.49690547592211,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jumping",
+            "lying",
+            "running",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "shoaib/phone_right_pocket": {
+          "f1_macro": 70.28202628823335,
+          "balanced_accuracy": 70.2013654826722,
+          "accuracy": 70.25,
+          "f1_weighted": 70.29749769310101,
+          "n_samples": 400,
+          "n_gt_classes": 7,
+          "n_scored_classes": 7,
+          "n_windows": 400,
+          "predicted_classes": [
+            "cycling",
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "inclusivehar/phone_waist": {
+          "f1_macro": 20.534199294259654,
+          "balanced_accuracy": 28.90094979647218,
+          "accuracy": 28.749999999999996,
+          "f1_weighted": 20.447447044906802,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "usc_had/phone_hip": {
+          "f1_macro": 32.42077724953302,
+          "balanced_accuracy": 38.6660724896019,
+          "accuracy": 38.5,
+          "f1_weighted": 32.32022791808743,
+          "n_samples": 400,
+          "n_gt_classes": 12,
+          "n_scored_classes": 12,
+          "n_windows": 400,
+          "predicted_classes": [
+            "elevator_down",
+            "elevator_up",
+            "jumping_up",
+            "running_forward",
+            "sitting",
+            "sleeping",
+            "standing",
+            "walking_downstairs",
+            "walking_forward",
+            "walking_left",
+            "walking_right",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "tnda_har/watch_wrist": {
+          "f1_macro": 52.62349267901699,
+          "balanced_accuracy": 58.00000000000001,
+          "accuracy": 57.99999999999999,
+          "f1_weighted": 52.62349267901699,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "ascending_stairs",
+            "descending_stairs",
+            "jogging",
+            "lying_down",
+            "riding",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "ut_complex/watch_wrist": {
+          "f1_macro": 29.851852456018506,
+          "balanced_accuracy": 37.65095119933829,
+          "accuracy": 37.75,
+          "f1_weighted": 29.894001242870516,
+          "n_samples": 400,
+          "n_gt_classes": 13,
+          "n_scored_classes": 13,
+          "n_windows": 400,
+          "predicted_classes": [
+            "biking",
+            "eating",
+            "jogging",
+            "sitting",
+            "standing",
+            "talking",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs",
+            "writing"
+          ],
+          "reachability_lb": 1.0
+        }
+      },
+      "subject_variability": {
+        "motionsense/phone_front_pocket": {
+          "n_subjects": 24,
+          "mean_subject_f1": 75.075,
+          "std_subject_f1": 13.307,
+          "worst_subject_f1": 47.487,
+          "best_subject_f1": 92.5
+        },
+        "realworld/phone_waist": {
+          "n_subjects": 15,
+          "mean_subject_f1": 28.597,
+          "std_subject_f1": 6.305,
+          "worst_subject_f1": 16.905,
+          "best_subject_f1": 40.918
+        },
+        "shoaib/phone_right_pocket": {
+          "n_subjects": 10,
+          "mean_subject_f1": 67.137,
+          "std_subject_f1": 7.88,
+          "worst_subject_f1": 55.68,
+          "best_subject_f1": 82.771
+        },
+        "inclusivehar/phone_waist": {
+          "n_subjects": 20,
+          "mean_subject_f1": 19.702,
+          "std_subject_f1": 10.604,
+          "worst_subject_f1": 6.667,
+          "best_subject_f1": 46.732
+        },
+        "usc_had/phone_hip": {
+          "n_subjects": 14,
+          "mean_subject_f1": 28.09,
+          "std_subject_f1": 7.374,
+          "worst_subject_f1": 10.606,
+          "best_subject_f1": 43.897
+        },
+        "tnda_har/watch_wrist": {
+          "n_subjects": 1,
+          "mean_subject_f1": 52.623,
+          "std_subject_f1": 0.0,
+          "worst_subject_f1": 52.623,
+          "best_subject_f1": 52.623
+        },
+        "ut_complex/watch_wrist": {
+          "n_subjects": 10,
+          "mean_subject_f1": 27.017,
+          "std_subject_f1": 6.881,
+          "worst_subject_f1": 12.821,
+          "best_subject_f1": 37.785
+        }
+      },
+      "label_novelty": {
+        "motionsense/phone_front_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 6,
+            "balanced_accuracy": 80.0257846241165,
+            "macro_f1": 80.0000711248106
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "realworld/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 300,
+            "n_labels": 6,
+            "balanced_accuracy": 51.33333333333333,
+            "macro_f1": 46.08240590236825
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 100,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "shoaib/phone_right_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 7,
+            "balanced_accuracy": 70.2013654826722,
+            "macro_f1": 70.28202628823335
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "inclusivehar/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 265,
+            "n_labels": 4,
+            "balanced_accuracy": 43.35142469470827,
+            "macro_f1": 37.78790007901968
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 135,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "usc_had/phone_hip": {
+          "seen_in_halo_corpus": {
+            "n_windows": 233,
+            "n_labels": 7,
+            "balanced_accuracy": 36.35090399796282,
+            "macro_f1": 25.134357326417117
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 167,
+            "n_labels": 5,
+            "balanced_accuracy": 41.90730837789661,
+            "macro_f1": 17.494505494505493
+          }
+        },
+        "tnda_har/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 81.5,
+            "macro_f1": 56.00633153016298
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 34.5,
+            "macro_f1": 23.166304508073253
+          }
+        },
+        "ut_complex/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 246,
+            "n_labels": 8,
+            "balanced_accuracy": 48.66935483870968,
+            "macro_f1": 34.769845538222086
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 154,
+            "n_labels": 5,
+            "balanced_accuracy": 20.02150537634409,
+            "macro_f1": 12.811059907834101
+          }
+        }
+      },
+      "placement": {
+        "axis": "placement",
+        "dataset": "xrf_v2",
+        "stream": "left_wrist->left_pocket",
+        "n_windows": 400,
+        "matched_f1": 1.267,
+        "shifted_f1": 3.236,
+        "absolute_drop": -1.969,
+        "retention": 2.5545,
+        "prediction_consistency": 0.42,
+        "matched_balanced_accuracy": 5.316239316239316,
+        "shifted_balanced_accuracy": 7.145299145299146,
+        "status": "complete",
+        "row_aligned": true,
+        "paired_same_instant": true,
+        "corpus_overlap": true,
+        "held_out_dataset": false,
+        "valid_for_cross_dataset_robustness": false,
+        "exact_memory_overlap_possible": false
+      },
+      "elapsed_s": 2.696
+    },
+    "limubert": {
+      "status": "complete",
+      "tier": "conse",
+      "rows": [
+        {
+          "axis": "rate",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 47.645,
+          "shifted_f1": 47.645,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 53.698641374234,
+          "shifted_balanced_accuracy": 53.698641374234,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 47.645,
+          "shifted_f1": 32.942,
+          "absolute_drop": 14.703,
+          "retention": 0.6914,
+          "prediction_consistency": 0.6425,
+          "matched_balanced_accuracy": 53.698641374234,
+          "shifted_balanced_accuracy": 39.674399836823014,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 47.645,
+          "shifted_f1": 43.437,
+          "absolute_drop": 4.208,
+          "retention": 0.9117,
+          "prediction_consistency": 0.575,
+          "matched_balanced_accuracy": 53.698641374234,
+          "shifted_balanced_accuracy": 45.55919156445934,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "motionsense",
+          "stream": "phone_front_pocket",
+          "n_windows": 400,
+          "matched_f1": 47.645,
+          "shifted_f1": 30.567,
+          "absolute_drop": 17.079,
+          "retention": 0.6415,
+          "prediction_consistency": 0.3925,
+          "matched_balanced_accuracy": 53.698641374234,
+          "shifted_balanced_accuracy": 38.30103049813322,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 30.512,
+          "shifted_f1": 30.512,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 38.49999999999999,
+          "shifted_balanced_accuracy": 38.49999999999999,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 30.512,
+          "shifted_f1": 19.003,
+          "absolute_drop": 11.51,
+          "retention": 0.6228,
+          "prediction_consistency": 0.7025,
+          "matched_balanced_accuracy": 38.49999999999999,
+          "shifted_balanced_accuracy": 29.250000000000004,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 30.512,
+          "shifted_f1": 21.165,
+          "absolute_drop": 9.347,
+          "retention": 0.6937,
+          "prediction_consistency": 0.6475,
+          "matched_balanced_accuracy": 38.49999999999999,
+          "shifted_balanced_accuracy": 29.750000000000004,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "realworld",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 30.512,
+          "shifted_f1": 33.991,
+          "absolute_drop": -3.479,
+          "retention": 1.114,
+          "prediction_consistency": 0.73,
+          "matched_balanced_accuracy": 38.49999999999999,
+          "shifted_balanced_accuracy": 39.24999999999999,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 50.419,
+          "shifted_f1": 50.419,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 58.39598997493734,
+          "shifted_balanced_accuracy": 58.39598997493734,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 50.419,
+          "shifted_f1": 62.97,
+          "absolute_drop": -12.552,
+          "retention": 1.2489,
+          "prediction_consistency": 0.64,
+          "matched_balanced_accuracy": 58.39598997493734,
+          "shifted_balanced_accuracy": 65.16290726817043,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 50.419,
+          "shifted_f1": 32.16,
+          "absolute_drop": 18.259,
+          "retention": 0.6378,
+          "prediction_consistency": 0.515,
+          "matched_balanced_accuracy": 58.39598997493734,
+          "shifted_balanced_accuracy": 36.66493820758793,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "shoaib",
+          "stream": "phone_right_pocket",
+          "n_windows": 400,
+          "matched_f1": 50.419,
+          "shifted_f1": 14.636,
+          "absolute_drop": 35.782,
+          "retention": 0.2903,
+          "prediction_consistency": 0.3275,
+          "matched_balanced_accuracy": 58.39598997493734,
+          "shifted_balanced_accuracy": 26.81704260651629,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 27.232,
+          "shifted_f1": 27.232,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 35.65128900949796,
+          "shifted_balanced_accuracy": 35.65128900949796,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 27.232,
+          "shifted_f1": 22.612,
+          "absolute_drop": 4.62,
+          "retention": 0.8303,
+          "prediction_consistency": 0.5875,
+          "matched_balanced_accuracy": 35.65128900949796,
+          "shifted_balanced_accuracy": 31.833257952660936,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 27.232,
+          "shifted_f1": 21.875,
+          "absolute_drop": 5.356,
+          "retention": 0.8033,
+          "prediction_consistency": 0.6175,
+          "matched_balanced_accuracy": 35.65128900949796,
+          "shifted_balanced_accuracy": 29.360771898085332,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "inclusivehar",
+          "stream": "phone_waist",
+          "n_windows": 400,
+          "matched_f1": 27.232,
+          "shifted_f1": 22.185,
+          "absolute_drop": 5.047,
+          "retention": 0.8147,
+          "prediction_consistency": 0.575,
+          "matched_balanced_accuracy": 35.65128900949796,
+          "shifted_balanced_accuracy": 31.33574551484999,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 2.9,
+          "shifted_f1": 2.9,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 3.230837789661319,
+          "shifted_balanced_accuracy": 3.230837789661319,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 2.9,
+          "shifted_f1": 13.963,
+          "absolute_drop": -11.064,
+          "retention": 4.8153,
+          "prediction_consistency": 0.1,
+          "matched_balanced_accuracy": 3.230837789661319,
+          "shifted_balanced_accuracy": 21.234402852049907,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 2.9,
+          "shifted_f1": 5.176,
+          "absolute_drop": -2.277,
+          "retention": 1.7851,
+          "prediction_consistency": 0.325,
+          "matched_balanced_accuracy": 3.230837789661319,
+          "shifted_balanced_accuracy": 8.422459893048128,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "usc_had",
+          "stream": "phone_hip",
+          "n_windows": 400,
+          "matched_f1": 2.9,
+          "shifted_f1": 2.989,
+          "absolute_drop": -0.089,
+          "retention": 1.0307,
+          "prediction_consistency": 0.745,
+          "matched_balanced_accuracy": 3.230837789661319,
+          "shifted_balanced_accuracy": 3.995840760546643,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 46.6,
+          "shifted_f1": 46.6,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 51.5,
+          "shifted_balanced_accuracy": 51.5,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 46.6,
+          "shifted_f1": 32.147,
+          "absolute_drop": 14.454,
+          "retention": 0.6898,
+          "prediction_consistency": 0.655,
+          "matched_balanced_accuracy": 51.5,
+          "shifted_balanced_accuracy": 37.25,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 46.6,
+          "shifted_f1": 28.677,
+          "absolute_drop": 17.924,
+          "retention": 0.6154,
+          "prediction_consistency": 0.52,
+          "matched_balanced_accuracy": 51.5,
+          "shifted_balanced_accuracy": 33.5,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "tnda_har",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 46.6,
+          "shifted_f1": 13.064,
+          "absolute_drop": 33.537,
+          "retention": 0.2803,
+          "prediction_consistency": 0.465,
+          "matched_balanced_accuracy": 51.5,
+          "shifted_balanced_accuracy": 23.25,
+          "status": "complete"
+        },
+        {
+          "axis": "rate",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 16.045,
+          "shifted_f1": 16.045,
+          "absolute_drop": 0.0,
+          "retention": 1.0,
+          "prediction_consistency": 1.0,
+          "matched_balanced_accuracy": 22.66025641025641,
+          "shifted_balanced_accuracy": 22.66025641025641,
+          "status": "complete"
+        },
+        {
+          "axis": "channel",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 16.045,
+          "shifted_f1": 11.326,
+          "absolute_drop": 4.718,
+          "retention": 0.7059,
+          "prediction_consistency": 0.3925,
+          "matched_balanced_accuracy": 22.66025641025641,
+          "shifted_balanced_accuracy": 15.02274607113317,
+          "status": "complete"
+        },
+        {
+          "axis": "orientation",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 16.045,
+          "shifted_f1": 17.316,
+          "absolute_drop": -1.271,
+          "retention": 1.0792,
+          "prediction_consistency": 0.2925,
+          "matched_balanced_accuracy": 22.66025641025641,
+          "shifted_balanced_accuracy": 21.42834987593052,
+          "status": "complete"
+        },
+        {
+          "axis": "gravity",
+          "dataset": "ut_complex",
+          "stream": "watch_wrist",
+          "n_windows": 400,
+          "matched_f1": 16.045,
+          "shifted_f1": 7.82,
+          "absolute_drop": 8.225,
+          "retention": 0.4874,
+          "prediction_consistency": 0.255,
+          "matched_balanced_accuracy": 22.66025641025641,
+          "shifted_balanced_accuracy": 11.599979321753516,
+          "status": "complete"
+        }
+      ],
+      "aggregate": {
+        "rate": {
+          "n_streams": 7,
+          "mean_matched_f1": 31.622,
+          "mean_shifted_f1": 31.622,
+          "mean_absolute_drop": 0.0,
+          "retention_from_mean_f1": 1.0,
+          "mean_per_stream_retention_unstable": 1.0,
+          "n_near_floor_streams": 1,
+          "mean_prediction_consistency": 1.0
+        },
+        "channel": {
+          "n_streams": 7,
+          "mean_matched_f1": 31.622,
+          "mean_shifted_f1": 27.852,
+          "mean_absolute_drop": 3.77,
+          "retention_from_mean_f1": 0.8808,
+          "mean_per_stream_retention_unstable": 1.3721,
+          "n_near_floor_streams": 1,
+          "mean_prediction_consistency": 0.5314
+        },
+        "orientation": {
+          "n_streams": 7,
+          "mean_matched_f1": 31.622,
+          "mean_shifted_f1": 24.258,
+          "mean_absolute_drop": 7.364,
+          "retention_from_mean_f1": 0.7671,
+          "mean_per_stream_retention_unstable": 0.9323,
+          "n_near_floor_streams": 1,
+          "mean_prediction_consistency": 0.4989
+        },
+        "gravity": {
+          "n_streams": 7,
+          "mean_matched_f1": 31.622,
+          "mean_shifted_f1": 17.893,
+          "mean_absolute_drop": 13.729,
+          "retention_from_mean_f1": 0.5658,
+          "mean_per_stream_retention_unstable": 0.6656,
+          "n_near_floor_streams": 1,
+          "mean_prediction_consistency": 0.4986
+        }
+      },
+      "matched": {
+        "motionsense/phone_front_pocket": {
+          "f1_macro": 47.64510121470726,
+          "balanced_accuracy": 53.698641374234,
+          "accuracy": 53.75,
+          "f1_weighted": 47.67569245608131,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "realworld/phone_waist": {
+          "f1_macro": 30.51217334957012,
+          "balanced_accuracy": 38.49999999999999,
+          "accuracy": 38.5,
+          "f1_weighted": 30.51217334957012,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "climbingup",
+            "jumping",
+            "lying",
+            "running",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "shoaib/phone_right_pocket": {
+          "f1_macro": 50.418863912415944,
+          "balanced_accuracy": 58.39598997493734,
+          "accuracy": 58.5,
+          "f1_weighted": 50.534483419301566,
+          "n_samples": 400,
+          "n_gt_classes": 7,
+          "n_scored_classes": 7,
+          "n_windows": 400,
+          "predicted_classes": [
+            "cycling",
+            "jogging",
+            "sitting",
+            "standing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "inclusivehar/phone_waist": {
+          "f1_macro": 27.23152423149478,
+          "balanced_accuracy": 35.65128900949796,
+          "accuracy": 35.5,
+          "f1_weighted": 27.124871639782246,
+          "n_samples": 400,
+          "n_gt_classes": 6,
+          "n_scored_classes": 6,
+          "n_windows": 400,
+          "predicted_classes": [
+            "jogging",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "usc_had/phone_hip": {
+          "f1_macro": 2.8998166629924533,
+          "balanced_accuracy": 3.230837789661319,
+          "accuracy": 3.25,
+          "f1_weighted": 2.899555077700266,
+          "n_samples": 400,
+          "n_gt_classes": 12,
+          "n_scored_classes": 12,
+          "n_windows": 400,
+          "predicted_classes": [
+            "elevator_down",
+            "jumping_up",
+            "running_forward",
+            "sitting",
+            "sleeping",
+            "standing",
+            "walking_downstairs",
+            "walking_forward",
+            "walking_right",
+            "walking_upstairs"
+          ],
+          "reachability_lb": 1.0
+        },
+        "tnda_har/watch_wrist": {
+          "f1_macro": 46.60049122307646,
+          "balanced_accuracy": 51.5,
+          "accuracy": 51.5,
+          "f1_weighted": 46.60049122307646,
+          "n_samples": 400,
+          "n_gt_classes": 8,
+          "n_scored_classes": 8,
+          "n_windows": 400,
+          "predicted_classes": [
+            "ascending_stairs",
+            "jogging",
+            "lying_down",
+            "riding",
+            "sitting",
+            "standing",
+            "walking"
+          ],
+          "reachability_lb": 1.0
+        },
+        "ut_complex/watch_wrist": {
+          "f1_macro": 16.044658732334867,
+          "balanced_accuracy": 22.66025641025641,
+          "accuracy": 22.75,
+          "f1_weighted": 16.021755043862562,
+          "n_samples": 400,
+          "n_gt_classes": 13,
+          "n_scored_classes": 13,
+          "n_windows": 400,
+          "predicted_classes": [
+            "biking",
+            "eating",
+            "jogging",
+            "sitting",
+            "smoking",
+            "standing",
+            "talking",
+            "typing",
+            "walking",
+            "walking_downstairs",
+            "walking_upstairs",
+            "writing"
+          ],
+          "reachability_lb": 1.0
+        }
+      },
+      "subject_variability": {
+        "motionsense/phone_front_pocket": {
+          "n_subjects": 24,
+          "mean_subject_f1": 44.524,
+          "std_subject_f1": 10.676,
+          "worst_subject_f1": 23.485,
+          "best_subject_f1": 62.5
+        },
+        "realworld/phone_waist": {
+          "n_subjects": 15,
+          "mean_subject_f1": 27.502,
+          "std_subject_f1": 9.958,
+          "worst_subject_f1": 9.762,
+          "best_subject_f1": 40.952
+        },
+        "shoaib/phone_right_pocket": {
+          "n_subjects": 10,
+          "mean_subject_f1": 50.647,
+          "std_subject_f1": 5.835,
+          "worst_subject_f1": 43.124,
+          "best_subject_f1": 61.111
+        },
+        "inclusivehar/phone_waist": {
+          "n_subjects": 20,
+          "mean_subject_f1": 26.466,
+          "std_subject_f1": 14.027,
+          "worst_subject_f1": 9.524,
+          "best_subject_f1": 60.256
+        },
+        "usc_had/phone_hip": {
+          "n_subjects": 14,
+          "mean_subject_f1": 1.822,
+          "std_subject_f1": 2.208,
+          "worst_subject_f1": 0.0,
+          "best_subject_f1": 6.996
+        },
+        "tnda_har/watch_wrist": {
+          "n_subjects": 1,
+          "mean_subject_f1": 46.6,
+          "std_subject_f1": 0.0,
+          "worst_subject_f1": 46.6,
+          "best_subject_f1": 46.6
+        },
+        "ut_complex/watch_wrist": {
+          "n_subjects": 10,
+          "mean_subject_f1": 14.253,
+          "std_subject_f1": 4.484,
+          "worst_subject_f1": 5.385,
+          "best_subject_f1": 21.986
+        }
+      },
+      "label_novelty": {
+        "motionsense/phone_front_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 6,
+            "balanced_accuracy": 53.698641374234,
+            "macro_f1": 47.64510121470726
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "realworld/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 300,
+            "n_labels": 6,
+            "balanced_accuracy": 51.33333333333333,
+            "macro_f1": 39.9876256376168
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 100,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "shoaib/phone_right_pocket": {
+          "seen_in_halo_corpus": {
+            "n_windows": 400,
+            "n_labels": 7,
+            "balanced_accuracy": 58.39598997493734,
+            "macro_f1": 50.418863912415944
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 0,
+            "n_labels": 0,
+            "balanced_accuracy": null,
+            "macro_f1": null
+          }
+        },
+        "inclusivehar/phone_waist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 265,
+            "n_labels": 4,
+            "balanced_accuracy": 53.47693351424694,
+            "macro_f1": 48.562450038881934
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 135,
+            "n_labels": 2,
+            "balanced_accuracy": 0.0,
+            "macro_f1": 0.0
+          }
+        },
+        "usc_had/phone_hip": {
+          "seen_in_halo_corpus": {
+            "n_windows": 233,
+            "n_labels": 7,
+            "balanced_accuracy": 2.13903743315508,
+            "macro_f1": 1.822645439666716
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 167,
+            "n_labels": 5,
+            "balanced_accuracy": 4.759358288770053,
+            "macro_f1": 3.133221717292514
+          }
+        },
+        "tnda_har/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 78.0,
+            "macro_f1": 53.05035614511272
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 200,
+            "n_labels": 4,
+            "balanced_accuracy": 25.0,
+            "macro_f1": 17.49791415592843
+          }
+        },
+        "ut_complex/watch_wrist": {
+          "seen_in_halo_corpus": {
+            "n_windows": 246,
+            "n_labels": 8,
+            "balanced_accuracy": 35.599798387096776,
+            "macro_f1": 24.26928519057133
+          },
+          "novel_to_halo_corpus": {
+            "n_windows": 154,
+            "n_labels": 5,
+            "balanced_accuracy": 1.956989247311828,
+            "macro_f1": 1.2226654846335698
+          }
+        }
+      },
+      "placement": {
+        "axis": "placement",
+        "dataset": "xrf_v2",
+        "stream": "left_wrist->left_pocket",
+        "n_windows": 400,
+        "matched_f1": 42.911,
+        "shifted_f1": 23.566,
+        "absolute_drop": 19.345,
+        "retention": 0.5492,
+        "prediction_consistency": 0.225,
+        "matched_balanced_accuracy": 44.937728937728934,
+        "shifted_balanced_accuracy": 26.323565323565322,
+        "status": "complete",
+        "row_aligned": true,
+        "paired_same_instant": true,
+        "corpus_overlap": true,
+        "held_out_dataset": false,
+        "valid_for_cross_dataset_robustness": false,
+        "exact_memory_overlap_possible": false
+      },
+      "elapsed_s": 2.667
+    }
+  },
+  "failures": [],
+  "elapsed_s": 30.76,
+  "placement_interpretation": "The default xrf_v2 pair is a same-instant controlled placement stress test, but xrf_v2 is in the Phase-A/head-fit corpus. It is not a held-out robustness estimate; retrieval models may contain the exact query windows in memory."
+}

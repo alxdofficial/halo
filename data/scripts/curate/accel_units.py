@@ -36,6 +36,8 @@ ACC_UNIT_G = frozenset({
     "sp_sw_har",  # converter already divides raw m/s² by 9.81 -> g (see convert.py).
     "nfi_fared",  # NFI-FARED accelerometer reported in g (verified at-rest |acc|~1.00).
     "xrf_v2",     # 5-pos IMU acc in g (verified still |acc|~0.9-1.0); AirPods total acc=grav+userAccel (g).
+    "extrasensory",  # converter normalizes Android m/s^2, iPhone g (author split), and watch milli-g.
+    "nhanes",        # CDC PAX80_G release is calibrated triaxial acceleration in g.
 })
 
 # --- Accelerometer in m/s² → scale 1/9.80665 -------------------------------------------------------

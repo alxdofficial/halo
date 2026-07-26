@@ -1,5 +1,4 @@
-"""Tier-1 sweep: squeeze the UNTRAINED retrieval mechanism (raw features + raw SBERT bridge),
-which already beats ConSE (45.3 vs 42.7), with no learning — so no overfitting risk.
+"""Tier-1 sweep for the untrained retrieval mechanism (raw features + raw SBERT bridge).
 
 Knobs (all applied to the raw-feature / raw-text mechanism; g,t are NOT used):
   - top_k        : hard neighbor cutoff before softmax (fixes the effective-k~2200 diffuseness)
@@ -167,8 +166,7 @@ def main() -> None:
     means = {cfg: round(float(np.mean(v)), 2) for cfg, v in results.items()}
     ranked = sorted(means.items(), key=lambda kv: -kv[1])
     print("\n=== TIER-1 SWEEP (mean macro-F1 over gate, query-subsampled) ===", flush=True)
-    print("  (top_k, tau, csls, text_ens) -> meanF1   [ConSE 42.7 · untrained-baseline 45.3 · harnet 47.3]",
-          flush=True)
+    print("  (top_k, tau, csls, text_ens) -> meanF1", flush=True)
     for cfg, m in ranked[:12]:
         print(f"  {cfg} -> {m}", flush=True)
     baseline = means.get((0, 0.03, False, False))  # closest to the both=identity baseline knobs
@@ -185,7 +183,7 @@ def main() -> None:
         print(f"  {cell:26} F1={f1:.1f}", flush=True)
         del S; torch.cuda.empty_cache()
     full_mean = round(float(np.mean(list(full.values()))), 1)
-    print(f"  MEAN = {full_mean}  (ConSE 42.7 · harnet 47.3)", flush=True)
+    print(f"  MEAN = {full_mean}", flush=True)
 
     (_DIR / "tier1_sweep.json").write_text(json.dumps(
         {"best_config": {"top_k": top_k, "tau": tau, "csls": csls, "text_ens": tens},

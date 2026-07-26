@@ -92,6 +92,7 @@ def main() -> None:
     sessions_dir.mkdir(parents=True)
 
     labels: dict[str, list[str]] = {}
+    events: dict[str, str] = {}
     n_sess = 0
     dist: Counter = Counter()
     files = sorted(glob.glob(str(RAW / "**" / "*final*.csv"), recursive=True))
@@ -130,6 +131,7 @@ def main() -> None:
                 acc = df[[f"acc {a} {suf}" for a in "xyz"]].to_numpy(np.float32)[lo:hi]
                 gyro = df[[f"rot {a} {suf}" for a in "xyz"]].to_numpy(np.float32)[lo:hi] * DEG2RAD
                 sid = f"{subject}_{date}_{exp}_{tok}_run{k}"   # _back_/_arm_ token routes the stream
+                events[sid] = f"{subject}_{date}_{exp}_run{k}"
                 out = pd.DataFrame({
                     "timestamp_sec": ts,
                     **{f"acc_{a}": acc[:, i] for i, a in enumerate("xyz")},
@@ -144,6 +146,7 @@ def main() -> None:
             dist[canon] += 1
 
     (HERE / "labels.json").write_text(json.dumps(labels, indent=2))
+    (HERE / "events.json").write_text(json.dumps(events, indent=2))
     (HERE / "metadata.json").write_text(json.dumps(
         {"dataset": "nfi_fared", "sampling_rate_hz": NATIVE_RATE, "pre_windowed": False}, indent=2))
     (HERE / "manifest.json").write_text(json.dumps(create_manifest(), indent=2))

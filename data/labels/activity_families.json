@@ -1,0 +1,118 @@
+{
+  "description": "Project-level motion/observability families for Phase-B episodic sampling. Every canonical global label appears exactly once.",
+  "families": {
+    "locomotion_transport": [
+      "cycling",
+      "elevator_down",
+      "elevator_up",
+      "escalator_down",
+      "escalator_up",
+      "jogging",
+      "nordic_walking",
+      "running",
+      "stairs",
+      "turning",
+      "vehicle",
+      "walking",
+      "walking_backwards",
+      "walking_downstairs",
+      "walking_upstairs"
+    ],
+    "posture_transition": [
+      "knees_bending",
+      "lying",
+      "lying_down_from_standing",
+      "sitting",
+      "sitting_down",
+      "sleeping",
+      "standing",
+      "standing_up_from_lying",
+      "standing_up_from_sitting",
+      "syncope",
+      "waist_bends_forward"
+    ],
+    "falls": [
+      "falling_backward",
+      "falling_backward_sitting",
+      "falling_forward",
+      "falling_hitting_obstacle",
+      "falling_left",
+      "falling_right",
+      "falling_with_protection"
+    ],
+    "food_drink": [
+      "cutting_fruit",
+      "cutting_vegetables",
+      "drinking",
+      "eating_chips",
+      "eating_fruit",
+      "eating_pasta",
+      "eating_sandwich",
+      "eating_soup",
+      "making_tea",
+      "picking_fruit",
+      "pouring_water",
+      "taking_medicine"
+    ],
+    "personal_care": [
+      "applying_hand_cream",
+      "brushing_teeth",
+      "disinfecting_hands",
+      "washing_hands"
+    ],
+    "domestic_tasks": [
+      "cleaning_table",
+      "emptying_dishwasher",
+      "floor_cleaning",
+      "folding_clothes",
+      "ironing",
+      "opening_curtains",
+      "opening_windows",
+      "putting_away_dishes",
+      "throwing_garbage",
+      "vacuum_cleaning",
+      "washing_dishes",
+      "watering_plants",
+      "window_cleaning"
+    ],
+    "desk_communication": [
+      "answering_phone",
+      "opening_envelope",
+      "reading",
+      "talking_sitting",
+      "talking_standing",
+      "toggling_lamp",
+      "typing",
+      "using_mouse",
+      "using_phone",
+      "writing",
+      "writing_on_blackboard"
+    ],
+    "sport_exercise": [
+      "clapping",
+      "dribbling",
+      "frontal_elevation_arms",
+      "jump_front_back",
+      "jumping",
+      "kicking",
+      "playing_catch",
+      "punching",
+      "push_up",
+      "rope_jumping",
+      "sit_up",
+      "stretching",
+      "table_tennis",
+      "throwing"
+    ],
+    "manual_object_work": [
+      "dragging",
+      "picking_up"
+    ],
+    "coarse_context": [
+      "household_chores",
+      "manual_work",
+      "mixed_activity",
+      "sports"
+    ]
+  }
+}

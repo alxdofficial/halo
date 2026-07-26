@@ -1,7 +1,6 @@
 # Augmentation policy — what each model gets, and why
 
-> ⚠️ **Partially stale (2026-07-24).** Some claims predate the SSL pivot (label IDs used by A2;
-> gravity-gated rotation). Current facts: A2 is label-free SimCLR; SO(3) rotation now includes
+> **Updated for the 2026-07-25 SSL recipe.** A2 is label-free VICReg; SO(3) rotation includes
 > gravity-removed streams (`require_gravity=False`); a bounded **sensor-text dropout** was added.
 > The authoritative Phase-A recipe table is in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md).
@@ -25,12 +24,12 @@ Source of truth: `data/scripts/augmentations.py`. Applied per-sample in the load
 | `jitter` | ✅ | 0.5 | σ = 0.05 |
 | `scale` | ✅ | 0.5 | ×[0.9, 1.1] |
 | `gravity` (remove gravity) | ✅ | **0.15** | cutoff 0.4 Hz — **lowered from 0.5** (audit: p=0.5 stripped gravity on 52 % of windows, killing the DC/gravity feature on half the corpus) |
-| `rotation_3d` (SO(3)) | ✅ | 0.5 | requires gravity present (rotates acc+gyro jointly) |
+| `rotation_3d` (SO(3)) | ✅ | 0.5 | rotates real acc+gyro triads jointly; gravity presence is not required |
 | `rate` (resample) | ✅ | 0.5 | 15–100 Hz, min 32 samples |
 | `channel_dropout` | ✅ | 0.3 | drops the `gyro` group (acc never dropped) |
 | `window_crop` (P5) | ✅ | 0.5 | keep a random contiguous ≥50 % sub-window (session-length invariance); floor 32 samples |
 | `channel_text_phrase` / `channel_text_dropout` | ✅ | 0.5 / 0.15 | text-side augs (channel-text paraphrase, channel-desc dropout) |
-| `label_text` | ❌ **off in Phase-A** | (0.8) | label synonyms/templates — **computed then discarded** in pretraining: A2 contrasts on label **IDs**, not text, so the loader disables it (`pretrain_data.py:185`). A Pipeline-B (language-tower) concern. |
+| `label_text` | ❌ **off in Phase-A** | (0.8) | Phase A has no activity-label input or loss; label text belongs to Phase B |
 | `time_shift` / `time_warp` / `magnitude_warp` | ❌ off | — | available but disabled by default |
 
 **Rate/length diversity is now REAL, not synthetic (changed 2026-07-18).** HALO trains on the

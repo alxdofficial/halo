@@ -2,8 +2,8 @@
 paraphrase ensembling and (optional) fine-grained descriptions.
 
 Used by the T2.0 retrieval adapter (`baselines/halo_evidence`), the tier-1 sweep, and the
-decoder trainer, so every code path anchors labels in the *same* SBERT text the way the
-47.5 untrained mechanism did (raw canonical name + template/synonym paraphrases averaged).
+decoder trainer, so every code path anchors labels in the *same* SBERT text as the
+untrained mechanism (raw canonical name + template/synonym paraphrases averaged).
 
 - ``global_label_paraphrases`` merges every per-dataset synonym/template table into one
   dataset-agnostic pool. This is load-bearing: ``augment_label(label, dataset_name="")``
@@ -13,7 +13,7 @@ decoder trainer, so every code path anchors labels in the *same* SBERT text the 
   0 is always the canonical name (so E=1 reproduces the plain-ConSE text); higher E adds
   paraphrase variants; a fine-grained **description** (T2.1), when present, is appended as an
   extra anchor. The description file is optional — absent ⇒ this is a no-op and the mechanism
-  reproduces the exact 47.5 tier-1 config.
+  reproduces the exact tier-1 text configuration.
 """
 
 from __future__ import annotations

@@ -49,6 +49,10 @@ SYNONYMS = {
     "sit_to_lie": "lying_down_from_sitting",       # hapt-only; named to match the scheme
 }
 
+# Reserved data-plumbing markers are not activity concepts and must never enter
+# ConSE candidate vocabularies or Phase-B evidence labels.
+NON_SEMANTIC_LABELS = frozenset({"__unlabeled__"})
+
 
 def canonicalize(label: str) -> str:
     """Map a raw training label to its canonical name (identity if it has no synonym)."""

@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
@@ -64,6 +64,10 @@ class EvalStream:
     rate_hz: float
     mask: np.ndarray
     eval_labels: List[str]
+    # Synthetic diagnostic overrides. Production grid loads leave these as None and adapters derive
+    # the authoritative values from deployment_policy exactly as before.
+    gravity_state: Optional[str] = None
+    channel_descriptions: Optional[list] = None
 
     @property
     def n_windows(self) -> int:

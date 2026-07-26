@@ -132,3 +132,11 @@ def test_missing_cell_is_rejected_loudly(registered, tmp_path):
 def test_resolve_eval_cells_unknown_dataset_fails_loud():
     with pytest.raises(ValueError):
         run_baselines.resolve_eval_cells(["not_a_dataset"])
+
+
+def test_result_cell_lock_rejects_concurrent_writer(tmp_path):
+    cell = tmp_path / "model__dataset__stream.json"
+    with run_baselines._exclusive_cell(cell):
+        with pytest.raises(RuntimeError, match="already being evaluated"):
+            with run_baselines._exclusive_cell(cell):
+                pass

@@ -34,9 +34,8 @@ NOT rescaled here. The watch_wrist deployment stream is accelerometer-only; the 
 grid zero-pads + masks the absent gyroscope half.
 
 SCALE: the full corpus is ~2,500 annotated hours -> on the order of a million 6 s windows.
-Converting to sessions is cheap (they live on disk), but do NOT run
-`build_grids --dataset capture24` on the full set: build_grids loads every session frame
-into RAM at once and would OOM. Subsample sessions/windows before materialising a grid.
+The dataset metadata enables build_grids' two-pass disk-backed writer, so the full
+corpus can be materialised without concatenating the complete signal in RAM.
 
 License: CC BY 4.0. doi:10.5287/bodleian:NGx0JOMP5
 Reference: Chan Chang et al., "CAPTURE-24: A large dataset of wrist-worn activity tracker
@@ -212,7 +211,7 @@ def convert_dataset(limit: Optional[int] = None) -> bool:
     print(f"\nEstimated full-corpus 6 s windows : ~{est_windows:,}")
     print(f"Estimated harmonised grid size    : ~{est_grid_gb:,.1f} GB "
           f"(windows x 360 x 6 x 4 bytes)")
-    print("Do NOT run `build_grids --dataset capture24` on the full set (in-RAM OOM).")
+    print("Use build_grids' streaming writer to materialise the full corpus.")
     return True
 
 

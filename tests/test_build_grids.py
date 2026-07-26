@@ -36,6 +36,37 @@ def test_stream_grid_harmonised_stacks_resamples_and_canonicalizes():
     assert len(subjects) == len(grid.data) and set(subjects) == {"s1", "s2"}
 
 
+def test_stream_grid_persists_session_event_identity():
+    spec = get_stream_spec("hhar", "phone_waist")
+    frame = _session_frame("hhar", spec, 600, "walking")
+    frame.attrs["halo_session_id"] = "subject1_recording7"
+    grid, _ = stream_grid(
+        "hhar", spec, [(frame, 50.0, "s1")], alignment="native",
+        resample_to=None, canonical_labels=True, view="harmonised",
+    )
+    assert grid.event_ids == [
+        "hhar:subject1_recording7:0",
+        "hhar:subject1_recording7:1",
+    ]
+
+
+def test_stream_grid_prefers_shared_physical_event_over_device_session_id():
+    spec = get_stream_spec("hhar", "phone_waist")
+    grids = []
+    for device_session in ("recording_phone", "recording_watch"):
+        frame = _session_frame("hhar", spec, 300, "walking")
+        frame.attrs["halo_session_id"] = device_session
+        frame.attrs["halo_event_id"] = "subject1_physical_event7"
+        grid, _ = stream_grid(
+            "hhar", spec, [(frame, 50.0, "s1")], alignment="native",
+            resample_to=None, canonical_labels=True, view="harmonised",
+        )
+        grids.append(grid)
+    assert grids[0].event_ids == grids[1].event_ids == [
+        "hhar:subject1_physical_event7:0"
+    ]
+
+
 def test_stream_grid_non_harmonised_keeps_native_rate_and_labels():
     spec = get_stream_spec("hhar", "phone_waist")
     sessions = [(_session_frame("hhar", spec, 120, "laying"), 50.0, "s1")]

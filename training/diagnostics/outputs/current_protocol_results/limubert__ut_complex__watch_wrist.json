@@ -1,0 +1,84 @@
+{
+  "_baseline": "limubert",
+  "_dataset": "ut_complex",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.limubert.adapter",
+    "class": "LiMUBERTAdapter",
+    "tier": "conse"
+  },
+  "_timing": {
+    "setup_s": 0.006,
+    "cell_s": 0.429
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 17.38302832947855,
+    "balanced_accuracy": 24.58974358974359,
+    "accuracy": 24.58974358974359,
+    "f1_weighted": 17.38302832947855,
+    "n_samples": 3900,
+    "n_gt_classes": 13,
+    "n_scored_classes": 13,
+    "f1_macro_ci_lo": 13.953287502764752,
+    "f1_macro_ci_hi": 20.812769156192346,
+    "n_subjects": 10,
+    "n_folds": 10,
+    "ci_method": "subject_groupkfold_loso",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "biking": 7.08955223880597,
+      "drinking_coffee": 0.0,
+      "eating": 12.816691505216097,
+      "jogging": 18.181818181818183,
+      "sitting": 33.01384451544196,
+      "smoking": 8.80503144654088,
+      "standing": 56.51697699890471,
+      "talking": 1.5463917525773196,
+      "typing": 0.6211180124223602,
+      "walking": 39.097744360902254,
+      "walking_downstairs": 0.6172839506172839,
+      "walking_upstairs": 11.538461538461538,
+      "writing": 36.134453781512605
+    },
+    "reachable_nn_lb": [
+      "biking",
+      "drinking_coffee",
+      "eating",
+      "jogging",
+      "sitting",
+      "smoking",
+      "standing",
+      "talking",
+      "typing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs",
+      "writing"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "biking",
+      "eating",
+      "jogging",
+      "sitting",
+      "smoking",
+      "standing",
+      "talking",
+      "typing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs",
+      "writing"
+    ],
+    "n_predicted_classes": 12,
+    "top_T": 10
+  }
+}

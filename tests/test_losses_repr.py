@@ -15,11 +15,14 @@ from training.tokenizer.losses_repr import (
     grounding_loss,
     make_mask_plan,
     make_multiresolution_mask_plan,
+    masked_ema_latent_loss,
     masked_latent_loss,
     nt_xent,
     supcon_config_conditional,
     transform_cadence_for_timewarp,
+    vicreg,
 )
+from training.tokenizer.pretrain import update_ema_encoder
 
 GYRO = [3, 4, 5]
 
@@ -210,6 +213,63 @@ def test_nt_xent_gradient_flows():
     nt_xent(z_a, z_b, 0.1).backward()
     assert z_a.grad is not None and torch.isfinite(z_a.grad).all()
     assert z_b.grad is not None and torch.isfinite(z_b.grad).all()
+
+
+# --------------------------------------------------------------------------- VICReg / EMA targets
+def test_vicreg_prefers_aligned_pairs_without_negative_mining():
+    torch.manual_seed(4)
+    z = torch.randn(32, 16)
+    aligned = vicreg(z, z + 0.01 * torch.randn_like(z))
+    shuffled = vicreg(z, z.roll(1, dims=0))
+    assert aligned.total < shuffled.total
+    assert torch.isfinite(aligned.total)
+
+
+def test_vicreg_penalizes_collapsed_features():
+    diverse = torch.randn(64, 16)
+    collapsed = torch.zeros_like(diverse)
+    good = vicreg(diverse, diverse.clone())
+    bad = vicreg(collapsed, collapsed.clone())
+    assert bad.variance > good.variance
+    assert bad.min_std < 0.02
+
+
+def test_vicreg_gradient_flows_to_both_views():
+    a = torch.randn(16, 8, requires_grad=True)
+    b = torch.randn(16, 8, requires_grad=True)
+    vicreg(a, b).total.backward()
+    assert a.grad is not None and torch.isfinite(a.grad).all()
+    assert b.grad is not None and torch.isfinite(b.grad).all()
+
+
+def test_masked_ema_latent_is_stop_gradient_and_masked():
+    pred = torch.randn(2, 3, 2, 8, requires_grad=True)
+    target = pred.detach().clone().requires_grad_(True)
+    target.data[:, 0] *= -1
+    mask = torch.zeros(2, 3, 2, dtype=torch.bool)
+    mask[:, 1:] = True
+    loss = masked_ema_latent_loss(pred, target, mask)
+    assert loss < 1e-6
+    loss.backward()
+    assert pred.grad is not None
+    assert target.grad is None
+
+
+def test_ema_teacher_updates_without_gradients_and_roundtrips_state():
+    student = torch.nn.Linear(3, 2, bias=False)
+    teacher = torch.nn.Linear(3, 2, bias=False)
+    with torch.no_grad():
+        student.weight.fill_(2.0)
+        teacher.weight.zero_()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    update_ema_encoder(student, teacher, decay=0.5)
+    assert torch.allclose(teacher.weight, torch.ones_like(teacher.weight))
+    assert not teacher.weight.requires_grad
+
+    restored = torch.nn.Linear(3, 2, bias=False)
+    restored.load_state_dict(teacher.state_dict())
+    assert torch.equal(restored.weight, teacher.weight)
 
 
 # ------------------------------------------------------------------------ grounding

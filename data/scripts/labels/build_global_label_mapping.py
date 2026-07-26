@@ -34,7 +34,7 @@ from collections import Counter
 from pathlib import Path
 from typing import List, Optional
 
-from data.scripts.labels.canonical_labels import canonicalize
+from data.scripts.labels.canonical_labels import NON_SEMANTIC_LABELS, canonicalize
 
 REPO = Path(__file__).resolve().parents[3]
 OUT_PATH = REPO / "data" / "labels" / "global_labels.json"
@@ -57,7 +57,9 @@ def global_label_vocabulary(train_datasets: Optional[List[str]] = None,
         if ref.dataset not in datasets:
             continue
         for raw in ref.labels:
-            counts[canonicalize(raw)] += 1
+            label = canonicalize(raw)
+            if label not in NON_SEMANTIC_LABELS:
+                counts[label] += 1
     return sorted(counts), counts
 
 
@@ -70,7 +72,9 @@ def _metadata_declared(datasets: List[str]):
         if not acts:
             missing.append(ds)
             continue
-        declared.update(canonicalize(a) for a in acts)
+        declared.update(
+            canonicalize(a) for a in acts if canonicalize(a) not in NON_SEMANTIC_LABELS
+        )
     return declared, missing
 
 

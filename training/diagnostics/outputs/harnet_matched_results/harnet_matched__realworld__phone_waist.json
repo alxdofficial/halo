@@ -1,0 +1,70 @@
+{
+  "_baseline": "harnet_matched",
+  "_dataset": "realworld",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.harnet.adapter",
+    "class": "HarnetAdapter",
+    "tier": "conse"
+  },
+  "_timing": {
+    "setup_s": 36.127,
+    "cell_s": 19.677
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 32.99947763788569,
+    "balanced_accuracy": 39.79609764911019,
+    "accuracy": 43.241078579692086,
+    "f1_weighted": 34.79844762007493,
+    "n_samples": 11237,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": 30.89919007336869,
+    "f1_macro_ci_hi": 35.1444750592566,
+    "bootstrap_B": 1000,
+    "n_subjects": 15,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "climbingdown": 0.7892659826361484,
+      "climbingup": 7.766990291262135,
+      "jumping": 33.06666666666666,
+      "lying": 4.37956204379562,
+      "running": 77.5330396475771,
+      "sitting": 31.036324786324787,
+      "standing": 58.09712151175566,
+      "walking": 51.32685017306742
+    },
+    "reachable_nn_lb": [
+      "climbingdown",
+      "climbingup",
+      "jumping",
+      "lying",
+      "running",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "climbingdown",
+      "climbingup",
+      "jumping",
+      "lying",
+      "running",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "n_predicted_classes": 8,
+    "top_T": 10
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "nhanes_pax80_g",
+  "category": "datasets",
+  "document_title": "NHANES 2011-2012 Physical Activity Monitor - Raw Data 80 Hz (PAX80_G): Documentation, Codebook, and Frequencies",
+  "authors": "National Center for Health Statistics, Centers for Disease Control and Prevention",
+  "year": "2022",
+  "venue": "National Health and Nutrition Examination Survey 2011-2012 data documentation",
+  "paper_url": "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAX80_G.htm",
+  "pdf_url": "https://wwwn.cdc.gov/nchs/data/nhanes/public/2011/manuals/2012-Physicial-Activity-Monitor-Procedures-Manual-508.pdf",
+  "data_or_code_url": "https://ftp.cdc.gov/pub/pax_g/",
+  "license": "Public-use U.S. government dataset; users must follow NHANES analytic and citation guidance.",
+  "citation": "Centers for Disease Control and Prevention, National Center for Health Statistics. National Health and Nutrition Examination Survey 2011-2012: Physical Activity Monitor - Raw Data 80 Hz (PAX80_G). First published January 2022; revised October 2022.",
+  "notes": "The authoritative release documentation, rather than a secondary HAR paper, defines the waveform used by HALO. It specifies 6,917 public participants aged 6+, ActiGraph GT3X+ triaxial acceleration at 80 Hz in g, preferably on the non-dominant wrist for seven consecutive days, up to 194 hourly CSV files per participant, and per-participant QC intervals. No activity diary was collected. HALO therefore uses a deterministic bounded subset only for label-free Phase A and excludes its reserved __unlabeled__ marker from semantic vocabulary, validation, and Phase B.",
+  "local_documents": [
+    "procedures_manual.pdf",
+    "pax80_g_documentation.html"
+  ]
+}

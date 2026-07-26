@@ -1,0 +1,62 @@
+{
+  "_baseline": "crosshar",
+  "_dataset": "inclusivehar",
+  "_stream": "phone_waist",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.crosshar.adapter",
+    "class": "CrossHARAdapter",
+    "tier": "conse"
+  },
+  "_timing": {
+    "setup_s": 0.131,
+    "cell_s": 2.528
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 25.664180570388172,
+    "balanced_accuracy": 33.42947062710669,
+    "accuracy": 33.80952380952381,
+    "f1_weighted": 25.70971923445166,
+    "n_samples": 1260,
+    "n_gt_classes": 6,
+    "n_scored_classes": 6,
+    "f1_macro_ci_lo": 21.319210963385068,
+    "f1_macro_ci_hi": 29.647810060866945,
+    "bootstrap_B": 1000,
+    "n_subjects": 20,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "jogging": 18.39080459770115,
+      "ramp_ascent": 0.0,
+      "ramp_descent": 0.0,
+      "sitting": 47.13375796178344,
+      "standing": 49.69199178644764,
+      "walking": 38.76852907639681
+    },
+    "reachable_nn_lb": [
+      "jogging",
+      "ramp_ascent",
+      "ramp_descent",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "jogging",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "n_predicted_classes": 4,
+    "top_T": 10
+  }
+}

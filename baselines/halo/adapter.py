@@ -3,7 +3,7 @@
 HALO Phase-A (``best.pt``) is a configuration-conditional *representation* encoder — it
 has no trained label-text head. To place HALO in the SAME table as the self-pretrained /
 frozen baselines (crosshar, harnet, ...), we give it the SAME treatment those get: a
-linear softmax head fit on FROZEN HALO features over our 59-way global training
+linear softmax head fit on FROZEN HALO features over the current global training
 vocabulary, then scored zero-shot through the ConSE bridge. This is methodologically
 identical to the crosshar / harnet ConSE head-fit — SUBJECT-DISJOINT epoch selection +
 temperature calibration (the #82 fix) — so HALO's row is apples-to-apples with the
@@ -49,7 +49,8 @@ from eval import scoring
 _REPO = Path(__file__).resolve().parents[2]
 _BACKBONE_CKPT = Path(os.environ.get(
     "HALO_CKPT", _REPO / "training/tokenizer/outputs/pretrain_native/best.pt"))
-_HEAD_CACHE = Path(__file__).resolve().parent / "halo_conse_head.pt"
+_HEAD_CACHE = Path(os.environ.get(
+    "HALO_HEAD_CACHE", Path(__file__).resolve().parent / "halo_conse_head.pt"))
 
 FIT_EPOCHS = 100
 FIT_BATCH = 512
@@ -238,14 +239,16 @@ class HALOAdapter(ConSEAdapter):
         head.to(device)
         return float(temperature)
 
-    # ---- window_probs: (N, 59) softmax over the global vocab ------------------
+    # ---- window_probs: (N, |global vocab|) softmax over the global vocab ------
     def window_probs(self, stream, state, device) -> np.ndarray:
         from training.tokenizer.pretrain_data import (_stream_gravity_state,
                                                       stream_channel_descriptions)  # lazy
         enc, head = state["encoder"], state["head"]
         T = float(state.get("temperature", 1.0))     # calibrated temperature (#82)
-        texts = stream_channel_descriptions(stream.dataset, stream.stream)
-        gs = _stream_gravity_state(stream.dataset, stream.stream)
+        texts = (stream.channel_descriptions if getattr(stream, "channel_descriptions", None) is not None
+                 else stream_channel_descriptions(stream.dataset, stream.stream))
+        gs = (stream.gravity_state if getattr(stream, "gravity_state", None) is not None
+              else _stream_gravity_state(stream.dataset, stream.stream))
         feats = _encode(enc, np.asarray(stream.windows), texts, stream.rate_hz, gs, stream.mask, device,
                         stream.dataset, stream.stream)
         probs = []

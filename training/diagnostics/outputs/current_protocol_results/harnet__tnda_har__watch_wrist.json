@@ -1,0 +1,70 @@
+{
+  "_baseline": "harnet",
+  "_dataset": "tnda_har",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.harnet.adapter",
+    "class": "HarnetAdapter",
+    "tier": "conse"
+  },
+  "_timing": {
+    "setup_s": 0.042,
+    "cell_s": 0.178
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 50.2472006666888,
+    "balanced_accuracy": 54.47094299089647,
+    "accuracy": 57.20250521920668,
+    "f1_weighted": 51.99315523882277,
+    "n_samples": 3353,
+    "n_gt_classes": 8,
+    "n_scored_classes": 8,
+    "f1_macro_ci_lo": NaN,
+    "f1_macro_ci_hi": NaN,
+    "n_subjects": 1,
+    "n_folds": 0,
+    "ci_method": "subject_groupkfold_loso",
+    "ci_degenerate": true,
+    "per_class_f1": {
+      "ascending_stairs": 28.888888888888886,
+      "descending_stairs": 4.945054945054945,
+      "jogging": 86.16600790513834,
+      "lying_down": 25.37313432835821,
+      "riding": 87.04453441295547,
+      "sitting": 54.21773612112473,
+      "standing": 57.102672292545705,
+      "walking": 58.23957643944407
+    },
+    "reachable_nn_lb": [
+      "ascending_stairs",
+      "descending_stairs",
+      "jogging",
+      "lying_down",
+      "riding",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "ascending_stairs",
+      "descending_stairs",
+      "jogging",
+      "lying_down",
+      "riding",
+      "sitting",
+      "standing",
+      "walking"
+    ],
+    "n_predicted_classes": 8,
+    "top_T": 10
+  }
+}

@@ -27,10 +27,12 @@ data_or_code_url) is a follow-up.
 from __future__ import annotations
 
 import sys
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+from scipy.signal import resample_poly
 
 from ..base import CosineAdapter, InputContract, register
 
@@ -93,22 +95,21 @@ def _accel_indices(channels):
 
 
 def _resample_to_20hz(acc: np.ndarray, rate_hz: float) -> np.ndarray:
-    """(N,T,3) at rate_hz -> (N,T20,3) at 20 Hz via per-channel linear interpolation.
-
-    Matches the legacy limubert path (motionsense: 300 @ 50 Hz -> 120 @ 20 Hz, then wrap-padded to
-    200). If already at 20 Hz this is a no-op resample.
-    """
-    N, T, C = acc.shape
-    t20 = int(round(T * TARGET_HZ / float(rate_hz)))
-    if t20 == T:
+    """(N,T,3) at rate_hz -> 20 Hz with polyphase anti-alias filtering."""
+    _, length, _ = acc.shape
+    expected = int(round(length * TARGET_HZ / float(rate_hz)))
+    if expected == length and float(rate_hz) == TARGET_HZ:
         return acc
-    src = np.linspace(0.0, 1.0, T, dtype=np.float64)
-    dst = np.linspace(0.0, 1.0, t20, dtype=np.float64)
-    out = np.empty((N, t20, C), np.float32)
-    for n in range(N):
-        for c in range(C):
-            out[n, :, c] = np.interp(dst, src, acc[n, :, c])
-    return out
+    ratio = Fraction(TARGET_HZ / float(rate_hz)).limit_denominator(1000)
+    out = resample_poly(
+        acc.astype(np.float64), ratio.numerator, ratio.denominator, axis=1
+    )
+    # scipy returns ceil(T*up/down); keep the duration contract exact under non-integer source rates.
+    if out.shape[1] > expected:
+        out = out[:, :expected]
+    elif out.shape[1] < expected:
+        out = np.pad(out, ((0, 0), (0, expected - out.shape[1]), (0, 0)), mode="edge")
+    return out.astype(np.float32)
 
 
 @register
@@ -125,9 +126,30 @@ class UniMTSAdapter(CosineAdapter):
         """
         import torch
 
-        if str(UNIMTS_REPO) not in sys.path:
+        # UniMTS uses the generic top-level import ``from model import ST_GCN_18``. HALO also owns a
+        # package named ``model``; without isolation, whichever adapter runs first poisons the other
+        # through sys.modules. Snapshot HALO's package, load UniMTS against its repo-local module, then
+        # restore the snapshot. The instantiated classes retain their module objects, so inference is
+        # unaffected after the import names are cleaned up.
+        saved_model_modules = {
+            name: module for name, module in list(sys.modules.items())
+            if name == "model" or name.startswith("model.")
+        }
+        for name in saved_model_modules:
+            sys.modules.pop(name, None)
+        added_path = str(UNIMTS_REPO) not in sys.path
+        if added_path:
             sys.path.insert(0, str(UNIMTS_REPO))
-        from contrastive import ContrastiveModule  # noqa: E402  (repo-local import)
+        try:
+            sys.modules.pop("contrastive", None)
+            from contrastive import ContrastiveModule  # noqa: E402  (repo-local import)
+        finally:
+            for name in list(sys.modules):
+                if name == "model" or name.startswith("model."):
+                    sys.modules.pop(name, None)
+            sys.modules.update(saved_model_modules)
+            if added_path:
+                sys.path.remove(str(UNIMTS_REPO))
 
         args = SimpleNamespace(gyro=0, stft=0, stage="evaluation")  # acc-only, no finetune head
         model = ContrastiveModule(args).to(device)

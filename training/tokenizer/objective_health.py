@@ -1,4 +1,8 @@
-"""Per-objective 'is the model getting healthy data?' report (run before training).
+"""Historical label-SupCon objective-health report.
+
+The current label-free VICReg/EMA recipe reports representation health and per-objective gradient
+norms directly from ``training.tokenizer.pretrain``. This script intentionally retains the balanced
+sampler to diagnose the selectable label-SupCon control.
 
 For each elite-3 objective, report the distribution (min / p10 / median / p90 / max +
 the fraction of degenerate cases) of the stats that determine whether the objective has

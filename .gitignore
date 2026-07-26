@@ -22,7 +22,8 @@ env/
 
 # data/: CODE and authored metadata ARE tracked; downloads & converter-generated files are NOT.
 # Authored (tracked): convert.py, metadata.json, eval_labels.json.
-# Generated (ignored): sessions/, grids/, manifest.json, labels.json (session->activity map).
+# Generated (ignored): sessions/, grids/, manifest.json, labels.json (session->activity map),
+# events.json (device-session -> shared physical-event map).
 data/datasets/*/downloads/
 data/datasets/*/download/
 data/datasets/*/raw/
@@ -31,6 +32,7 @@ data/datasets/*/processed/
 data/datasets/*/grids/
 data/datasets/*/manifest.json
 data/datasets/*/labels.json
+data/datasets/*/events.json
 data/datasets/*/debug_*.png
 data/**/bundles/
 training_output/

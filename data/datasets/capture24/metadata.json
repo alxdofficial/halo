@@ -31,5 +31,5 @@
   "train_subjects": [],
   "test_subjects": [],
   "role": "train",
-  "max_hours_per_class": 25
+  "streaming_grid": true
 }

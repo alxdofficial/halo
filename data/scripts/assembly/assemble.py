@@ -39,6 +39,9 @@ class Grid:
     alignment: str              # "harmonised" | "non_harmonised"
     dataset: str
     rate_hz: float
+    # Stable physical-event identity per window. Populated by stream_grid(), where the converted
+    # session id and local window ordinal are available. It deliberately does not come from labels.
+    event_ids: Optional[List[str]] = None
 
 
 def canonicalize_units(curated: pd.DataFrame, dataset: str, channels: Sequence[str]) -> np.ndarray:

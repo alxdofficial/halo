@@ -102,12 +102,45 @@ def embedding_fingerprint(enc, device) -> torch.Tensor:
 
 
 @torch.no_grad()
-def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
-                   channel_mask=None, dataset=None, stream=None) -> torch.Tensor:
-    """(N, T, 6) raw windows at the stream's NATIVE rate -> (N, d) pooled embeddings.
+def patch_embedding_fingerprint(enc, device) -> torch.Tensor:
+    """Deterministic fingerprint of valid patch vectors and their structural metadata."""
+    g = torch.Generator().manual_seed(20260724)
+    data = torch.randn(_PROBE["n"], _PROBE["samples"], 6, generator=g).numpy()
+    texts = [f"probe channel {i}" for i in range(6)]
+    encoded = encode_dataset_detailed(
+        enc, data, texts, device, _PROBE["rate"], gravity_state="present",
+        channel_mask=[True] * 6, dataset=_PROBE["dataset"], stream=_PROBE["stream"],
+    )
+    pieces = [
+        encoded["patch_Z"].float().flatten(),
+        encoded["patch_window"].float(),
+        encoded["patch_time"].float(),
+        encoded["patch_duration"].float(),
+        encoded["patch_resolution"].float(),
+    ]
+    return torch.cat(pieces).cpu()
+
+
+@torch.no_grad()
+def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state=None,
+                            channel_mask=None, dataset=None, stream=None,
+                            _require_patches: bool = True) -> dict[str, torch.Tensor]:
+    """Encode windows and retain both pooled and valid per-patch representations.
+
+    Returns:
+      pooled          (N, d)
+      patch_Z         (M, d)
+      patch_window    (M,) local input-window row
+      patch_time      (M,) window-relative patch-center seconds
+      patch_duration  (M,) represented physical seconds
+      patch_resolution (M,) 0=single/short grid, 1=long grid
 
     ``dataset``/``stream`` are only needed for a FACTORED encoder (to build the role/sensor text);
     the default per_channel path uses the ``texts`` (per-channel descriptions) exactly as before.
+
+    Only patches marked valid by ``patch_padding_mask`` are exported. This is important for the
+    Phase-B memory bank: padding tokens must never become retrievable evidence. The historical
+    :func:`encode_dataset` API below remains a pooled-only compatibility wrapper.
     """
     collate = (
         MultiResolutionCollate(fixed_patch_seconds=enc.eval_resolution_pair,
@@ -135,6 +168,11 @@ def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
         )
         sensor_id_t = torch.tensor(sensor_id_list, dtype=torch.long)
     embs = []
+    patch_z_parts = []
+    patch_window_parts = []
+    patch_time_parts = []
+    patch_duration_parts = []
+    patch_resolution_parts = []
     for start in range(0, len(data), 256):
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
         items = []
@@ -163,7 +201,70 @@ def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
             sensor_id=(batch["sensor_id"].to(device) if factored else None),
         )
         embs.append(out["pooled"].cpu())
-    return torch.cat(embs)
+        if "per_patch" not in out:
+            if _require_patches:
+                raise KeyError("encoder detailed export requires an out['per_patch'] tensor")
+            continue
+
+        valid = batch["patch_padding_mask"].bool()
+        per_patch = out["per_patch"].cpu()
+        local_rows = (
+            torch.arange(len(block), dtype=torch.long).unsqueeze(1)
+            .expand_as(valid) + int(start)
+        )
+        if "patch_durations" in batch:
+            durations = batch["patch_durations"].float()
+            resolutions = batch["resolution_ids"].long()
+        else:
+            # Single-resolution collate uses one honest true patch length per sample. Every valid
+            # full patch has that support; the short-window fallback records its shorter true len.
+            durations = (
+                batch["patch_len"].float() / batch["rates"].clamp_min(1e-8)
+            ).unsqueeze(1).expand_as(batch["positions"])
+            resolutions = torch.zeros_like(batch["positions"], dtype=torch.long)
+
+        patch_z_parts.append(per_patch[valid])
+        patch_window_parts.append(local_rows[valid])
+        patch_time_parts.append(batch["positions"].float()[valid])
+        patch_duration_parts.append(durations[valid])
+        patch_resolution_parts.append(resolutions[valid])
+
+    pooled = torch.cat(embs)
+    d_model = int(pooled.shape[-1])
+    return {
+        "pooled": pooled,
+        "patch_Z": (
+            torch.cat(patch_z_parts)
+            if patch_z_parts else torch.empty((0, d_model), dtype=pooled.dtype)
+        ),
+        "patch_window": (
+            torch.cat(patch_window_parts)
+            if patch_window_parts else torch.empty(0, dtype=torch.long)
+        ),
+        "patch_time": (
+            torch.cat(patch_time_parts)
+            if patch_time_parts else torch.empty(0, dtype=torch.float32)
+        ),
+        "patch_duration": (
+            torch.cat(patch_duration_parts)
+            if patch_duration_parts else torch.empty(0, dtype=torch.float32)
+        ),
+        "patch_resolution": (
+            torch.cat(patch_resolution_parts)
+            if patch_resolution_parts else torch.empty(0, dtype=torch.long)
+        ),
+    }
+
+
+@torch.no_grad()
+def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
+                   channel_mask=None, dataset=None, stream=None) -> torch.Tensor:
+    """Compatibility API: raw windows at native rate -> pooled embeddings only."""
+    return encode_dataset_detailed(
+        enc, data, texts, device, rate, gravity_state=gravity_state,
+        channel_mask=channel_mask, dataset=dataset, stream=stream,
+        _require_patches=False,
+    )["pooled"]
 
 
 def knn_balanced_acc(train_z, train_y, test_z, test_y, k=KNN_K) -> float:

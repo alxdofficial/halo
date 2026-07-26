@@ -1,0 +1,67 @@
+{
+  "_baseline": "harnet",
+  "_dataset": "shoaib",
+  "_stream": "phone_right_pocket",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.harnet.adapter",
+    "class": "HarnetAdapter",
+    "tier": "conse"
+  },
+  "_timing": {
+    "setup_s": 0.042,
+    "cell_s": 0.171
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 69.90721565079727,
+    "balanced_accuracy": 69.76190476190476,
+    "accuracy": 69.76190476190476,
+    "f1_weighted": 69.90721565079727,
+    "n_samples": 2100,
+    "n_gt_classes": 7,
+    "n_scored_classes": 7,
+    "f1_macro_ci_lo": 65.42918860244356,
+    "f1_macro_ci_hi": 74.38524269915098,
+    "n_subjects": 10,
+    "n_folds": 10,
+    "ci_method": "subject_groupkfold_loso",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "cycling": 63.51351351351351,
+      "jogging": 97.10391822827938,
+      "sitting": 77.32962447844228,
+      "standing": 67.44186046511628,
+      "walking": 59.20792079207921,
+      "walking_downstairs": 68.40958605664488,
+      "walking_upstairs": 56.344086021505376
+    },
+    "reachable_nn_lb": [
+      "cycling",
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "cycling",
+      "jogging",
+      "sitting",
+      "standing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs"
+    ],
+    "n_predicted_classes": 7,
+    "top_T": 10
+  }
+}

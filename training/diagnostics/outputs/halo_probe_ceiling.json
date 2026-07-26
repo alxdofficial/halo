@@ -1,0 +1,86 @@
+{
+  "schema_version": 2,
+  "protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "checkpoint": "training/tokenizer/outputs/pretrain_native/best.pt",
+  "checkpoint_sha256": "00244c5c192b2ef23f887e0bf19af406c9e0fa181d8b689ad5af96edde6d8fe4",
+  "step": 20000,
+  "zero_shot_baseline": "halo",
+  "results_dir": "/home/alex/code/HALO/halo/eval/results",
+  "per_dataset": [
+    {
+      "dataset": "motionsense",
+      "ceiling_supervised_f1": 95.73,
+      "stream": "phone_front_pocket",
+      "zeroshot_f1": 46.23311487141013,
+      "gap": 49.5,
+      "n_labels": 6,
+      "n_train": 3616,
+      "n_val": 391,
+      "n_test": 527
+    },
+    {
+      "dataset": "realworld",
+      "ceiling_supervised_f1": 89.4,
+      "stream": "phone_waist",
+      "zeroshot_f1": 43.648086687507,
+      "gap": 45.75,
+      "n_labels": 8,
+      "n_train": 8999,
+      "n_val": 716,
+      "n_test": 1522
+    },
+    {
+      "dataset": "shoaib",
+      "ceiling_supervised_f1": 99.05,
+      "stream": "phone_right_pocket",
+      "zeroshot_f1": 34.88993919871683,
+      "gap": 64.16,
+      "n_labels": 7,
+      "n_train": 1680,
+      "n_val": 210,
+      "n_test": 210
+    },
+    {
+      "dataset": "inclusivehar",
+      "ceiling_supervised_f1": 60.96,
+      "stream": "phone_waist",
+      "zeroshot_f1": 23.984544855963673,
+      "gap": 36.97,
+      "n_labels": 6,
+      "n_train": 1006,
+      "n_val": 131,
+      "n_test": 123
+    },
+    {
+      "dataset": "usc_had",
+      "ceiling_supervised_f1": 73.88,
+      "stream": "phone_hip",
+      "zeroshot_f1": 7.615554392305522,
+      "gap": 66.27,
+      "n_labels": 12,
+      "n_train": 3456,
+      "n_val": 415,
+      "n_test": 479
+    },
+    {
+      "dataset": "ut_complex",
+      "ceiling_supervised_f1": 89.94,
+      "stream": "watch_wrist",
+      "zeroshot_f1": 39.893757848690875,
+      "gap": 50.05,
+      "n_labels": 13,
+      "n_train": 3120,
+      "n_val": 390,
+      "n_test": 390
+    }
+  ],
+  "mean_ceiling": 84.83,
+  "mean_zeroshot": 32.71,
+  "mean_gap": 52.12,
+  "elapsed_s": 25.681
+}

@@ -1,8 +1,9 @@
 # Native Phase-A pretrain — pre-launch manifest (2026-07-19)
 
-> ⚠️ **RECIPE SUPERSEDED (2026-07-24).** This predates the SSL pivot and describes the OLD objective
+> **RECIPE SUPERSEDED (2026-07-25).** This predates the current SSL recipe and describes the OLD objective
 > (SupCon, A3 0.1, balanced sampling, old batch/LR). The **authoritative** current launch recipe —
-> A1 + SimCLR + TF-C-inspired, temperature sampler, factored conditioning — is the table in
+> fixed/EMA A1 + augmentation/TF-C/placement VICReg + A3, temperature sampler, factored
+> conditioning — is the table in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md), mirroring the live
 > `PretrainConfig`. Use that for any launch.
 
@@ -19,7 +20,8 @@ Save this next to the run.
   optimizer/scheduler/scaler/RNG (warm-resume via `--resume`).
 
 ## Corpus (native alignment)
-- **20 streams · 305,049 train / 38,186 val windows · 93 labels.** Subject-disjoint split.
+- **20 streams · 300,231 train / 42,909 val windows · 93 labels.** Subject-disjoint split after
+  the 2026-07-25 event-grid migration and 95 implausible-window exclusions.
 - **Native sampling rates:** 20 Hz (70,205 win) · 50 Hz (86,101) · 100 Hz (186,929). No 60 Hz resample
   — the filterbank is rate-invariant; HALO trains on real native rates + the `rate`/`window_crop` augs.
 - All native grids finite, 6-channel `[acc xyz, gyro xyz]` pad+mask, accel in g, canonical labels.

@@ -1,0 +1,65 @@
+{
+  "_baseline": "imagebind",
+  "_dataset": "ut_complex",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.imagebind.adapter",
+    "class": "ImageBindAdapter",
+    "tier": "cosine"
+  },
+  "_timing": {
+    "setup_s": 9.778,
+    "cell_s": 1.694
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 7.642752427344683,
+    "balanced_accuracy": 12.871794871794872,
+    "accuracy": 12.871794871794872,
+    "f1_weighted": 7.642752427344683,
+    "n_samples": 3900,
+    "n_gt_classes": 13,
+    "n_scored_classes": 13,
+    "f1_macro_ci_lo": 6.170398785910162,
+    "f1_macro_ci_hi": 9.115106068779204,
+    "n_subjects": 10,
+    "n_folds": 10,
+    "ci_method": "subject_groupkfold_loso",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "biking": 50.712250712250714,
+      "drinking_coffee": 9.9644128113879,
+      "eating": 0.0,
+      "jogging": 0.0,
+      "sitting": 1.972872996300863,
+      "smoking": 7.339449541284404,
+      "standing": 0.0,
+      "talking": 9.118541033434651,
+      "typing": 0.0,
+      "walking": 0.0,
+      "walking_downstairs": 20.24825446082234,
+      "walking_upstairs": 0.0,
+      "writing": 0.0
+    },
+    "predicted_classes": [
+      "biking",
+      "drinking_coffee",
+      "jogging",
+      "sitting",
+      "smoking",
+      "standing",
+      "talking",
+      "typing",
+      "walking_downstairs",
+      "walking_upstairs",
+      "writing"
+    ]
+  }
+}

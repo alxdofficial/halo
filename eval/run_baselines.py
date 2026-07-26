@@ -1,8 +1,8 @@
-"""Generic baseline evaluation RUNNER for the ZS-XD protocol (v2).
+"""Generic baseline evaluation runner for the current ZS-XD protocol.
 
 One loop over the adapter ``baselines.REGISTRY`` — no per-baseline dispatch.
 Each registered adapter is scored on every held-out eval dataset/stream via its
-shared :meth:`BaselineAdapter.evaluate`, which returns either a v2 metric bundle
+shared :meth:`BaselineAdapter.evaluate`, which returns either the current metric bundle
 or a disclosed ``{"status": "n/a", ...}`` for an incompatible dataset. Every
 (baseline, dataset, stream) cell is written to its own JSON under
 ``eval/results/`` (gitignored) so the table assembler can reject a missing or
@@ -31,13 +31,21 @@ Usage::
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import fcntl
 import json
+import os
+import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
 import baselines as B
 from data.scripts.curate import deployment_policy as policy
+from eval.protocol import protocol_fingerprint
 
 REPO = Path(__file__).resolve().parents[1]
 RESULTS_DIR = REPO / "eval" / "results"
@@ -78,6 +86,46 @@ def _atomic_write(path: Path, payload: dict) -> None:
     partial.replace(path)   # atomic promote — final exists only once fully written
 
 
+@contextmanager
+def _exclusive_cell(path: Path):
+    """Prevent two current runners from evaluating/writing the same result cell."""
+    lock_path = path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(
+                f"result cell is already being evaluated by another process: {path}"
+            ) from exc
+        lock.seek(0)
+        lock.truncate()
+        lock.write(f"pid={os.getpid()} acquired={datetime.now(timezone.utc).isoformat()}\n")
+        lock.flush()
+        yield
+
+
+def _run_provenance() -> dict:
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=REPO, text=True, stderr=subprocess.DEVNULL,
+        ).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"],
+            cwd=REPO, text=True, stderr=subprocess.DEVNULL,
+        ).strip())
+    except (OSError, subprocess.CalledProcessError):
+        commit, dirty = None, None
+    return {
+        "id": str(uuid.uuid4()),
+        "started_utc": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        "git_commit": commit,
+        "git_dirty": dirty,
+    }
+
+
 # =============================================================================
 # One cell
 # =============================================================================
@@ -91,49 +139,58 @@ def run_cell(
     device,
     state,
     results_dir: Path,
+    setup_elapsed_s: float = 0.0,
+    run_provenance: dict | None = None,
 ) -> str:
     """Score one (baseline, dataset, stream) cell and write its JSON.
 
     Returns the cell ``_status``: ``"complete"``, ``"na"`` or ``"failed"``.
     """
     out_path = result_path(results_dir, baseline, dataset, stream)
-    # Drop any stale final BEFORE running so a crash can't leave last run's file.
-    if out_path.exists():
-        out_path.unlink()
+    with _exclusive_cell(out_path):
+        # Drop any stale final BEFORE running so a crash can't leave last run's file.
+        if out_path.exists():
+            out_path.unlink()
 
-    # Stamp the protocol into EVERY cell (including failures and n/a), so the assembler can tell
-    # a 59-label result from a 93-label one. Without this, stale results are indistinguishable
-    # from current ones and a table silently mixes protocols.
-    from eval.protocol import protocol_fingerprint
-    base = {"_baseline": baseline, "_dataset": dataset, "_stream": stream,
-            "_alignment": alignment, "_protocol": protocol_fingerprint()}
-    adapter = B.REGISTRY[baseline]
-    try:
-        result = adapter.evaluate(dataset, stream, alignment=alignment,
-                                  device=device, state=state)
-    except Exception as e:  # a crash is a RECORDED failure, never a silent skip
-        import traceback
-        traceback.print_exc()
-        _atomic_write(out_path, {**base, "_status": "failed", "error": repr(e)})
-        print(f"  {dataset:14} {stream:22} FAILED: {e}")
-        return "failed"
+        # Stamp the protocol into EVERY cell (including failures and n/a), so the assembler can tell
+        # a 59-label result from a 93-label one. Without this, stale results are indistinguishable
+        # from current ones and a table silently mixes protocols.
+        adapter = B.REGISTRY[baseline]
+        base = {"_baseline": baseline, "_dataset": dataset, "_stream": stream,
+                "_alignment": alignment, "_protocol": protocol_fingerprint(),
+                "_run": run_provenance or _run_provenance(),
+                "_adapter": {"module": type(adapter).__module__, "class": type(adapter).__name__,
+                             "tier": adapter.tier},
+                "_timing": {"setup_s": round(float(setup_elapsed_s), 3)}}
+        cell_started = time.time()
+        try:
+            result = adapter.evaluate(dataset, stream, alignment=alignment,
+                                      device=device, state=state)
+        except Exception as e:  # a crash is a RECORDED failure, never a silent skip
+            import traceback
+            traceback.print_exc()
+            base["_timing"]["cell_s"] = round(time.time() - cell_started, 3)
+            _atomic_write(out_path, {**base, "_status": "failed", "error": repr(e)})
+            print(f"  {dataset:14} {stream:22} FAILED: {e}")
+            return "failed"
 
-    if isinstance(result, dict) and result.get("status") == "n/a":
-        _atomic_write(out_path, {**base, "_status": "na",
-                                 "na_reason": result.get("reason", "")})
-        print(f"  {dataset:14} {stream:22} N/A ({result.get('reason', '')})")
-        return "na"
+        base["_timing"]["cell_s"] = round(time.time() - cell_started, 3)
+        if isinstance(result, dict) and result.get("status") == "n/a":
+            _atomic_write(out_path, {**base, "_status": "na",
+                                     "na_reason": result.get("reason", "")})
+            print(f"  {dataset:14} {stream:22} N/A ({result.get('reason', '')})")
+            return "na"
 
-    _atomic_write(out_path, {**base, "_status": "complete", "metrics": result})
-    f1 = result.get("f1_macro")
-    if result.get("ci_degenerate"):
-        ci = "[degenerate]"
-    else:
-        ci = f"[{result.get('f1_macro_ci_lo', float('nan')):.1f}," \
-             f"{result.get('f1_macro_ci_hi', float('nan')):.1f}]"
-    print(f"  {dataset:14} {stream:22} F1={f1:5.1f} {ci}  "
-          f"bAcc={result.get('balanced_accuracy', float('nan')):5.1f}")
-    return "complete"
+        _atomic_write(out_path, {**base, "_status": "complete", "metrics": result})
+        f1 = result.get("f1_macro")
+        if result.get("ci_degenerate"):
+            ci = "[degenerate]"
+        else:
+            ci = f"[{result.get('f1_macro_ci_lo', float('nan')):.1f}," \
+                 f"{result.get('f1_macro_ci_hi', float('nan')):.1f}]"
+        print(f"  {dataset:14} {stream:22} F1={f1:5.1f} {ci}  "
+              f"bAcc={result.get('balanced_accuracy', float('nan')):5.1f}")
+        return "complete"
 
 
 # =============================================================================
@@ -152,6 +209,7 @@ def run(
     ``failed_cells`` is a list of ``(baseline, dataset, stream)``."""
     results_dir.mkdir(parents=True, exist_ok=True)
     cells = resolve_eval_cells(datasets)
+    provenance = _run_provenance()
 
     unknown = [b for b in baselines if b not in B.REGISTRY]
     if unknown:
@@ -167,6 +225,7 @@ def run(
         # setup once per baseline; a setup crash fails every cell for it (recorded).
         state = None
         setup_error = None
+        setup_started = time.time()
         try:
             state = adapter.setup(device)
         except Exception as e:
@@ -174,21 +233,36 @@ def run(
             traceback.print_exc()
             setup_error = e
             print(f"  !! setup failed: {e}")
+        setup_elapsed_s = time.time() - setup_started
 
         ran.append(name)
         for ds, stream in cells:
             if setup_error is not None:
                 out_path = result_path(results_dir, name, ds, stream)
-                if out_path.exists():
-                    out_path.unlink()
-                _atomic_write(out_path, {"_baseline": name, "_dataset": ds,
-                                         "_stream": stream, "_alignment": alignment,
-                                         "_status": "failed",
-                                         "error": f"setup failed: {setup_error!r}"})
+                with _exclusive_cell(out_path):
+                    if out_path.exists():
+                        out_path.unlink()
+                    _atomic_write(out_path, {"_baseline": name, "_dataset": ds,
+                                             "_stream": stream, "_alignment": alignment,
+                                             "_protocol": protocol_fingerprint(),
+                                             "_run": provenance,
+                                             "_adapter": {
+                                                 "module": type(adapter).__module__,
+                                                 "class": type(adapter).__name__,
+                                                 "tier": adapter.tier,
+                                             },
+                                             "_timing": {
+                                                 "setup_s": round(setup_elapsed_s, 3),
+                                                 "cell_s": 0.0,
+                                             },
+                                             "_status": "failed",
+                                             "error": f"setup failed: {setup_error!r}"})
                 failed_cells.append((name, ds, stream))
                 continue
             status = run_cell(name, ds, stream, alignment=alignment, device=device,
-                              state=state, results_dir=results_dir)
+                              state=state, results_dir=results_dir,
+                              setup_elapsed_s=setup_elapsed_s,
+                              run_provenance=provenance)
             if status == "failed":
                 failed_cells.append((name, ds, stream))
 
@@ -223,7 +297,9 @@ def main(argv=None) -> int:
     device = args.device or _default_device()
     results_dir = Path(args.results_dir)
 
-    print(f"Protocol v2 | device={device} | alignment={args.alignment} | "
+    protocol = protocol_fingerprint()
+    print(f"Protocol v{protocol['version']} ({protocol['n_labels']} labels) | "
+          f"device={device} | alignment={args.alignment} | "
           f"registry={sorted(B.REGISTRY)} | run={baselines}")
 
     ran, failed_cells = run(baselines, args.datasets, alignment=args.alignment,

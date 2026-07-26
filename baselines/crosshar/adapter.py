@@ -4,7 +4,7 @@ CrossHAR is a self-supervised IMU method (masked-reconstruction + contrastive) â
 it ships NO released weights, so its backbone is pretrained ON OUR CORPUS by
 ``baselines/crosshar/train.py`` (see that file for the full-run command). This
 adapter loads that self-pretrained backbone and, exactly like the harnet adapter,
-fits a softmax head over OUR 59-way global training vocabulary
+fits a softmax head over our current global training vocabulary
 (``data/labels/global_labels.json``) so CrossHAR is scored zero-shot through the
 ConSE bridge.
 

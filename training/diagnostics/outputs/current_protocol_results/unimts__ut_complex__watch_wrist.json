@@ -1,0 +1,67 @@
+{
+  "_baseline": "unimts",
+  "_dataset": "ut_complex",
+  "_stream": "watch_wrist",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.unimts.adapter",
+    "class": "UniMTSAdapter",
+    "tier": "cosine"
+  },
+  "_timing": {
+    "setup_s": 2.96,
+    "cell_s": 3.068
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 28.31294315850296,
+    "balanced_accuracy": 32.4102564102564,
+    "accuracy": 32.41025641025641,
+    "f1_weighted": 28.31294315850295,
+    "n_samples": 3900,
+    "n_gt_classes": 13,
+    "n_scored_classes": 13,
+    "f1_macro_ci_lo": 26.33789570502644,
+    "f1_macro_ci_hi": 30.28799061197948,
+    "n_subjects": 10,
+    "n_folds": 10,
+    "ci_method": "subject_groupkfold_loso",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "biking": 40.08714596949891,
+      "drinking_coffee": 16.764459346186086,
+      "eating": 16.129032258064516,
+      "jogging": 98.36065573770492,
+      "sitting": 40.74074074074074,
+      "smoking": 23.40966921119593,
+      "standing": 0.7782101167315175,
+      "talking": 1.9543973941368076,
+      "typing": 0.4464285714285714,
+      "walking": 57.90554414784395,
+      "walking_downstairs": 43.47826086956522,
+      "walking_upstairs": 23.52941176470588,
+      "writing": 4.484304932735426
+    },
+    "predicted_classes": [
+      "biking",
+      "drinking_coffee",
+      "eating",
+      "jogging",
+      "sitting",
+      "smoking",
+      "standing",
+      "talking",
+      "typing",
+      "walking",
+      "walking_downstairs",
+      "walking_upstairs",
+      "writing"
+    ]
+  }
+}

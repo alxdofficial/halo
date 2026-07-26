@@ -1,0 +1,78 @@
+{
+  "_baseline": "halo",
+  "_dataset": "usc_had",
+  "_stream": "phone_hip",
+  "_alignment": "non_harmonised",
+  "_protocol": {
+    "version": 4,
+    "n_labels": 93,
+    "vocab_fp": "05853ac157dd03ad",
+    "split_fp": "b2030909040a1dce"
+  },
+  "_adapter": {
+    "module": "baselines.halo.adapter",
+    "class": "HALOAdapter",
+    "tier": "conse"
+  },
+  "_timing": {
+    "setup_s": 56.012,
+    "cell_s": 9.46
+  },
+  "_status": "complete",
+  "metrics": {
+    "f1_macro": 7.615554392305522,
+    "balanced_accuracy": 16.501341961952868,
+    "accuracy": 18.620689655172416,
+    "f1_weighted": 7.760577417506576,
+    "n_samples": 4350,
+    "n_gt_classes": 12,
+    "n_scored_classes": 12,
+    "f1_macro_ci_lo": 6.226318972431577,
+    "f1_macro_ci_hi": 9.639447303831052,
+    "bootstrap_B": 1000,
+    "n_subjects": 14,
+    "ci_method": "subject_bootstrap",
+    "ci_degenerate": false,
+    "per_class_f1": {
+      "elevator_down": 0.0,
+      "elevator_up": 0.0,
+      "jumping_up": 12.345679012345679,
+      "running_forward": 7.90273556231003,
+      "sitting": 28.048272992093214,
+      "sleeping": 0.9331259720062209,
+      "standing": 9.375,
+      "walking_downstairs": 0.0,
+      "walking_forward": 0.0,
+      "walking_left": 0.0,
+      "walking_right": 32.78183916891112,
+      "walking_upstairs": 0.0
+    },
+    "reachable_nn_lb": [
+      "elevator_down",
+      "elevator_up",
+      "jumping_up",
+      "running_forward",
+      "sitting",
+      "sleeping",
+      "standing",
+      "walking_downstairs",
+      "walking_forward",
+      "walking_left",
+      "walking_right",
+      "walking_upstairs"
+    ],
+    "reachability_lb": 1.0,
+    "predicted_classes": [
+      "elevator_down",
+      "jumping_up",
+      "running_forward",
+      "sitting",
+      "sleeping",
+      "standing",
+      "walking_downstairs",
+      "walking_right"
+    ],
+    "n_predicted_classes": 8,
+    "top_T": 10
+  }
+}

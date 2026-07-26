@@ -21,6 +21,7 @@ from training.tokenizer.pretrain_data import (  # noqa: E402
     MultiResolutionCollate,
     MultiScaleCollate,
     PretrainDataset,
+    TemperatureSampler,
     WindowKey,
     stream_channel_descriptions,
 )
@@ -174,6 +175,65 @@ def test_sampler_source_balances_within_label():
     uni = BalancedBatchSampler(keys, 1, 8, steps_per_epoch=300)  # no stream_datasets -> old behaviour
     c2 = Counter(sd[keys[i].stream_i] for batch in uni for i in batch)
     assert c2["small"] / (c2["big"] + c2["small"]) < 0.1         # uniform-over-pool follows raw count
+
+
+def test_temperature_sampler_reserves_verified_event_pairs():
+    keys = [WindowKey(i % 2, i, 0) for i in range(100)]
+    # Ten events have two placements; all remaining windows are unrelated.
+    positive = [-1] * 100
+    event_ids = list(range(100))
+    for event in range(10):
+        positive[2 * event] = positive[2 * event + 1] = event
+        event_ids[2 * event] = event_ids[2 * event + 1] = event
+    sampler = TemperatureSampler(
+        keys, ["a", "b"], num_samples=40, batch_size=40,
+        event_ids=event_ids, positive_event_ids=positive, pair_fraction=0.2, seed=3,
+    )
+    batch = list(sampler)
+    counts = {}
+    for i in batch:
+        if positive[i] >= 0:
+            counts[positive[i]] = counts.get(positive[i], 0) + 1
+    assert sum(count == 2 for count in counts.values()) == 4
+    assert len(batch) == len(set(batch)) == 40
+
+
+def test_temperature_sampler_caps_datasets_and_tempers_subjects():
+    # Five datasets make a 25% ceiling feasible. Dataset 0 is 10x larger than every other source;
+    # within it, subject 0 has 90 windows and subject 1 has 10.
+    sizes = [100, 10, 10, 10, 10]
+    keys, datasets, subjects = [], [], []
+    for stream, size in enumerate(sizes):
+        for window in range(size):
+            keys.append(WindowKey(stream, window, 0))
+            datasets.append(f"d{stream}")
+            subjects.append(int(window >= 90) if stream == 0 else 0)
+    sampler = TemperatureSampler(
+        keys, [f"d{i}" for i in range(5)], num_samples=100,
+        alpha=0.25, subject_ids=subjects, subject_alpha=0.5,
+        max_dataset_share=0.25,
+    )
+    assert sampler.dataset_probabilities["d0"] == pytest.approx(0.25)
+    assert max(sampler.dataset_probabilities.values()) <= 0.25 + 1e-12
+    assert sum(sampler.dataset_probabilities.values()) == pytest.approx(1.0)
+
+    d0_rows = torch.tensor([i for i, dataset in enumerate(datasets) if dataset == "d0"])
+    d0_weight = sampler.weights[d0_rows].sum()
+    subject0 = sampler.weights[d0_rows[:90]].sum() / d0_weight
+    expected = 90**0.5 / (90**0.5 + 10**0.5)
+    assert float(subject0) == pytest.approx(expected)
+
+
+def test_verified_event_pair_extraction_requires_distinct_streams():
+    from training.tokenizer.pretrain import verified_event_pairs
+    left, right = verified_event_pairs(
+        ["e1", "e1", "e2", "e2", "e3"],
+        torch.tensor([True, True, True, True, False]),
+        ["a", "b", "a", "a", "c"],
+        torch.device("cpu"),
+    )
+    assert left.tolist() == [0]
+    assert right.tolist() == [1]
 
 
 def test_no_hapt_uci_leak(index):
@@ -333,3 +393,27 @@ def test_gravity_aligned_in_collate(index):
     if present.any():
         z_frac = acc0[present, 2].abs() / mag[present].clamp(min=1e-6)
         assert z_frac.median() > 0.9, "gravity not aligned to +z in collate"
+
+
+def test_source_rate_is_bounded_by_the_hardware_clock_after_rate_augmentation():
+    """Observability is min(hardware, augmented). Resampling never widens measured bandwidth.
+
+    Regression for the pre-2026-07-26 formula ``src0 * augmented / stored``, which advertised
+    94 Hz of bandwidth for wisdm windows upsampled from 20 Hz (32 observable bands where only 26
+    carry signal) and hid 5 real bands when xrf_v2's 25 Hz AirPods stream was downsampled.
+    """
+    from training.tokenizer.pretrain_data import STREAM_SOURCE_RATE_HZ
+
+    def bound(key, stored_hz, augmented_hz):
+        hw = STREAM_SOURCE_RATE_HZ.get(key, stored_hz)
+        return min(float(hw), float(augmented_hz))
+
+    # No converter resample: the stored rate IS the hardware rate.
+    assert bound("wisdm/phone_pocket", 20.0, 94.15) == 20.0     # upsample cannot add bandwidth
+    assert bound("wisdm/phone_pocket", 20.0, 12.0) == 12.0      # downsample genuinely narrows it
+    assert bound("capture24/watch_wrist", 100.0, 41.0) == 41.0
+
+    # Converter stored these ABOVE their capture clock; the clock still bounds them.
+    assert bound("xrf_v2/airpods_ear", 50.0, 81.43) == 25.0
+    assert bound("xrf_v2/airpods_ear", 50.0, 21.88) == 21.88    # not 25 * 21.88/50 = 10.94
+    assert bound("extrasensory/watch_wrist", 50.0, 90.0) == 25.0
