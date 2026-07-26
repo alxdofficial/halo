@@ -27,6 +27,8 @@ class GridRef:
     mask: tuple[bool, ...]
     labels: tuple[str, ...]
     subjects: tuple[str, ...]
+    event_ids: tuple[str, ...]
+    event_ids_explicit: bool
     shape: tuple[int, int, int]
     grid_dir: Path
 
@@ -40,6 +42,10 @@ class GridRef:
 
     @property
     def duration_seconds(self) -> float:
+        # An empty placeholder grid (a failed/absent conversion) carries rate 0. Report no
+        # duration rather than raising ZeroDivisionError in every caller that sums hours.
+        if self.rate_hz <= 0 or self.shape[0] == 0:
+            return 0.0
         return self.shape[0] * self.shape[1] / self.rate_hz
 
     def load_data(self) -> np.ndarray:
@@ -67,11 +73,19 @@ def discover_grids(
         channels = tuple(map(str, meta["channels"]))
         labels = tuple(map(str, meta["labels"]))
         subjects = tuple(map(str, meta["subjects"]))
+        event_ids_explicit = "event_ids" in meta and len(meta["event_ids"]) == data.shape[0]
+        event_ids = (
+            tuple(map(str, meta["event_ids"]))
+            if event_ids_explicit
+            else tuple(f"{meta['dataset']}/{meta['stream_id']}:{i}" for i in range(data.shape[0]))
+        )
 
         if data.ndim != 3:
             raise ValueError(f"{grid_dir}: expected (N,T,C), got {data.shape}")
         if len(labels) != data.shape[0] or len(subjects) != data.shape[0]:
             raise ValueError(f"{grid_dir}: labels/subjects do not match window count")
+        if len(event_ids) != data.shape[0]:
+            raise ValueError(f"{grid_dir}: event_ids do not match window count")
         if len(channels) != data.shape[2] or mask.shape != (data.shape[2],):
             raise ValueError(f"{grid_dir}: channels/mask do not match channel dimension")
 
@@ -84,6 +98,8 @@ def discover_grids(
             mask=tuple(map(bool, mask)),
             labels=labels,
             subjects=subjects,
+            event_ids=event_ids,
+            event_ids_explicit=event_ids_explicit,
             shape=tuple(map(int, data.shape)),
             grid_dir=grid_dir,
         ))
