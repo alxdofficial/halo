@@ -1,0 +1,30 @@
+{
+  "display_name": "H-MOG",
+  "sampling_rate_hz": 100,
+  "channels": [
+    "acc_x",
+    "acc_y",
+    "acc_z",
+    "gyro_x",
+    "gyro_y",
+    "gyro_z"
+  ],
+  "core_channels": {
+    "acc_x": "acc_x",
+    "acc_y": "acc_y",
+    "acc_z": "acc_z",
+    "gyro_x": "gyro_x",
+    "gyro_y": "gyro_y",
+    "gyro_z": "gyro_z"
+  },
+  "extra_channels": [],
+  "placement": "Samsung Galaxy S4 held in the hand",
+  "num_subjects": 100,
+  "activities": [
+    "sitting",
+    "walking"
+  ],
+  "role": "optional_phase_a_scale",
+  "streaming_grid": true,
+  "note": "Controlled phone-use sessions: reading, writing, and map navigation while sitting or walking. Converter synchronizes native 100 Hz accelerometer and gyroscope by monotonic event time, splits gaps, and retains complete 6-second blocks. Acceleration is m/s^2 with gravity present; gyroscope is rad/s."
+}

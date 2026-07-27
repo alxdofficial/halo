@@ -1,0 +1,9 @@
+Official dataset, data dictionary, terms, and checksum:
+https://hmog-dataset.github.io/hmog/
+
+Primary publication:
+https://doi.org/10.1109/TIFS.2015.2506542
+https://arxiv.org/abs/1501.01199
+
+Dataset publication:
+https://doi.org/10.1145/2668332.2668366

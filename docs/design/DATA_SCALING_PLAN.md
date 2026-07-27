@@ -8,11 +8,12 @@ materialised, and allowed into each experiment.
 Keep two claims separate:
 
 1. **Technique comparison:** the frozen 12-source corpus is the default for HALO and corpus-matched
-   baselines. ExtraSensory and NHANES are absent. This is the arm used to argue that the method, rather
-   than extra data, improves results.
-2. **Data-scaling ablation:** explicitly add ExtraSensory and a versioned, bounded NHANES subset. This
-   tests whether more free-living variation raises HALO's ceiling. It must be reported as an expanded
-   data result, never substituted for the matched technique comparison.
+   baselines. ExtraSensory, NHANES, and H-MOG are absent. This is the arm used to argue that the
+   method, rather than extra data, improves results.
+2. **Data-scaling ablation:** explicitly add ExtraSensory, a versioned bounded NHANES subset, and
+   H-MOG. This tests whether more free-living variation plus a large six-channel phone-in-hand source
+   raises HALO's ceiling. It must be reported as an expanded data result, never substituted for the
+   matched technique comparison.
 
 Optional datasets require both `build_grids --dataset ...` and an explicit `pretrain --datasets ...`
 roster. Missing requested grids fail fast. The exact roster and subset manifest are persisted.
@@ -23,21 +24,21 @@ multi-placement, gyro-bearing share. "More free-living data did not help" and "t
 heterogeneous" are not distinguishable from the headline number alone; report the per-source val
 breakdown alongside it.
 
-Draw shares must be measured from `TemperatureSampler`, not computed as `n^α / Σn^α`. The α=0.5
+Draw shares must be measured from `TemperatureSampler`, not computed as `n^α / Σn^α`. The alpha=0.25
 weights are only half the story: `placement_pair_fraction=0.1` reserves ~10% of every batch for
 *verified simultaneous* events, which exist **only** in nfi_fared and xrf_v2, so those two are
-oversampled on top of their temperature weight. Measured over 10 batches of 512 on the primary
-corpus:
+oversampled on top of their temperature weight. Measured over 256,000 draws in batches of 256 on the
+primary corpus:
 
 | dataset | pair_fraction=0 | **actual (0.1)** |
 |---|---:|---:|
-| capture24 | 47.4% | **43.3%** |
-| nfi_fared | 6.5% | **13.4%** ← 2× |
-| wisdm | 10.5% | 9.6% |
-| xrf_v2 | 8.1% | **9.2%** |
-| harmes | 5.8% | 4.8% |
-| uci_har | 4.1% | 3.1% |
-| others | — | ≤4% each |
+| capture24 | 23.3% | **21.0%** |
+| nfi_fared | 8.5% | **14.8%** |
+| xrf_v2 | 9.0% | **11.3%** |
+| wisdm | 10.8% | 9.7% |
+| harmes | 7.8% | 7.0% |
+| uci_har | 6.7% | 6.0% |
+| others | — | <=6.1% each |
 
 nfi_fared has 12,263 eligible paired events against xrf_v2's 5,124, so the quota lands mostly on
 nfi_fared. An earlier revision of this table quoted the analytic `n^α` shares (capture24 33.5%,
@@ -49,7 +50,7 @@ roster into a primary-corpus claim.
 | Corpus | Streams | Materialised windows | Materialised hours | Train / val at the default data seed 20260718 | Semantic labels |
 |---|---:|---:|---:|---:|---:|
 | Primary 12 sources | 20 | 1,729,885 | 2,858.34 | 1,542,518 / 186,269 (95 implausible + 1,003 duplicate dropped) | 93 |
-| Expanded (+ExtraSensory + NHANES pilot) | 24 | 2,504,001 | 4,148.53 | 2,212,911 / 256,247 (95 implausible + 34,748 duplicate dropped) | 93 + reserved `__unlabeled__` |
+| Expanded (+ExtraSensory + NHANES pilot + H-MOG) | 25 | 2,695,536 | 4,467.76 | 2,382,969 / 277,724 (95 implausible + 34,748 duplicate dropped) | 93 + reserved `__unlabeled__` |
 
 The seed is `pretrain.py`'s `data_seed` default; an earlier revision of this table quoted 20260726,
 which no default command reproduces. Materialised counts are what `build_grids` wrote; the train/val
@@ -95,6 +96,7 @@ Capture-24 subsets.
 | Capture-24 | Already local, full 6.4 GB source release | All 151 subjects; random raw/session/grid samples | **Enabled in primary, uncapped** |
 | ExtraSensory | Official HTTP archives return 200 with stable sizes; 7.54 GB already local | Full phone, watch, labels, and author CV/platform split | **Enabled as optional labelled Phase A** |
 | NHANES PAX80_G | Live CDC index exposes 6,917 archives; individual HEAD/download works | Eight deterministic participants (1.37 GB compressed), 24 spread hours each | **Enabled as optional label-free Phase A pilot** |
+| H-MOG | Official Box archive returns 200; 6,132,356,276 bytes with published MD5 | All 100 nested participant archives, bundled schema, real sessions, converter and native grid | **Enabled as optional labelled Phase A** |
 | PAAWS Release 2 | Official website and GitHub parser are public, but Northeastern collection returns HTTP 403 from this machine | Official sample file only; no released participant archive | **Not integrated** |
 
 The PAAWS sample confirms ActiGraph CSV headers, 80 Hz acceleration in g, 100 Hz IMU in the lab, and
@@ -164,43 +166,62 @@ grouping, release-wide units, or download reproducibility, so no converter is co
 - Local sources: `references/datasets/nhanes/procedures_manual.pdf` and
   `references/datasets/nhanes/pax80_g_documentation.html`.
 
+### H-MOG
+
+- Samsung Galaxy S4 held in the hand during reading, writing, and map-navigation tasks.
+- Co-located accelerometer (m/s², gravity present) and gyroscope (rad/s), nominally 100 Hz.
+- The bundled data dictionary defines `Gesture_scenario` 1/2 as sitting/walking. Conversion checks
+  that field against the independent odd/even `TaskID` protocol code before assigning labels.
+- Sensor streams are synchronized on monotonic `EventTime`. Gaps over 250 ms split the signal; each
+  continuous block is truncated to complete six-second windows, so no grid window crosses a gap.
+- The official files repeat some `ActivityID` metadata rows. Protocol fields must agree before
+  deduplication. One outer archive ID typo (`207969` -> unique internal ID `207696`) is retained as an
+  explicit manifest alias for subject-disjoint splitting.
+- Materialized: 191,535 windows / 319.23 h from 100 participants, 154.41 h sitting and 164.82 h
+  walking. Full-grid screens found no physical-rail violations and no byte-identical duplicates.
+- Local sources: `references/datasets/hmog/{paper.pdf,data_description.pdf}`.
+
 ## Augmentation and conditioning compatibility
 
-All optional streams are accelerometer-only. Their native grids use the standard six-slot layout
-`[acc_xyz, gyro_xyz]`; absent gyro channels are zero and masked. Real end-to-end samples verified that
-signal/rate/crop/rotation/gravity/text augmentations preserve those zeros and masks through both
-independent views and multi-resolution collate.
+ExtraSensory and NHANES are accelerometer-only; H-MOG carries real co-located accelerometer and
+gyroscope. Every native grid uses the standard six-slot layout `[acc_xyz, gyro_xyz]`; absent gyro
+channels are zero and masked. Real end-to-end samples verified that signal/rate/crop/rotation/gravity/
+text augmentations preserve zeros and masks through both independent views and multi-resolution
+collate, and the H-MOG smoke exercised all six real channels.
 
 Configuration text is distinct:
 
 - ExtraSensory: phone + hand, phone + trouser pocket, watch + wrist.
 - NHANES: watch + non-dominant wrist.
+- H-MOG: Samsung Galaxy S4 phone + hand.
 
 Acquisition-rate metadata remains distinct from storage rate: ExtraSensory watch is observed at 25 Hz
 although stored at 50 Hz; phone observability uses a conservative 30 Hz source floor; NHANES remains
-80 Hz. This prevents the filterbank from claiming unobservable high-frequency bands.
+80 Hz; H-MOG remains at its native 100 Hz. This prevents the filterbank from claiming unobservable
+high-frequency bands.
 
 ## Sampling implications
 
-The default temperature sampler uses `P(dataset) proportional to n_dataset^0.5`, not raw proportional
+The default temperature sampler uses `P(dataset) proportional to n_dataset^0.25`, not raw proportional
 sampling. Expected primary shares are:
 
 | Dataset | Primary draw share |
 |---|---:|
-| Capture-24 | 48.65% |
-| WISDM | 10.42% |
-| XRF V2 | 7.33% |
-| NFI-FARED | 6.40% |
-| HARMES | 5.36% |
-| all other primary datasets combined | 21.84% |
+| Capture-24 | 21.0% |
+| NFI-FARED | 14.8% |
+| XRF V2 | 11.3% |
+| WISDM | 9.7% |
+| HARMES | 7.0% |
+| all other primary datasets combined | 36.2% |
 
-Expanded shares put Capture-24 at 33.49%, ExtraSensory at 21.97%, and NHANES at 9.19%. Within
-ExtraSensory, raw window-proportional drawing makes the watch 84.5% of that dataset's samples. Thus the
-expanded run is intentionally a free-living wrist-heavy scale experiment, not a balanced placement
-experiment. Per-source and per-stream telemetry should be inspected before changing the sampler.
+For the 15-source expanded roster with the pair quota included, measured shares are Capture-24 14.5%,
+NFI-FARED 12.5%, ExtraSensory 11.6%, H-MOG 8.6%, XRF V2 8.5%, and NHANES 7.4%. Within ExtraSensory,
+raw window-proportional drawing makes the watch 84.5% of that dataset's samples. H-MOG therefore
+restores a substantial gyro-bearing phone stream without dominating the expanded arm. Per-source and
+per-stream telemetry should be inspected before changing the sampler.
 
-At batch 512 and 30,000 steps, training draws 15.36 million windows with replacement: about 8.9 raw
-corpus equivalents for primary and 6.1 for expanded, but exposure differs by source. To preserve
+At batch 256 and 30,000 steps, training draws 7.68 million windows with replacement: about 4.4 raw
+corpus equivalents for primary and 2.8 for expanded, but exposure differs by source. To preserve
 approximately the primary run's Capture-24 exposure in the expanded arm requires about 45,000 steps.
 Report both data roster and optimizer steps; “epochs” alone is not well-defined under temperature
 sampling.
@@ -208,7 +229,7 @@ sampling.
 ## Launch sequence
 
 1. Run the matched 12-source Phase A at the frozen 30,000-step recipe.
-2. Run the 14-source expanded pilot at the same 30,000 steps as a fixed-compute ablation.
+2. Run the 15-source expanded pilot at the same 30,000 steps as a fixed-compute ablation.
 3. If the pilot moves transfer/retrieval metrics, run a predeclared approximately 45,000-step
    exposure-matched arm.
 4. Only then expand NHANES subject count. Prefer more subjects over more hours per subject; 64 subjects
@@ -231,5 +252,6 @@ Primary online sources:
 - ExtraSensory: http://extrasensory.ucsd.edu/
 - NHANES PAX80_G documentation:
   https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2011/DataFiles/PAX80_G.htm
+- H-MOG: https://hmog-dataset.github.io/hmog/
 - Capture-24: https://www.nature.com/articles/s41597-024-03960-3
 - PAAWS release status and formats: https://www.paawsstudy.org/data.html

@@ -83,12 +83,13 @@ Dump the live config any time with:
 
 ## Optional scale experiment
 
-ExtraSensory and a bounded NHANES PAX80_G subset are fully wired but deliberately opt-in. They are not
-silently mixed into the paper's matched 12-source technique comparison. The current local pilot adds
-three ExtraSensory streams and one NHANES stream, bringing the expanded materialisation to 4,148.5
-hours and the current subject split to 2,260,852 train / 243,054 validation windows. NHANES has no
-activity annotations: its reserved `__unlabeled__` marker is excluded from semantic vocabulary,
-validation probes, and Phase B.
+ExtraSensory, a bounded NHANES PAX80_G subset, and H-MOG are fully wired but deliberately opt-in.
+They are not silently mixed into the paper's matched 12-source technique comparison. The current
+local pilot adds three ExtraSensory streams, one NHANES stream, and one H-MOG phone-in-hand stream,
+bringing the expanded materialisation to 25 streams / 4,467.76 hours and the current subject split to
+2,382,969 train / 277,724 validation windows after quality screens. NHANES has no activity
+annotations: its reserved `__unlabeled__` marker is excluded from semantic vocabulary, validation
+probes, and Phase B.
 
 ```bash
 # ExtraSensory: fetch/import -> convert -> native grids
@@ -101,14 +102,20 @@ python -m data.datasets.nhanes.fetch --subjects 8
 python -m data.datasets.nhanes.convert --max-hours-per-subject 24
 python -m data.scripts.build_grids --dataset nhanes --alignment native
 
+# H-MOG: accept the official non-commercial research terms -> verify -> convert -> native grid
+python -m data.datasets.hmog.fetch --accept-license
+python -m data.datasets.hmog.convert
+python -m data.scripts.build_grids --dataset hmog --alignment native
+
 # Expanded Phase-A run: the exact roster is persisted in run_config.json
 python -m training.tokenizer.pretrain \
   --datasets uci_har hhar pamap2 wisdm kuhar unimib_shar mhealth capture24 \
-             sp_sw_har nfi_fared harmes xrf_v2 extrasensory nhanes \
+             sp_sw_har nfi_fared harmes xrf_v2 extrasensory nhanes hmog \
   --out training/tokenizer/outputs/expanded_scale
 ```
 
-The local publications/protocol documents are under `references/datasets/{capture24,extrasensory,nhanes}`.
+The local publications/protocol documents are under
+`references/datasets/{capture24,extrasensory,nhanes,hmog}`.
 PAAWS was considered but is not integrated because its official release endpoint returns HTTP 403 from
 this machine; its public sample/parser is sufficient to inspect format, but not to validate released
 participant bytes.

@@ -167,7 +167,14 @@ class PretrainConfig:
     placement_weight: float = 0.1
     placement_pair_fraction: float = 0.1
     # Contextual masked target from a slow teacher, alongside the fixed physical A1 target.
-    ema_latent_weight: float = 0.1
+    # Raised 0.1 -> 0.3 (2026-07-26). At 0.1 the rail contributed 1.1% of objective gradient
+    # while costing a full extra no-grad encoder pass — the worst ratio in the stack. Splitting
+    # tokenize() into analyze()+project() gave the teacher the student's DSP back, roughly halving
+    # that cost, and 0.3 lifts its gradient share into the ~3% band the other rails occupy
+    # (placement 3.6%, A3 2.3%) without competing with the A1/A2 drivers (50%/44%). The target
+    # TYPE is what justifies keeping it at all: A1 predicts a fixed physical target, this predicts
+    # a slow teacher's CONTEXTUAL latent, which A1 cannot supply.
+    ema_latent_weight: float = 0.3
     ema_decay: float = 0.996
     # Label-free hierarchical corpus sampler. Dataset mass is tempered and capped, then distributed
     # within each dataset as P(subject) ∝ n_subject^subject_alpha. This keeps Capture-24's useful
@@ -186,6 +193,16 @@ class PretrainConfig:
     val_every: int = 1_000
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
     knn_k: int = 5
+    # torch.compile the encoder's transformer. OFF by default: an isolated fixed-shape
+    # microbenchmark showed 1.43x (13.57 -> 9.46 ms fwd+bwd at batch 16), but that did NOT
+    # survive the real loop. Measured end-to-end, 200 steps at batch 256 on a 4090:
+    #     eager     40.6 s   12.05 GiB
+    #     compiled  85.3 s   10.94 GiB     <- 2.1x SLOWER
+    # The loop draws patch_seconds PER BATCH, so P and patch_len change constantly and
+    # dynamic=True pays guard evaluation and repeated specialisation on every new shape —
+    # which a fixed-shape benchmark cannot see. It does save ~9% VRAM, so --compile is worth
+    # trying if you are memory-bound rather than time-bound.
+    compile_encoder: bool = False
     num_workers: int = 8                  # re-profiled 2026-07-26: the step is compute-bound well
                                           # before 12 — data is 2% of the step at nw=12 and 15% at
                                           # nw=6, so 8 is the free point and frees CPU + host RAM.
@@ -623,6 +640,9 @@ def main() -> None:
                              "ablation DEFAULT_CAP so train and metric-eval share one corpus).")
     parser.add_argument("--seed", type=int, default=None,
                         help="MODEL seed (init/augmentation/batch order). Vary this across replicates.")
+    parser.add_argument("--compile", dest="compile_encoder", action="store_true", default=None,
+                        help="torch.compile the encoder. Default OFF: measured 2.1x SLOWER "
+                             "end-to-end (per-batch shape churn) though ~9%% lighter on VRAM.")
     parser.add_argument("--data-seed", type=int, default=None,
                         help="DATA seed = the subject train/val split. Keep FIXED across all arms and "
                              "replicates so the split (and the metric harness) stays identical (#1).")
@@ -678,6 +698,8 @@ def main() -> None:
         cfg.batch_size = args.batch
     if args.seed is not None:
         cfg.seed = args.seed
+    if args.compile_encoder is not None:
+        cfg.compile_encoder = args.compile_encoder
     if args.data_seed is not None:
         cfg.data_seed = args.data_seed
     if args.datasets is not None:
@@ -1132,11 +1154,25 @@ def main() -> None:
         else:
             te_b, tm_b = model.encoder.encode_texts(batch["texts_b"], device)
             ste_b = stm_b = sid_b = None
-        return model.encoder.encode(tokens_b, te_b, tm_b, pos_b,
+        return encode_fn(tokens_b, te_b, tm_b, pos_b,
                                     patch_durations=pdur_b, resolution_ids=rids_b,
                                     channel_mask=cmask_b, patch_padding_mask=ppad_b,
                                     sensor_text_embs=ste_b, sensor_text_masks=stm_b,
                                     sensor_id=sid_b)
+
+    # One compiled callable reused by the clean / masked / view-B passes. The EMA teacher stays
+    # eager: it is no-grad, cheaper, and its weights change every step, so compiling it buys little.
+    encode_fn = model.encoder.encode
+    if cfg.compile_encoder and device.type == "cuda":
+        # `objective_encoder_grad_norm` re-walks the graph with autograd.grad(retain_graph=True)
+        # on log steps to attribute gradient per objective. Inductor's donated-buffer optimisation
+        # assumes every backward is retain_graph=False and raises at runtime otherwise, so it has
+        # to be off for the two to coexist. Keeping the telemetry: it is what showed A1b buys 1.1%
+        # of gradient for 8.2% of the step, and that is worth more than the buffer saving.
+        torch._functorch.config.donated_buffer = False
+        encode_fn = torch.compile(model.encoder.encode, dynamic=True)
+        print("torch.compile: encoder.encode (dynamic, donated_buffer off) — step 1 pays the compile",
+              flush=True)
 
     model.train()
     for step, batch in enumerate(train_loader, start=start_step + 1):
@@ -1181,9 +1217,20 @@ def main() -> None:
                         o, _ = target_tok.masks(rates, patch_len, source_rate_hz=_src)  # (B,K) observable
                         extra = o.new_ones(B, len(signal_idx) - o.shape[1])
                         a1_feature_valid = torch.cat([o, extra], dim=1).view(B, 1, 1, -1)
-                sensor_tokens = model.encoder.tokenize(
-                    patches.float(), rates, patch_len,
-                    source_rate_hz=batch.get("source_rates", rates).to(device))
+                # Split analysis from projection so the EMA teacher can reuse the DSP. On the
+                # fixed arm `analyze` is parameter-free, so the teacher's analysis would be
+                # bit-identical anyway and running the rDFT + constant-Q einsum twice per step
+                # was pure waste. The learnable arm's analysis reads EMA-diverging parameters,
+                # so it keeps its own pass (shared_analysis stays None).
+                _src_rate = batch.get("source_rates", rates).to(device)
+                if cfg.frontend == "fixed":
+                    shared_analysis = model.encoder.analyze(
+                        patches.float(), rates, patch_len, source_rate_hz=_src_rate)
+                    sensor_tokens = model.encoder.project_tokens(shared_analysis)
+                else:
+                    shared_analysis = None
+                    sensor_tokens = model.encoder.tokenize(
+                        patches.float(), rates, patch_len, source_rate_hz=_src_rate)
                 enc_channel_mask = channel_mask
                 enc_texts = batch["texts"]
             # Config-text conditioning, built ONCE and reused by the clean and masked encode passes.
@@ -1198,7 +1245,7 @@ def main() -> None:
             else:
                 text_embs, text_masks = model.encoder.encode_texts(enc_texts, device)
                 sensor_text_embs = sensor_text_masks = enc_sensor_id = None
-            clean = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
+            clean = encode_fn(sensor_tokens, text_embs, text_masks, positions,
                                          patch_durations=patch_durations,
                                          resolution_ids=resolution_ids,
                                          channel_mask=enc_channel_mask,
@@ -1209,7 +1256,7 @@ def main() -> None:
             z = model.a2_proj(clean["pooled"])
             # --- masked student pass, shared by fixed-feature and EMA latent targets ---
             if compute_masked:
-                masked = model.encoder.encode(sensor_tokens, text_embs, text_masks, positions,
+                masked = encode_fn(sensor_tokens, text_embs, text_masks, positions,
                                               patch_durations=patch_durations,
                                               resolution_ids=resolution_ids,
                                               cross_resolution_attention=not cfg.multiresolution,
@@ -1237,10 +1284,17 @@ def main() -> None:
                 # outputs, but run the teacher's own frontend/fusion/transformer weights.
                 with torch.no_grad():
                     with torch.amp.autocast(device.type, enabled=False):
-                        teacher_sensor_tokens = ema_encoder.tokenize(
-                            patches.float(), rates, patch_len,
-                            source_rate_hz=batch.get("source_rates", rates).to(device),
-                        )
+                        if shared_analysis is not None:
+                            # Fixed arm: reuse the student's parameter-free analysis, then apply
+                            # the TEACHER's own (EMA-lagged) projection. Detached — the teacher
+                            # never receives gradient.
+                            teacher_sensor_tokens = ema_encoder.project_tokens(
+                                shared_analysis.detach())
+                        else:
+                            teacher_sensor_tokens = ema_encoder.tokenize(
+                                patches.float(), rates, patch_len,
+                                source_rate_hz=batch.get("source_rates", rates).to(device),
+                            )
                     teacher_clean = ema_encoder.encode(
                         teacher_sensor_tokens, text_embs, text_masks, positions,
                         patch_durations=patch_durations,

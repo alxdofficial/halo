@@ -47,6 +47,7 @@ PRIMARY_TRAIN_DATASETS = (
 OPTIONAL_PHASE_A_DATASETS = (
     "extrasensory",
     "nhanes",
+    "hmog",
 )
 
 PRIMARY_EVAL_DATASETS = (
@@ -212,6 +213,12 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                session_contains=("_watch_wrist",),
                note="NHANES PAX80_G ActiGraph acceleration at 80 Hz; unlabeled Phase-A-only "
                     "bounded subset with released QC intervals applied."),
+    StreamSpec("hmog", "phone_hand", "phone", "the hand",
+               _GENERIC_ACC, _GENERIC_GYRO, "present", role="phase_a_scale",
+               session_contains=("_phone_hand",),
+               note="Samsung Galaxy S4 held during reading, writing, or map navigation while "
+                    "sitting/walking. Native 100 Hz acc m/s^2 + gyro rad/s; converter synchronizes "
+                    "the two event clocks and splits source gaps."),
 
     # Primary evaluation datasets.
     StreamSpec("motionsense", "phone_front_pocket", "phone", "front pocket",

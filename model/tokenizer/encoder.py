@@ -134,6 +134,15 @@ class SetTokenizerEncoder(nn.Module):
         return self.filterbank(patches, sampling_rate_hz, patch_len_samples,
                                source_rate_hz=source_rate_hz)
 
+    def analyze(self, patches, sampling_rate_hz, patch_len_samples, source_rate_hz=None):
+        """Parameter-free (fixed arm) physical feature, shareable across encoder copies."""
+        return self.filterbank.analyze(patches, sampling_rate_hz, patch_len_samples,
+                                       source_rate_hz=source_rate_hz)
+
+    def project_tokens(self, token_in: torch.Tensor) -> torch.Tensor:
+        """Apply THIS encoder's learnable filterbank projection to a shared analysis."""
+        return self.filterbank.project(token_in)
+
     def encode_texts(
         self, channel_texts: Sequence[Sequence[str]], device: torch.device
     ) -> tuple[torch.Tensor, torch.Tensor]:

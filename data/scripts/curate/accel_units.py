@@ -51,6 +51,7 @@ ACC_UNIT_MS2 = frozenset({
     "hhar", "pamap2", "wisdm", "kuhar", "mhealth", "realworld", "mobiact", "shoaib",
     "tnda_har", "ut_complex", "unimib_shar",  # accelerometer in m/s^2 (gravity present) -> rescale to g.
     "harmes",  # WearOS right-wrist acc in m/s^2 (verified at-rest |acc|~9.81) -> rescale to g.
+    "hmog",    # Samsung Galaxy S4 accelerometer in m/s^2; sitting-session |acc|~9.81, gravity present.
 })
 
 

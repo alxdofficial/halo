@@ -55,7 +55,7 @@ TRAIN_DATASETS = (
 # intentionally absent from label probes and Phase B because it has no activity
 # annotations; ExtraSensory is labelled but remains opt-in so data-scale results
 # cannot be confused with the frozen 12-source technique comparison.
-OPTIONAL_PHASE_A_DATASETS = ("extrasensory", "nhanes")
+OPTIONAL_PHASE_A_DATASETS = ("extrasensory", "nhanes", "hmog")
 PHASE_A_ONLY_DATASETS = frozenset({"nhanes"})
 UNLABELED_LABEL = "__unlabeled__"
 MAX_PER_STREAM = 20_000          # legacy optional balanced-corpus cap; PER-STREAM (so

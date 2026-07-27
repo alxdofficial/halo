@@ -1,0 +1,13 @@
+{
+  "name": "hmog",
+  "category": "datasets",
+  "paper_title": "HMOG: New Behavioral Biometric Features for Continuous Authentication of Smartphone Users",
+  "authors": "Zdenka Sitova, Jaroslav Sedenka, Qing Yang, Ge Peng, Gang Zhou, Paolo Gasti, Kiran S. Balagani",
+  "year": "2016",
+  "venue": "IEEE Transactions on Information Forensics and Security, 11(5), 877-892",
+  "doi": "10.1109/TIFS.2015.2506542",
+  "paper_url": "https://arxiv.org/abs/1501.01199",
+  "data_or_code_url": "https://hmog-dataset.github.io/hmog/",
+  "license": "Non-exclusive, non-transferable, revocable license for non-commercial educational and research use only; redistribution and re-identification are prohibited.",
+  "notes": "100 participants, nominally 24 Samsung Galaxy S4 phone-use sessions each. Reading, writing, and map-navigation tasks were performed sitting or walking. Accelerometer, gyroscope, magnetometer, touch, and interaction events were recorded; HALO retains only co-located accelerometer and gyroscope at 100 Hz from the phone held in the hand."
+}

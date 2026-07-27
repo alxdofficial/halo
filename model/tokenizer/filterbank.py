@@ -540,8 +540,17 @@ class PhysicalFilterbankTokenizer(nn.Module):
         self.finalize_norm_stats(eps)
 
     # --------------------------------------------------------------------- forward
-    def forward(self, patches, sampling_rate_hz, patch_len_samples=None,
+    def analyze(self, patches, sampling_rate_hz, patch_len_samples=None,
                 source_rate_hz=None) -> torch.Tensor:
+        """Physical feature (B, P, C, in_dim) — everything BEFORE the learnable projection.
+
+        Split out from ``forward`` so callers holding two copies of this module can share the
+        expensive part. On the FIXED arm this whole path is parameter-free (rDFT, constant-Q
+        filterbank against ``self.centers``, plus frozen norm/DC buffers), so an EMA teacher's
+        analysis is bit-identical to the student's and recomputing it is pure waste. On the
+        LEARNABLE arm the adaptive residual branch reads parameters that EMA-diverge, so the
+        teacher must run its own ``analyze``.
+        """
         B, P, S, C = patches.shape
         assert S == self.S, (
             f"patch time dim {S} != dft_size {self.S}; zero-pad patches to S before the tokenizer"
@@ -602,5 +611,14 @@ class PhysicalFilterbankTokenizer(nn.Module):
         if self.use_dc:
             feats.append(dc_feat)
 
-        token_in = torch.cat(feats, dim=-1)                        # (B,P,C,in_dim)
-        return self.proj(token_in)                                 # (B,P,C,d_model)
+        return torch.cat(feats, dim=-1)                            # (B,P,C,in_dim)
+
+    def project(self, token_in: torch.Tensor) -> torch.Tensor:
+        """The learnable half: (B,P,C,in_dim) -> (B,P,C,d_model)."""
+        return self.proj(token_in)
+
+    def forward(self, patches, sampling_rate_hz, patch_len_samples=None,
+                source_rate_hz=None) -> torch.Tensor:
+        return self.project(
+            self.analyze(patches, sampling_rate_hz, patch_len_samples, source_rate_hz)
+        )
