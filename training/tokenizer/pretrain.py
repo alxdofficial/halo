@@ -943,8 +943,13 @@ def main() -> None:
         # masks dropped (they were ~81% of the target norm — audit 2026-07-18).
         signal_idx = torch.tensor(target_tok.signal_feature_indices(), device=device)
         a1_target_dim = len(signal_idx)
+        # signal_feature_indices() returns [bands(K) | amplitude? | DC?] in that order, so K is
+        # exactly where the cosine (spectral SHAPE) half ends and the Huber (absolute MAGNITUDE)
+        # half begins in the gathered target.
+        a1_n_bands = target_tok.n_bands
     else:
         target_tok, signal_idx, a1_target_dim = None, None, 1   # dormant a1_head
+        a1_n_bands = None
 
     # ------------------------------------------------------------------ model
     model = PipelineAModel(cfg, a1_target_dim=a1_target_dim).to(device)
@@ -1398,6 +1403,7 @@ def main() -> None:
             out = elite3_loss(
                 a1_pred=a1_pred, a1_target=a1_target,
                 a1_mask=a1_loss_mask,
+                a1_n_bands=a1_n_bands,
                 a2_embeddings=z, a2_labels=labels,
                 a3_cadence_pred=a3_cad,
                 a3_eigen_pred=a3_eig,
@@ -1478,7 +1484,8 @@ def main() -> None:
             if compute_fixed_a1:                                 # per-source A1 (diagnostic, off-graph)
                 with torch.no_grad():
                     a1_pw = masked_latent_per_window(a1_pred.float(), a1_target, a1_loss_mask,
-                                                     feature_valid=a1_feature_valid)
+                                                     feature_valid=a1_feature_valid,
+                                                     n_bands=a1_n_bands)
                 rec["a1_by_source"] = per_source_mean(a1_pw, batch["sources"])
                 # Windows that get NO masked A1 token at all. The mask planner correctly
                 # refuses to mask when every real token overlaps the interval (there is no

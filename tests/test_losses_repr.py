@@ -324,3 +324,59 @@ def test_elite3_combined_finite_and_weighted():
     assert set(out.parts) == {"a1_masked", "a2_supcon", "a3_grounding"}
     expected = out.parts["a1_masked"] + out.parts["a2_supcon"] + 0.1 * out.parts["a3_grounding"]
     assert math.isclose(float(out.total), expected, rel_tol=1e-5)
+
+
+def test_a1_split_supervises_absolute_magnitude_that_the_cosine_alone_ignores():
+    """The whole point: scaling the magnitude features must change the loss.
+
+    With everything L2-normalised (n_bands=None) a pure rescale of the target is invisible —
+    that is what discarded absolute signal energy, since A3's eigen-ratios are gain-invariant
+    and A2's VICReg is invariant to the magnitude augmentations too.
+    """
+    import torch
+    from training.tokenizer.losses_repr import masked_latent_loss
+
+    torch.manual_seed(0)
+    B, T, C, K, M = 2, 3, 6, 8, 2                      # K bands + M magnitude scalars
+    pred = torch.randn(B, T, C, K + M)
+    tgt = torch.randn(B, T, C, K + M)
+    mask = torch.ones(B, T, C, dtype=torch.bool)
+
+    tgt_scaled = tgt.clone()
+    tgt_scaled[..., K:] *= 3.0                          # only the magnitude half changes
+
+    all_cosine = masked_latent_loss(pred, tgt, mask, n_bands=None)
+    all_cosine_scaled = masked_latent_loss(pred, tgt_scaled, mask, n_bands=None)
+    split = masked_latent_loss(pred, tgt, mask, n_bands=K)
+    split_scaled = masked_latent_loss(pred, tgt_scaled, mask, n_bands=K)
+
+    # The split path notices; it must move by a real margin, not float noise.
+    assert (split_scaled - split).abs() > 1e-3
+    # And the band (shape) half is still scale-invariant on its own.
+    tgt_bands_scaled = tgt.clone()
+    tgt_bands_scaled[..., :K] *= 5.0
+    torch.testing.assert_close(
+        masked_latent_loss(pred, tgt, mask, n_bands=K, magnitude_weight=0.0),
+        masked_latent_loss(pred, tgt_bands_scaled, mask, n_bands=K, magnitude_weight=0.0),
+        rtol=1e-5, atol=1e-6,
+    )
+    assert all_cosine.isfinite() and all_cosine_scaled.isfinite()
+
+
+def test_a1_split_keeps_tokens_whose_bands_are_all_unobservable():
+    """A token with no observable band still carries real magnitude supervision."""
+    import torch
+    from training.tokenizer.losses_repr import masked_latent_loss
+
+    B, T, C, K, M = 1, 1, 1, 4, 2
+    pred = torch.randn(B, T, C, K + M)
+    tgt = torch.randn(B, T, C, K + M)
+    mask = torch.ones(B, T, C, dtype=torch.bool)
+    fv = torch.ones(B, T, C, K + M)
+    fv[..., :K] = 0.0                                   # every band masked out
+
+    loss = masked_latent_loss(pred, tgt, mask, feature_valid=fv, n_bands=K)
+    assert torch.isfinite(loss) and loss > 0            # magnitude term survives
+    # Without a magnitude half the same token is un-learnable and must drop out entirely.
+    assert masked_latent_loss(pred[..., :K], tgt[..., :K], mask,
+                              feature_valid=fv[..., :K], n_bands=None) == 0.0

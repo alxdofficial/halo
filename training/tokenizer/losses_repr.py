@@ -47,6 +47,11 @@ A3_WEIGHT = 0.1              # grounding rail, not a driver
 # is largely recoverable from the band energies and is valid on only 7-15% of windows in the
 # free-living majority (nhanes 0.07, extrasensory 0.09, capture24 0.10 — measured), so it
 # keeps the 0.5 it effectively had and is independently zeroable.
+# A1 magnitude term. The band cosine lands ~O(0.1-2); Huber on the standardized DC and the
+# log1p amplitude lands ~O(0.1-1), so 0.5 keeps shape as the dominant signal while making
+# absolute energy learnable at all. Needs a sweep — it is the one number here with no
+# measurement behind it yet.
+A1_MAGNITUDE_WEIGHT = 0.5
 A3_CADENCE_WEIGHT = 0.5
 A3_EIGEN_WEIGHT = 1.0
 HUBER_DELTA = 1.0
@@ -215,6 +220,60 @@ def make_multiresolution_mask_plan(
     return MaskPlan(token_mask=mask, kind="mixed_multiresolution")
 
 
+def _a1_per_token(
+    predicted: torch.Tensor,
+    target: torch.Tensor,
+    feature_valid: Optional[torch.Tensor],
+    n_bands: Optional[int],
+    magnitude_weight: float,
+    delta: float = HUBER_DELTA,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-token A1 loss (B,T,C) and the (B,T,C) mask of tokens that carry any signal.
+
+    SHAPE-vs-MAGNITUDE SPLIT. The A1 target is not a learned latent — it is
+    ``[band energies (K) | amplitude | DC]``, calibrated physical quantities. L2-normalising
+    all of it (JEPA/BYOL hygiene, correct for learned latents that can drift in scale)
+    discarded magnitude, which for inertial sensing IS much of the signal: sitting and
+    walking share a broadly similar spectral SHAPE and differ by an order of magnitude in
+    energy. It also largely cancelled the `amplitude` feature — added precisely to
+    "preserve absolute magnitude" — by dividing it by the norm of the vector it sits in,
+    and the DC feature that separates stand/sit/lie.
+
+    That mattered more than a normalisation detail: A3's eigen-ratios are gain-invariant by
+    construction and A2's VICReg is invariant to the magnitude augmentations, so with A1
+    scale-blind too, NOTHING in the objective stack supervised absolute signal energy.
+
+    So: cosine on the band sub-vector, where scale-invariance genuinely is the spectral
+    shape we want predicted; Huber on the trailing amplitude/DC scalars, where the absolute
+    value is the content. ``n_bands=None`` restores the all-cosine behaviour.
+    """
+    target = target.detach()
+    if feature_valid is not None:
+        fv = feature_valid.to(target.dtype)
+        target = target * fv
+        predicted = predicted * fv
+
+    split = n_bands if (n_bands is not None and 0 < n_bands < target.shape[-1]) else None
+    band_p, band_t = (predicted[..., :split], target[..., :split]) if split else (predicted, target)
+
+    # A token whose every OBSERVABLE band was masked out has an all-zero band target:
+    # F.normalize returns zeros, the cosine is 0 and the term is a constant 2.0 with no
+    # gradient. Zero the shape term there rather than let it inflate the loss.
+    has_signal = band_t.abs().sum(dim=-1) > 0                           # (B, T, C)
+    cos_term = 2.0 - 2.0 * (F.normalize(band_p, dim=-1) * F.normalize(band_t, dim=-1)).sum(dim=-1)
+    per_token = torch.where(has_signal, cos_term, torch.zeros_like(cos_term))
+
+    keep = has_signal
+    if split:
+        # Magnitude features are always observable (feature_valid is 1 there), so a token
+        # with no usable band still carries real magnitude supervision — keep it.
+        mag = F.huber_loss(predicted[..., split:], target[..., split:],
+                           delta=delta, reduction="none").mean(dim=-1)
+        per_token = per_token + float(magnitude_weight) * mag
+        keep = torch.ones_like(has_signal)
+    return per_token, keep
+
+
 def masked_latent_loss(
     predicted: torch.Tensor,
     target: torch.Tensor,
@@ -222,34 +281,25 @@ def masked_latent_loss(
     feature_valid: Optional[torch.Tensor] = None,
     token_groups: Optional[torch.Tensor] = None,
     token_durations: Optional[torch.Tensor] = None,   # (B,T) represented seconds per patch (F1)
+    n_bands: Optional[int] = None,
+    magnitude_weight: float = A1_MAGNITUDE_WEIGHT,
 ) -> torch.Tensor:
     """A1: regression in LATENT space on masked tokens only.
 
     predicted: (B, T, C, D) head outputs; target: (B, T, C, D) the (stop-grad) latent
-    targets for the same grid; token_mask: (B, T, C) True where masked. Targets are
-    L2-normalized per token (direction, not magnitude — standard JEPA/BYOL hygiene).
+    targets for the same grid; token_mask: (B, T, C) True where masked.
+
+    ``n_bands`` splits the feature axis into the band sub-vector (compared by cosine, so
+    scale-invariant) and the trailing amplitude/DC scalars (compared by Huber, so absolute
+    magnitude is supervised). See ``_a1_per_token``.
 
     feature_valid: optional broadcastable-to-(B,T,C,D) mask over the FEATURE dims. Bands
     above a sample's Nyquist are zero in the target and trivial to predict; zeroing those
-    dims in BOTH pred and target before the cosine excludes them from the objective so A1
-    only supervises OBSERVABLE signal (refinement to the signal-only-target fix).
+    dims in BOTH pred and target excludes them so A1 only supervises OBSERVABLE signal.
     """
-    target = target.detach()
-    has_signal = None
-    if feature_valid is not None:
-        fv = feature_valid.to(target.dtype)
-        target = target * fv
-        predicted = predicted * fv
-        # A token whose every feature was masked out has an all-zero target: F.normalize
-        # returns zeros, the cosine is 0, and the loss is a CONSTANT 2.0 carrying no
-        # gradient. Including it inflated the reported A1 loss with un-learnable tokens.
-        has_signal = target.abs().sum(dim=-1) > 0                       # (B, T, C)
-    target = F.normalize(target, dim=-1)
-    predicted = F.normalize(predicted, dim=-1)
-    per_token = 2.0 - 2.0 * (predicted * target).sum(dim=-1)            # cosine loss
-    masked = token_mask & torch.isfinite(per_token)
-    if has_signal is not None:
-        masked = masked & has_signal
+    per_token, has_signal = _a1_per_token(
+        predicted, target, feature_valid, n_bands, magnitude_weight)
+    masked = token_mask & torch.isfinite(per_token) & has_signal
 
     def _reduce(sel_mask):
         """Mean over selected tokens, optionally weighted by represented duration (F1): a partial
@@ -277,24 +327,15 @@ def masked_latent_loss(
             else predicted.new_zeros(()))
 
 
-def masked_latent_per_window(predicted, target, token_mask, feature_valid=None) -> torch.Tensor:
+def masked_latent_per_window(predicted, target, token_mask, feature_valid=None,
+                             n_bands=None,
+                             magnitude_weight: float = A1_MAGNITUDE_WEIGHT) -> torch.Tensor:
     """Per-WINDOW A1 loss (B,) for telemetry — same cosine loss as `masked_latent_loss` but reduced
     per window instead of globally, so it can be grouped by data source. Windows with no masked token
     return NaN (caller filters). Pure diagnostic; not part of the training gradient."""
-    target = target.detach()
-    has_signal = None
-    if feature_valid is not None:
-        fv = feature_valid.to(target.dtype)
-        target = target * fv
-        predicted = predicted * fv
-        has_signal = target.abs().sum(dim=-1) > 0        # mirrors masked_latent_loss
-    target = F.normalize(target, dim=-1)
-    predicted = F.normalize(predicted, dim=-1)
-    per_token = 2.0 - 2.0 * (predicted * target).sum(dim=-1)            # (B, T, C)
-    keep = token_mask & torch.isfinite(per_token)
-    if has_signal is not None:
-        keep = keep & has_signal
-    m = keep.to(per_token.dtype)
+    per_token, has_signal = _a1_per_token(
+        predicted, target, feature_valid, n_bands, magnitude_weight)
+    m = (token_mask & torch.isfinite(per_token) & has_signal).to(per_token.dtype)
     denom = m.sum(dim=(1, 2))
     win = (per_token.nan_to_num(0.0) * m).sum(dim=(1, 2)) / denom.clamp(min=1)
     return torch.where(denom > 0, win, torch.full_like(win, float("nan")))
@@ -535,6 +576,8 @@ def elite3_loss(
     a1_feature_valid: Optional[torch.Tensor] = None,
     a1_token_groups: Optional[torch.Tensor] = None,
     a1_token_durations: Optional[torch.Tensor] = None,
+    a1_n_bands: Optional[int] = None,          # split point: bands (cosine) | amplitude+DC (Huber)
+    a1_magnitude_weight: float = A1_MAGNITUDE_WEIGHT,
     a2_loss: Optional[torch.Tensor] = None,
     a2_key: str = "a2_supcon",
 ) -> EliteLossOutput:
@@ -546,6 +589,7 @@ def elite3_loss(
     ablation path). Either way it is scaled by ``weights.a2_supcon``.
     """
     l1 = masked_latent_loss(a1_pred, a1_target, a1_mask, feature_valid=a1_feature_valid,
+                            n_bands=a1_n_bands, magnitude_weight=a1_magnitude_weight,
                             token_groups=a1_token_groups, token_durations=a1_token_durations)
     l2 = a2_loss if a2_loss is not None else supcon_config_conditional(a2_embeddings, a2_labels)
     l3 = grounding_loss(a3_cadence_pred, a3_eigen_pred, a3_targets)
