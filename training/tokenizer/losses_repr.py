@@ -551,7 +551,7 @@ def grounding_loss(
 # ================================================================================================
 @dataclass
 class EliteLossWeights:
-    a1_masked: float = 1.0
+    a1_physical: float = 1.0
     a2_supcon: float = 1.0
     a3_grounding: float = A3_WEIGHT   # rail, not driver
 
@@ -593,12 +593,12 @@ def elite3_loss(
                             token_groups=a1_token_groups, token_durations=a1_token_durations)
     l2 = a2_loss if a2_loss is not None else supcon_config_conditional(a2_embeddings, a2_labels)
     l3 = grounding_loss(a3_cadence_pred, a3_eigen_pred, a3_targets)
-    total = weights.a1_masked * l1 + weights.a2_supcon * l2 + weights.a3_grounding * l3
+    total = weights.a1_physical * l1 + weights.a2_supcon * l2 + weights.a3_grounding * l3
     return EliteLossOutput(
         total=total,
-        parts={"a1_masked": float(l1.detach()), a2_key: float(l2.detach()),
+        parts={"a1_physical": float(l1.detach()), a2_key: float(l2.detach()),
                "a3_grounding": float(l3.detach())},
-        terms={"a1_masked": weights.a1_masked * l1,
+        terms={"a1_physical": weights.a1_physical * l1,
                a2_key: weights.a2_supcon * l2,
                "a3_grounding": weights.a3_grounding * l3},
     )

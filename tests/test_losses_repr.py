@@ -318,11 +318,11 @@ def test_elite3_combined_finite_and_weighted():
         a3_cadence_pred=torch.randn(B),
         a3_eigen_pred=torch.rand(B, 4, 3),
         a3_targets=t,
-        weights=EliteLossWeights(a1_masked=1.0, a2_supcon=1.0, a3_grounding=0.1),
+        weights=EliteLossWeights(a1_physical=1.0, a2_supcon=1.0, a3_grounding=0.1),
     )
     assert torch.isfinite(out.total)
-    assert set(out.parts) == {"a1_masked", "a2_supcon", "a3_grounding"}
-    expected = out.parts["a1_masked"] + out.parts["a2_supcon"] + 0.1 * out.parts["a3_grounding"]
+    assert set(out.parts) == {"a1_physical", "a2_supcon", "a3_grounding"}
+    expected = out.parts["a1_physical"] + out.parts["a2_supcon"] + 0.1 * out.parts["a3_grounding"]
     assert math.isclose(float(out.total), expected, rel_tol=1e-5)
 
 

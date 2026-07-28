@@ -33,8 +33,30 @@ sampling, gravity-gated rotation, old batch/LR). The live source of truth is
 
 | knob | current default | note |
 |---|---|---|
-| objectives | **fixed A1 (1.0) + EMA-latent A1 (0.1) + A2 VICReg (1.0) + placement VICReg (0.1, invariance-only) + A3 (0.05)** | all activity-label-free. TF-C **dropped** (`tfc_weight=0`) — see the memory note |
+| objectives | **A1 (1.0) + A2 (1.0) + A3 (0.05) + A4 (0.1)** | all activity-label-free; see the table below |
 | A2 mode | `vicreg` (two augmented positives, no negatives) | `simclr` and label-based `supcon` are controls |
+
+### The four objectives
+
+| | name | target / positive | grounded in | weight |
+|---|---|---|---|---:|
+| **A1** | masked latent prediction | an EMA teacher's post-attention tokens at masked positions | a learned contextual abstraction | 1.0 |
+| **A2** | augmentation agreement (VICReg) | two independently augmented views of one window | a synthetic augmentation | 1.0 |
+| **A3** | physical-primitive grounding | cadence (0.5) + eigen-ratios (1.0), self-derived | fixed DSP of the signal | 0.05 |
+| **A4** | cross-placement agreement (VICReg, invariance-only) | two REAL devices recording the same instant | a physical fact | 0.1 |
+
+A1 is JEPA (data2vec / I-JEPA / JETS): student encodes the masked view, EMA teacher the clean one,
+a predictor maps student -> teacher latents. It **replaced** a fixed-DSP target (band energies +
+amplitude + DC, `proj=Identity`) on 2026-07-28 — that target was generative-in-feature-space, closer
+to MaskFeat than JEPA, and was also "home-field for the filterbank arm", biasing the fixed-vs-
+learnable tokenizer comparison. It stays switchable as `--a1-physical-weight 1.0` for the ablation;
+at 0 the `target_tok` build and its 50-batch calibration pass are skipped entirely.
+
+A4 was previously called "placement". It is the only objective whose positive is observed rather
+than assumed, and historically the one most likely to go **silently dead** — the per-batch quota is
+`round(batch x a4_pair_fraction / 2)`, which yields 1 pair at batch 16 and then contributes exactly
+0.0000. Only nfi_fared and xrf_v2 currently supply verified pairs; sp_sw_har and wisdm are genuinely
+simultaneous phone+watch data whose converters never emitted a shared event key.
 | TF-C | **off** (`tfc_weight=0`) | its two views are the same unaugmented window through two networks, and the time branch is unanchored + discarded; `--tfc-weight 0.25` restores it for the ablation |
 | placement | weight 0.1; 10% window-pair quota | only explicit simultaneous `event_ids`; a real run fails if grids predate them |
 | EMA target | weight 0.1; decay 0.996 | clean stop-gradient teacher, masked student predictor; checkpointed/restored |
