@@ -1,47 +1,39 @@
 {
-  "device": "cuda",
+  "device": "cpu",
   "batch": [
-    256,
+    64,
     6,
     6
   ],
-  "loss_parts": {
-    "a1_masked": 1.8300141096115112,
-    "a2_supcon": 5.5520124435424805,
-    "a3_grounding": 0.4284414052963257
+  "loss": {
+    "jepa": 1.0599080324172974,
+    "relation": 23.75098419189453
   },
   "activation_rms": {
-    "sensor_tokens(filterbank)": 0.5636,
-    "text_embeddings(raw MiniLM)": 0.4459,
-    "text_after_proj": 0.2735,
-    "fused_tokens": 0.5778,
-    "fusion_delta(fused-sensor)": 0.1022,
-    "transformer_out": 1.0,
-    "pooled": 0.8896,
-    "a2_proj_out": 0.1682
+    "sensor_tokens": 0.48773,
+    "text_embeddings": 0.48145,
+    "projected_text": 0.28763,
+    "fused_tokens": 0.48943,
+    "fusion_delta": 0.03542,
+    "pooled": 0.93566,
+    "relation_projection": 0.22048
   },
-  "fusion_delta_ratio": 0.181,
-  "grad_norms": {
-    "filterbank.proj": 2.53404,
-    "mask_token": 1.09046,
-    "fusion": 7.91773,
-    "a1_head": 3.87011,
-    "a2_proj": 2.46729,
-    "a3_cadence": 0.41558,
-    "a3_eigen": 0.07817,
-    "transformer_layers(shallow->deep)": [
-      4.52268,
-      3.11678,
-      2.9921,
-      3.01264
+  "fusion_delta_ratio": 0.07262,
+  "gradient_norms": {
+    "encoder": 5.140115737915039,
+    "jepa_predictor": 1.9689276218414307,
+    "relation_projector": 2.3021788597106934,
+    "transformer_layers": [
+      2.6024909019470215,
+      2.0482773780822754
     ]
   },
+  "dead_parameters": [],
   "checks": {
-    "text_lm_has_no_grad": true,
-    "no_dead_trainable_params": true,
-    "dead_params": [],
-    "fusion_balanced(0.1<ratio<10)": true,
-    "layer_grads_monotone_healthy(no >20x jump)": true,
-    "all_activations_finite": true
+    "text_encoder_frozen": true,
+    "no_dead_trainable_parameters": true,
+    "fusion_scale_reasonable": true,
+    "finite_activations": true,
+    "finite_loss": true
   }
 }

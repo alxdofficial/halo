@@ -92,11 +92,11 @@ def test_sensor_text_dropout_is_bounded_and_keeps_one_with_two_sensors():
     assert len(survived) >= 1, "bounded dropout must keep >=1 sensor described when there are 2"
 
 
-def test_sensor_text_dropout_decision_is_shared_across_simclr_views():
-    """Config-conditional thesis guard: the two SimCLR views of one window must never disagree on
+def test_sensor_text_dropout_decision_is_shared_across_relation_views():
+    """Config-conditional thesis guard: the two relation views of one window must never disagree on
     WHETHER the acquisition config was described. With independent draws ~2p(1-p) of positive pairs
-    are 'config in A, neutralised in B', and NT-Xent then trains embed(config) == embed(no config),
-    i.e. to IGNORE the config — the opposite of salient-not-invariant."""
+    are 'config in A, neutralised in B', and relation learning trains embed(config) ==
+    embed(no config), i.e. to IGNORE the config — the opposite of salient-not-invariant."""
     cfg = AugmentationConfig.none()
     cfg.sensor_text_dropout.enabled = True
     cfg.sensor_text_dropout.p = 0.5            # high rate so disagreement would be common

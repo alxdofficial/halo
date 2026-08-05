@@ -6,7 +6,7 @@ Assembly (build plan M3; EVIDENCE_ENGINE.md §5.2.1):
                                                       │
     channel descriptions ──frozen LM──> text embeddings ──ChannelTextFusion──> identity
                                                       │
-    A1 token_mask ──> learned [MASK] token (BEFORE fusion, so the model knows WHICH
+    JEPA token_mask ──> learned [MASK] token (BEFORE fusion, so the model knows WHICH
                       channel is hidden — masked-channel modeling needs the identity
                       of the thing it must reconstruct)
                                                       │
@@ -56,7 +56,7 @@ class SetTokenizerEncoder(nn.Module):
         dim_feedforward: int = 256,
         dropout: float = 0.1,
         text_model: str = "all-MiniLM-L6-v2",
-        frontend: str = "fixed",                  # tokenizer front end: 'fixed'|'learnable' (see scattering.build_frontend)
+        frontend: str = "fixed",                  # tokenizer front end: 'fixed'|'learnable'
         text_conditioning: str = "per_channel",  # 'per_channel' (legacy) | 'factored' (role+sensor)
         gate_bias_init: float = -2.0,             # factored: negative => identity lightly injected @ init
         temporal_mode: str = "full",           # 'full' | 'causal' (streaming/world-model)
@@ -78,20 +78,12 @@ class SetTokenizerEncoder(nn.Module):
         if text_conditioning not in ("per_channel", "factored"):
             raise ValueError("text_conditioning must be 'per_channel' or 'factored'")
         self.text_conditioning = text_conditioning
-        # Back-compat: callers (training/tokenizer/pretrain.py, older checkpoints) select the arm
-        # via a legacy `learnable=bool` kwarg. Translate it into `frontend` and DROP it, so
-        # build_frontend -- which sets `learnable` itself for the fixed/learnable arms -- does not
-        # receive it twice (that collision broke the default fixed path; regression 2026-07-22).
-        legacy_learnable = filterbank_kwargs.pop("learnable", None)
-        if legacy_learnable is not None and frontend == "fixed":
-            frontend = "learnable" if legacy_learnable else "fixed"
-        self.frontend_kind = frontend
-        # The tokenizer front end is swappable (fixed filterbank | learnable) but every option
-        # honours the same (B,P,S,C)+rate+N -> (B,P,C,d) contract, so the encoder body is identical
-        # across the ablation. Attribute stays named `filterbank` for back-compat with checkpoints
-        # and the tokenize() shim below.
-        from .scattering import build_frontend
-        self.filterbank = build_frontend(frontend, d_model=d_model, **filterbank_kwargs)
+        if frontend not in {"fixed", "learnable"}:
+            raise ValueError("frontend must be 'fixed' or 'learnable'")
+        # Attribute stays named `filterbank` for checkpoint compatibility.
+        self.filterbank = PhysicalFilterbankTokenizer(
+            learnable=frontend == "learnable", d_model=d_model, **filterbank_kwargs,
+        )
         self.text_encoder = TokenTextEncoder(model_name=text_model)   # frozen, cached
         if text_conditioning == "factored":
             # per-channel ROLE text + per-sensor IDENTITY text (docs/design/TEXT_CONDITIONING.md)
@@ -123,7 +115,7 @@ class SetTokenizerEncoder(nn.Module):
 
     # ------------------------------------------------------------------ shareable stages
     # The forward splits into (tokenize · encode_texts · encode) so a training step that
-    # needs two views (masked for A1, clean for A2/A3) computes the filterbank and the
+    # needs masked and clean views computes the filterbank and the
     # text embeddings ONCE and only re-runs the cheap transformer tail.
 
     def tokenize(self, patches, sampling_rate_hz, patch_len_samples, channel_mask=None,
@@ -199,7 +191,7 @@ class SetTokenizerEncoder(nn.Module):
         patch_durations: Optional[torch.Tensor] = None,  # (B, P) true temporal support in seconds
         resolution_ids: Optional[torch.Tensor] = None,   # (B, P) 0=short, 1=long, -1=padding
         cross_resolution_attention: bool = True,
-        token_mask: Optional[torch.Tensor] = None,   # (B, P, C) True = hide (A1)
+        token_mask: Optional[torch.Tensor] = None,   # (B, P, C) True = hide for JEPA
         channel_mask: Optional[torch.Tensor] = None, # (B, C) True = channel exists
         patch_padding_mask: Optional[torch.Tensor] = None,  # (B, P) True = real patch
         # --- factored text conditioning (only when text_conditioning='factored') ---
@@ -209,7 +201,7 @@ class SetTokenizerEncoder(nn.Module):
     ) -> dict[str, torch.Tensor]:
         B, P, C, _ = sensor_tokens.shape
 
-        # A1 masking BEFORE fusion: the [MASK] token then receives its channel's text
+        # JEPA masking BEFORE fusion: the [MASK] token then receives its channel's text
         # identity, so the encoder knows *which* channel it must reconstruct.
         tokens = sensor_tokens
         if token_mask is not None:
@@ -312,7 +304,7 @@ class SetTokenizerEncoder(nn.Module):
         patch_durations: Optional[torch.Tensor] = None,
         resolution_ids: Optional[torch.Tensor] = None,
         cross_resolution_attention: bool = True,
-        token_mask: Optional[torch.Tensor] = None,   # (B, P, C) True = hide (A1)
+        token_mask: Optional[torch.Tensor] = None,   # (B, P, C) True = hide for JEPA
         channel_mask: Optional[torch.Tensor] = None, # (B, C) True = channel exists
         patch_padding_mask: Optional[torch.Tensor] = None,  # (B, P) True = real patch
         sensor_texts: Optional[Sequence[Sequence[str]]] = None,  # factored: B lists of N_sensor strings

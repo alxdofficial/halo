@@ -29,14 +29,11 @@ import numpy as np
 import torch
 
 from data.scripts.eda.grid_io import discover_grids
-from model.tokenizer.preprocess import gravity_align
 from training.tokenizer.eval_transfer import (EVAL_STREAMS, build_encoder, encode_dataset,
                                               knn_balanced_acc)
-from training.tokenizer.pretrain_data import (CHANNELS, DFT_SIZE, stream_channel_descriptions,
-                                              _stream_gravity_state)
+from training.tokenizer.pretrain_data import stream_channel_descriptions, _stream_gravity_state
 
 RATE = 60.0
-PS = 1.0
 SEED = 20260718
 # Report is written next to the evaluated checkpoint (args.checkpoint.parent), NOT a hardcoded dir —
 # so evaluating pretrain_native/best.pt never drops its report into the smoke outputs/pretrain/ folder.

@@ -1,6 +1,8 @@
 # Agreed Phase-A and Phase-B Implementation Plan
 
-Status: implemented and CPU smoke-tested, 2026-07-26. Real training gates remain below.
+Status: Phase B implemented as recorded below. Phase A was consolidated on 2026-08-05 to the
+two-objective JEPA + relation recipe documented in `training/tokenizer/README.md`; that recipe
+supersedes the earlier configurable objective menu in this plan.
 
 ## Implementation map and launch gates
 
@@ -61,7 +63,7 @@ training.
 
 Corpus scale is controlled without deleting windows. Phase A assigns dataset mass proportional to
 `n^0.25`, caps any ordinary dataset share at 25%, and splits each dataset's mass across subjects
-proportional to `n_subject^0.5`; the separate 10% verified-placement quota remains intact. On the
+proportional to `n_subject^0.5`; the separate 20% verified-placement window quota remains intact. On the
 current 12-source corpus this reduces Capture-24 from 88.4% of raw windows / 43.7% under the old
 sampler to 21.2% of realized draws in a 50-batch audit. Phase B's 8,000-window label cap is
 water-filled across configurations, and patch-episode queries are uniform over selected labels and
@@ -69,54 +71,45 @@ configurations with square-root subject tempering. Historical controls remain av
 `--sampler-alpha 0.5 --sampler-max-dataset-share 1 --sampler-subject-alpha 1`,
 `build_memory --label-cap-policy random`, and `train_patch_decoder --query-balance legacy_sqrt`.
 
-This document records the agreed HALO representation-pretraining and evidence-engine design. Every
-new behavior must be configurable so the previous implementation remains an attributable ablation.
 Phase A remains activity-label-free. Phase B may use labels attached to retrieved memory examples and
 the runtime candidate vocabulary.
 
 ## Phase A: label-free representation pretraining
 
-The full configurable objective is:
+The consolidated objective is:
 
 ```text
-fixed-feature masked prediction
-+ EMA-latent masked prediction
-+ augmentation VICReg
-+ time-frequency VICReg
-+ simultaneous-placement VICReg
-+ a small self-derived physical-grounding rail
+JEPA masked contextual prediction
++ unified relation learning
+    - augmentation VICReg for every window
+    - verified cross-placement cosine agreement where available
 ```
 
-### VICReg
+### Unified relation learning
 
-- Add one float32 VICReg implementation with independently reported invariance, variance, and
-  covariance components.
-- Use raw projector outputs; do not L2-normalize before the loss.
-- Make VICReg the default A2 objective over the existing independently augmented views.
-- Replace TF-C's NT-Xent with VICReg while retaining its separate time and frequency projectors.
-- Retain SimCLR/NT-Xent and label-SupCon as explicit controls.
-- Re-tune global objective weights from measured encoder gradient norms. The old TF-C weight was
-  calibrated for NT-Xent and is not assumed to transfer unchanged.
+- Use float32 VICReg over two independently augmented views of every sampled window.
+- Use raw projector outputs for VICReg's MSE invariance, variance, and covariance terms.
+- Reduce verified cross-placement cosine agreement separately and add it inside the same relation
+  objective. Do not estimate sparse-pair variance/covariance or let universal pairs dilute it.
+- Keep fixed top-level coefficients. There is no adaptive objective calibration.
 
 ### Simultaneous-placement positives
 
 - Persist an explicit physical-event identity from conversion/grid assembly into the pretraining
   index. Do not infer positive identity solely from equal array lengths or row numbers.
-- Sample verified simultaneous placements as an additional positive pair source.
+- Reserve a quota of verified simultaneous placements as an additional positive relation source.
 - Apply the placement-consistency loss to pooled projection representations, not individual channel
   tokens, because observability legitimately differs by placement.
-- Keep this term lower-weight and quota-controlled so six-placement recordings cannot dominate it.
+- Keep this subterm lower-weight and quota-controlled so six-placement recordings cannot dominate it.
 - Never use an activity label to manufacture Phase-A positives.
 
 ### Masked targets
 
-- Keep the existing fixed physical-filterbank A1 target and validity-aware, physical-interval mask.
-- Add an EMA teacher with no gradients. The clean teacher emits contextual token targets; the masked
+- Use only an EMA teacher with no gradients. The clean teacher emits contextual token targets; the masked
   student predicts them at valid masked positions through a dedicated predictor.
-- Update the teacher only after an optimizer step. Save and restore teacher state in checkpoints.
-- Use the same cross-resolution physical mask for fixed and EMA targets to prevent duplicate-view
-  leakage.
-- Keep cadence/eigen-ratio grounding independently switchable and augmentation-aware.
+- Update the teacher only after an optimizer step and save/restore it in checkpoints.
+- Use one cross-resolution physical mask and skip a resolution when it would have no visible context.
+- Reduce each resolution independently and duration-weight partial tail patches.
 
 ### Frontends, sampling, and health
 
@@ -125,6 +118,10 @@ fixed-feature masked prediction
 - Log per-objective gradient norms, VICReg component values, minimum feature standard deviation,
   effective rank, embedding norms, covariance statistics, and positive similarity by pair type.
 - Warn or fail on non-finite values and clear representation collapse.
+
+Cadence/eigen primitives are diagnostics, not objectives. Physical reconstruction, SimCLR, SupCon,
+TF-C, separate A4, mask compensation, balanced sampling, and objective auto-calibration were deleted
+from the live trainer rather than retained as dormant switches.
 
 ## Phase B: patch evidence with candidate hypotheses
 

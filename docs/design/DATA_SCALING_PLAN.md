@@ -240,12 +240,11 @@ sampling.
 
 ## Verification
 
-- 84 focused converter/grid/policy/data-loader tests pass.
-- Full expanded-roster CPU smoke completed one optimization step with finite A1, VICReg, TF-C,
-  placement, EMA, and A3 losses. ExtraSensory and NHANES both appeared in per-source A1 telemetry;
-  13 of 14 total sources appeared in that single stochastic batch.
-- The optional-only smoke also completed; NHANES correctly has no validation or semantic probe rows.
-- No GPU training was launched.
+The earlier four-objective smoke record was superseded when Phase A was consolidated. Current
+verification is maintained in `training/tokenizer/README.md`: a launch must pass the objective-health
+diagnostic, gradient check, full tests, and a consolidated JEPA + relation CPU smoke. Optional-only
+runs still require NHANES to have no semantic validation or Phase-B rows. No GPU training is implied
+by these checks.
 
 Primary online sources:
 

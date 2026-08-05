@@ -8,15 +8,14 @@ so they are easy to find and hard to second-guess.
 
 `learnable=True` is the constrained-learnable arm: mildly adaptive ordered centers,
 bandwidths, compression knees, and a shared filter shape are mixed with the fixed
-physical bank through a learned residual gate. Select frontends via
-`model.tokenizer.scattering.build_frontend` — the fixed filterbank is the default
-until an ablation earns a switch.
+physical bank through a learned residual gate. `SetTokenizerEncoder(frontend=...)`
+selects either the fixed or constrained-learnable arm.
 """
 
 import math
 import torch
 import torch.nn as nn
-from typing import List, Optional, Tuple
+from typing import Tuple
 
 # ============================================================================
 # PhysicalFilterbankTokenizer — default hyperparameters (justified)
@@ -276,25 +275,6 @@ class PhysicalFilterbankTokenizer(nn.Module):
     def get_output_dim(self) -> int:
         return self.d_model
 
-    def signal_feature_indices(self) -> list[int]:
-        """Indices (into the raw ``in_dim`` feature) of the SIGNAL-content features —
-        band energies + amplitude + DC — EXCLUDING the rate-determined observability
-        metadata (nyquist mask, resolution flag). Those masks are deterministic
-        functions of (rate, patch_len), constant across a window and trivially
-        computable, so they must NOT be an A1 prediction target: as the raw 98-dim
-        feature they carry ~81% of the target norm and turn A1 into 'echo the rate'.
-
-        Feature layout (see forward): [e_hat(K) | nyquist(K) | resolution(K)? | amp? | dc?].
-        """
-        K = self.n_bands
-        idx = list(range(K))                                    # e_hat band energies
-        off = 2 * K + (K if self.use_resolution_mask else 0)    # skip nyquist (+ resolution)
-        if self.use_amplitude:
-            idx.append(off); off += 1
-        if self.use_dc:
-            idx.append(off)
-        return idx
-
     def get_config(self) -> dict:
         """Hyperparameters needed to reconstruct this tokenizer (for save/load, M4)."""
         return {
@@ -452,7 +432,7 @@ class PhysicalFilterbankTokenizer(nn.Module):
 
     @torch.no_grad()
     def accumulate_norm_stats(self, patches, sampling_rate_hz, patch_len_samples=None,
-                              patch_mask=None, channel_mask=None):
+                              patch_mask=None, channel_mask=None, source_rate_hz=None):
         """Fold one (augmented) batch into the running per-band log-energy stats.
 
         Only *observable* bands are folded in (Nyquist mask applied per band), so a band
@@ -464,6 +444,9 @@ class PhysicalFilterbankTokenizer(nn.Module):
         channel_mask: optional (B, C) bool — ABSENT (zero-filled) channels excluded, so
                       the frozen mean/sd reflect REAL sensor energy and are not dragged
                       toward the all-zero signature (~67% of the corpus is accel-only).
+        source_rate_hz: optional native acquisition bandwidth. A converter may store an
+                       upsampled signal at a higher rate; those interpolation-only bands must
+                       not enter the observable-conditional normalization statistics.
         """
         B, P, S, C = patches.shape
         r, N = self._prep_rate_len(sampling_rate_hz, patch_len_samples, B,
@@ -472,7 +455,11 @@ class PhysicalFilterbankTokenizer(nn.Module):
         centers = self.centers.to(device=patches.device, dtype=patches.dtype)
         sigma = centers / (2.0 * self.Q)
         E = self._apply_filterbank(power, r, centers, sigma, centers.new_tensor(2.0))
-        o, _ = self._observability_masks(r, N, centers, sigma)          # (B,K)
+        src_r = None
+        if source_rate_hz is not None:
+            src_r, _ = self._prep_rate_len(
+                source_rate_hz, patch_len_samples, B, patches.device, patches.dtype, P=P)
+        o, _ = self._observability_masks(r, N, centers, sigma, source_r=src_r)  # (B,K)
         e = torch.log1p(E).to(torch.float64)                           # (B,P,C,K)
         w = o.view(B, 1, 1, self.n_bands).expand_as(e).to(torch.float64)
         if patch_mask is not None:
@@ -533,10 +520,12 @@ class PhysicalFilterbankTokenizer(nn.Module):
         self._norm_fitted.fill_(1.0)
 
     @torch.no_grad()
-    def fit_norm_stats(self, patches, sampling_rate_hz, patch_len_samples=None, eps: float = 1e-5):
+    def fit_norm_stats(self, patches, sampling_rate_hz, patch_len_samples=None, eps: float = 1e-5,
+                       source_rate_hz=None):
         """Convenience one-shot calibration over a single (large) batch."""
         self.reset_norm_accumulator()
-        self.accumulate_norm_stats(patches, sampling_rate_hz, patch_len_samples)
+        self.accumulate_norm_stats(
+            patches, sampling_rate_hz, patch_len_samples, source_rate_hz=source_rate_hz)
         self.finalize_norm_stats(eps)
 
     # --------------------------------------------------------------------- forward

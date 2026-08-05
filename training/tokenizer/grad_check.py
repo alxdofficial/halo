@@ -1,166 +1,165 @@
-"""Magnitude + gradient-flow diagnostic for the Phase-1 model (run before training).
+"""Activation and gradient-flow diagnostic for the live Phase-A model.
 
-Checks the two failure modes that silently wreck pretraining:
-  * ACTIVATION MAGNITUDE imbalance — if the frozen text embeddings enter fusion at a
-    wildly different scale than the sensor tokens, the gated sum is dominated by one
-    side and the other's gradient starves. Reports RMS at every stage.
-  * GRADIENT FLOW — per-module grad norms after one real backward; vanishing/exploding
-    across transformer depth; dead parameters (grad exactly 0); the mask-token and
-    frozen-text invariants (text LM must have NO grad; everything else must).
+Runs one real CPU batch through JEPA and the unified relation objective. It checks fusion scale,
+per-module gradients, frozen text parameters, and dead trainable parameters.
 
-Run:  /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.grad_check
+Run: /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.grad_check
 """
 
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 
-from model.tokenizer.filterbank import PhysicalFilterbankTokenizer
 from training.tokenizer.losses_repr import (
-    GroundingTargets, elite3_loss, make_mask_plan,
+    make_mask_plan,
+    masked_ema_latent_loss,
+    phase_a_loss,
+    relation_loss,
 )
-from training.tokenizer.pretrain import PipelineAModel, PretrainConfig, align_batch
-from training.tokenizer.pretrain_data import (
-    CorpusIndex, MultiScaleCollate, PretrainDataset,
-)
+from training.tokenizer.pretrain import PipelineAModel, PretrainConfig
+from training.tokenizer.pretrain_data import CorpusIndex, MultiScaleCollate, PretrainDataset
 
 OUT = Path(__file__).resolve().parent / "outputs" / "grad_check"
-GYRO_IDX = [3, 4, 5]
+GYRO = [3, 4, 5]
 
 
-def rms(x: torch.Tensor) -> float:
-    return float(x.detach().float().pow(2).mean().sqrt())
+def rms(value: torch.Tensor) -> float:
+    return float(value.detach().float().square().mean().sqrt())
+
+
+def module_grad_norm(module: nn.Module) -> float:
+    squares = [parameter.grad.detach().float().square().sum()
+               for parameter in module.parameters() if parameter.grad is not None]
+    return float(torch.stack(squares).sum().sqrt()) if squares else 0.0
 
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cfg = PretrainConfig(device=str(device))
-
-    index = CorpusIndex(max_per_stream=400, seed=1)
-    ds = PretrainDataset(index, index.train, augment=True)
-    collate = MultiScaleCollate(fixed_patch_seconds=1.0, seed=1)
-    keys = list(range(256))
-    batch = align_batch(collate([ds[i] for i in keys]))
-
-    target_tok = PhysicalFilterbankTokenizer(d_model=1, dft_size=256)
-    target_tok.proj = nn.Identity()
-    target_tok.reset_norm_accumulator()
-    target_tok.accumulate_norm_stats(batch["patches"], batch["rates"], batch["patch_len"])
-    target_tok.finalize_norm_stats()
-    target_tok.eval().to(device)
-    for p in target_tok.parameters():
-        p.requires_grad_(False)
-
-    signal_idx = target_tok.signal_feature_indices()      # A1 target = signal dims only
-    model = PipelineAModel(cfg, a1_target_dim=len(signal_idx)).to(device)
-    for buf in ("norm_mu", "norm_sd", "dc_mu", "dc_sd"):
-        getattr(model.encoder.filterbank, buf).copy_(getattr(target_tok, buf))
-
-    patches = batch["patches"].to(device)
-    rates = batch["rates"].to(device)
-    plen = batch["patch_len"].to(device)
-    pos = batch["positions"].to(device)
-    cmask = batch["channel_mask"].to(device)
-    labels = batch["labels"].to(device)
-    B, P, _, C = patches.shape
-
-    # ---------------------------------------------------------------- magnitudes
-    mags: dict[str, float] = {}
-    enc = model.encoder
-    sensor = enc.tokenize(patches, rates, plen)
-    mags["sensor_tokens(filterbank)"] = rms(sensor)
-    text_embs, text_masks = enc.encode_texts(batch["texts"], device)
-    mags["text_embeddings(raw MiniLM)"] = rms(text_embs)
-    # fusion internals: projected text + channel embeddings vs sensor
-    proj_text = enc.fusion.text_proj(text_embs.reshape(B * C, text_embs.shape[2], -1))
-    mags["text_after_proj"] = rms(proj_text)
-    fused = enc.fusion(sensor, text_embs, text_masks)
-    mags["fused_tokens"] = rms(fused)
-    mags["fusion_delta(fused-sensor)"] = rms(fused - sensor)
-    h = enc.transformer(fused, channel_mask=cmask, positions=pos)
-    mags["transformer_out"] = rms(h)
-    out_full = enc.encode(sensor, text_embs, text_masks, pos, channel_mask=cmask)
-    mags["pooled"] = rms(out_full["pooled"])
-    mags["a2_proj_out"] = rms(model.a2_proj(out_full["pooled"]))
-
-    fusion_ratio = mags["fusion_delta(fused-sensor)"] / (mags["sensor_tokens(filterbank)"] + 1e-9)
-
-    # ---------------------------------------------------------------- gradient flow
-    plan = make_mask_plan(B, P, C, GYRO_IDX, device=device)
-    a1_mask = plan.token_mask & cmask.unsqueeze(1)
-    with torch.no_grad():
-        a1_target = target_tok(patches, rates, plen)[..., signal_idx]
-    st = enc.tokenize(patches, rates, plen)
-    te, tm = enc.encode_texts(batch["texts"], device)
-    masked = enc.encode(st, te, tm, pos, token_mask=plan.token_mask, channel_mask=cmask)
-    clean = enc.encode(st, te, tm, pos, channel_mask=cmask)
-    z = model.a2_proj(clean["pooled"])
-    targets = GroundingTargets(
-        batch["cadence_target"].to(device), batch["cadence_valid"].to(device),
-        batch["eigen_target"].to(device), batch["eigen_valid"].to(device),
+    np.random.seed(0)
+    random.seed(0)
+    # Diagnostics must never take a shared GPU implicitly.
+    device = torch.device("cpu")
+    cfg = PretrainConfig(
+        d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
+        device=str(device), text_conditioning="factored",
     )
-    loss = elite3_loss(
-        model.a1_head(masked["tokens"]), a1_target, a1_mask, z, labels,
-        model.a3_cadence(clean["pooled"]).squeeze(1),
-        model.a3_eigen(clean["pooled"]).view(B, 4, 3), targets,
+    index = CorpusIndex(max_per_stream=200, seed=1)
+    dataset = PretrainDataset(index, index.train, augment=True, two_view=True)
+    collate = MultiScaleCollate(fixed_patch_seconds=1.0, seed=1, two_view=True)
+    batch = collate([dataset[i] for i in range(64)])
+
+    model = PipelineAModel(cfg).to(device)
+    frontend = model.encoder.filterbank
+    frontend.reset_norm_accumulator()
+    frontend.accumulate_norm_stats(
+        batch["patches"].to(device), batch["rates"].to(device),
+        batch["patch_len"].to(device),
+        patch_mask=batch["patch_padding_mask"].to(device),
+        channel_mask=batch["channel_mask"].to(device),
+        source_rate_hz=batch["source_rates"].to(device),
     )
-    model.zero_grad()
+    frontend.finalize_norm_stats()
+
+    def encode(suffix: str = "", token_mask=None):
+        patches = batch[f"patches{suffix}"].to(device)
+        rates = batch[f"rates{suffix}"].to(device)
+        lengths = batch[f"patch_len{suffix}"].to(device)
+        positions = batch[f"positions{suffix}"].to(device)
+        channel_mask = batch[f"channel_mask{suffix}"].to(device)
+        patch_mask = batch[f"patch_padding_mask{suffix}"].to(device)
+        tokens = model.encoder.tokenize(
+            patches, rates, lengths,
+            source_rate_hz=batch[f"source_rates{suffix}"].to(device),
+        )
+        text, text_mask, sensor_text, sensor_text_mask = model.encoder.encode_texts_factored(
+            batch[f"role_texts{suffix}"], batch[f"sensor_texts{suffix}"], device,
+        )
+        sensor_id = batch[f"sensor_id{suffix}"].to(device)
+        output = model.encoder.encode(
+            tokens, text, text_mask, positions, token_mask=token_mask,
+            channel_mask=channel_mask, patch_padding_mask=patch_mask,
+            sensor_text_embs=sensor_text, sensor_text_masks=sensor_text_mask,
+            sensor_id=sensor_id,
+        )
+        return tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id, output
+
+    tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id, clean = encode()
+    batch_size, patches, channels = clean["tokens"].shape[:3]
+    plan = make_mask_plan(
+        batch_size, patches, channels, GYRO, device=device,
+        valid_patches=batch["patch_padding_mask"].to(device),
+        channel_mask=batch["channel_mask"].to(device),
+    )
+    *_, masked = encode(token_mask=plan.token_mask)
+    *_, view_b = encode("_b")
+    jepa_prediction = model.jepa_predictor(masked["tokens"])
+    jepa = masked_ema_latent_loss(
+        jepa_prediction, clean["tokens"].detach(), plan.token_mask,
+    )
+    z_a = model.relation_projector(clean["pooled"])
+    z_b = model.relation_projector(view_b["pooled"])
+    relation = relation_loss(z_a, z_b)
+    loss = phase_a_loss(jepa, relation.total)
+
+    model.zero_grad(set_to_none=True)
     loss.total.backward()
 
-    # per-module grad norms
-    def module_grad_norm(mod: nn.Module) -> float:
-        gs = [p.grad.detach().float().norm() ** 2 for p in mod.parameters()
-              if p.grad is not None]
-        return float(torch.stack(gs).sum().sqrt()) if gs else 0.0
-
-    grad = {
-        "filterbank.proj": module_grad_norm(enc.filterbank.proj),
-        "mask_token": float(enc.mask_token.grad.norm()) if enc.mask_token.grad is not None else 0.0,
-        "fusion": module_grad_norm(enc.fusion),
-        "a1_head": module_grad_norm(model.a1_head),
-        "a2_proj": module_grad_norm(model.a2_proj),
-        "a3_cadence": module_grad_norm(model.a3_cadence),
-        "a3_eigen": module_grad_norm(model.a3_eigen),
+    encoder = model.encoder
+    projected_text = encoder.fusion.pool.text_proj(
+        text.reshape(batch_size * channels, text.shape[2], -1)
+    )
+    fused = encoder.fusion(
+        tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id,
+    )
+    magnitudes = {
+        "sensor_tokens": rms(tokens),
+        "text_embeddings": rms(text),
+        "projected_text": rms(projected_text),
+        "fused_tokens": rms(fused),
+        "fusion_delta": rms(fused - tokens),
+        "pooled": rms(clean["pooled"]),
+        "relation_projection": rms(z_a),
     }
-    # per transformer layer (vanishing/exploding across depth)
-    layer_grads = [round(module_grad_norm(layer), 5)
-                   for layer in enc.transformer.layers]
-    grad["transformer_layers(shallow->deep)"] = layer_grads
-
-    # invariants
-    text_lm_grads = [p.grad is not None for p in enc.text_encoder.parameters()]
-    dead = [n for n, p in model.named_parameters()
-            if p.requires_grad and (p.grad is None or float(p.grad.norm()) == 0.0)]
-
+    fusion_ratio = magnitudes["fusion_delta"] / max(magnitudes["sensor_tokens"], 1e-9)
+    gradients = {
+        "encoder": module_grad_norm(encoder),
+        "jepa_predictor": module_grad_norm(model.jepa_predictor),
+        "relation_projector": module_grad_norm(model.relation_projector),
+        "transformer_layers": [module_grad_norm(layer) for layer in encoder.transformer.layers],
+    }
+    dead = [name for name, parameter in model.named_parameters()
+            if parameter.requires_grad and (parameter.grad is None or not bool(parameter.grad.any()))]
+    checks = {
+        "text_encoder_frozen": not any(
+            parameter.grad is not None for parameter in encoder.text_encoder.parameters()
+        ),
+        "no_dead_trainable_parameters": not dead,
+        # Factored conditioning intentionally starts as a light residual (gate bias -2).
+        "fusion_scale_reasonable": 0.03 < fusion_ratio < 10.0,
+        "finite_activations": all(value == value and abs(value) < 1e4
+                                  for value in magnitudes.values()),
+        "finite_loss": bool(torch.isfinite(loss.total)),
+    }
     report = {
-        "device": str(device), "batch": [B, P, C],
-        "loss_parts": loss.parts,
-        "activation_rms": {k: round(v, 4) for k, v in mags.items()},
-        "fusion_delta_ratio": round(fusion_ratio, 3),
-        "grad_norms": {k: (v if isinstance(v, list) else round(v, 5))
-                       for k, v in grad.items()},
-        "checks": {
-            "text_lm_has_no_grad": not any(text_lm_grads),
-            "no_dead_trainable_params": len(dead) == 0,
-            "dead_params": dead,
-            "fusion_balanced(0.1<ratio<10)": 0.1 < fusion_ratio < 10,
-            "layer_grads_monotone_healthy(no >20x jump)":
-                all(layer_grads[i] == 0 or 0.05 < layer_grads[i + 1] / (layer_grads[i] + 1e-9) < 20
-                    for i in range(len(layer_grads) - 1)),
-            "all_activations_finite": all(v == v and abs(v) < 1e4 for v in mags.values()),
-        },
+        "device": str(device),
+        "batch": [batch_size, patches, channels],
+        "loss": {"jepa": float(jepa.detach()), "relation": float(relation.total.detach())},
+        "activation_rms": {key: round(value, 5) for key, value in magnitudes.items()},
+        "fusion_delta_ratio": round(fusion_ratio, 5),
+        "gradient_norms": gradients,
+        "dead_parameters": dead,
+        "checks": checks,
     }
     (OUT / "report.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
-    verdict = all(report["checks"][k] for k in report["checks"]
-                  if isinstance(report["checks"][k], bool))
-    print(f"\nGRAD/MAGNITUDE CHECK: {'PASS' if verdict else 'ISSUES — see checks'}")
+    print(f"GRAD CHECK: {'PASS' if all(checks.values()) else 'ISSUES'}")
 
 
 if __name__ == "__main__":

@@ -27,8 +27,7 @@ import torch
 
 from data.scripts.eda.grid_io import discover_grids
 from model.tokenizer.encoder import SetTokenizerEncoder
-from model.tokenizer.preprocess import gravity_align
-from training.tokenizer.pretrain_data import (CHANNELS, DFT_SIZE, stream_channel_descriptions,
+from training.tokenizer.pretrain_data import (DFT_SIZE, stream_channel_descriptions,
                                               stream_sensor_texts, _stream_gravity_state,
                                               MultiResolutionCollate, MultiScaleCollate,
                                               VAL_RESOLUTION_PAIR)
@@ -144,10 +143,9 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
     """
     collate = (
         MultiResolutionCollate(fixed_patch_seconds=enc.eval_resolution_pair,
-                               min_resolution_ratio=enc.min_resolution_ratio,
-                               compute_targets=False)
+                               min_resolution_ratio=enc.min_resolution_ratio)
         if enc.use_duration_embedding else
-        MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS, compute_targets=False)
+        MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS)
     )
     enc_texts = texts
     cmask = (torch.ones(6, dtype=torch.bool) if channel_mask is None

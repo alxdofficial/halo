@@ -17,12 +17,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 eda = ["matplotlib", "torch"]
-experiments = ["torch"]
 # Full training/eval stack: encoder text prototypes (sentence-transformers) + probes (scikit-learn).
 model = ["torch", "sentence-transformers", "scikit-learn"]
 
 [tool.setuptools.packages.find]
-include = ["data*", "experiments*", "model*", "training*"]
+include = ["data*", "model*", "training*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

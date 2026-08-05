@@ -1,4 +1,4 @@
-"""M2 augmentation-range visual inspection (A1 build discipline, §5.2.1).
+"""Augmentation-range visual inspection for Phase A.
 
 Draw REAL windows through the actual training augmentation stack — one axis at a
 time, forced on — and plot before/after so the chosen ranges can be eyeballed

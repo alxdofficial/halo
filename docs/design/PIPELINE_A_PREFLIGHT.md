@@ -1,8 +1,10 @@
-> ⚠️ **SUPERSEDED for corpus facts (2026-07-21).** This audit describes the OLD corpus:
+> **HISTORICAL AUDIT.** Superseded for both corpus facts and Phase-A objective semantics. This
+> audit describes the OLD corpus:
 > **8 datasets / 57 labels / 60 Hz harmonised**. The corpus is now **12 datasets / 93 labels /
 > native-rate**, and the encoder here (peak @ 11k steps) is not one we still use. Superseded by
-> `NATIVE_PRETRAIN_PREFLIGHT.md` for corpus and provenance; the *methodology* (what we audit before
-> a pretrain, and the bugs found) remains useful. Any number below is pre-vocabulary-fix.
+> `training/tokenizer/README.md` is the live recipe; the *methodology* (what we audit before
+> a pretrain, and the bugs found) remains useful. Any number below is pre-vocabulary-fix, and
+> retired paths such as `m2_gate.py` no longer exist.
 
 # Pipeline A — Phase-1 pre-flight audit & decisions
 

@@ -7,7 +7,7 @@ The M0 robustness probe (training/tokenizer/outputs/m0_probe/REPORT.md) fixed th
                         the best cross-dataset transfer family in M0 (0.502 vs raw 0.461).
   * eigen_ratios      — per-band accel-triad covariance eigen-ratios (linearity/planarity/
                         isotropy). Exactly rotation- AND gain-invariant (C -> RCR^T keeps
-                        eigenvalues; ratios cancel g^2). Grounding targets for A3.
+                        eigenvalues; ratios cancel g^2). Diagnostic physical primitives.
   * coherence         — accel<->gyro magnitude coherence per band (rotation-invariant via
                         magnitudes). Undefined without a gyro -> validity-masked.
   * spectral_shape    — relative band-energy distribution + centroid + entropy of |acc|.

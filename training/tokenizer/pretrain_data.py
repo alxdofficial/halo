@@ -7,8 +7,7 @@ Design decisions carried in from the gates:
     homogenized 60 Hz base — the 60 Hz "harmonised" grids are the layout-locked baselines' crutch,
     not HALO's. Source-balanced sampling (no per-stream cap) spreads each activity across configs.
   * Subject-disjoint train/val split per dataset.
-  * The default label-free recipe uses source-temperature sampling. Label-balanced batches remain
-    available only for the historical label-SupCon control.
+  * Label-free hierarchical temperature sampling is the sole Phase-A sampler.
   * The FULL augmentation stack (data/scripts/augmentations.py default_v2), with
     per-worker reseeding of BOTH np.random and stdlib random (the CrossHAR lesson —
     the augmenter draws from both RNGs).
@@ -17,9 +16,6 @@ Design decisions carried in from the gates:
     and (B,) patch lengths — batches need bucketing only by patch_seconds; this
     CORRECTS the earlier "bucket by (rate, patch_seconds)" note, which applied to
     the legacy experiment encoder, not the ported filterbank).
-  * A3 grounding targets computed per sample on the FINAL augmented view (the §5.2.3
-    rule) with validity masks; primitives are rate/rotation/gain-invariant so most
-    augs are free, and the non-analytic ones (PCHIP time-warp) are simply recomputed.
   * Channel identity/config = per-stream TEXT (placement parsed from the stream id),
     with the text augmentations (paraphrase/dropout) supplying variety; absent
     channels (pad+mask grids) carry a channel_mask, never fake text confidence.
@@ -29,7 +25,6 @@ from __future__ import annotations
 
 import random as stdlib_random
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterator, Sequence
 
 import numpy as np
@@ -39,7 +34,6 @@ from torch.utils.data import Dataset, Sampler
 from data.scripts.augmentations import AugmentationConfig, IMUAugmenter, IMUSample
 from data.scripts.eda.grid_io import GridRef, discover_grids
 from model.tokenizer.preprocess import gravity_align
-from model.tokenizer.primitives import cadence, eigen_ratios
 
 # ----------------------------------------------------------------------------------------------
 # Corpus configuration
@@ -51,24 +45,22 @@ TRAIN_DATASETS = (
     "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar",
     "mhealth", "capture24", "sp_sw_har", "nfi_fared", "harmes", "xrf_v2",
 )
-# Fully wired scale sources, opt-in through pretrain.py --datasets. NHANES is
-# intentionally absent from label probes and Phase B because it has no activity
-# annotations; ExtraSensory is labelled but remains opt-in so data-scale results
-# cannot be confused with the frozen 12-source technique comparison.
+# Fully wired scale sources, opt-in through pretrain.py --datasets. NHANES is intentionally absent
+# from label probes and Phase B because it has no activity annotations.
 OPTIONAL_PHASE_A_DATASETS = ("extrasensory", "nhanes", "hmog")
 PHASE_A_ONLY_DATASETS = frozenset({"nhanes"})
 UNLABELED_LABEL = "__unlabeled__"
-MAX_PER_STREAM = 20_000          # legacy optional balanced-corpus cap; PER-STREAM (so
-                                 # wisdm's 2 streams get 2x — kept for baseline parity,
-                                 # phone+watch ARE distinct configs; audited 2026-07-18)
+# The only datasets whose converter/grid metadata establishes that event IDs refer to the same
+# physical instant across streams. Keep this policy in one place: both the sampler index and the
+# materialized dataset item must agree, otherwise the sampler can reserve a relation pair that
+# the collator cannot validate.
+VERIFIED_SIMULTANEOUS_DATASETS = frozenset({"xrf_v2", "nfi_fared", "sp_sw_har"})
 WINDOW_SECONDS = 6.0
 VAL_SUBJECT_FRACTION = 0.10      # subject-disjoint val within the train datasets
 GRAVITY_AUG_P = 0.15             # DROP from default_v2's 0.5: the audit found gravity
                                  # removed on 52% of windows, killing the M0 gravity-align /
                                  # DC-tilt features on half the corpus. 0.15 keeps the
                                  # iOS-userAcceleration robustness without dominating.
-MIN_WINDOWS_TO_ANCHOR = 8        # balanced/SupCon control: labels below this can't form real positives
-                                 # (would be duplicate-oversampled); excluded from anchoring
 # per-batch multi-scale draw -> T = 6s / ps in {12, 8, 6, 4}. 2.0s (T=3) DROPPED: T=3 is
 # too coarse for masked prediction, and it's where native-short windows (uci_har 2.56s,
 # unimib falls) collapse to a single un-maskable patch (objective-health audit 2026-07-18).
@@ -247,8 +239,15 @@ class WindowKey:
     label_id: int
 
 
+def _event_is_verified(ref: GridRef) -> bool:
+    """Whether a grid's explicit event IDs are valid cross-stream physical positives."""
+    return bool(
+        ref.event_ids_explicit and ref.dataset in VERIFIED_SIMULTANEOUS_DATASETS
+    )
+
+
 class CorpusIndex:
-    """Discover, balance, split, and label the pretraining corpus (lazy windows)."""
+    """Discover, curate, subject-split, and label the lazy pretraining corpus index."""
 
     def __init__(self, max_per_stream: int | None = None, seed: int = SEED,
                  datasets: Sequence[str] = TRAIN_DATASETS, alignment: str = "native"):
@@ -368,13 +367,12 @@ class CorpusIndex:
         # stamps its own UPTIME counter, and the two ranges do not intersect at all (offsets
         # measured at ~45 h / ~19 days / ~12 min across subjects). Pairing it would mean assuming
         # both recordings start together -- the array alignment this objective exists to avoid.
-        verified_simultaneous = {"xrf_v2", "nfi_fared", "sp_sw_har"}
         ev: dict[str, int] = {}
         self.train_event_ids: list[int] = []
         self.train_event_is_verified: list[bool] = []
         for k in self.train:
             ref = self.refs[k.stream_i]
-            verified = ref.dataset in verified_simultaneous and ref.event_ids_explicit
+            verified = _event_is_verified(ref)
             key = ref.event_ids[k.window_i] if verified else f"{ref.key}:{k.window_i}"
             self.train_event_ids.append(ev.setdefault(key, len(ev)))
             self.train_event_is_verified.append(verified)
@@ -445,7 +443,7 @@ def _seed_worker(worker_id: int) -> None:
 class PretrainDataset(Dataset):
     """One item = one augmented window: variable (T', 6) data + rate + texts + label.
 
-    ``two_view`` (augmentation-agreement A2): also emit an independently augmented second view
+    ``two_view`` (relation objective): also emit an independently augmented second view
     window under ``item["view_b"]`` (its own signal augmentation, rate, channel_mask and
     augmentation-consistent channel text). The collate patchifies it into the ``*_b`` keys."""
 
@@ -457,7 +455,7 @@ class PretrainDataset(Dataset):
         cfg = AugmentationConfig.default_v2() if augment else AugmentationConfig.none()
         if augment:
             cfg.gravity.p = GRAVITY_AUG_P     # audit: 0.5 killed gravity on half the corpus
-            cfg.label_text.enabled = False    # A2 uses label IDs, not text — this aug is
+            cfg.label_text.enabled = False    # Phase A never conditions on activity-label text; this aug is
                                               # computed-then-discarded in pretraining (label
                                               # text is a Pipeline-B concern)
         self.augmenter = IMUAugmenter(cfg)
@@ -530,8 +528,8 @@ class PretrainDataset(Dataset):
         # ratio (the previous formula) is wrong in BOTH directions: upsampling wisdm 20 -> 94 Hz
         # advertised 94 Hz of measured bandwidth (32 observable bands where only 26 carry signal),
         # and downsampling xrf_v2's 25 Hz AirPods stream to 21.9 Hz reported 10.9 Hz, hiding 5 real
-        # bands. This feeds the encoder tokens, the fixed A1 target and a1_feature_valid, so an
-        # over-claim teaches the filterbank that interpolation artifacts are measurable signal.
+        # bands. This feeds the encoder tokens, so an over-claim teaches the filterbank that
+        # interpolation artifacts are measurable signal.
         hardware_rate = STREAM_SOURCE_RATE_HZ.get(f"{ref.dataset}/{ref.stream}", float(ref.rate_hz))
         source_rate = min(float(hardware_rate), float(sample.sampling_rate))
         return {
@@ -539,7 +537,7 @@ class PretrainDataset(Dataset):
             "rate": float(sample.sampling_rate),
             "source_rate": source_rate,
             "texts": texts6,
-            # Factored text (docs/design/TEXT_CONDITIONING.md §4b): carried per view so the A2
+            # Factored text (docs/design/TEXT_CONDITIONING.md §4b): carried per view so the relation
             # second view gets its OWN independently-augmented role/sensor text. label_id is
             # view-independent and lives in __getitem__ below.
             "role_texts": role_texts6,
@@ -556,8 +554,8 @@ class PretrainDataset(Dataset):
         slot = {c: k for k, c in enumerate(CHANNELS)}
         # One CONFIG-text-dropout decision per window, shared by both positive views. The signal
         # augmentations still draw independently (that is what makes the pair a positive), but the
-        # views never disagree on WHETHER the acquisition config was described — otherwise NT-Xent
-        # would train embed(config) == embed(no config), i.e. to ignore the config text, which is
+        # views never disagree on WHETHER the acquisition config was described — otherwise the
+        # relation loss would train embed(config) == embed(no config), i.e. to ignore that text,
         # the opposite of the config-conditional thesis. See SensorTextDropoutCfg.shared_across_views.
         cfg_seed = stdlib_random.randrange(2 ** 31)
         view = self._augment_to_slots(ref, key, base_texts, slot, shared_config_seed=cfg_seed)
@@ -569,9 +567,7 @@ class PretrainDataset(Dataset):
             "window_index": key.window_i,
             "subject": f"{ref.dataset}:{ref.subjects[key.window_i]}",
             "event_id": ref.event_ids[key.window_i],
-            "event_verified": bool(
-                ref.event_ids_explicit and ref.dataset in {"xrf_v2", "nfi_fared"}
-            ),
+            "event_verified": _event_is_verified(ref),
         }
         if self.two_view:
             # Second view: signal augmentation INDEPENDENT, config-text dropout SHARED (same seed).
@@ -581,79 +577,6 @@ class PretrainDataset(Dataset):
                 "source": ref.dataset,
             }
         return item
-
-
-class BalancedBatchSampler(Sampler[list[int]]):
-    """classes_per_batch x samples_per_class over the train keys — guarantees SupCon
-    positives. Classes with too few windows are excluded from anchoring (rare labels are
-    oversampled with replacement instead of dropped).
-
-    When ``stream_datasets`` is given, the per-class draw is additionally **source-balanced**:
-    a label's `samples_per_class` slots are spread evenly across the datasets/configs that
-    carry that label (round-robin over datasets, then a window drawn within each), instead of
-    uniformly over the pooled windows. This stops a large single-config dataset (e.g. capture24,
-    acc-only wrist free-living) from dominating a shared activity's window pool, so each activity
-    is seen across many acquisition configs — the point of the config-generalization corpus. It
-    also makes SupCon positives cross-config. Without it, behaviour is the old uniform-over-pool."""
-
-    def __init__(self, keys: list[WindowKey], classes_per_batch: int,
-                 samples_per_class: int, steps_per_epoch: int, seed: int = SEED,
-                 min_windows: int = MIN_WINDOWS_TO_ANCHOR, *,
-                 stream_datasets: list[str] | None = None):
-        by_label: dict[int, list[int]] = {}
-        for i, k in enumerate(keys):
-            by_label.setdefault(k.label_id, []).append(i)
-        # Exclude labels too small to form real positives — anchoring an 8-slot batch
-        # with a 2-window class means 4x duplicated windows (degenerate SupCon positives).
-        self.excluded = sorted(l for l, w in by_label.items() if len(w) < min_windows)
-        kept = {l: w for l, w in by_label.items() if len(w) >= min_windows}
-        if self.excluded:
-            print(f"[sampler] excluded {len(self.excluded)} labels below "
-                  f"{min_windows} windows from anchoring: {self.excluded}")
-        # Per label, group key indices by their source dataset (for source-balanced draws).
-        # stream_datasets is None -> a single pooled group per label (old uniform behaviour).
-        self.by_label_ds: dict[int, list[np.ndarray]] = {}
-        for l, idxs in kept.items():
-            if stream_datasets is None:
-                self.by_label_ds[l] = [np.asarray(idxs)]
-            else:
-                per_ds: dict[str, list[int]] = {}
-                for i in idxs:
-                    per_ds.setdefault(stream_datasets[keys[i].stream_i], []).append(i)
-                self.by_label_ds[l] = [np.asarray(v) for v in per_ds.values()]
-        self.labels = list(self.by_label_ds)
-        self.classes_per_batch = min(classes_per_batch, len(self.labels))
-        self.samples_per_class = samples_per_class
-        self.steps = steps_per_epoch
-        self.seed = seed
-        self.epoch = 0
-
-    def __len__(self) -> int:
-        return self.steps
-
-    def __iter__(self) -> Iterator[list[int]]:
-        rng = np.random.default_rng(self.seed + self.epoch)
-        self.epoch += 1
-        for _ in range(self.steps):
-            classes = rng.choice(len(self.labels), size=self.classes_per_batch,
-                                 replace=False)
-            batch: list[int] = []
-            for c in classes:
-                pools = self.by_label_ds[self.labels[int(c)]]   # one array per source dataset
-                order = rng.permutation(len(pools))             # round-robin datasets, shuffled
-                # Assign each of samples_per_class slots to a source round-robin, then draw the
-                # slots for each source WITHOUT replacement (F6): no duplicate window indices in a
-                # class-group unless a source pool is smaller than its assigned slot count (a rare
-                # tiny pool), which keeps SupCon positives distinct.
-                counts: dict[int, int] = {}
-                for s in range(self.samples_per_class):
-                    src = int(order[s % len(pools)])
-                    counts[src] = counts.get(src, 0) + 1
-                for src, cnt in counts.items():
-                    pool = pools[src]
-                    picks = rng.choice(len(pool), size=cnt, replace=cnt > len(pool))
-                    batch.extend(int(pool[p]) for p in picks)
-            yield batch
 
 
 def _capped_probabilities(
@@ -701,12 +624,12 @@ class TemperatureSampler(Sampler[int]):
       * alpha = 1  -> proportional to dataset size (large corpora dominate),
       * alpha = 0  -> uniform per source (every dataset equally likely),
       * alpha = 0.25 + a 0.25 cap is the Phase-A recipe.
-    Draws ``num_samples`` indices WITH replacement via ``torch.multinomial``; with a DataLoader
-    ``batch_size`` and ``drop_last=True`` that yields ``num_samples // batch_size`` full batches.
-    Unlike ``BalancedBatchSampler`` there is no per-class structure; activity labels are unused."""
+    Draws without replacement inside each batch and with replacement across batches, yielding
+    exactly ``num_samples // batch_size`` full batches.
+    There is no per-class structure; activity labels are unused."""
 
     def __init__(self, keys: list[WindowKey], stream_datasets: list[str], num_samples: int,
-                 alpha: float = 0.5, seed: int = SEED, batch_size: int = 0,
+                 batch_size: int, alpha: float = 0.5, seed: int = SEED,
                  event_ids: Sequence[int] | None = None,
                  positive_event_ids: Sequence[int] | None = None,
                  pair_fraction: float = 0.0,
@@ -749,14 +672,14 @@ class TemperatureSampler(Sampler[int]):
                 row_weights.append(self.dataset_probabilities[dataset] * within_dataset)
         self.weights = torch.tensor(row_weights, dtype=torch.double)
         self.num_samples = int(num_samples)
-        self.alpha = float(alpha)
-        self.subject_alpha = float(subject_alpha)
-        self.max_dataset_share = max_dataset_share
         self.seed = int(seed)
-        # When >0, draw each batch of this size WITHOUT replacement so a batch never contains an exact
-        # duplicate window (a false negative for the SimCLR control and wasted diversity for VICReg);
-        # still holds ACROSS batches (F11). 0 => legacy per-window with-replacement draw.
         self.batch_size = int(batch_size)
+        if self.num_samples <= 0 or self.batch_size < 2:
+            raise ValueError("num_samples must be positive and batch_size must be at least 2")
+        if self.batch_size > len(keys):
+            raise ValueError("batch_size cannot exceed the number of indexed windows")
+        if self.num_samples % self.batch_size:
+            raise ValueError("num_samples must be divisible by batch_size")
         # Per-window EVENT id; two windows sharing one id are simultaneous recordings of the same
         # physical event (different placements) and must not co-occur unless explicitly paired.
         self.event_ids = None if event_ids is None else np.asarray(event_ids)
@@ -766,6 +689,8 @@ class TemperatureSampler(Sampler[int]):
         self.pair_fraction = float(pair_fraction)
         if not 0.0 <= self.pair_fraction < 1.0:
             raise ValueError("pair_fraction must be in [0, 1)")
+        if self.event_ids is not None and len(self.event_ids) != len(keys):
+            raise ValueError("event_ids must align 1:1 with keys")
         if self.positive_event_ids is not None and len(self.positive_event_ids) != len(keys):
             raise ValueError("positive_event_ids must align 1:1 with keys")
         self.positive_event_members: dict[int, list[int]] = {}
@@ -784,80 +709,74 @@ class TemperatureSampler(Sampler[int]):
 
     def __iter__(self) -> Iterator[int]:
         # Advance the seed per epoch so the calibration pass and each training epoch draw
-        # different windows (mirrors BalancedBatchSampler's per-__iter__ epoch bump).
+        # different windows on each new sampler pass.
         gen = torch.Generator().manual_seed(self.seed + self.epoch)
         self.epoch += 1
         bs = self.batch_size
-        if 1 < bs <= self.weights.numel():
-            # Each batch drawn WITHOUT replacement (no exact within-batch duplicate = no NT-Xent
-            # false negative), WITH replacement across batches. num_samples is a multiple of bs.
-            for _ in range(self.num_samples // bs):
-                take: list[int] = []
-                seen_windows: set[int] = set()
-                seen_events: set[int] = set()
+        # Each batch is drawn without replacement so exact duplicates do not reduce relation
+        # diversity; sampling remains with replacement across batches.
+        for _ in range(self.num_samples // bs):
+            take: list[int] = []
+            seen_windows: set[int] = set()
+            seen_events: set[int] = set()
 
-                # Reserve a controlled fraction of the batch for verified simultaneous positives.
-                # Each selected event contributes exactly two placements; remaining draws avoid that
-                # event so every event yields one unambiguous pair.
-                n_pairs = min(
-                    int(round(bs * self.pair_fraction / 2.0)),
-                    len(self.positive_event_members),
+            # Reserve a controlled fraction of the batch for verified simultaneous positives.
+            # Each selected event contributes exactly two placements; remaining draws avoid that
+            # event so every event yields one unambiguous pair.
+            n_pairs = min(
+                int(round(bs * self.pair_fraction / 2.0)),
+                len(self.positive_event_members),
+            )
+            if n_pairs:
+                event_keys = sorted(self.positive_event_members)
+                chosen = torch.randperm(len(event_keys), generator=gen)[:n_pairs].tolist()
+                for j in chosen:
+                    event_id = event_keys[j]
+                    members = self.positive_event_members[event_id]
+                    order = torch.randperm(len(members), generator=gen)[:2].tolist()
+                    for pos in order:
+                        i = members[pos]
+                        take.append(i)
+                        seen_windows.add(i)
+                    seen_events.add(event_id)
+
+            # Oversample once, then keep unique windows and unique non-positive events. This
+            # preserves event hygiene while allowing only deliberately reserved positive pairs.
+            draw_n = min(4 * bs, self.weights.numel())
+            candidates = torch.multinomial(
+                self.weights, draw_n, replacement=False, generator=gen
+            ).tolist()
+            for i in candidates:
+                if len(take) >= bs:
+                    break
+                if i in seen_windows:
+                    continue
+                event_id = int(self.event_ids[i]) if self.event_ids is not None else i
+                positive_id = (
+                    int(self.positive_event_ids[i])
+                    if self.positive_event_ids is not None else -1
                 )
-                if n_pairs:
-                    event_keys = sorted(self.positive_event_members)
-                    chosen = torch.randperm(len(event_keys), generator=gen)[:n_pairs].tolist()
-                    for j in chosen:
-                        event_id = event_keys[j]
-                        members = self.positive_event_members[event_id]
-                        order = torch.randperm(len(members), generator=gen)[:2].tolist()
-                        for pos in order:
-                            i = members[pos]
-                            take.append(i)
-                            seen_windows.add(i)
-                        seen_events.add(event_id)
-
-                # Oversample once, then keep unique windows and unique non-positive events. This
-                # preserves the old event hygiene when pair_fraction=0 while allowing only the
-                # deliberately reserved positive pairs when pair_fraction>0.
-                draw_n = min(max(4 * bs, bs), self.weights.numel())
-                candidates = torch.multinomial(
-                    self.weights, draw_n, replacement=False, generator=gen
-                ).tolist()
+                grouping_id = positive_id if positive_id >= 0 else event_id
+                if grouping_id in seen_events:
+                    continue
+                take.append(i)
+                seen_windows.add(i)
+                seen_events.add(grouping_id)
+            if len(take) < bs:
+                # Tiny synthetic corpora may not have enough distinct events. Preserve batch size
+                # without duplicating a window, even if distinct-event hygiene must relax.
                 for i in candidates:
                     if len(take) >= bs:
                         break
-                    if i in seen_windows:
-                        continue
-                    event_id = int(self.event_ids[i]) if self.event_ids is not None else i
-                    positive_id = (
-                        int(self.positive_event_ids[i])
-                        if self.positive_event_ids is not None else -1
-                    )
-                    grouping_id = positive_id if positive_id >= 0 else event_id
-                    if grouping_id in seen_events:
-                        continue
-                    take.append(i)
-                    seen_windows.add(i)
-                    seen_events.add(grouping_id)
-                if len(take) < bs:
-                    # The corpus has vastly more events than one batch; reaching this fallback means
-                    # an unusually tiny synthetic test corpus. Preserve batch size without duplicating
-                    # a window, even if distinct-event hygiene must relax.
-                    for i in candidates:
-                        if len(take) >= bs:
-                            break
-                        if i not in seen_windows:
-                            take.append(i)
-                            seen_windows.add(i)
-                if len(take) != bs:
-                    raise RuntimeError(
-                        f"could only draw {len(take)}/{bs} unique windows for a temperature batch"
-                    )
-                order = torch.randperm(bs, generator=gen).tolist()
-                yield from [take[i] for i in order]
-        else:
-            idx = torch.multinomial(self.weights, self.num_samples, replacement=True, generator=gen)
-            yield from idx.tolist()
+                    if i not in seen_windows:
+                        take.append(i)
+                        seen_windows.add(i)
+            if len(take) != bs:
+                raise RuntimeError(
+                    f"could only draw {len(take)}/{bs} unique windows for a temperature batch"
+                )
+            order = torch.randperm(bs, generator=gen).tolist()
+            yield from [take[i] for i in order]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -866,9 +785,8 @@ class TemperatureSampler(Sampler[int]):
 class MultiScaleCollate:
     """Draw ONE patch_seconds per batch; patchify each sample at its OWN rate.
 
-    Per sample: compute A3 targets on the raw augmented window (rotation-invariant) -> patchify.
-    Trailing patches the (possibly rate-shortened / cropped) window can't fill are flagged in
-    `patch_padding_mask`, never treated as real.
+    Trailing patches the (possibly rate-shortened / cropped) window cannot fill are flagged in
+    ``patch_padding_mask`` and never treated as real.
 
     **Gravity is NOT aligned by default (design decision, 2026-07-19).** The tokenizer's signed-DC
     feature already exposes the gravity DIRECTION per channel, so posture (stand/sit/lie, which differ
@@ -879,23 +797,18 @@ class MultiScaleCollate:
 
     Output: patches (B, P, S, 6) zero-padded · patch_len (B,) · rates (B,) ·
     positions (B, P) s · channel_mask (B, 6) · patch_padding_mask (B, P) True=real ·
-    texts · labels · A3 targets (validity-masked).
+    texts · labels.
     """
 
     def __init__(self, dft_size: int = DFT_SIZE,
                  patch_choices: Sequence[float] = PATCH_SECONDS_CHOICES,
                  fixed_patch_seconds: float | None = None, seed: int = SEED,
-                 align_gravity: bool = False, compute_targets: bool = True,
-                 two_view: bool = False):
+                 align_gravity: bool = False, two_view: bool = False):
         self.dft_size = dft_size
         self.patch_choices = tuple(patch_choices)
         self.fixed = fixed_patch_seconds
         self.align_gravity = align_gravity
-        # A3 grounding targets (cadence + eigen) cost an FFT + PCA per window. They are ONLY used
-        # by the training loss; validation/embedding never reads them, so val loaders pass
-        # compute_targets=False to skip that per-window DSP (the val-speed fix — 2026-07-19).
-        self.compute_targets = compute_targets
-        # A2: also patchify item["view_b"] (the second augmented view) into `*_b` keys.
+        # Relation objective: patchify the independently augmented positive view into `*_b` keys.
         self.two_view = two_view
         self.seed = seed
 
@@ -909,17 +822,17 @@ class MultiScaleCollate:
 
     def __call__(self, batch: list[dict]) -> dict:
         ps = self._patch_seconds(batch)
-        out = self._collate_impl(batch, ps, self.compute_targets)
+        out = self._collate_impl(batch, ps)
         if self.two_view and batch and "view_b" in batch[0]:
-            # Second positive view: same patch_seconds; A1/A3 use only view A.
-            out_b = self._collate_impl([item["view_b"] for item in batch], ps, compute_targets=False)
+            # Second positive view uses the same patch duration; JEPA uses only view A.
+            out_b = self._collate_impl([item["view_b"] for item in batch], ps)
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "texts",
                       "role_texts", "sensor_texts", "sensor_id",
                       "channel_mask", "patch_padding_mask"):
                 out[f"{k}_b"] = out_b[k]
         return out
 
-    def _collate_impl(self, batch: list[dict], ps: float, compute_targets: bool) -> dict:
+    def _collate_impl(self, batch: list[dict], ps: float) -> dict:
         P = max(1, int(round(WINDOW_SECONDS / ps)))
         B = len(batch)
         patches = torch.zeros(B, P, self.dft_size, len(CHANNELS))
@@ -927,10 +840,6 @@ class MultiScaleCollate:
         patch_pad = torch.zeros(B, P, dtype=torch.bool)     # True = real patch
         rates = torch.zeros(B)
         source_rates = torch.zeros(B)
-        cadence_t = torch.zeros(B)
-        cadence_v = torch.zeros(B, dtype=torch.bool)
-        eigen_t = torch.full((B, 4, 3), float("nan"))
-        eigen_v = torch.zeros(B, dtype=torch.bool)
         # Per-sample patch-CENTER positions (seconds). Default = the nominal patch grid; the
         # usable==0 fallback below overrides row b's single patch to the window's TRUE center (F4a).
         positions = (torch.arange(P).float() * ps + ps / 2).unsqueeze(0).repeat(B, 1)
@@ -940,19 +849,6 @@ class MultiScaleCollate:
             n = max(1, int(round(rate * ps)))
             if n > self.dft_size:
                 raise ValueError(f"patch length {n} exceeds dft_size {self.dft_size}")
-            # A3 targets on the RAW augmented view (rotation-invariant, so pre-align).
-            # Call cadence + eigen DIRECTLY on the accel triad (canonical slots 0:3) — the
-            # full compute_primitives would also gravity-align internally and compute 4
-            # unused families (grav-energy/coherence/shape/dc_tilt); that redundant work +
-            # the double align is the second-agent efficiency finding. Skipped entirely when
-            # compute_targets is False (val/embedding loaders don't use A3).
-            if compute_targets:
-                acc = data[:, :3].unsqueeze(0)                           # (1, T, 3)
-                cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
-                cadence_t[b] = cad.values[0, 0].nan_to_num(0.0)
-                cadence_v[b] = cad.valid[0]
-                eigen_t[b] = eig.values[0]
-                eigen_v[b] = eig.valid[0]
             # Gravity-align the whole window on its true length (one R per window). Pass the
             # AUTHORITATIVE gravity_state so gravity-removed streams skip alignment (F9).
             if self.align_gravity:
@@ -965,7 +861,7 @@ class MultiScaleCollate:
                 # Window shorter than one patch at this scale (e.g. sp_sw_har's 1.0 s TUG
                 # windows in a ps=1.5 batch). Emit ONE short patch spanning the whole
                 # window rather than an all-padding window (which yields a degenerate
-                # pooled embedding that poisons A2). patch_len is honest (< n); the
+                # pooled embedding that poisons the relation objective). patch_len is honest (< n); the
                 # filterbank flags the under-resolved bands via its resolution mask.
                 per_patch, usable = data.shape[0], 1
                 positions[b, 0] = 0.5 * per_patch / rate   # true center of the short patch (F4a)
@@ -1010,10 +906,6 @@ class MultiScaleCollate:
             ),
             "channel_mask": torch.stack([item["channel_mask"] for item in batch]),
             "patch_padding_mask": patch_pad,
-            "cadence_target": cadence_t,
-            "cadence_valid": cadence_v,
-            "eigen_target": eigen_t,
-            "eigen_valid": eigen_v,
         }
 
 
@@ -1036,7 +928,6 @@ class MultiResolutionCollate:
         min_resolution_ratio: float = MIN_RESOLUTION_RATIO,
         seed: int = SEED,
         align_gravity: bool = False,
-        compute_targets: bool = True,
         two_view: bool = False,
     ):
         self.dft_size = int(dft_size)
@@ -1047,8 +938,7 @@ class MultiResolutionCollate:
         self.min_resolution_ratio = float(min_resolution_ratio)
         self.seed = int(seed)
         self.align_gravity = bool(align_gravity)
-        self.compute_targets = bool(compute_targets)
-        # A2: also patchify item["view_b"] (the second augmented view) into `*_b` keys.
+        # Relation objective: patchify the independently augmented positive view into `*_b` keys.
         self.two_view = bool(two_view)
         self._valid_pairs = tuple(
             (short, long)
@@ -1089,40 +979,27 @@ class MultiResolutionCollate:
 
     def __call__(self, batch: list[dict]) -> dict:
         pair = self._patch_seconds(batch)
-        out = self._collate_impl(batch, pair, self.compute_targets)
+        out = self._collate_impl(batch, pair)
         if self.two_view and batch and "view_b" in batch[0]:
-            # Second positive view: same resolution pair; A1/A3 use only view A.
-            out_b = self._collate_impl([item["view_b"] for item in batch], pair,
-                                       compute_targets=False)
+            # Second positive view uses the same resolution pair; JEPA uses only view A.
+            out_b = self._collate_impl([item["view_b"] for item in batch], pair)
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "patch_durations",
                       "resolution_ids", "texts", "role_texts", "sensor_texts", "sensor_id",
                       "channel_mask", "patch_padding_mask"):
                 out[f"{k}_b"] = out_b[k]
         return out
 
-    def _collate_impl(self, batch: list[dict], pair: tuple[float, float],
-                      compute_targets: bool) -> dict:
+    def _collate_impl(self, batch: list[dict], pair: tuple[float, float]) -> dict:
         B = len(batch)
         rates = torch.zeros(B)
         source_rates = torch.zeros(B)
         channel_mask = torch.stack([item["channel_mask"] for item in batch])
-        cadence_t = torch.zeros(B)
-        cadence_v = torch.zeros(B, dtype=torch.bool)
-        eigen_t = torch.full((B, 4, 3), float("nan"))
-        eigen_v = torch.zeros(B, dtype=torch.bool)
         all_entries: list[list[tuple]] = []
 
         for b, item in enumerate(batch):
             data, rate = item["data"], float(item["rate"])
             rates[b] = rate
             source_rates[b] = float(item.get("source_rate", rate))
-            if compute_targets:
-                acc = data[:, :3].unsqueeze(0)
-                cad, eig = cadence(acc, rate), eigen_ratios(acc, rate)
-                cadence_t[b] = cad.values[0, 0].nan_to_num(0.0)
-                cadence_v[b] = cad.valid[0]
-                eigen_t[b] = eig.values[0]
-                eigen_v[b] = eig.valid[0]
             if self.align_gravity:
                 data, _, _ = gravity_align(data.unsqueeze(0), list(CHANNELS), rate,
                                            gravity_state=item.get("gravity_state"))
@@ -1210,8 +1087,4 @@ class MultiResolutionCollate:
             ),
             "channel_mask": channel_mask,
             "patch_padding_mask": patch_pad,
-            "cadence_target": cadence_t,
-            "cadence_valid": cadence_v,
-            "eigen_target": eigen_t,
-            "eigen_valid": eigen_v,
         }

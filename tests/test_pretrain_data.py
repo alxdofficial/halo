@@ -16,13 +16,14 @@ pytestmark = pytest.mark.skipif(
 from training.tokenizer.pretrain_data import (  # noqa: E402
     CHANNELS,
     PATCH_SECONDS_CHOICES,
-    BalancedBatchSampler,
     CorpusIndex,
     MultiResolutionCollate,
     MultiScaleCollate,
     PretrainDataset,
     TemperatureSampler,
+    VERIFIED_SIMULTANEOUS_DATASETS,
     WindowKey,
+    _event_is_verified,
     stream_channel_descriptions,
 )
 
@@ -46,18 +47,6 @@ def test_corpus_excludes_eval_datasets(index):
     for banned in ("motionsense", "realworld", "shoaib", "inclusivehar",
                    "tnda_har", "ut_complex"):
         assert banned not in datasets, f"eval dataset {banned} leaked into pretraining"
-
-
-def test_balanced_sampler_composition(index):
-    sampler = BalancedBatchSampler(index.train, classes_per_batch=4,
-                                   samples_per_class=3, steps_per_epoch=5, seed=1)
-    batches = list(sampler)
-    assert len(batches) == 5
-    for batch in batches:
-        assert len(batch) == 12
-        labels = [index.train[i].label_id for i in batch]
-        counts = {l: labels.count(l) for l in set(labels)}
-        assert all(v == 3 for v in counts.values()), counts
 
 
 def test_item_canonical_slots_and_mask(index):
@@ -92,9 +81,6 @@ def test_collate_shapes_and_positions(index, ps):
     # positions are patch CENTERS in seconds
     assert torch.allclose(out["positions"][0, 0], torch.tensor(ps / 2))
     assert (out["patch_len"] >= 1).all()
-    # A3 targets carry validity, never silent NaN in the valid entries
-    valid_cad = out["cadence_target"][out["cadence_valid"]]
-    assert torch.isfinite(valid_cad).all()
 
 
 def test_collate_handles_per_sample_rates(index):
@@ -122,9 +108,7 @@ def test_multiresolution_collate_covers_signal_and_retains_partial_tails():
         "label_id": 0, "channel_mask": torch.ones(6, dtype=torch.bool),
         "gravity_state": "present", "source": "synthetic",
     }
-    out = MultiResolutionCollate(
-        fixed_patch_seconds=(0.4, 1.4), compute_targets=False,
-    )([item])
+    out = MultiResolutionCollate(fixed_patch_seconds=(0.4, 1.4))([item])
     real = out["patch_padding_mask"][0]
     assert out["patch_len"].shape == out["positions"].shape
     assert set(out["resolution_ids"][0, real].tolist()) == {0, 1}
@@ -162,21 +146,6 @@ def test_stream_text_uses_rich_distinct_placement():
     assert "lower back" in t("nfi_fared", "back")
 
 
-def test_sampler_source_balances_within_label():
-    """A shared label's draws are spread evenly across its datasets, not by raw count."""
-    from collections import Counter
-    from training.tokenizer.pretrain_data import WindowKey
-    # label 0 present in a 'big' stream (1000 windows) and a 'small' one (10) — 100:1 imbalance.
-    keys = [WindowKey(0, w, 0) for w in range(1000)] + [WindowKey(1, w, 0) for w in range(10)]
-    sd = ["big", "small"]
-    bal = BalancedBatchSampler(keys, 1, 8, steps_per_epoch=300, stream_datasets=sd)
-    c = Counter(sd[keys[i].stream_i] for batch in bal for i in batch)
-    assert 0.4 < c["small"] / (c["big"] + c["small"]) < 0.6      # source-balanced ~50/50
-    uni = BalancedBatchSampler(keys, 1, 8, steps_per_epoch=300)  # no stream_datasets -> old behaviour
-    c2 = Counter(sd[keys[i].stream_i] for batch in uni for i in batch)
-    assert c2["small"] / (c2["big"] + c2["small"]) < 0.1         # uniform-over-pool follows raw count
-
-
 def test_temperature_sampler_reserves_verified_event_pairs():
     keys = [WindowKey(i % 2, i, 0) for i in range(100)]
     # Ten events have two placements; all remaining windows are unrelated.
@@ -209,7 +178,7 @@ def test_temperature_sampler_caps_datasets_and_tempers_subjects():
             datasets.append(f"d{stream}")
             subjects.append(int(window >= 90) if stream == 0 else 0)
     sampler = TemperatureSampler(
-        keys, [f"d{i}" for i in range(5)], num_samples=100,
+        keys, [f"d{i}" for i in range(5)], num_samples=100, batch_size=10,
         alpha=0.25, subject_ids=subjects, subject_alpha=0.5,
         max_dataset_share=0.25,
     )
@@ -234,6 +203,16 @@ def test_verified_event_pair_extraction_requires_distinct_streams():
     )
     assert left.tolist() == [0]
     assert right.tolist() == [1]
+
+
+def test_verified_event_policy_includes_sp_sw_har_everywhere():
+    from types import SimpleNamespace
+
+    assert "sp_sw_har" in VERIFIED_SIMULTANEOUS_DATASETS
+    ref = SimpleNamespace(dataset="sp_sw_har", event_ids_explicit=True)
+    assert _event_is_verified(ref)
+    assert not _event_is_verified(SimpleNamespace(dataset="wisdm", event_ids_explicit=True))
+    assert not _event_is_verified(SimpleNamespace(dataset="sp_sw_har", event_ids_explicit=False))
 
 
 def test_no_hapt_uci_leak(index):
@@ -261,7 +240,7 @@ def test_patch_padding_mask_flags_phantom_patches(index):
 def test_short_window_yields_at_least_one_patch(index):
     """A window shorter than one patch at the drawn scale (e.g. sp_sw_har's 1.0 s TUG
     windows at ps=1.5) must still get exactly one REAL short patch spanning the whole
-    window — never an all-padding window (which would pool to a degenerate A2 embedding).
+    window — never an all-padding window (which would pool to a degenerate embedding).
     patch_len is honest (< round(rate*ps))."""
     ds = PretrainDataset(index, index.train[:32], augment=True)
     items = [ds[i] for i in range(32)]
@@ -325,18 +304,6 @@ def test_collate_fallback_position_is_window_center():
     out = MultiScaleCollate(fixed_patch_seconds=1.5)([item])   # 100 samples @100Hz = 1.0 s < 1.5 s patch
     assert int(out["patch_len"][0]) == 100                     # whole window in one short patch
     assert abs(float(out["positions"][0, 0]) - 0.5) < 1e-4     # 0.5 s (not the nominal 0.75)
-
-
-def test_sampler_draws_without_replacement_in_group():
-    """F6: a class-group of samples_per_class draws contains no duplicate window index (unless a
-    source pool is smaller than its slot count)."""
-    from training.tokenizer.pretrain_data import WindowKey
-    keys = [WindowKey(0, w, 0) for w in range(500)] + [WindowKey(1, w, 0) for w in range(500)]
-    sd = ["a", "b"]
-    bal = BalancedBatchSampler(keys, classes_per_batch=1, samples_per_class=8,
-                               steps_per_epoch=200, stream_datasets=sd)
-    for batch in bal:
-        assert len(set(batch)) == len(batch), "duplicate window in a class-group"
 
 
 def test_wisdm_native_grid_is_full_six_channel(index):

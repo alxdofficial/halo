@@ -52,7 +52,7 @@ Pipeline (files):
    Channels carry **no positional index** — identity is entirely the fused text, which is what makes
    channel count/order free.
 5. **`encoder.py` · `SetTokenizerEncoder`** — orchestrates tokenize → encode_texts → encode, masks
-   for A1 *before* fusion (so the [MASK] token still gets its channel's identity), pools to
+   for JEPA *before* fusion (so the [MASK] token still gets its channel's identity), pools to
    `per_patch (B,P,d)` and `pooled (B,d)` with channel/patch masks respected.
 
 **So the tokenizer is already a text-keyed set over channels.** The proposed change is not "add

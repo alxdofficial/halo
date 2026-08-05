@@ -1,9 +1,8 @@
 """Pre-training corpus + task-distribution audit (run before the first Phase-1 run).
 
 Answers, with numbers: how much data, does it load, unique examples, label/dataset
-imbalances, the realized distribution of the pretraining tasks (augmentation firing,
-mask ratios, patch-scale draws), and A3 target validity rates (including by label —
-cadence is structurally locomotion-only).
+imbalances, the realized distribution of augmentations and masks, temperature-sampler
+source shares, and physical-primitive validity as a diagnostic probe.
 
 Run:  /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.corpus_audit
 """
@@ -22,10 +21,9 @@ from training.tokenizer.losses_repr import make_mask_plan
 from training.tokenizer.pretrain_data import (
     CHANNELS,
     PATCH_SECONDS_CHOICES,
-    BalancedBatchSampler,
     CorpusIndex,
-    MultiScaleCollate,
     PretrainDataset,
+    TemperatureSampler,
 )
 
 OUT = Path(__file__).resolve().parent / "outputs" / "corpus_audit"
@@ -41,7 +39,7 @@ def main() -> None:
     torch.manual_seed(SEED)
 
     # ---------------------------------------------------------------- corpus volume
-    index = CorpusIndex()      # the real training config (20k/stream cap)
+    index = CorpusIndex()      # the real training config (all curated windows)
     per_dataset = defaultdict(lambda: {"streams": 0, "windows_total": 0,
                                        "windows_used": 0, "subjects": set()})
     used_by_stream = Counter()
@@ -146,8 +144,8 @@ def main() -> None:
         },
     }
 
-    # mask-plan realized ratios (the A1 task distribution)
-    ratios, gyro_drops, causal = [], 0, 0
+    # Mask-plan realized ratios for the JEPA task distribution.
+    ratios, gyro_drops = [], 0
     for t_count in (3, 4, 6, 8, 12):
         plan = make_mask_plan(512, t_count, 6, [3, 4, 5],
                               generator=torch.Generator().manual_seed(1))
@@ -160,18 +158,22 @@ def main() -> None:
         "patch_seconds_choices": list(PATCH_SECONDS_CHOICES),
     }
 
-    # balanced-sampler coverage: how often each label anchors a batch
-    sampler = BalancedBatchSampler(index.train, 32, 8, steps_per_epoch=200, seed=3)
-    anchored = Counter()
-    for batch in sampler:
-        for lab in {index.train[i].label_id for i in batch}:
-            anchored[id_to_label[lab]] += 1
+    # Live label-free sampler: empirical source share and verified-pair quota.
+    sampler = TemperatureSampler(
+        index.train, index.stream_datasets, num_samples=200 * 256, batch_size=256,
+        alpha=0.25, seed=3, event_ids=index.train_event_ids,
+        positive_event_ids=index.train_positive_event_ids, pair_fraction=0.2,
+        subject_ids=index.train_subject_ids, subject_alpha=0.5, max_dataset_share=0.25,
+    )
+    draws = list(sampler)
+    sampled_sources = Counter(index.stream_datasets[index.train[i].stream_i] for i in draws)
+    sampled_events = Counter(index.train_positive_event_ids[i] for i in draws
+                             if index.train_positive_event_ids[i] >= 0)
     report["sampler"] = {
-        "labels_never_anchored_in_200_steps":
-            [l for l in hist if anchored[l] == 0],
-        "min_anchor_count": min(anchored.values()) if anchored else 0,
-        "oversampled_labels(<8 windows, drawn with replacement)":
-            report["label_distribution"]["labels_below_8_windows"],
+        "sampled_windows": len(draws),
+        "source_share": {source: round(count / len(draws), 4)
+                         for source, count in sampled_sources.most_common()},
+        "complete_verified_pairs": sum(count == 2 for count in sampled_events.values()),
     }
 
     (OUT / "report.json").write_text(json.dumps(report, indent=2))

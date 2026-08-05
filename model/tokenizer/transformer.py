@@ -91,7 +91,6 @@ class TemporalSelfAttention(nn.Module):
 
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
-        self.d_model = d_model
         self.num_heads = num_heads
         self.head_dim = d_model // num_heads
 
@@ -218,7 +217,6 @@ class CrossChannelSelfAttention(nn.Module):
 
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
-        self.d_model = d_model
         self.num_heads = num_heads
         self.head_dim = d_model // num_heads
 
@@ -334,79 +332,6 @@ class FeedForward(nn.Module):
         x = self.dropout1(x)
         x = self.fc2(x)
         x = self.dropout2(x)
-        return x
-
-
-class TemporalTransformerBlock(nn.Module):
-    """
-    Single transformer block with temporal self-attention.
-
-    Architecture:
-    - Temporal self-attention with residual connection and layer norm
-    - Feed-forward network with residual connection and layer norm
-    """
-
-    def __init__(
-        self,
-        d_model: int,
-        num_heads: int = 8,
-        dim_feedforward: int = 512,
-        dropout: float = 0.1
-    ):
-        """
-        Args:
-            d_model: Feature dimension
-            num_heads: Number of attention heads
-            dim_feedforward: Hidden dimension for feed-forward network
-            dropout: Dropout probability
-        """
-        super().__init__()
-
-        self.self_attn = TemporalSelfAttention(
-            d_model=d_model,
-            num_heads=num_heads,
-            dropout=dropout
-        )
-
-        self.feed_forward = FeedForward(
-            d_model=d_model,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout
-        )
-
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        key_padding_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        Forward pass through transformer block.
-
-        Args:
-            x: Input tensor of shape (batch_size * num_channels, num_patches, d_model)
-            mask: Optional attention mask
-            key_padding_mask: Optional patch validity mask (batch_channels, num_patches)
-                             True = valid, False = padded
-
-        Returns:
-            Output tensor of same shape
-        """
-        # Self-attention with residual
-        attn_output = self.self_attn(x, mask, key_padding_mask=key_padding_mask)
-        x = x + self.dropout(attn_output)
-        x = self.norm1(x)
-
-        # Feed-forward with residual
-        ff_output = self.feed_forward(x)
-        x = x + self.dropout(ff_output)
-        x = self.norm2(x)
-
         return x
 
 
@@ -569,107 +494,6 @@ class DualBranchTransformerBlock(nn.Module):
         return x
 
 
-class ChannelIndependentTemporalTransformer(nn.Module):
-    """
-    Temporal transformer that processes each channel independently.
-
-    Each channel's patch sequence is processed through the same transformer,
-    learning temporal dependencies without mixing information across channels.
-
-    Input:  (batch, patches, channels, d_model)
-    Process: Each channel independently through temporal attention
-    Output: (batch, patches, channels, d_model)
-    """
-
-    def __init__(
-        self,
-        d_model: int = 128,
-        num_layers: int = 4,
-        num_heads: int = 8,
-        dim_feedforward: int = 512,
-        dropout: float = 0.1
-    ):
-        """
-        Args:
-            d_model: Feature dimension
-            num_layers: Number of transformer layers
-            num_heads: Number of attention heads
-            dim_feedforward: Hidden dimension for feed-forward networks
-            dropout: Dropout probability
-        """
-        super().__init__()
-
-        self.d_model = d_model
-        self.num_layers = num_layers
-        self.gradient_checkpointing = False
-
-        # Stack of transformer blocks
-        self.layers = nn.ModuleList([
-            TemporalTransformerBlock(
-                d_model=d_model,
-                num_heads=num_heads,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout
-            )
-            for _ in range(num_layers)
-        ])
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        patch_padding_mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """
-        Process input through channel-independent temporal transformer.
-
-        Args:
-            x: Input tensor of shape (batch_size, num_patches, num_channels, d_model)
-            mask: Optional attention mask of shape (num_patches, num_patches)
-            patch_padding_mask: Optional patch validity mask (batch_size, num_patches)
-                               True = valid patch, False = padded
-
-        Returns:
-            Output tensor of shape (batch_size, num_patches, num_channels, d_model)
-
-        Processing:
-            1. Reshape to (batch * channels, patches, d_model)
-            2. Apply transformer layers
-            3. Reshape back to (batch, patches, channels, d_model)
-        """
-        batch_size, num_patches, num_channels, d_model = x.shape
-
-        # Reshape to process each channel independently
-        # (batch, patches, channels, d_model) -> (batch * channels, patches, d_model)
-        x = x.permute(0, 2, 1, 3)  # (batch, channels, patches, d_model)
-        x = x.reshape(batch_size * num_channels, num_patches, d_model)
-
-        # Expand patch padding mask to (B*C, P)
-        if patch_padding_mask is not None:
-            key_padding_mask = patch_padding_mask.unsqueeze(1).expand(
-                batch_size, num_channels, num_patches
-            ).reshape(batch_size * num_channels, num_patches)
-        else:
-            key_padding_mask = None
-
-        # Apply transformer layers
-        for layer in self.layers:
-            if self.gradient_checkpointing and self.training:
-                x = torch.utils.checkpoint.checkpoint(
-                    layer, x, mask, key_padding_mask,
-                    use_reentrant=False
-                )
-            else:
-                x = layer(x, mask, key_padding_mask=key_padding_mask)
-
-        # Reshape back to original format
-        # (batch * channels, patches, d_model) -> (batch, patches, channels, d_model)
-        x = x.reshape(batch_size, num_channels, num_patches, d_model)
-        x = x.permute(0, 2, 1, 3)  # (batch, patches, channels, d_model)
-
-        return x
-
-
 class DualBranchTransformer(nn.Module):
     """
     Dual-branch transformer with both temporal and cross-channel attention.
@@ -704,9 +528,6 @@ class DualBranchTransformer(nn.Module):
             use_rope / rope_min_period / rope_max_period: physical-time RoPE for temporal attn
         """
         super().__init__()
-
-        self.d_model = d_model
-        self.num_layers = num_layers
 
         # Stack of dual-branch transformer blocks
         self.layers = nn.ModuleList([
@@ -748,90 +569,3 @@ class DualBranchTransformer(nn.Module):
             x = layer(x, temporal_mask, channel_mask, patch_padding_mask, positions=positions)
 
         return x
-
-
-class IMUTransformer(nn.Module):
-    """
-    Main transformer module for IMU encoder.
-
-    Supports two modes:
-    1. Temporal-only: Channel-independent temporal attention (backward compatible)
-    2. Dual-branch: Temporal + cross-channel attention (enables channel interactions)
-    """
-
-    def __init__(
-        self,
-        d_model: int = 128,
-        num_temporal_layers: int = 4,
-        num_heads: int = 8,
-        dim_feedforward: int = 512,
-        dropout: float = 0.1,
-        use_cross_channel: bool = False,
-        use_rope: bool = False,
-        rope_min_period: float = 1.0,
-        rope_max_period: float = 1000.0,
-    ):
-        """
-        Args:
-            d_model: Feature dimension
-            num_temporal_layers: Number of temporal transformer layers
-            num_heads: Number of attention heads
-            dim_feedforward: Hidden dimension for feed-forward networks
-            dropout: Dropout probability
-            use_cross_channel: Whether to use cross-channel attention (default: False)
-            use_rope / rope_min_period / rope_max_period: physical-time RoPE (dual-branch only)
-        """
-        super().__init__()
-
-        self.use_cross_channel = use_cross_channel
-        self.use_rope = use_rope
-
-        if use_cross_channel:
-            # Use dual-branch transformer with temporal + cross-channel attention
-            self.transformer = DualBranchTransformer(
-                d_model=d_model,
-                num_layers=num_temporal_layers,
-                num_heads=num_heads,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout,
-                use_rope=use_rope,
-                rope_min_period=rope_min_period,
-                rope_max_period=rope_max_period,
-            )
-        else:
-            # Use temporal-only transformer (backward compatible)
-            self.transformer = ChannelIndependentTemporalTransformer(
-                d_model=d_model,
-                num_layers=num_temporal_layers,
-                num_heads=num_heads,
-                dim_feedforward=dim_feedforward,
-                dropout=dropout
-            )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        temporal_mask: Optional[torch.Tensor] = None,
-        channel_mask: Optional[torch.Tensor] = None,
-        patch_padding_mask: Optional[torch.Tensor] = None,
-        positions: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Process input through transformer.
-
-        Args:
-            x: Input tensor of shape (batch_size, num_patches, num_channels, d_model)
-            temporal_mask: Optional (P,P) or per-sample (B,P,P) mask for temporal attention
-            channel_mask: Optional mask for channel attention (only used if use_cross_channel=True)
-            patch_padding_mask: Optional patch validity mask (batch_size, num_patches)
-            positions: Optional per-patch physical times (batch_size, num_patches) for RoPE
-
-        Returns:
-            Output tensor of shape (batch_size, num_patches, num_channels, d_model)
-        """
-        if self.use_cross_channel:
-            return self.transformer(x, temporal_mask, channel_mask, patch_padding_mask,
-                                    positions=positions)
-        else:
-            # Temporal-only path does not support RoPE/positions (backward compatible).
-            return self.transformer(x, temporal_mask, patch_padding_mask)

@@ -1,10 +1,6 @@
-"""Time-domain preprocessing for the Pipeline A front end (M1).
+"""Gravity-aware time-domain preprocessing for the Phase-A diagnostics and collator.
 
-Two parts:
-  1. Patching utilities ported from `legacy_code/model/preprocessing.py`
-     (create_patches / zero_pad_patches / preprocess_imu_data) — native-rate
-     patches zero-padded to the filterbank DFT size, no interpolation.
-  2. NEW: joint gravity canonicalization (`gravity_align`) — estimate the gravity
+`gravity_align` estimates the gravity
      direction from the low-pass accelerometer, rotate the whole IMU frame so
      "up" is canonical +z, applying the SAME rotation to every co-located triad
      (accel AND gyro — rotating one alone creates physically impossible frames).
@@ -21,7 +17,6 @@ silently disables alignment on this corpus).
 
 from __future__ import annotations
 
-import math
 from typing import Optional, Sequence, Tuple
 
 import torch
@@ -32,81 +27,6 @@ import torch
 GRAVITY_LP_HZ = 0.5      # low-pass cutoff isolating the quasi-DC gravity component
 GRAVITY_MIN_G = 0.5      # |lowpass acc| below this  => gravity absent (e.g. gravity-removed sets)
 GRAVITY_MAX_G = 2.0      # |lowpass acc| above this  => not a plausible gravity estimate
-
-
-# ================================================================================================
-# Patching (ported)
-# ================================================================================================
-def create_patches(
-    data: torch.Tensor,
-    sampling_rate_hz: float,
-    patch_size_sec: float,
-    stride_sec: Optional[float] = None,
-) -> torch.Tensor:
-    """Split (T, C) data into (num_patches, patch_timesteps, C) fixed-duration patches."""
-    if stride_sec is None:
-        stride_sec = patch_size_sec
-
-    if not isinstance(data, torch.Tensor):
-        data = torch.as_tensor(data, dtype=torch.float32)
-    elif data.device.type != "cpu":
-        data = data.cpu()
-
-    num_timesteps, _ = data.shape
-    patch_timesteps = int(sampling_rate_hz * patch_size_sec)
-    stride_timesteps = int(sampling_rate_hz * stride_sec)
-
-    if patch_timesteps > num_timesteps:
-        raise ValueError(
-            f"Patch size ({patch_timesteps} timesteps) is larger than data length "
-            f"({num_timesteps} timesteps). Reduce patch_size_sec or provide more data."
-        )
-
-    patches = data.t().unsqueeze(0)                                   # (1, C, T)
-    patches = patches.unfold(2, patch_timesteps, stride_timesteps)    # (1, C, P, N)
-    patches = patches.squeeze(0).permute(1, 2, 0)                     # (P, N, C)
-    return patches.contiguous()
-
-
-def zero_pad_patches(patches: torch.Tensor, target_size: int) -> torch.Tensor:
-    """Zero-pad native-rate patches (P, N, C) to the DFT size S — no resampling."""
-    num_patches, n, num_channels = patches.shape
-    if n == target_size:
-        return patches
-    if n > target_size:
-        raise ValueError(
-            f"Native patch length ({n}) exceeds DFT size ({target_size}); "
-            f"raise dft_size so that sampling_rate * patch_size_sec <= dft_size."
-        )
-    out = patches.new_zeros(num_patches, target_size, num_channels)
-    out[:, :n, :] = patches
-    return out
-
-
-def preprocess_imu_data(
-    data: torch.Tensor,
-    sampling_rate_hz: float,
-    patch_size_sec: float,
-    stride_sec: Optional[float] = None,
-    pad_to_size: int = None,
-) -> Tuple[torch.Tensor, dict]:
-    """Native-rate patches -> zero-pad to the filterbank DFT size S. No interpolation,
-    no per-patch z-score (the filterbank does its own DC removal + amplitude handling)."""
-    if pad_to_size is None:
-        raise ValueError("preprocess_imu_data requires pad_to_size (the filterbank DFT size S)")
-
-    patches = create_patches(data, sampling_rate_hz, patch_size_sec, stride_sec)
-    original_patch_size = patches.shape[1]
-    patches = zero_pad_patches(patches, target_size=pad_to_size)
-    metadata = {
-        "original_patch_size": original_patch_size,
-        "patch_len_samples": original_patch_size,   # true N for the tokenizer
-        "dft_size": pad_to_size,
-        "sampling_rate_hz": sampling_rate_hz,
-        "patch_size_sec": patch_size_sec,
-        "num_channels": data.shape[1],
-    }
-    return patches, metadata
 
 
 # ================================================================================================

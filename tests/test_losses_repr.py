@@ -1,27 +1,22 @@
-"""Unit tests for the elite-3 Phase-1 losses (M2)."""
+"""Unit tests for the consolidated JEPA + relation Phase-A losses."""
 
 from __future__ import annotations
-
-import math
 
 import pytest
 import torch
 
 from training.tokenizer.losses_repr import (
     MIN_VISIBLE_TIME,
-    EliteLossWeights,
-    GroundingTargets,
-    elite3_loss,
-    grounding_loss,
     make_mask_plan,
     make_multiresolution_mask_plan,
     masked_ema_latent_loss,
-    masked_latent_loss,
-    nt_xent,
-    supcon_config_conditional,
+    phase_a_loss,
+    relation_loss,
     vicreg,
 )
-from training.tokenizer.pretrain import update_ema_encoder
+from training.tokenizer.pretrain import (
+    update_ema_encoder,
+)
 
 GYRO = [3, 4, 5]
 
@@ -50,16 +45,20 @@ def test_multiresolution_mask_hides_every_overlapping_support():
     assert torch.equal(masked, overlap), "an overlapping scale token leaked the masked interval"
 
 
-def test_masked_loss_weights_resolutions_equally():
-    # Three short tokens have loss 0; one opposite long token has cosine loss 4.
-    # Equal-scale reduction is 2.0, whereas a token-weighted reduction would be 1.0.
-    target = torch.tensor([[[[1.0, 0.0]], [[1.0, 0.0]], [[1.0, 0.0]], [[1.0, 0.0]]]])
-    pred = target.clone()
-    pred[:, 3] = torch.tensor([-1.0, 0.0])
-    mask = torch.ones(1, 4, 1, dtype=torch.bool)
+def test_multiresolution_mask_drops_unlearnable_fully_masked_resolution():
+    """Temporal attention is isolated by resolution, so a one-token scale cannot be its own context."""
+    starts = torch.tensor([[0.0, 0.4, 0.8, 0.0]])
+    ends = torch.tensor([[0.4, 0.8, 1.0, 1.0]])
     groups = torch.tensor([[0, 0, 0, 1]])
-    loss = masked_latent_loss(pred, target, mask, token_groups=groups)
-    assert torch.allclose(loss, torch.tensor(2.0), atol=1e-6)
+    plan = make_multiresolution_mask_plan(
+        starts, ends, groups, C=1, gyro_channels=None, generator=gen(4),
+        channel_event_p=0.0, causal_p=1.0, time_ratio=0.5,
+        valid_patches=torch.ones_like(groups, dtype=torch.bool),
+        channel_mask=torch.ones(1, 1, dtype=torch.bool),
+    )
+    masked = plan.token_mask[0, :, 0]
+    assert bool(masked[:3].any()) and bool((~masked[:3]).any())
+    assert not bool(masked[3]), "one-token isolated resolution received an impossible JEPA target"
 
 
 # ------------------------------------------------------------------------- mask plan
@@ -93,7 +92,7 @@ def test_gyro_triad_dropped_jointly():
 
 def test_validity_aware_mask_guarantees_supervision():
     """With valid_patches + channel_mask, every window with >=2 real patches must get
-    at least one masked REAL token (the A1 zero-supervision fix), and no non-real token
+    at least one masked REAL token (the JEPA zero-supervision fix), and no non-real token
     is ever masked."""
     B, T, C = 256, 6, 6
     g = gen(5)
@@ -110,7 +109,7 @@ def test_validity_aware_mask_guarantees_supervision():
     assert not bool((plan.token_mask & ~real).any())
     # every window with >=2 real patches has >=1 masked real token
     sup = (plan.token_mask & real).flatten(1).sum(1)
-    assert (sup[usable >= 2] >= 1).all(), "zero A1 supervision on a >=2-patch window"
+    assert (sup[usable >= 2] >= 1).all(), "zero JEPA supervision on a >=2-patch window"
 
 
 def test_causal_variant_masks_the_tail():
@@ -123,95 +122,6 @@ def test_causal_variant_masks_the_tail():
         row = mask[b]
         if row.any():
             assert bool(row[int(first_masked[b]):].all()), "causal mask must be a suffix"
-
-
-# ------------------------------------------------------------------- masked latent
-def test_masked_latent_loss_zero_for_perfect_prediction():
-    x = torch.randn(4, 6, 3, 16)
-    mask = torch.rand(4, 6, 3) < 0.5
-    assert masked_latent_loss(x, x.clone(), mask).abs() < 1e-6
-
-
-def test_masked_latent_loss_only_counts_masked_tokens():
-    target = torch.randn(2, 5, 3, 8)
-    pred = target.clone()
-    pred[:, 0] = -target[:, 0]                            # corrupt t=0 only
-    mask = torch.zeros(2, 5, 3, dtype=torch.bool)
-    mask[:, 1:] = True                                    # t=0 NOT masked -> loss ignores it
-    assert masked_latent_loss(pred, target, mask).abs() < 1e-6
-    mask[:, 0] = True                                     # now it counts
-    assert masked_latent_loss(pred, target, mask) > 0.1
-
-
-def test_masked_latent_loss_empty_mask_is_zero_and_finite():
-    loss = masked_latent_loss(torch.randn(2, 4, 3, 8), torch.randn(2, 4, 3, 8),
-                              torch.zeros(2, 4, 3, dtype=torch.bool))
-    assert loss == 0.0 and torch.isfinite(loss)
-
-
-# --------------------------------------------------------------------------- supcon
-def test_supcon_prefers_clustered_embeddings():
-    labels = torch.tensor([0, 0, 1, 1, 2, 2])
-    clustered = torch.stack([
-        torch.tensor([1.0, 0.0]), torch.tensor([0.99, 0.1]),
-        torch.tensor([0.0, 1.0]), torch.tensor([0.1, 0.99]),
-        torch.tensor([-1.0, 0.0]), torch.tensor([-0.99, 0.1]),
-    ])
-    scrambled = clustered[torch.tensor([0, 2, 4, 1, 3, 5])]
-    assert supcon_config_conditional(clustered, labels) < \
-        supcon_config_conditional(scrambled, labels)
-
-
-def test_supcon_no_positive_anchors_is_zero():
-    labels = torch.tensor([0, 1, 2, 3])
-    loss = supcon_config_conditional(torch.randn(4, 8), labels)
-    assert loss == 0.0
-
-
-def test_supcon_gradient_flows():
-    z = torch.randn(8, 16, requires_grad=True)
-    labels = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3])
-    supcon_config_conditional(z, labels).backward()
-    assert z.grad is not None and torch.isfinite(z.grad).all()
-
-
-# ----------------------------------------------------------------------- nt_xent (SimCLR)
-def test_nt_xent_finite_and_symmetric():
-    torch.manual_seed(0)
-    z_a, z_b = torch.randn(8, 16), torch.randn(8, 16)
-    la, lb = nt_xent(z_a, z_b, 0.1), nt_xent(z_b, z_a, 0.1)
-    assert torch.isfinite(la)
-    assert torch.allclose(la, lb, atol=1e-6), "NT-Xent must be symmetric in its two views"
-
-
-def test_nt_xent_minimized_for_aligned_orthogonal_views():
-    z = torch.eye(6, 8)                                   # 6 mutually-orthogonal samples
-    aligned = nt_xent(z, z.clone(), 0.1)                  # identical views == perfect positives
-    # misaligned: shuffle view B so each anchor's positive is a DIFFERENT sample -> higher loss
-    perm = torch.tensor([1, 2, 3, 4, 5, 0])
-    misaligned = nt_xent(z, z[perm].clone(), 0.1)
-    assert aligned < misaligned
-    # collapsed: all vectors identical -> negatives no longer orthogonal -> higher loss than
-    # the aligned-orthogonal optimum (so nt_xent prefers orthogonal negatives)
-    collapsed = z.new_ones(6, 8)
-    assert aligned < nt_xent(collapsed, collapsed.clone(), 0.1)
-
-
-def test_nt_xent_analytic_value_for_aligned_orthonormal():
-    B, T = 5, 0.1
-    z = torch.eye(B, B)                                   # orthonormal aligned views
-    loss = nt_xent(z, z.clone(), T)
-    # each anchor: positive logit 1/T (cosine 1), 2B-2 orthogonal negatives at logit 0
-    expected = -(1.0 / T) + math.log(math.exp(1.0 / T) + 2 * B - 2)
-    assert abs(float(loss) - expected) < 1e-4
-
-
-def test_nt_xent_gradient_flows():
-    z_a = torch.randn(8, 16, requires_grad=True)
-    z_b = torch.randn(8, 16, requires_grad=True)
-    nt_xent(z_a, z_b, 0.1).backward()
-    assert z_a.grad is not None and torch.isfinite(z_a.grad).all()
-    assert z_b.grad is not None and torch.isfinite(z_b.grad).all()
 
 
 # --------------------------------------------------------------------------- VICReg / EMA targets
@@ -241,6 +151,34 @@ def test_vicreg_gradient_flows_to_both_views():
     assert b.grad is not None and torch.isfinite(b.grad).all()
 
 
+def test_relation_uses_every_augmented_pair_and_sparse_placement_pairs():
+    torch.manual_seed(7)
+    z_a = torch.randn(16, 8, requires_grad=True)
+    z_b = (z_a.detach() + 0.05 * torch.randn(16, 8)).requires_grad_(True)
+    left, right = torch.tensor([0, 2]), torch.tensor([1, 3])
+    out = relation_loss(z_a, z_b, left, right, cross_placement_weight=0.2)
+    assert out.placement_pairs == 2
+    assert out.total > out.augmentation.total
+    assert out.cross_placement_weighted > 0
+    out.total.backward()
+    assert z_a.grad is not None and z_b.grad is not None
+
+
+def test_relation_accepts_one_verified_pair():
+    z = torch.eye(4)
+    out = relation_loss(z, z.clone(), torch.tensor([0]), torch.tensor([1]))
+    assert out.placement_pairs == 1
+    assert torch.isfinite(out.total) and out.cross_placement > 0
+
+
+def test_relation_without_placement_is_universal_vicreg():
+    z_a, z_b = torch.randn(8, 4), torch.randn(8, 4)
+    relation = relation_loss(z_a, z_b)
+    baseline = vicreg(z_a, z_b)
+    assert relation.placement_pairs == 0
+    assert torch.allclose(relation.total, baseline.total)
+
+
 def test_masked_ema_latent_is_stop_gradient_and_masked():
     pred = torch.randn(2, 3, 2, 8, requires_grad=True)
     target = pred.detach().clone().requires_grad_(True)
@@ -252,6 +190,34 @@ def test_masked_ema_latent_is_stop_gradient_and_masked():
     loss.backward()
     assert pred.grad is not None
     assert target.grad is None
+
+
+def test_masked_ema_latent_weights_resolutions_equally():
+    target = torch.tensor([[[[1.0, 0.0]], [[1.0, 0.0]], [[1.0, 0.0]], [[1.0, 0.0]]]])
+    pred = target.clone()
+    pred[:, 3] = torch.tensor([-1.0, 0.0])
+    mask = torch.ones(1, 4, 1, dtype=torch.bool)
+    groups = torch.tensor([[0, 0, 0, 1]])
+    loss = masked_ema_latent_loss(pred, target, mask, token_groups=groups)
+    assert torch.allclose(loss, torch.tensor(1.0), atol=1e-6)
+
+
+def test_masked_ema_latent_duration_weights_partial_tail():
+    target = torch.tensor([[[[1.0, 0.0]], [[1.0, 0.0]]]])
+    pred = target.clone()
+    pred[:, 1] = torch.tensor([-1.0, 0.0])
+    mask = torch.ones(1, 2, 1, dtype=torch.bool)
+    durations = torch.tensor([[1.0, 0.1]])
+    loss = masked_ema_latent_loss(pred, target, mask, token_durations=durations)
+    assert torch.allclose(loss, torch.tensor(2.0 / 11.0), atol=1e-6)
+
+
+def test_phase_a_loss_has_exactly_two_weighted_terms():
+    jepa = torch.tensor(2.0)
+    relation = torch.tensor(3.0)
+    out = phase_a_loss(jepa, relation, jepa_weight=0.5, relation_weight=2.0)
+    assert set(out.terms) == {"jepa", "relation"}
+    assert out.total == pytest.approx(7.0)
 
 
 def test_ema_teacher_updates_without_gradients_and_roundtrips_state():
@@ -271,153 +237,31 @@ def test_ema_teacher_updates_without_gradients_and_roundtrips_state():
     assert torch.equal(restored.weight, teacher.weight)
 
 
-# ------------------------------------------------------------------------ grounding
-def _targets(b: int = 6) -> GroundingTargets:
-    return GroundingTargets(
-        cadence_log2hz=torch.ones(b),
-        cadence_valid=torch.tensor([True, True, False, True, False, True]),
-        eigen_ratios=torch.rand(b, 4, 3),
-        eigen_valid=torch.ones(b, dtype=torch.bool),
-    )
+def test_cross_placement_cosine_survives_a_large_common_mean():
+    """The cross-placement term must keep discriminating when the projector's mean drifts.
 
-
-def test_grounding_masks_invalid_cadence():
-    t = _targets()
-    pred_cad = torch.ones(6)
-    pred_cad[2] = 999.0                                   # invalid slot: must not matter
-    pred_cad[4] = -999.0
-    loss = grounding_loss(pred_cad, t.eigen_ratios.clone(), t)
-    assert loss < 1e-6
-
-
-def test_grounding_all_invalid_is_zero():
-    t = _targets()
-    t.cadence_valid[:] = False
-    t.eigen_valid[:] = False
-    loss = grounding_loss(torch.randn(6), torch.randn(6, 4, 3), t)
-    assert loss == 0.0 and torch.isfinite(loss)
-
-
-def test_grounding_nan_target_entries_are_skipped():
-    t = _targets()
-    t.eigen_ratios[:, 2, :] = float("nan")               # one empty band
-    loss = grounding_loss(t.cadence_log2hz.clone(), t.eigen_ratios.nan_to_num(0.3), t)
-    assert torch.isfinite(loss)
-
-
-
-def test_elite3_combined_finite_and_weighted():
-    B, T, C, D = 6, 8, 6, 16
-    t = _targets()
-    out = elite3_loss(
-        a1_pred=torch.randn(B, T, C, D),
-        a1_target=torch.randn(B, T, C, D),
-        a1_mask=torch.rand(B, T, C) < 0.5,
-        a2_embeddings=torch.randn(B, D),
-        a2_labels=torch.tensor([0, 0, 1, 1, 2, 2]),
-        a3_cadence_pred=torch.randn(B),
-        a3_eigen_pred=torch.rand(B, 4, 3),
-        a3_targets=t,
-        weights=EliteLossWeights(a1_physical=1.0, a2_supcon=1.0, a3_grounding=0.1),
-    )
-    assert torch.isfinite(out.total)
-    assert set(out.parts) == {"a1_physical", "a2_supcon", "a3_grounding"}
-    expected = out.parts["a1_physical"] + out.parts["a2_supcon"] + 0.1 * out.parts["a3_grounding"]
-    assert math.isclose(float(out.total), expected, rel_tol=1e-5)
-
-
-def test_a1_split_supervises_absolute_magnitude_that_the_cosine_alone_ignores():
-    """The whole point: scaling the magnitude features must change the loss.
-
-    With everything L2-normalised (n_bands=None) a pure rescale of the target is invisible —
-    that is what discarded absolute signal energy, since A3's eigen-ratios are gain-invariant
-    and A2's VICReg is invariant to the magnitude augmentations too.
-    """
-    import torch
-    from training.tokenizer.losses_repr import masked_latent_loss
-
-    torch.manual_seed(0)
-    B, T, C, K, M = 2, 3, 6, 8, 2                      # K bands + M magnitude scalars
-    pred = torch.randn(B, T, C, K + M)
-    tgt = torch.randn(B, T, C, K + M)
-    mask = torch.ones(B, T, C, dtype=torch.bool)
-
-    tgt_scaled = tgt.clone()
-    tgt_scaled[..., K:] *= 3.0                          # only the magnitude half changes
-
-    all_cosine = masked_latent_loss(pred, tgt, mask, n_bands=None)
-    all_cosine_scaled = masked_latent_loss(pred, tgt_scaled, mask, n_bands=None)
-    split = masked_latent_loss(pred, tgt, mask, n_bands=K)
-    split_scaled = masked_latent_loss(pred, tgt_scaled, mask, n_bands=K)
-
-    # The split path notices; it must move by a real margin, not float noise.
-    assert (split_scaled - split).abs() > 1e-3
-    # And the band (shape) half is still scale-invariant on its own.
-    tgt_bands_scaled = tgt.clone()
-    tgt_bands_scaled[..., :K] *= 5.0
-    torch.testing.assert_close(
-        masked_latent_loss(pred, tgt, mask, n_bands=K, magnitude_weight=0.0),
-        masked_latent_loss(pred, tgt_bands_scaled, mask, n_bands=K, magnitude_weight=0.0),
-        rtol=1e-5, atol=1e-6,
-    )
-    assert all_cosine.isfinite() and all_cosine_scaled.isfinite()
-
-
-def test_a1_split_keeps_tokens_whose_bands_are_all_unobservable():
-    """A token with no observable band still carries real magnitude supervision."""
-    import torch
-    from training.tokenizer.losses_repr import masked_latent_loss
-
-    B, T, C, K, M = 1, 1, 1, 4, 2
-    pred = torch.randn(B, T, C, K + M)
-    tgt = torch.randn(B, T, C, K + M)
-    mask = torch.ones(B, T, C, dtype=torch.bool)
-    fv = torch.ones(B, T, C, K + M)
-    fv[..., :K] = 0.0                                   # every band masked out
-
-    loss = masked_latent_loss(pred, tgt, mask, feature_valid=fv, n_bands=K)
-    assert torch.isfinite(loss) and loss > 0            # magnitude term survives
-    # Without a magnitude half the same token is un-learnable and must drop out entirely.
-    assert masked_latent_loss(pred[..., :K], tgt[..., :K], mask,
-                              feature_valid=fv[..., :K], n_bands=None) == 0.0
-
-
-def test_mask_compensation_is_a_trade_not_a_fix():
-    """Pins the measured trade behind `compensate_patch_length` (default OFF).
-
-    Overlap masking means a token of support p is caught whenever the interval comes within p
-    of it, so nominal MASK_RATIO_TIME=0.5 does not mask 50%. Compensation fixes the average but
-    increases partial cross-resolution leakage. Both halves are asserted so a future change that
-    silently flips the default has to confront the cost.
+    Cosine is invariant to a global SCALE but not to a common MEAN offset, and nothing in VICReg
+    constrains that mean (variance and covariance are both computed mean-centred). A 3,000-step
+    run measured ||batch mean|| drifting 2.0 -> 39.6 while the spread stayed ~11, which drove the
+    uncentred cross-placement margin from 0.244 to 0.003. Centring makes the term invariant to
+    both, so the loss must be (near) unchanged by adding a constant vector to every row.
     """
     torch.manual_seed(0)
-    B, W, short, long = 2000, 6.0, 0.5, 1.4
-    ns, nl = int(W / short), int(W / long)
-    st = torch.tensor([[i * short for i in range(ns)] + [j * long for j in range(nl)]]).repeat(B, 1)
-    en = torch.tensor([[(i + 1) * short for i in range(ns)]
-                       + [(j + 1) * long for j in range(nl)]]).repeat(B, 1)
-    rid = torch.tensor([[0] * ns + [1] * nl]).repeat(B, 1)
+    n, d = 64, 128
+    spread = torch.randn(n, d)
+    partner = spread + 0.3 * torch.randn(n, d)
+    z = torch.cat([spread, partner])
+    left = torch.arange(n)
+    right = torch.arange(n) + n
 
-    def measure(compensate):
-        plan = make_multiresolution_mask_plan(
-            st, en, rid, C=1, gyro_channels=None, channel_event_p=0.0,
-            compensate_patch_length=compensate)
-        m = plan.token_mask[:, :, 0]
-        leaked = total = 0
-        for j in range(nl):
-            lj = ns + j
-            inside = [i for i in range(ns)
-                      if st[0, i] >= st[0, lj] - 1e-6 and en[0, i] <= en[0, lj] + 1e-6]
-            total += int(m[:, lj].sum())
-            if inside:
-                leaked += int((m[:, lj] & (~m[:, inside]).any(dim=1)).sum())
-        return float(m[:, ns:].float().mean()), leaked / max(total, 1)
+    def cross_of(offset):
+        shifted = z + offset
+        out = relation_loss(shifted, shifted.roll(1, 0), left, right,
+                            cross_placement_weight=0.1)
+        return float(out.cross_placement)
 
-    off_masked, off_leak = measure(False)
-    on_masked, on_leak = measure(True)
-    # the default masks the long grid HARDER than nominal, leaving little visible context ...
-    assert off_masked > 0.62, off_masked
-    # ... and compensation relieves that ...
-    assert on_masked < off_masked
-    # ... but strictly increases partial leakage, which is why it is not the default.
-    assert on_leak > off_leak + 0.10, (off_leak, on_leak)
+    base = cross_of(torch.zeros(d))
+    shifted = cross_of(torch.full((d,), 40.0 / d ** 0.5))   # ||mean|| = 40, the measured drift
+    assert abs(shifted - base) < 0.02 * max(base, 1e-6) + 1e-4, (base, shifted)
+    # and it must still be far from the no-information value of 1.0
+    assert base < 0.5, base

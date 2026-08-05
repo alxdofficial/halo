@@ -1,22 +1,11 @@
-"""Pipeline A Phase-1 pretraining — fully self-supervised by default.
+"""Pipeline A pretraining with two label-free objectives.
 
-The default recipe uses NO labels in the training loss:
-  * A1 masked-latent recon (masked forward; feature targets from the CALIBRATED frozen
-    filterbank) — the world-model rail.                     (M2 lesson 1)
-  * A2 = VICReg between TWO independent augmentations of each window. Other windows are
-    never declared negatives. Labels are used ONLY for the val kNN/ConSE metric.
-  * TF-C = time-frequency consistency: VICReg pulling the FREQUENCY view (the main encoder's
-    pooled output, reused from A2) toward a TIME view (an auxiliary TimeEncoder over the raw
-    samples) of the SAME window. Augmentation-free, ON by default alongside VICReg; summed into
-    the total (weight cfg.tfc_weight). --tfc-weight 0 (or --a2-mode supcon) skips it. The
-    TimeEncoder is discarded at inference.
-  * Verified simultaneous placements form a second, lower-weight VICReg positive source.
-  * A1 can also predict contextual latents from a stop-gradient EMA teacher.
-  * A3's self-derived physical grounding remains a small, independently switchable rail.
-  * The corpus sampler is label-free and hierarchical: capped dataset-temperature mass, then
-    subject-temperature mass, then windows. It is NOT activity-class-balanced.
-The ORIGINAL label-supervised recipe is fully selectable for the do-no-harm ablation:
-  --a2-mode supcon --a3-weight 0.1 --sampler balanced (A1 + label-SupCon A2 + A3 rail).
+  * JEPA: a masked student predicts a clean EMA teacher's contextual tokens.
+  * Relation: VICReg between two augmentations of every window, plus separately reduced
+    scale-free agreement for verified simultaneous cross-placement recordings.
+
+Labels are used only by the validation probes. The corpus sampler is hierarchical and label-free:
+capped dataset-temperature mass, subject-temperature mass, then windows.
 
 Other invariants:
   * Config conditioning is channel TEXT; the text-dropout/paraphrase augs supply the
@@ -26,7 +15,7 @@ Other invariants:
   * The encoder's inner filterbank norm is CALIBRATED before training.  (M3 lesson)
 
 Model selection: subject-disjoint val kNN balanced accuracy (macro), not loss.
-Checkpoints carry config + label map + filterbank norm stats + git provenance.
+Checkpoints carry config + label map + filterbank norm stats + provenance.
 
 Run (CPU smoke):   .../python -m training.tokenizer.pretrain --steps 20 --smoke
 Run (real, GPU):   .../python -m training.tokenizer.pretrain --device cuda
@@ -37,42 +26,31 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import statistics
 import subprocess
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from model.tokenizer.encoder import SetTokenizerEncoder
-from model.tokenizer.filterbank import PhysicalFilterbankTokenizer
-from model.tokenizer.preprocess import gravity_align
 from training.tokenizer.losses_repr import (
-    EliteLossWeights,
-    GroundingTargets,
-    elite3_loss,
     make_mask_plan,
     make_multiresolution_mask_plan,
-    masked_latent_per_window,
     masked_ema_latent_loss,
-    nt_xent,
     pair_contrast,
-    vicreg,
+    phase_a_loss,
+    relation_loss,
 )
-from training.tokenizer.time_encoder import TimeEncoder
 from training.tokenizer.pretrain_data import (
-    CHANNELS,
     DFT_SIZE,
     LONG_PATCH_SECONDS_CHOICES,
     MIN_RESOLUTION_RATIO,
     SHORT_PATCH_SECONDS_CHOICES,
     VAL_RESOLUTION_PAIR,
-    BalancedBatchSampler,
     CorpusIndex,
     MultiResolutionCollate,
     MultiScaleCollate,
@@ -88,19 +66,13 @@ OUT_DIR = Path(__file__).resolve().parent / "outputs" / "pretrain"
 
 @dataclass
 class PretrainConfig:
-    # d256/6L/~7.3M: clears all three consumer floors (tokenizer rep, A1/A2/A3 heads,
-    # evidence-engine multi-vector memory), data-appropriate for the ~300k-window native corpus
-    # (300,231 train / 42,909 val, 93 labels after the 2026-07-25 event-grid migration).
-    # The 30k-step budget is about 50 expected corpus passes at batch 512. Confirm objective balance
-    # from the logged gradient norms during the pilot before committing to the full run.
-    # the frozen encoder's d sets the memory-bank vector width. (User-approved 2026-07-18.)
+    # d256/6L sets the frozen encoder and evidence-memory vector width.
     d_model: int = 256
     num_layers: int = 6
     num_heads: int = 8
     dim_feedforward: int = 1024
     dropout: float = 0.1
-    arm: str = "fixed"                    # headline preset: fixed | learnable
-    frontend: str = "fixed"               # independently switchable for attribution
+    frontend: str = "fixed"               # fixed | constrained-learnable filterbank
     # Config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). 'per_channel' (default) is the
     # legacy one-description-per-channel path; 'factored' splits it into per-channel ROLE text +
     # per-sensor IDENTITY text. Default MUST stay 'per_channel' (do-no-harm). asdict(cfg) serializes
@@ -123,12 +95,6 @@ class PretrainConfig:
     long_patch_choices: tuple[float, ...] = LONG_PATCH_SECONDS_CHOICES
     min_resolution_ratio: float = MIN_RESOLUTION_RATIO
     val_resolution_pair: tuple[float, float] = VAL_RESOLUTION_PAIR
-    classes_per_batch: int = 64           # Balanced/SupCon control: 64x8 = batch 512.
-    samples_per_class: int = 8            # Balanced/SupCon control only (64x8). NB the 'batch >=32
-                                          # OOMs / batch 16 peaks at 12.7 GB' note that stood here
-                                          # was a TF-C-era measurement and contradicted the live
-                                          # default: re-measured 2026-08-05, batch 256 peaks at
-                                          # 12.03 GiB of 24. See training/tokenizer/README.md.
     steps: int = 30_000                   # ~5 corpus passes at the live batch of 256 (6,025
                                           # steps/pass on the 1.54M-window corpus). The previous
                                           # '~10 passes at batch 512' note was written when
@@ -143,116 +109,25 @@ class PretrainConfig:
     weight_decay: float = 0.05
     warmup_steps: int = 1_000
     grad_clip: float = 1.0
-    # A2's weight was previously HARD-CODED: `EliteLossWeights.a2_supcon` defaulted to 1.0 and
-    # was never set from config, and `--a2-mode` has no 'off' choice -- so A2 was the one
-    # objective that could not be ablated or swept at all, and the paper's
-    # "- augmentation VICReg" ablation row had no way to be produced. Exposed 2026-08-05.
-    a2_weight: float = 1.0
-    # --- gradient-share auto-calibration -------------------------------------------------------
-    # The four objectives' losses differ by ~100x in VALUE and their encoder gradients by ~154x
-    # (measured: ||grad L|| at unit weight, post-warmup -- A1 0.215, A2 8.118, A3 0.305, A4 33.2),
-    # so hand-set coefficients do not set relative influence at all: the shipped 1.0/1.0/0.05/0.1
-    # produced shares of 1.8% / 69.6% / 0.1% / 28.4%.
-    #
-    # ||grad (w*L)|| == w*||grad L|| EXACTLY, so there is nothing to search: measure once and
-    # solve. We calibrate AFTER warmup because the norms are not stationary through it (A1 drifts
-    # 0.1x, A4 29x between step 1 and step 500) and because A1 carries no discriminative signal
-    # for its first ~200-300 steps (a1/margin 0.004 -> 0.02 -> 0.71 by step 450) while its
-    # gradient is at its LARGEST -- calibrating at init would lock in that transient.
-    #
-    # Then FREEZE. Per Xin et al. (NeurIPS 2022) and Kurin et al. (NeurIPS 2022), adaptive
-    # multi-task optimisers do not beat tuned static weights and mostly rediscover a constant;
-    # freezing also keeps the run reproducible and each arm ablatable, which continuous
-    # reweighting does not.
-    autocalibrate_at: int = 2_000         # step at which to calibrate; 0 disables
-    autocalibrate_batches: int = 10       # measure over this many steps and take the median
-    autocalibrate_target: str = "equal"   # equal gradient share across active objectives
-    # All Phase-A targets remain label-free. A3 is a small physical rail, not an activity objective.
-    a3_weight: float = 0.05
-    # A1-physical — the RETIRED fixed-DSP target, kept switchable for the ablation
-    # (--a1-physical-weight 1.0). Off by default. Besides the generative-vs-latent argument, its
-    # target is the fixed filterbank's own output, which the code has long flagged as "home-field
-    # for the filterbank arm" — scoring the fixed-vs-learnable tokenizer comparison on a target one
-    # arm produces. Setting it to 0 also skips building target_tok and its 50-batch calibration.
-    a1_physical_weight: float = 0.0
-    # A2 defaults to VICReg: aligned augmented rows are positives; there are no batch negatives.
-    # Historical SimCLR and label-SupCon remain selectable controls.
-    a2_mode: str = "vicreg"
-    simclr_temperature: float = 0.1       # NT-Xent temperature (SimCLR default)
+    # Two fixed-weight objectives. ``jepa_weight=0`` gives the relation-only R0/R1 controls;
+    # ``cross_placement_weight=0`` gives R0 without changing which ordinary windows are sampled.
+    jepa_weight: float = 1.0
+    relation_weight: float = 1.0
+    jepa_ema_decay: float = 0.996
     vicreg_invariance_weight: float = 25.0
     vicreg_variance_weight: float = 25.0
     vicreg_covariance_weight: float = 1.0
     vicreg_target_std: float = 1.0
-    # TF-C-inspired cross-domain consistency. NOTE this is NOT faithful TF-C
-    # (Zhang et al. 2022): there is no time/time contrastive term and the time encoder is discarded at
-    # inference. The global weight must be rechecked from gradient norms after the loss migration.
-    # TF-C: DROPPED as a default 2026-07-26. Its two "views" are the SAME window, unaugmented,
-    # encoded by two different networks — so it teaches architectural agreement, not invariance to
-    # anything physical. The time branch is randomly initialised, trained ONLY by this loss and
-    # discarded at inference, so it has no independent anchor: the objective reduces to "agree with
-    # a small CNN that exists only to agree back". Faithful TF-C (Zhang et al. 2022) grounds each
-    # branch with its own time-time / freq-freq contrastive term; those were never implemented here.
-    # Cost was the tiebreaker, not the argument: the discarded 174k-param rail took 3.5x the step
-    # time and 22x the VRAM of the 7.17M-param encoder, and capped the batch at 16. With it off the
-    # batch reaches 256. Re-enable for the ablation with --tfc-weight 0.25.
-    tfc_weight: float = 0.0
-    tfc_loss: str = "vicreg"              # vicreg | nt_xent (historical control)
-    tfc_temperature: float = 0.1          # NT-Xent temperature for the time<->freq contrast
-    # Verified cross-placement positives. pair_fraction is a WINDOW quota; two windows make one pair.
-    a4_weight: float = 0.1
-    # 0.1 -> 0.2 (2026-08-05). At 0.1 the quota is round(256*0.1/2) = 13 pairs, and A4's per-batch
-    # loss had CV 0.53 -- 5x every other objective (A1 0.11, A2 0.10, A3 0.15) and a 22x swing
-    # between logged steps -- because 13 samples is a very noisy gradient estimate for a term
-    # carrying ~28% of the update. The paired-event pool is 18,400 events, so the quota was the
-    # binding constraint, not the data. 0.2 gives ~26 pairs (CV ~1/sqrt(2) lower).
-    # COST, logged not free: the quota can only be filled from the three datasets that HAVE
-    # verified pairs, so raising it skews sampling toward them (at 0.1: nfi_fared 8.5% -> 14.8%,
-    # xrf_v2 9.0% -> 11.3% of draws). Check the measured draw shares after changing this.
-    a4_pair_fraction: float = 0.2
-    # 'cosine' as of 2026-08-05 (was the implicit 'mse'). A4 runs variance_weight=0, so its
-    # invariance term IS the whole loss -- and MSE there conflates "the two placements disagree"
-    # with "the representation grew". Measured: A2's variance hinge drives per-dim std
-    # 0.054 -> 0.88 over 2k steps and A4's MSE loss rose 0.095 -> 3.3 alongside it while the pair
-    # cosine stayed ~0.87-0.99. Cosine makes A4 scale-free, so it measures placement agreement
-    # only. `--a4-invariance mse` restores the old behaviour for the ablation arm.
-    a4_invariance: str = "cosine"
-    # A1's masked interval is a FRACTION of the observed window (MASK_RATIO_TIME), but masking is
-    # by overlap, so the realised fraction is (L + patch)/W, not L/W: nominal 0.5 actually masks
-    # 0.56 of short tokens and 0.67 of long ones. Compensation subtracts the measured mean patch
-    # support so the average matches the configured ratio.
-    # OFF by default: measured, it is a trade rather than a fix. It buys the long grid context
-    # (0.67 -> 0.58 masked, ~1.3 -> ~1.7 visible tokens of 4) at the cost of more partial
-    # cross-resolution leakage (25.7% -> 40.1% of masked long tokens having a visible short token
-    # inside their support). Neither side dominates, so it ships as an arm, not a default.
-    mask_compensate_patch_length: bool = False
-    # Contextual masked target from a slow teacher, alongside the fixed physical A1 target.
-    # A1 — masked latent prediction against an EMA teacher (JEPA). PRIMARY objective as of
-    # 2026-07-28, replacing the fixed-DSP target below. The teacher encodes the CLEAN view, the
-    # student the MASKED one, and a predictor maps student -> teacher latents at masked positions.
-    # Rationale: the retired target was a deterministic function of the input (band energies +
-    # amplitude + DC with proj=Identity), i.e. generative-in-feature-space, closer to MaskFeat than
-    # to JEPA. data2vec / I-JEPA / JETS all predict CONTEXTUAL latents instead, and the paradigm
-    # comparison (arXiv 2605.19462) finds latent prediction beats generative — weakest exactly in
-    # the label-efficient regime this paper is organised around.
-    # The EMA is kept deliberately: SimSiam's "stop-grad suffices" result is for augmentation-
-    # Siamese pairs, not masked prediction, where the target branch sees the SAME input unmasked
-    # and the teacher's temporal lag is what stops the target being a near-identity. It also
-    # smooths the target (a temporal ensemble of the student), which self-targeting loses.
-    a1_weight: float = 1.0
-    a1_ema_decay: float = 0.996
+    # Pair quota is a fraction of BATCH WINDOWS; two windows form one verified relation.
+    cross_placement_weight: float = 0.1
+    relation_pair_fraction: float = 0.2
     # Label-free hierarchical corpus sampler. Dataset mass is tempered and capped, then distributed
     # within each dataset as P(subject) ∝ n_subject^subject_alpha. This keeps Capture-24's useful
     # scale without letting one acc-only wrist corpus or its longest subjects define the encoder.
-    sampler: str = "temperature"
     sampler_alpha: float = 0.25
     sampler_max_dataset_share: float = 0.25
     sampler_subject_alpha: float = 0.5
-    batch_size: int = 256                 # batch for the temperature sampler (balanced uses
-                                          # classes_per_batch * samples_per_class instead).
-                                          # MEASURED 2026-07-26 on a 24 GB 4090: 512 OOMs even with
-                                          # TF-C off (4 encoder passes/step); 256 peaks at 12.0 GiB.
-                                          # Also keeps the placement rail alive (13 pairs/batch; at
-                                          # batch 16 the quota yields 1 pair and VICReg -> exactly 0).
+    batch_size: int = 256                 # measured peak: 12.0 GiB on a 24 GB RTX 4090
     calib_batches: int = 50               # frontend norm calibration pass
     val_every: int = 1_000
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
@@ -281,7 +156,7 @@ class PretrainConfig:
 
 
 class PipelineAModel(nn.Module):
-    def __init__(self, cfg: PretrainConfig, a1_target_dim: int):
+    def __init__(self, cfg: PretrainConfig):
         super().__init__()
         self.encoder = SetTokenizerEncoder(
             d_model=cfg.d_model, num_layers=cfg.num_layers, num_heads=cfg.num_heads,
@@ -301,27 +176,11 @@ class PipelineAModel(nn.Module):
             filter_shape_max=cfg.filter_shape_max,
             adaptive_gate_init=cfg.adaptive_gate_init,
         )
-        self.a1_physical_head = nn.Linear(cfg.d_model, a1_target_dim)
-        self.a1_predictor = nn.Sequential(
+        self.jepa_predictor = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
             nn.Linear(cfg.d_model, cfg.d_model),
         )
-        self.a2_proj = nn.Sequential(
-            nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
-            nn.Linear(cfg.d_model, 128),
-        )
-        self.a3_cadence = nn.Linear(cfg.d_model, 1)
-        self.a3_eigen = nn.Linear(cfg.d_model, 4 * 3)
-        # --- TF-C rail (auxiliary; discarded at inference) ------------------------------------
-        # A compact TIME-domain encoder over the raw samples, plus two SEPARATE projection heads
-        # (kept independent of a2_proj so augmentation A2 and TF-C do not share a bottleneck):
-        # projects the FREQUENCY view (reused encoder pooled output), tfc_proj_time the TIME view.
-        self.time_encoder = TimeEncoder(cfg.d_model, n_channels=len(CHANNELS))
-        self.tfc_proj = nn.Sequential(
-            nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
-            nn.Linear(cfg.d_model, 128),
-        )
-        self.tfc_proj_time = nn.Sequential(
+        self.relation_projector = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
             nn.Linear(cfg.d_model, 128),
         )
@@ -441,14 +300,6 @@ def corpus_fingerprint(index) -> str:
     sig.append(f"cap={getattr(index, 'max_per_stream', None)}:seed={getattr(index, 'seed', None)}"
                f":ntrain={len(index.train)}:nval={len(index.val)}")
     return hashlib.sha256("|".join(sig).encode()).hexdigest()[:16]
-
-
-def align_batch(batch: dict) -> dict:
-    """DEPRECATED no-op. Gravity alignment now happens PER WINDOW on real-length data
-    inside MultiScaleCollate (the sweep found aligning the zero-padded patch buffer here
-    was diluted to a ~96% no-op and rotated each patch independently). Kept as a pass-
-    through so older call sites don't break; do not add logic here."""
-    return batch
 
 
 def knn_balanced_acc(train_z, train_y, test_z, test_y, k: int) -> float:
@@ -601,16 +452,9 @@ def module_grad_norms(model) -> dict:
         sq = sum(float(p.grad.detach().pow(2).sum()) for p in params if p.grad is not None)
         return sq ** 0.5
 
-    mods = (("encoder", model.encoder), ("a1", model.a1_physical_head),
-            ("a1_predictor", model.a1_predictor), ("a2", model.a2_proj),
-            ("a3_cad", model.a3_cadence), ("a3_eig", model.a3_eigen),
-            ("time_encoder", model.time_encoder))
-    out = {f"grad/{name}": _gn(mod.parameters()) for name, mod in mods}
-    # TF-C projection heads (both freq- and time-view heads) under one key so their health is
-    # visible alongside grad/time_encoder — is the TF-C rail alive, and is any objective drowning?
-    out["grad/tfc_proj"] = _gn(list(model.tfc_proj.parameters())
-                               + list(model.tfc_proj_time.parameters()))
-    return out
+    mods = (("encoder", model.encoder), ("jepa_predictor", model.jepa_predictor),
+            ("relation_projector", model.relation_projector))
+    return {f"grad/{name}": _gn(mod.parameters()) for name, mod in mods}
 
 
 def per_source_mean(values: torch.Tensor, sources: list) -> dict:
@@ -634,71 +478,27 @@ def main() -> None:
     parser.add_argument("--resume", type=Path, default=None,
                         help="warm-resume from a checkpoint (restore encoder/heads/opt/sched/scaler/"
                              "RNG + step and continue the remaining steps)")
-    parser.add_argument("--arm", choices=("fixed", "learnable"), default="fixed",
-                        help="frontend preset. DEFAULT 'fixed' = fixed physical filterbank + "
-                             "multiresolution (the winning Phase-A config; see "
-                             "docs/design/LEARNABLE_TOKENIZER_ARM.md). 'learnable' swaps in the "
-                             "constrained adaptive frontend — a documented negative result, kept opt-in.")
-    parser.add_argument("--frontend", choices=("fixed", "learnable"), default=None,
+    parser.add_argument("--frontend", choices=("fixed", "learnable"), default="fixed",
                         help="tokenizer arm. 'fixed' = physical-Hz constant-Q filterbank (default); "
-                             "'learnable' = the constrained-adaptive filterbank (documented negative "
-                             "result, kept opt-in; docs/design/LEARNABLE_TOKENIZER_ARM.md).")
+                             "'learnable' = the constrained-adaptive filterbank arm "
+                             "(docs/design/LEARNABLE_TOKENIZER_ARM.md).")
     parser.add_argument("--text-conditioning", choices=("per_channel", "factored"), default=None,
                         help="config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). "
                              "'per_channel' = one description per channel; 'factored' (the CLI "
-                             "DEFAULT, set in main()) = "
-                             "per-channel ROLE text + per-sensor IDENTITY text. None keeps the "
-                             "config default (per_channel).")
+                             "DEFAULT) = per-channel ROLE text + per-sensor IDENTITY text.")
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
                         help="override multiresolution (default ON); --no-multiresolution is the "
                              "single-resolution ablation")
-    parser.add_argument("--a1-physical-weight", type=float, default=None,
-                        help="scale the A1 masked-recon loss. Set 0 for an objective-NEUTRAL tokenizer "
-                             "comparison because A1's target is the fixed filterbank.")
-    parser.add_argument("--a2-mode", choices=("vicreg", "simclr", "supcon"), default=None,
-                        help="A2 mode. DEFAULT 'vicreg' uses aligned augmented positives without "
-                             "negatives. 'simclr' and label-based 'supcon' are controls.")
-    parser.add_argument("--a2-weight", type=float, default=None,
-                        help="A2 weight (default 1.0). --a2-weight 0 is the 'no augmentation "
-                             "agreement' ablation; it requires --a4-weight 0 too, because A4 is "
-                             "invariance-only and depends on A2's variance term for collapse "
-                             "prevention over the shared projection.")
-    parser.add_argument("--a3-weight", type=float, default=None,
-                        help="scale the A3 grounding rail (default 0.05; 0 disables its DSP/heads).")
-    parser.add_argument("--simclr-temperature", type=float, default=None,
-                        help="NT-Xent temperature for --a2-mode simclr (default 0.1).")
-    parser.add_argument("--tfc-weight", type=float, default=None,
-                        help="scale the TF-C (time-frequency consistency) term, summed alongside "
-                             "A1 + A2. DEFAULT 0.25. 0 cleanly skips the "
-                             "TimeEncoder forward + TF-C loss (a hygiene knob, not a separate arm); "
-                             "TF-C is also skipped under --a2-mode supcon.")
-    parser.add_argument("--tfc-loss", choices=("vicreg", "nt_xent"), default=None,
-                        help="time-frequency consistency loss (default VICReg; NT-Xent is historical).")
-    parser.add_argument("--tfc-temperature", type=float, default=None,
-                        help="NT-Xent temperature for the TF-C time<->freq contrast (default 0.1).")
-    parser.add_argument("--a4-weight", type=float, default=None,
-                        help="VICReg weight for verified simultaneous cross-placement events.")
-    parser.add_argument("--a4-pair-fraction", type=float, default=None,
-                        help="fraction of temperature-sampled batch windows reserved for verified pairs.")
-    parser.add_argument("--a4-invariance", choices=("cosine", "mse"), default=None,
-                        help="A4 pair comparison. DEFAULT 'cosine' (scale-free: A4 has no "
-                             "variance term, so MSE confounded disagreement with the "
-                             "representation growing). 'mse' is the ablation arm.")
-    parser.add_argument("--mask-compensation", action=argparse.BooleanOptionalAction, default=None,
-                        help="Subtract mean patch support from A1's masked interval so the "
-                             "realised mask fraction matches MASK_RATIO_TIME. DEFAULT OFF: it "
-                             "buys long-grid context but raises partial cross-resolution leakage "
-                             "25.7%% -> 40.1%%. An arm, not a fix.")
-    parser.add_argument("--autocalibrate-at", type=int, default=None,
-                        help="Step at which to rebalance objective weights to equal gradient "
-                             "share, then freeze. 0 disables (keeps the configured weights).")
-    parser.add_argument("--a1-weight", type=float, default=None,
-                        help="masked contextual-latent prediction weight (0 disables the EMA teacher).")
-    parser.add_argument("--a1-ema-decay", type=float, default=None,
+    parser.add_argument("--jepa-weight", type=float, default=None,
+                        help="masked contextual prediction weight; 0 selects relation-only R0/R1")
+    parser.add_argument("--relation-weight", type=float, default=None,
+                        help="unified relation objective weight (must be positive)")
+    parser.add_argument("--jepa-ema-decay", type=float, default=None,
                         help="EMA teacher momentum (default 0.996).")
-    parser.add_argument("--sampler", choices=("temperature", "balanced"), default=None,
-                        help="corpus sampler. DEFAULT 'temperature' (per-window, P(dataset) ∝ n^alpha, "
-                             "no class balancing). 'balanced' = label-balanced batches (needed for supcon).")
+    parser.add_argument("--cross-placement-weight", type=float, default=None,
+                        help="cross-placement subterm weight; 0 selects augmentation-only R0")
+    parser.add_argument("--relation-pair-fraction", type=float, default=None,
+                        help="batch-window fraction reserved for verified cross-placement pairs")
     parser.add_argument("--sampler-alpha", type=float, default=None,
                         help="temperature-sampler exponent: 1=proportional, 0=uniform-per-source, "
                              "0.25 is the default.")
@@ -709,8 +509,7 @@ def main() -> None:
                         help="within-dataset subject-size exponent: 1=proportional, 0=uniform over "
                              "subjects, 0.5=square-root tempering (default).")
     parser.add_argument("--batch", type=int, default=None,
-                        help="batch size for the temperature sampler (default 256). The balanced "
-                             "sampler ignores this and uses classes_per_batch * samples_per_class.")
+                        help="batch size for the temperature sampler (default 256)")
     parser.add_argument("--subset", action="store_true",
                         help="train on the tokenizer-ablation 3-rate-core subset (5 datasets, xrf_v2 "
                              "held out) instead of the full corpus. See ablation_subset.py.")
@@ -731,52 +530,27 @@ def main() -> None:
 
     cfg = PretrainConfig(
         device=args.device,
-        arm=args.arm,
-        frontend="learnable" if args.arm == "learnable" else "fixed",
+        frontend=args.frontend,
         multiresolution=True,          # new Phase-A default: multiresolution ON (diagnostic-confirmed
                                        # winner, 0.835 held-out transfer); --no-multiresolution to ablate
         text_conditioning="factored",  # PAPER default (F8): factored role+sensor conditioning is the
                                        # committed arm; --text-conditioning per_channel is the ablation.
                                        # (The dataclass default stays per_channel for direct/test ctors.)
     )
-    if args.frontend is not None:
-        cfg.frontend = args.frontend
     if args.text_conditioning is not None:
         cfg.text_conditioning = args.text_conditioning
     if args.multiresolution is not None:
         cfg.multiresolution = args.multiresolution
-    if args.a1_physical_weight is not None:
-        cfg.a1_physical_weight = args.a1_physical_weight
-    if args.a2_mode is not None:
-        cfg.a2_mode = args.a2_mode
-    if args.a2_weight is not None:
-        cfg.a2_weight = args.a2_weight
-    if args.a4_invariance is not None:
-        cfg.a4_invariance = args.a4_invariance
-    if args.mask_compensation is not None:
-        cfg.mask_compensate_patch_length = args.mask_compensation
-    if args.autocalibrate_at is not None:
-        cfg.autocalibrate_at = args.autocalibrate_at
-    if args.a3_weight is not None:
-        cfg.a3_weight = args.a3_weight
-    if args.simclr_temperature is not None:
-        cfg.simclr_temperature = args.simclr_temperature
-    if args.tfc_weight is not None:
-        cfg.tfc_weight = args.tfc_weight
-    if args.tfc_loss is not None:
-        cfg.tfc_loss = args.tfc_loss
-    if args.tfc_temperature is not None:
-        cfg.tfc_temperature = args.tfc_temperature
-    if args.a4_weight is not None:
-        cfg.a4_weight = args.a4_weight
-    if args.a4_pair_fraction is not None:
-        cfg.a4_pair_fraction = args.a4_pair_fraction
-    if args.a1_weight is not None:
-        cfg.a1_weight = args.a1_weight
-    if args.a1_ema_decay is not None:
-        cfg.a1_ema_decay = args.a1_ema_decay
-    if args.sampler is not None:
-        cfg.sampler = args.sampler
+    if args.jepa_weight is not None:
+        cfg.jepa_weight = args.jepa_weight
+    if args.relation_weight is not None:
+        cfg.relation_weight = args.relation_weight
+    if args.jepa_ema_decay is not None:
+        cfg.jepa_ema_decay = args.jepa_ema_decay
+    if args.cross_placement_weight is not None:
+        cfg.cross_placement_weight = args.cross_placement_weight
+    if args.relation_pair_fraction is not None:
+        cfg.relation_pair_fraction = args.relation_pair_fraction
     if args.sampler_alpha is not None:
         cfg.sampler_alpha = args.sampler_alpha
     if args.sampler_max_dataset_share is not None:
@@ -803,34 +577,20 @@ def main() -> None:
             cfg.max_per_stream = DEFAULT_CAP
     if args.max_per_stream is not None:
         cfg.max_per_stream = args.max_per_stream
-    if args.steps:
+    if args.steps is not None:
         cfg.steps = args.steps
     if args.smoke:
-        cfg = PretrainConfig(
+        # Preserve every experimental override and change only resource/budget knobs. Rebuilding
+        # PretrainConfig field-by-field repeatedly dropped newly added objective settings, so a
+        # passing smoke could exercise a different arm than the requested run.
+        cfg = replace(
+            cfg,
             d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
-            classes_per_batch=8, samples_per_class=4, batch_size=32, steps=args.steps or 10,
-            warmup_steps=2, calib_batches=3, val_every=max(args.steps or 10, 5),
-            val_per_label=10, num_workers=0, max_per_stream=200,
-            device=args.device, arm=cfg.arm, frontend=cfg.frontend,
-            multiresolution=cfg.multiresolution,
-            # carry the fine-grained overrides the smoke reconstruction used to DROP (audit #6):
-            a1_physical_weight=cfg.a1_physical_weight, seed=cfg.seed, data_seed=cfg.data_seed,
-            train_datasets=cfg.train_datasets,
-            text_conditioning=cfg.text_conditioning, gate_bias_init=cfg.gate_bias_init,
-            a2_mode=cfg.a2_mode, a3_weight=cfg.a3_weight,
-            simclr_temperature=cfg.simclr_temperature, sampler=cfg.sampler,
-            sampler_alpha=cfg.sampler_alpha,
-            sampler_max_dataset_share=cfg.sampler_max_dataset_share,
-            sampler_subject_alpha=cfg.sampler_subject_alpha,
-            tfc_weight=cfg.tfc_weight, tfc_loss=cfg.tfc_loss,
-            tfc_temperature=cfg.tfc_temperature,
-            a4_weight=cfg.a4_weight,
-            a4_pair_fraction=cfg.a4_pair_fraction,
-            a1_weight=cfg.a1_weight, a1_ema_decay=cfg.a1_ema_decay,
-            vicreg_invariance_weight=cfg.vicreg_invariance_weight,
-            vicreg_variance_weight=cfg.vicreg_variance_weight,
-            vicreg_covariance_weight=cfg.vicreg_covariance_weight,
-            vicreg_target_std=cfg.vicreg_target_std,
+            batch_size=32,
+            steps=args.steps if args.steps is not None else 10,
+            warmup_steps=2, calib_batches=3,
+            val_every=max(args.steps if args.steps is not None else 10, 5), val_per_label=10,
+            num_workers=0, max_per_stream=200,
         )
     if cfg.sampler_alpha < 0:
         parser.error("--sampler-alpha must be nonnegative")
@@ -838,6 +598,21 @@ def main() -> None:
         parser.error("--sampler-max-dataset-share must be in (0,1]")
     if not 0 <= cfg.sampler_subject_alpha <= 1:
         parser.error("--sampler-subject-alpha must be in [0,1]")
+    for field in ("jepa_weight", "cross_placement_weight", "frontend_reg_weight"):
+        if float(getattr(cfg, field)) < 0:
+            parser.error(f"--{field.replace('_', '-')} must be nonnegative")
+    if cfg.relation_weight <= 0:
+        parser.error("--relation-weight must be positive")
+    if cfg.steps <= 0 or cfg.batch_size <= 0:
+        parser.error("--steps and --batch must be positive")
+    if cfg.max_per_stream is not None and cfg.max_per_stream <= 0:
+        parser.error("--max-per-stream must be positive when provided")
+    if not 0 <= cfg.jepa_ema_decay < 1:
+        parser.error("--jepa-ema-decay must be in [0,1)")
+    if cfg.lr <= 0 or cfg.grad_clip <= 0:
+        parser.error("learning rate and gradient clipping threshold must be positive")
+    if not 0 <= cfg.relation_pair_fraction < 1:
+        parser.error("--relation-pair-fraction must be in [0,1)")
     device = torch.device(cfg.device)
     if device.type == "cuda":
         # TF32 for the fp32 regions autocast doesn't cover (filterbank einsum/proj, val ridge
@@ -858,7 +633,7 @@ def main() -> None:
         else:
             raise SystemExit(f"output dir {args.out} already contains {[p.name for p in stale]}; "
                              f"choose a fresh --out or pass --force to overwrite (or --resume).")
-    print(f"arm={cfg.arm} frontend={cfg.frontend} multiresolution={cfg.multiresolution}", flush=True)
+    print(f"frontend={cfg.frontend} multiresolution={cfg.multiresolution}", flush=True)
     # NB: run_config.json is written AFTER resume validation (below), so a rejected --resume can't
     # overwrite the metadata with the bad attempted config (audit 2026-07-23 #6).
 
@@ -872,20 +647,18 @@ def main() -> None:
     positive_events = {
         event_id for event_id in index.train_positive_event_ids if event_id >= 0
     }
-    if cfg.a4_weight > 0 and len(positive_events) < 2:
+    if cfg.cross_placement_weight > 0 and not positive_events:
         message = (
-            "placement VICReg is enabled but the corpus has fewer than two verified simultaneous "
+            "cross-placement relation learning is enabled but the corpus has no verified simultaneous "
             "events. Rebuild native grids with `python -m data.scripts.build_grids --alignment "
             "native` so explicit event_ids are persisted; refusing to silently train without the "
-            "configured objective."
+            "configured relation type. Pass --cross-placement-weight 0 for the R0 control."
         )
         if args.smoke:
             print(f"[smoke warning] {message}", flush=True)
         else:
             raise RuntimeError(message)
-    two_view = cfg.a2_mode in {"vicreg", "simclr"}
-    train_compute_targets = cfg.a3_weight > 0     # A3 disabled -> skip the per-window A3 DSP
-    train_ds = PretrainDataset(index, index.train, augment=True, two_view=two_view)
+    train_ds = PretrainDataset(index, index.train, augment=True, two_view=True)
     def _stratified_subset(keys, per_label: int, seed: int, allowed_labels=None):
         """Deterministically pick min(per_label, available) keys per label.
 
@@ -918,63 +691,48 @@ def main() -> None:
     train_collate = (MultiResolutionCollate(
         short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
         min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
-        compute_targets=train_compute_targets, two_view=two_view,
+        two_view=True,
     ) if cfg.multiresolution
-                     else MultiScaleCollate(seed=cfg.seed, compute_targets=train_compute_targets,
-                                            two_view=two_view))
+                     else MultiScaleCollate(seed=cfg.seed, two_view=True))
     loader_kwargs = dict(
         collate_fn=train_collate, num_workers=cfg.num_workers, worker_init_fn=_seed_worker,
         persistent_workers=cfg.num_workers > 0, pin_memory=device.type == "cuda")
-    if cfg.sampler == "balanced":
-        # Label-balanced batches (the supcon path): classes_per_batch x samples_per_class.
-        train_loader = DataLoader(
-            train_ds,
-            batch_sampler=BalancedBatchSampler(index.train, cfg.classes_per_batch,
-                                               cfg.samples_per_class, cfg.steps, cfg.seed,
-                                               stream_datasets=index.stream_datasets),
-            **loader_kwargs)
-    else:
-        # Temperature sampler (default): per-window draw, P(dataset) ∝ n^alpha, no class balancing.
-        temperature_sampler = TemperatureSampler(
-            index.train, index.stream_datasets,
-            num_samples=cfg.steps * cfg.batch_size,
-            alpha=cfg.sampler_alpha, seed=cfg.seed,
-            batch_size=cfg.batch_size,    # within-batch no-replacement (F11)
-            event_ids=index.train_event_ids,
-            positive_event_ids=index.train_positive_event_ids,
-            pair_fraction=(cfg.a4_pair_fraction
-                           if cfg.a4_weight > 0 else 0.0),
-            subject_ids=index.train_subject_ids,
-            subject_alpha=cfg.sampler_subject_alpha,
-            max_dataset_share=cfg.sampler_max_dataset_share,
+    temperature_sampler = TemperatureSampler(
+        index.train, index.stream_datasets,
+        num_samples=cfg.steps * cfg.batch_size,
+        alpha=cfg.sampler_alpha, seed=cfg.seed,
+        batch_size=cfg.batch_size,
+        event_ids=index.train_event_ids,
+        positive_event_ids=index.train_positive_event_ids,
+        pair_fraction=(cfg.relation_pair_fraction
+                       if cfg.cross_placement_weight > 0 else 0.0),
+        subject_ids=index.train_subject_ids,
+        subject_alpha=cfg.sampler_subject_alpha,
+        max_dataset_share=cfg.sampler_max_dataset_share,
+    )
+    shares = ", ".join(
+        f"{dataset}={share:.1%}"
+        for dataset, share in sorted(
+            temperature_sampler.dataset_probabilities.items(),
+            key=lambda item: (-item[1], item[0]),
         )
-        shares = ", ".join(
-            f"{dataset}={share:.1%}"
-            for dataset, share in sorted(
-                temperature_sampler.dataset_probabilities.items(),
-                key=lambda item: (-item[1], item[0]),
-            )
-        )
-        print(
-            f"sampler: dataset alpha={cfg.sampler_alpha:g}, "
-            f"max_share={cfg.sampler_max_dataset_share:.1%}, "
-            f"subject alpha={cfg.sampler_subject_alpha:g} ({shares})",
-            flush=True,
-        )
-        train_loader = DataLoader(
-            train_ds,
-            sampler=temperature_sampler,
-            batch_size=cfg.batch_size, drop_last=True, **loader_kwargs)
-    # val: no aug, fixed 1.0 s patches, plain order. compute_targets=False skips the per-window
-    # A3 DSP (unused by embedding), and parallel persistent workers cut the collate time — together
-    # these take a val from ~9.5 min to seconds (the val-speed fix; val ran 5x the train cost).
+    )
+    print(
+        f"sampler: dataset alpha={cfg.sampler_alpha:g}, "
+        f"max_share={cfg.sampler_max_dataset_share:.1%}, "
+        f"subject alpha={cfg.sampler_subject_alpha:g} ({shares})",
+        flush=True,
+    )
+    train_loader = DataLoader(
+        train_ds, sampler=temperature_sampler,
+        batch_size=cfg.batch_size, drop_last=True, **loader_kwargs)
+    # Validation uses deterministic fixed patch durations and no augmentation.
     val_workers = min(6, cfg.num_workers)
     val_collate = (
         MultiResolutionCollate(fixed_patch_seconds=cfg.val_resolution_pair,
-                               min_resolution_ratio=cfg.min_resolution_ratio,
-                               compute_targets=False)
+                               min_resolution_ratio=cfg.min_resolution_ratio)
         if cfg.multiresolution else
-        MultiScaleCollate(fixed_patch_seconds=1.0, compute_targets=False)
+        MultiScaleCollate(fixed_patch_seconds=1.0)
     )
     val_loader = DataLoader(val_ds, batch_size=256, shuffle=False, collate_fn=val_collate,
                             num_workers=val_workers, persistent_workers=val_workers > 0,
@@ -1008,58 +766,26 @@ def main() -> None:
         while True:
             yield from loader
 
-    # ---------------------------------------------------- A1 target tokenizer (only if A1 is on)
-    # A1's target is the fixed filterbank's per-channel features. When a1_physical_weight=0, building and
-    # calibrating it for calib_batches is avoidable work; the a1_physical_head stays but receives zero weight.
-    compute_a1_physical = cfg.a1_physical_weight > 0
-    compute_masked = compute_a1_physical or cfg.a1_weight > 0
-    if compute_a1_physical:
-        target_tok = PhysicalFilterbankTokenizer(d_model=1, dft_size=DFT_SIZE)
-        target_tok.proj = nn.Identity()
-        print(f"calibrating filterbank norm on {cfg.calib_batches} batches ...", flush=True)
-        target_tok.reset_norm_accumulator()
-        calib_iter = _cycle(train_loader)     # robust if calib_batches > sampler steps (smoke)
-        for _ in range(cfg.calib_batches):
-            batch = next(calib_iter)          # gravity-aligned + patch-masked in the collate
-            target_tok.accumulate_norm_stats(
-                batch["patches"], batch["rates"], batch["patch_len"],
-                patch_mask=batch["patch_padding_mask"], channel_mask=batch["channel_mask"])
-        target_tok.finalize_norm_stats()
-        target_tok.eval()
-        for p in target_tok.parameters():
-            p.requires_grad_(False)
-        # A1 predicts only the SIGNAL-content dims (band energies + amplitude + dc); rate-metadata
-        # masks dropped (they were ~81% of the target norm — audit 2026-07-18).
-        signal_idx = torch.tensor(target_tok.signal_feature_indices(), device=device)
-        a1_target_dim = len(signal_idx)
-        # signal_feature_indices() returns [bands(K) | amplitude? | DC?] in that order, so K is
-        # exactly where the cosine (spectral SHAPE) half ends and the Huber (absolute MAGNITUDE)
-        # half begins in the gathered target.
-        a1_n_bands = target_tok.n_bands
-    else:
-        target_tok, signal_idx, a1_target_dim = None, None, 1   # dormant a1_physical_head
-        a1_n_bands = None
-
     # ------------------------------------------------------------------ model
-    model = PipelineAModel(cfg, a1_target_dim=a1_target_dim).to(device)
-    # Calibrate the ENCODER's frontend with its OWN accumulate/finalize (per-band + signed-DC stats),
-    # over the same data as the A1 target.
+    model = PipelineAModel(cfg).to(device)
+    # Calibrate the encoder frontend's per-band and signed-DC normalization.
     fe = model.encoder.filterbank
+    print(f"calibrating filterbank norm on {cfg.calib_batches} batches ...", flush=True)
     fe.reset_norm_accumulator()
     fe_iter = _cycle(train_loader)
     for _ in range(cfg.calib_batches):
         b = next(fe_iter)
         fe.accumulate_norm_stats(
             b["patches"].to(device), b["rates"].to(device), b["patch_len"].to(device),
-            patch_mask=b["patch_padding_mask"].to(device), channel_mask=b["channel_mask"].to(device))
+            patch_mask=b["patch_padding_mask"].to(device),
+            channel_mask=b["channel_mask"].to(device),
+            source_rate_hz=b.get("source_rates", b["rates"]).to(device))
     fe.finalize_norm_stats()
-    if compute_a1_physical:
-        target_tok = target_tok.to(device)
 
-    a1_teacher = None
-    if cfg.a1_weight > 0:
-        a1_teacher = copy.deepcopy(model.encoder).to(device).eval()
-        for parameter in a1_teacher.parameters():
+    jepa_teacher = None
+    if cfg.jepa_weight > 0:
+        jepa_teacher = copy.deepcopy(model.encoder).to(device).eval()
+        for parameter in jepa_teacher.parameters():
             parameter.requires_grad_(False)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1091,56 +817,6 @@ def main() -> None:
         * 0.5 * (1 + np.cos(np.pi * min(s / cfg.steps, 1.0))),
     )
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
-    weights = EliteLossWeights(a1_physical=cfg.a1_physical_weight, a2_supcon=cfg.a2_weight,
-                               a3_grounding=cfg.a3_weight)
-
-    # --- gradient-share auto-calibration state (see PretrainConfig.autocalibrate_at) -----------
-    # A2's coefficient lives on `weights` (built once, passed to elite3_loss) while the others are
-    # read off `cfg` each step, so the accessors below hide that split -- writing to only one of
-    # the two would silently no-op.
-    _WEIGHT_FIELDS = {
-        "a1_masked_latent": ("cfg", "a1_weight"),
-        "a1_physical": ("weights", "a1_physical"),
-        "a2_vicreg": ("weights", "a2_supcon"),
-        "a2_simclr": ("weights", "a2_supcon"),
-        "a2_supcon": ("weights", "a2_supcon"),
-        "a3_grounding": ("weights", "a3_grounding"),
-        "a4_placement": ("cfg", "a4_weight"),
-        "tfc": ("cfg", "tfc_weight"),
-    }
-
-    def live_weight(name: str) -> float:
-        holder, field = _WEIGHT_FIELDS.get(name, (None, None))
-        if holder is None:
-            return 0.0
-        return float(getattr(cfg if holder == "cfg" else weights, field))
-
-    def set_live_weight(name: str, value: float) -> None:
-        holder, field = _WEIGHT_FIELDS.get(name, (None, None))
-        if holder is None:
-            return
-        setattr(cfg if holder == "cfg" else weights, field, float(value))
-        if field == "a3_grounding":          # cfg.a3_weight also gates the collate's A3 DSP
-            cfg.a3_weight = float(value)
-
-    def solve_equal_share(samples: dict[str, list[float]], getter) -> dict[str, float]:
-        """w_i proportional to 1 / ||grad L_i||, rescaled to preserve the CURRENT total.
-
-        Preserving the total matters because grad-clip (1.0) is always active here -- measured
-        grad/encoder median 9.05, min 2.49 -- so changing the overall magnitude would silently
-        change the effective learning rate rather than the balance.
-        """
-        unit = {k: statistics.median(v) for k, v in samples.items() if statistics.median(v) > 0}
-        if not unit:
-            return {}
-        current_total = sum(getter(k) * u for k, u in unit.items())
-        raw = {k: 1.0 / u for k, u in unit.items()}
-        scale = current_total / max(sum(raw[k] * unit[k] for k in unit), 1e-12)
-        return {k: raw[k] * scale for k in unit}
-
-    calib_samples: dict[str, list[float]] = {}
-    calib_done = cfg.autocalibrate_at <= 0
-    weights_before = {n: live_weight(n) for n in _WEIGHT_FIELDS}
     log_path = args.out / "log.jsonl"
     best_ba = -1.0
     t0 = time.time()
@@ -1150,15 +826,10 @@ def main() -> None:
         torch.save({
             "encoder": model.encoder.state_dict(),
             "heads": {k: v.state_dict() for k, v in
-                      (("a1", model.a1_physical_head), ("a1_predictor", model.a1_predictor),
-                       ("a2", model.a2_proj),
-                       ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen),
-                       # TF-C aux modules: saved only so a warm --resume stays consistent; the
-                       # inference loaders read ckpt["encoder"] alone and never touch these.
-                       ("time_encoder", model.time_encoder), ("tfc_proj", model.tfc_proj),
-                       ("tfc_proj_time", model.tfc_proj_time))},
+                      (("jepa_predictor", model.jepa_predictor),
+                       ("relation_projector", model.relation_projector))},
             "config": asdict(cfg),
-            "a1_teacher": (a1_teacher.state_dict() if a1_teacher is not None else None),
+            "jepa_teacher": (jepa_teacher.state_dict() if jepa_teacher is not None else None),
             "label_ids": index.label_ids,
             "step": step, "val_ba": val_ba,
             "best_ba": max(best_ba, val_ba),   # running best so a resume can't overwrite a better best.pt (#6)
@@ -1182,10 +853,8 @@ def main() -> None:
         rk = torch.load(args.resume, map_location=device, weights_only=False)
         saved_cfg = rk.get("config", {})
         # A faithful resume must reproduce the SAME optimization trajectory, so validate the ENTIRE
-        # serialized config against the checkpoint — NOT a hand-listed subset. The old subset silently
-        # accepted a mixed objective/sampler/seed resume (e.g. --a2-mode supcon --sampler balanced
-        # --tfc-weight 0 --seed 999 on a VICReg/TF-C run), which then overwrote run_config.json and
-        # made the mixed-protocol run look pure. Only knobs that touch NEITHER the training trajectory
+        # serialized config against the checkpoint — NOT a hand-listed subset. Only knobs that touch
+        # neither the training trajectory
         # NOR the saved model's meaning may differ — runtime + eval-cadence. (steps stays checked: it
         # rescales the cosine LR schedule, so a faithful resume passes the same --steps.)
         _RESUME_RUNTIME_ONLY = {"device", "num_workers", "val_every", "val_per_label", "knn_k"}
@@ -1215,37 +884,25 @@ def main() -> None:
                 raise ValueError(
                     f"resume configuration mismatch for {key}: checkpoint={saved!r}, requested={cur!r} "
                     f"— a resume must reproduce the run; only {sorted(_RESUME_RUNTIME_ONLY)} may differ.")
+        saved_step = int(rk["step"])
         saved_fp = rk.get("corpus_fingerprint")
         if saved_fp is not None and saved_fp != corpus_fingerprint(index):
             raise ValueError(
                 f"resume corpus fingerprint mismatch: checkpoint={saved_fp}, "
                 f"current={corpus_fingerprint(index)} — the corpus/cap/seed changed since the run started.")
         model.encoder.load_state_dict(rk["encoder"])
-        _AUX_TFC = {"time_encoder", "tfc_proj", "tfc_proj_time"}
-        for k, head in (("a1", model.a1_physical_head), ("a1_predictor", model.a1_predictor),
-                        ("a2", model.a2_proj),
-                        ("a3_cadence", model.a3_cadence), ("a3_eigen", model.a3_eigen),
-                        ("time_encoder", model.time_encoder), ("tfc_proj", model.tfc_proj),
-                        ("tfc_proj_time", model.tfc_proj_time)):
-            if k not in rk["heads"]:           # aux TF-C modules absent in pre-TF-C checkpoints
-                continue
-            if k in _AUX_TFC:
-                # The aux TF-C rail is training-only and discarded at inference, and its shape has
-                # changed (the F2/F3 rate/position FiLM added parameters). A checkpoint predating
-                # that must still be resumable, so load it leniently and re-init what is missing
-                # rather than crashing the run on a module the encoder never uses.
-                try:
-                    head.load_state_dict(rk["heads"][k])
-                except RuntimeError as exc:
-                    print(f"[resume] aux TF-C module {k!r} predates the current architecture "
-                          f"({str(exc).splitlines()[0]}); re-initialised.", flush=True)
+        for key, head in (("jepa_predictor", model.jepa_predictor),
+                          ("relation_projector", model.relation_projector)):
+            if key not in rk.get("heads", {}):
+                raise ValueError(
+                    f"resume checkpoint predates the consolidated Phase-A objective: missing {key!r}"
+                )
+            head.load_state_dict(rk["heads"][key])
+        if jepa_teacher is not None:
+            if rk.get("jepa_teacher") is not None:
+                jepa_teacher.load_state_dict(rk["jepa_teacher"])
             else:
-                head.load_state_dict(rk["heads"][k])   # main heads stay STRICT
-        if a1_teacher is not None:
-            if rk.get("a1_teacher") is not None:
-                a1_teacher.load_state_dict(rk["a1_teacher"])
-            else:
-                a1_teacher.load_state_dict(model.encoder.state_dict())
+                raise ValueError("resume checkpoint is missing the JEPA teacher state")
         opt.load_state_dict(rk["optimizer"])
         sched.load_state_dict(rk["scheduler"])
         scaler.load_state_dict(rk["scaler"])
@@ -1254,7 +911,7 @@ def main() -> None:
             torch.set_rng_state(rk["rng"]["torch"])
             np.random.set_state(rk["rng"]["numpy"])
             _sr.setstate(rk["rng"]["python"])
-        start_step = int(rk["step"])
+        start_step = saved_step
         # Restore the RUNNING best, not this checkpoint's own val_ba (#6): resuming from last.pt
         # (whose val_ba is the latest, not the best) must not let a later worse val overwrite best.pt.
         best_ba = float(rk.get("best_ba", rk["val_ba"]))
@@ -1272,7 +929,7 @@ def main() -> None:
 
     def encode_clean_view_b(batch: dict) -> dict:
         """Encode the SECOND augmentation-positive view (the collate's ``*_b`` keys), clean/no mask.
-        Only ['pooled'] is consumed (its a2_proj gives z_b). Tokenization runs fp32 (autocast
+        Only ['pooled'] is consumed by the relation projector. Tokenization runs fp32 (autocast
         off) like view A; the transformer runs under whatever autocast the caller is in. The
         conditioning path MATCHES view A (per_channel vs factored), so the encoder sees the same
         text mode — factored view B carries its OWN independently-augmented role/sensor text."""
@@ -1307,11 +964,8 @@ def main() -> None:
     # eager: it is no-grad, cheaper, and its weights change every step, so compiling it buys little.
     encode_fn = model.encoder.encode
     if cfg.compile_encoder and device.type == "cuda":
-        # `objective_encoder_grad_norm` re-walks the graph with autograd.grad(retain_graph=True)
-        # on log steps to attribute gradient per objective. Inductor's donated-buffer optimisation
-        # assumes every backward is retain_graph=False and raises at runtime otherwise, so it has
-        # to be off for the two to coexist. Keeping the telemetry: it is what showed A1b buys 1.1%
-        # of gradient for 8.2% of the step, and that is worth more than the buffer saving.
+        # Objective gradient telemetry re-walks the graph with retain_graph=True; disable Inductor's
+        # donated-buffer optimization so the diagnostic backward remains valid.
         torch._functorch.config.donated_buffer = False
         encode_fn = torch.compile(model.encoder.encode, dynamic=True)
         print("torch.compile: encoder.encode (dynamic, donated_buffer off) — step 1 pays the compile",
@@ -1329,38 +983,22 @@ def main() -> None:
                           if "resolution_ids" in batch else None)
         channel_mask = batch["channel_mask"].to(device)
         patch_pad = batch["patch_padding_mask"].to(device)
-        labels = batch["labels"].to(device)
         B, P, _, C = patches.shape
 
-        # The fixed and EMA targets share one validity-aware physical-interval mask.
-        if compute_masked:
+        if cfg.jepa_weight > 0:
             if cfg.multiresolution:
                 plan = make_multiresolution_mask_plan(
                     batch["patch_starts"].to(device), batch["patch_ends"].to(device),
-                    resolution_ids, C, GYRO_IDX, channel_mask=channel_mask, valid_patches=patch_pad,
-                    compensate_patch_length=cfg.mask_compensate_patch_length)
+                    resolution_ids, C, GYRO_IDX, channel_mask=channel_mask,
+                    valid_patches=patch_pad)
             else:
                 plan = make_mask_plan(B, P, C, GYRO_IDX, device=device,
                                       valid_patches=patch_pad, channel_mask=channel_mask)
-        targets = GroundingTargets(
-            cadence_log2hz=batch["cadence_target"].to(device),
-            cadence_valid=batch["cadence_valid"].to(device),
-            eigen_ratios=batch["eigen_target"].to(device),
-            eigen_valid=batch["eigen_valid"].to(device),
-        )
 
         with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
             # The filterbank DSP (rDFT + constant-Q einsum) runs in fp32 — fp16 has too little headroom
-            # for the band-energy magnitudes (sweep finding 15). sensor_tokens keeps grad; A1 TARGET is no_grad.
+            # for the band-energy magnitudes. Sensor tokens retain gradients.
             with torch.amp.autocast(device.type, enabled=False):
-                if compute_a1_physical:
-                    with torch.no_grad():
-                        _src = batch.get("source_rates", rates).to(device)
-                        a1_target = target_tok(patches.float(), rates, patch_len,
-                                               source_rate_hz=_src)[..., signal_idx]
-                        o, _ = target_tok.masks(rates, patch_len, source_rate_hz=_src)  # (B,K) observable
-                        extra = o.new_ones(B, len(signal_idx) - o.shape[1])
-                        a1_feature_valid = torch.cat([o, extra], dim=1).view(B, 1, 1, -1)
                 # Split analysis from projection so the EMA teacher can reuse the DSP. On the
                 # fixed arm `analyze` is parameter-free, so the teacher's analysis would be
                 # bit-identical anyway and running the rDFT + constant-Q einsum twice per step
@@ -1397,9 +1035,8 @@ def main() -> None:
                                          sensor_text_embs=sensor_text_embs,
                                          sensor_text_masks=sensor_text_masks,
                                          sensor_id=enc_sensor_id)
-            z = model.a2_proj(clean["pooled"])
-            # --- masked student pass, shared by fixed-feature and EMA latent targets ---
-            if compute_masked:
+            z = model.relation_projector(clean["pooled"])
+            if cfg.jepa_weight > 0:
                 masked = encode_fn(sensor_tokens, text_embs, text_masks, positions,
                                               patch_durations=patch_durations,
                                               resolution_ids=resolution_ids,
@@ -1410,20 +1047,14 @@ def main() -> None:
                                               sensor_text_embs=sensor_text_embs,
                                               sensor_text_masks=sensor_text_masks,
                                               sensor_id=enc_sensor_id)
-                a1_loss_mask = plan.token_mask & enc_channel_mask.unsqueeze(1) & patch_pad.unsqueeze(2)
+                jepa_mask = plan.token_mask & enc_channel_mask.unsqueeze(1) & patch_pad.unsqueeze(2)
             else:
                 masked = clean
-                a1_loss_mask = torch.zeros(clean["tokens"].shape[:3], dtype=torch.bool, device=device)
+                jepa_mask = torch.zeros(clean["tokens"].shape[:3], dtype=torch.bool, device=device)
 
-            if compute_a1_physical:
-                a1_pred = model.a1_physical_head(masked["tokens"])
-            else:
-                a1_pred = model.a1_physical_head(clean["tokens"].detach())
-                a1_target = torch.zeros_like(a1_pred)
-                a1_feature_valid = None
-
-            ema_loss = clean["pooled"].new_zeros(())
-            if a1_teacher is not None:
+            jepa_loss = clean["pooled"].new_zeros(())
+            jepa_parts: dict[str, float] = {}
+            if jepa_teacher is not None:
                 # The teacher sees the clean view and never receives gradients. Reuse frozen text-LM
                 # outputs, but run the teacher's own frontend/fusion/transformer weights.
                 with torch.no_grad():
@@ -1432,14 +1063,14 @@ def main() -> None:
                             # Fixed arm: reuse the student's parameter-free analysis, then apply
                             # the TEACHER's own (EMA-lagged) projection. Detached — the teacher
                             # never receives gradient.
-                            teacher_sensor_tokens = a1_teacher.project_tokens(
+                            teacher_sensor_tokens = jepa_teacher.project_tokens(
                                 shared_analysis.detach())
                         else:
-                            teacher_sensor_tokens = a1_teacher.tokenize(
+                            teacher_sensor_tokens = jepa_teacher.tokenize(
                                 patches.float(), rates, patch_len,
                                 source_rate_hz=batch.get("source_rates", rates).to(device),
                             )
-                    teacher_clean = a1_teacher.encode(
+                    teacher_clean = jepa_teacher.encode(
                         teacher_sensor_tokens, text_embs, text_masks, positions,
                         patch_durations=patch_durations,
                         resolution_ids=resolution_ids,
@@ -1449,220 +1080,84 @@ def main() -> None:
                         sensor_text_masks=sensor_text_masks,
                         sensor_id=enc_sensor_id,
                     )
-                ema_pred = model.a1_predictor(masked["tokens"])
-                ema_loss = masked_ema_latent_loss(
-                    ema_pred, teacher_clean["tokens"], a1_loss_mask
+                jepa_prediction = model.jepa_predictor(masked["tokens"])
+                jepa_loss = masked_ema_latent_loss(
+                    jepa_prediction, teacher_clean["tokens"], jepa_mask,
+                    token_groups=resolution_ids,
+                    token_durations=patch_durations,
                 )
-                # A1 has no negatives, so its loss alone cannot distinguish "learned to predict
+                # JEPA has no negatives, so its loss alone cannot distinguish "learned to predict
                 # the teacher" from "the teacher collapsed and anything predicts it". Log the
                 # margin over a random masked-position pairing (see losses_repr.pair_contrast).
-                if bool(a1_loss_mask.any()):
-                    a1_diag = pair_contrast(ema_pred[a1_loss_mask].flatten(1),
-                                            teacher_clean["tokens"][a1_loss_mask].flatten(1))
-                    a1_parts = {f"a1/{k}": v for k, v in a1_diag.items()}
-                else:
-                    a1_parts = {}
+                if bool(jepa_mask.any()):
+                    jepa_diag = pair_contrast(jepa_prediction[jepa_mask].flatten(1),
+                                              teacher_clean["tokens"][jepa_mask].flatten(1))
+                    jepa_parts = {f"jepa/{k}": v for k, v in jepa_diag.items()}
 
-            # --- A2 positive-view agreement + TF-C, both configurable for historical controls ---
-            tfc_loss = None
-            tfc_parts: dict[str, float] = {}
-            if cfg.a2_mode in {"vicreg", "simclr"}:
-                z_b = model.a2_proj(encode_clean_view_b(batch)["pooled"])
-                augmentation_positive_similarity = float(
-                    F.cosine_similarity(z.detach(), z_b.detach(), dim=-1).mean()
-                )
-                a2_contrast = pair_contrast(z, z_b)
-                if cfg.a2_mode == "vicreg":
-                    a2_vr = vicreg(
-                        z, z_b,
-                        invariance_weight=cfg.vicreg_invariance_weight,
-                        variance_weight=cfg.vicreg_variance_weight,
-                        covariance_weight=cfg.vicreg_covariance_weight,
-                        target_std=cfg.vicreg_target_std,
-                    )
-                    a2_loss, a2_key = a2_vr.total, "a2_vicreg"
-                else:
-                    a2_vr = None
-                    a2_loss, a2_key = nt_xent(z, z_b, cfg.simclr_temperature), "a2_simclr"
-                if cfg.tfc_weight > 0:
-                    z_freq = model.tfc_proj(clean["pooled"])
-                    time_emb = model.time_encoder(patches.float(), patch_len, channel_mask,
-                                                  patch_padding_mask=patch_pad,
-                                                  patch_durations=patch_durations, positions=positions)
-                    z_time = model.tfc_proj_time(time_emb)
-                    if cfg.tfc_loss == "vicreg":
-                        tfc_vr = vicreg(
-                            z_time, z_freq,
-                            invariance_weight=cfg.vicreg_invariance_weight,
-                            variance_weight=cfg.vicreg_variance_weight,
-                            covariance_weight=cfg.vicreg_covariance_weight,
-                            target_std=cfg.vicreg_target_std,
-                        )
-                        tfc_loss = tfc_vr.total
-                        tfc_parts = {
-                            "tfc/invariance": float(tfc_vr.invariance.detach()),
-                            "tfc/variance": float(tfc_vr.variance.detach()),
-                            "tfc/covariance": float(tfc_vr.covariance.detach()),
-                            "tfc/min_std": float(tfc_vr.min_std.detach()),
-                        }
-                    else:
-                        tfc_loss = nt_xent(z_time, z_freq, cfg.tfc_temperature)
-            else:
-                a2_vr = None
-                a2_loss, a2_key = None, "a2_supcon"   # elite3_loss computes the label-SupCon
-                augmentation_positive_similarity = float("nan")
-
-            placement_loss = clean["pooled"].new_zeros(())
-            placement_parts: dict[str, float] = {}
+            z_b = model.relation_projector(encode_clean_view_b(batch)["pooled"])
             pair_left, pair_right = verified_event_pairs(
                 batch["event_ids"], batch["event_verified"], batch["streams"], device
             )
-            # A4 is invariance-ONLY (see below), so it is a purely ATTRACTIVE loss whose global
-            # minimum is "map every window to one constant vector". Nothing inside A4 opposes
-            # that; the only thing that does is A2's VICReg variance/covariance terms acting on
-            # the SAME `z = a2_proj(...)`. So A4 is not independently well-posed -- it is
-            # well-posed only while A2 is on.
-            #
-            # That makes the `--a2-weight 0` ablation arm a trap: read naively it measures
-            # "A2 removed", but it actually measures "A2 removed AND A4 turned into an
-            # unopposed collapse driver", which is not an ablation of anything. Refuse it
-            # rather than silently produce a number nobody can interpret.
-            a2_on = cfg.a2_mode in {"vicreg", "simclr"} and cfg.a2_weight > 0
-            if cfg.a4_weight > 0 and not a2_on:
-                raise ValueError(
-                    "a4_weight > 0 requires A2 to be active: A4 is invariance-only and relies on "
-                    "A2's variance/covariance terms over the shared a2_proj output to prevent "
-                    "collapse. To ablate A2, pass --a4-weight 0 as well (and report it as the "
-                    "joint arm), or give A4 its own variance term first."
-                )
-            if cfg.a4_weight > 0 and len(pair_left) >= 2:
-                # INVARIANCE-ONLY (2026-07-26). The variance/covariance terms estimate a
-                # d_proj x d_proj covariance, but this rail only ever sees the verified-pair
-                # quota: 13 pairs at batch 256, 26 at batch 512, against a 128-d projection —
-                # so the covariance has rank <= n_pairs-1 and those terms fit noise. They are
-                # also redundant: `z` is the SAME a2_proj output whose collapse A2's VICReg
-                # already prevents over all 256 rows. What is unique here is the invariance
-                # term — two real devices recording the same instant — so keep only that.
-                placement_vr = vicreg(
-                    z[pair_left], z[pair_right],
-                    invariance_weight=cfg.vicreg_invariance_weight,
-                    variance_weight=0.0,
-                    covariance_weight=0.0,
-                    target_std=cfg.vicreg_target_std,
-                    invariance=cfg.a4_invariance,
-                )
-                placement_loss = placement_vr.total
-                placement_parts = {
-                    "placement/invariance": float(placement_vr.invariance.detach()),
-                    "placement/variance": float(placement_vr.variance.detach()),
-                    "placement/covariance": float(placement_vr.covariance.detach()),
-                    "placement/min_std": float(placement_vr.min_std.detach()),
-                    "placement/positive_similarity": float(F.cosine_similarity(
-                        z[pair_left].detach(), z[pair_right].detach(), dim=-1
-                    ).mean()),
-                }
-                # A4 is invariance-ONLY, i.e. purely attractive: its trivial minimum is a
-                # constant. The margin over a random pairing is the only evidence that it is
-                # learning placement invariance rather than riding a collapse.
-                placement_parts.update({f"placement/{k}": v for k, v in
-                                        pair_contrast(z[pair_left], z[pair_right]).items()
-                                        if k != "positive_similarity"})
-            # A3 grounding rail. Setting a3_weight=0 skips both heads and the collate's A3 DSP.
-            if cfg.a3_weight > 0:
-                a3_cad = model.a3_cadence(clean["pooled"]).squeeze(1)
-                a3_eig = model.a3_eigen(clean["pooled"]).view(B, 4, 3)
-            else:
-                a3_cad = clean["pooled"].new_zeros(B)
-                a3_eig = clean["pooled"].new_zeros(B, 4, 3)
-            out = elite3_loss(
-                a1_pred=a1_pred, a1_target=a1_target,
-                a1_mask=a1_loss_mask,
-                a1_n_bands=a1_n_bands,
-                a2_embeddings=z, a2_labels=labels,
-                a3_cadence_pred=a3_cad,
-                a3_eigen_pred=a3_eig,
-                a3_targets=targets, weights=weights,
-                a1_feature_valid=a1_feature_valid,
-                a1_token_groups=resolution_ids,
-                a1_token_durations=patch_durations,   # weight A1 by represented duration (F1)
-                a2_loss=a2_loss, a2_key=a2_key,
+            relation = relation_loss(
+                z, z_b, pair_left, pair_right,
+                cross_placement_weight=cfg.cross_placement_weight,
+                invariance_weight=cfg.vicreg_invariance_weight,
+                variance_weight=cfg.vicreg_variance_weight,
+                covariance_weight=cfg.vicreg_covariance_weight,
+                target_std=cfg.vicreg_target_std,
             )
-            if a2_vr is not None:
-                out.parts.update({
-                    "a2/invariance": float(a2_vr.invariance.detach()),
-                    "a2/variance": float(a2_vr.variance.detach()),
-                    "a2/covariance": float(a2_vr.covariance.detach()),
-                    "a2/min_std": float(a2_vr.min_std.detach()),
-                })
-            if tfc_loss is not None:
-                out.total = out.total + cfg.tfc_weight * tfc_loss
-                out.terms["tfc"] = cfg.tfc_weight * tfc_loss
-                out.parts["tfc"] = float(tfc_loss.detach())
-                out.parts["tfc/positive_similarity"] = float(F.cosine_similarity(
-                    z_time.detach(), z_freq.detach(), dim=-1
-                ).mean())
-            else:
-                out.parts["tfc"] = 0.0
-            out.parts.update(tfc_parts)
-            out.total = out.total + cfg.a4_weight * placement_loss
-            out.terms["a4_placement"] = cfg.a4_weight * placement_loss
-            out.parts["a4_placement"] = float(placement_loss.detach())
-            out.parts["placement_pairs"] = int(len(pair_left))
-            out.parts.update(placement_parts)
-            out.total = out.total + cfg.a1_weight * ema_loss
-            out.terms["a1_masked_latent"] = cfg.a1_weight * ema_loss
-            out.parts["a1_masked_latent"] = float(ema_loss.detach())
-            out.parts.update(a1_parts)
+
+            out = phase_a_loss(
+                jepa_loss, relation.total,
+                jepa_weight=cfg.jepa_weight,
+                relation_weight=cfg.relation_weight,
+            )
             frontend_reg = model.encoder.filterbank.adaptation_regularization()
             out.total = out.total + cfg.frontend_reg_weight * frontend_reg
-            out.terms["frontend_reg"] = cfg.frontend_reg_weight * frontend_reg
-            out.parts["frontend_reg"] = float(frontend_reg.detach())
-            out.parts["frontend_reg_weighted"] = float(
-                (cfg.frontend_reg_weight * frontend_reg).detach())
-            out.parts["a2/positive_similarity"] = augmentation_positive_similarity
-            out.parts.update({f"a2/{k}": v for k, v in a2_contrast.items()
-                              if k != "positive_similarity"})
+            parts = {
+                "jepa": float(jepa_loss.detach()),
+                "relation": float(relation.total.detach()),
+                "relation/augmentation": float(relation.augmentation.total.detach()),
+                "relation/augmentation_invariance": float(
+                    relation.augmentation.invariance.detach()),
+                "relation/variance": float(relation.augmentation.variance.detach()),
+                "relation/covariance": float(relation.augmentation.covariance.detach()),
+                "relation/min_std": float(relation.augmentation.min_std.detach()),
+                "relation/cross_placement_invariance": float(
+                    relation.cross_placement.detach()),
+                "relation/cross_placement_weighted": float(
+                    relation.cross_placement_weighted.detach()),
+                "relation/placement_pairs": relation.placement_pairs,
+                "frontend_reg": float(frontend_reg.detach()),
+                "frontend_reg_weighted": float(
+                    (cfg.frontend_reg_weight * frontend_reg).detach()),
+            }
+            parts.update(jepa_parts)
+            parts.update({f"relation/augmentation_{key}": value
+                          for key, value in pair_contrast(z, z_b).items()})
+            if relation.placement_pairs >= 2:
+                parts.update({f"relation/placement_{key}": value
+                              for key, value in pair_contrast(
+                                  z[pair_left], z[pair_right]).items()})
 
         do_log = step % 50 == 0 or step == 1
-        # Measure over the `autocalibrate_batches` steps ENDING at autocalibrate_at and take the
-        # median: A4's per-batch loss has CV 0.53 (5x every other term, it sees only the verified
-        # -pair quota), so a single-step reading would set its weight off noise.
-        calibrating = (cfg.autocalibrate_at > 0 and not calib_done
-                       and cfg.autocalibrate_at - cfg.autocalibrate_batches < step
-                       <= cfg.autocalibrate_at)
-        do_objective_grad_log = step == 1 or step % 500 == 0 or calibrating
+        do_objective_grad_log = step == 1 or step % 500 == 0
         objective_grad_norms = {}
         if do_objective_grad_log:
             objective_grad_norms = {
                 f"grad_objective/{name}": objective_encoder_grad_norm(term, model.encoder)
                 for name, term in out.terms.items()
             }
-        if calibrating:
-            for name, term in out.terms.items():
-                w = live_weight(name)
-                if w > 0:
-                    calib_samples.setdefault(name, []).append(
-                        objective_grad_norms[f"grad_objective/{name}"] / w)
-            if step == cfg.autocalibrate_at:
-                new_w = solve_equal_share(calib_samples, live_weight)
-                for name, w in new_w.items():
-                    set_live_weight(name, w)
-                calib_done = True
-                record = {"step": step, "event": "autocalibrate",
-                          "unit_grad_norm": {k: statistics.median(v)
-                                             for k, v in calib_samples.items()},
-                          "weights_before": {k: float(v) for k, v in weights_before.items()},
-                          "weights_after": new_w}
-                print(f"[autocalibrate] step {step}: {json.dumps(record['weights_after'])}")
-                with log_path.open("a") as fh:
-                    fh.write(json.dumps(record) + "\n")
         if not bool(torch.isfinite(out.total)):
-            raise FloatingPointError(f"non-finite Phase-A loss at step {step}: {out.parts}")
+            raise FloatingPointError(f"non-finite Phase-A loss at step {step}: {parts}")
         opt.zero_grad(set_to_none=True)
         scaler.scale(out.total).backward()
         scaler.unscale_(opt)
         gnorms = module_grad_norms(model) if do_log else {}     # pre-clip per-module grad norms
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+        clip_coefficient = min(
+            1.0, float(cfg.grad_clip) / (float(total_grad_norm.detach()) + 1e-6)
+        )
         old_scale = scaler.get_scale()
         scaler.step(opt)
         scaler.update()
@@ -1670,8 +1165,8 @@ def main() -> None:
         # LR schedule must advance only with real student updates, or the teacher drifts toward
         # unchanged weights while the optimizer trajectory silently loses a scheduler step.
         optimizer_stepped = scaler.get_scale() >= old_scale
-        if a1_teacher is not None and optimizer_stepped:
-            update_ema_encoder(model.encoder, a1_teacher, cfg.a1_ema_decay)
+        if jepa_teacher is not None and optimizer_stepped:
+            update_ema_encoder(model.encoder, jepa_teacher, cfg.jepa_ema_decay)
         if optimizer_stepped:
             sched.step()
 
@@ -1680,26 +1175,23 @@ def main() -> None:
             rec = {"step": step, "lr": lrs[0],
                    "elapsed_s": round(time.time() - t0, 1),
                    "patch_seconds": batch["patch_seconds"],
-                   "total": round(float(out.total.detach()), 4), **out.parts, **gnorms}
+                   "total": round(float(out.total.detach()), 4), **parts, **gnorms}
+            rec["grad/total_preclip"] = float(total_grad_norm.detach())
+            rec["grad/clip_coefficient"] = clip_coefficient
+            rec["grad/clipped"] = float(clip_coefficient < 1.0)
             rec.update(objective_grad_norms)
             rec.update(representation_health(z))
-            if compute_a1_physical:                                 # per-source A1 (diagnostic, off-graph)
-                with torch.no_grad():
-                    a1_pw = masked_latent_per_window(a1_pred.float(), a1_target, a1_loss_mask,
-                                                     feature_valid=a1_feature_valid,
-                                                     n_bands=a1_n_bands)
-                rec["a1_physical_by_source"] = per_source_mean(a1_pw, batch["sources"])
-            if compute_masked:
+            if cfg.jepa_weight > 0:
                 # Windows that get NO masked token at all, per source. The mask planner correctly
                 # refuses to mask when every real token overlaps the interval (there is no honest
                 # visible/masked split), but that is silent, and it is systematic on the
-                # short-window sources: sp_sw_har is 1.00 s windows and loses ~30-50% of its A1
+                # short-window sources: sp_sw_har is 1.00 s windows and loses ~30-50% of its JEPA
                 # supervision, uci_har (2.56 s) ~10%, unimib_shar (3.02 s) ~1%.
-                # Depends only on the MASK, so it is reported for whichever A1 variant is live —
-                # it must not vanish when the physical arm is off (which is now the default).
+                # This depends only on the mask and remains comparable across tokenizer arms.
                 with torch.no_grad():
-                    unmasked = (a1_loss_mask.flatten(1).sum(dim=1) == 0).float()
-                rec["a1_unmasked_frac_by_source"] = per_source_mean(unmasked, batch["sources"])
+                    unmasked = (jepa_mask.flatten(1).sum(dim=1) == 0).float()
+                rec["jepa_unmasked_frac_by_source"] = per_source_mean(
+                    unmasked, batch["sources"])
             if len(lrs) > 1:
                 rec["lr_frontend"] = lrs[1]
             if model.encoder.filterbank.learnable:

@@ -10,8 +10,10 @@
 > (`model/evidence/head.py`, `train_head.py`, `eval_gate.py`, `diagnose.py`) is **superseded** by the
 > Tier-2 decoder (`model/evidence/decoder.py`) and is retained only for the diagnostics that
 > produced the tier-1 sweep.
-> `model/` and `training/` are empty in this repo — this is greenfield, but the **legacy tree
-> (`/home/alex/code/HALO/legacy_code`) has reusable pieces** to port (noted per milestone).
+> **The M0-M3 Phase-A objective sections are also historical.** The live trainer was consolidated
+> to JEPA + unified VICReg relation learning; see `training/tokenizer/README.md`.
+> Paths named below such as `scattering.py` and `m2_gate.py` were retired and intentionally deleted;
+> they describe experiments that no longer form part of the executable repository.
 
 ## Guiding principles
 1. **Cheap, decisive experiments before big builds.** Every design fork gets an empirical gate

@@ -13,6 +13,10 @@
 > LEARN on top of the retrieval mechanism has been net-negative so far, which this design did not
 > anticipate. For what is actually true today read `EVIDENCE_ENGINE_FINDINGS.md` (STATUS block)
 > first, then `POSITIONING.md` for what the whole thing is for.
+>
+> **Phase-A objective warning (2026-08-05):** the numbered A1/A2/A3 recipe later in this document is
+> historical design rationale, not runnable configuration. The live trainer has exactly JEPA and a
+> unified relation objective; see `training/tokenizer/README.md`.
 
 ## 0. The shift
 From an **activity classifier** (emit one label) to a **human-activity foundation model**

@@ -8,9 +8,9 @@ families before vs after, and reports, per family:
   * DISCRIMINABILITY — subject-disjoint within-dataset kNN balanced accuracy, and
                        leave-one-dataset-out kNN balanced accuracy (the cross-config axis)
 
-It also doubles as the A3-target separation check (EVIDENCE_ENGINE.md §5.2.3): boxplots of
-cadence and per-band eigen-ratios across activities — the grounding targets must visibly
-separate walk/run/sit/stairs or they are too noisy at this band resolution.
+It also checks whether diagnostic physical primitives carry activity signal: boxplots of cadence
+and per-band eigen-ratios across activities should visibly separate walk/run/sit/stairs if these
+features are useful for interpreting the learned representation.
 
 Gate: keep only families that are BOTH invariant to the nuisance AND still separate activities.
 
@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 from scipy import signal as sps
 
-from data.scripts.eda.grid_io import GridRef, discover_grids, sample_indices, triad_indices
+from data.scripts.eda.grid_io import discover_grids, sample_indices, triad_indices
 
 # ----------------------------------------------------------------------------------------------
 # Probe configuration (all magic numbers live here)
@@ -62,7 +62,6 @@ ACTIVE_BANDS = BANDS[1:]  # bands used for eigen-ratios / shape / coherence (DC 
 # Perturbation parameters
 GAIN_RANGE = (0.7, 1.3)          # uniform per-window gain
 YAW_RANGE_DEG = (30.0, 330.0)    # yaw angle about the estimated gravity axis
-RESAMPLE_HZ = 30.0               # anti-aliased downsample target
 TIMEWARP_ALPHAS = (0.9, 1.1)     # mild uniform speed factors (alpha>1 = faster playback)
 
 GRAVITY_MIN_G = 0.5              # |lowpass acc| below this => gravity absent (skip align).
@@ -451,9 +450,9 @@ def discriminability_table(windows: list[ProbeWindow]) -> dict[str, dict[str, fl
 
 
 # ----------------------------------------------------------------------------------------------
-# A3-target separation plots (cadence + eigen-ratios across activities)
+# Physical-primitive diagnostic plots (cadence + eigen-ratios across activities)
 # ----------------------------------------------------------------------------------------------
-def a3_plots(windows: list[ProbeWindow], out_dir: Path) -> list[Path]:
+def physical_primitive_plots(windows: list[ProbeWindow], out_dir: Path) -> list[Path]:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -484,7 +483,7 @@ def a3_plots(windows: list[ProbeWindow], out_dir: Path) -> list[Path]:
             v = feat_cadence(w.acc, w.gyro, w.rate)
             if np.isfinite(v[CADENCE_DIM]):
                 cad[w.label].append(float(2 ** v[CADENCE_DIM]))
-    boxplot(cad, "Cadence by activity (valid windows)", "cadence (Hz)", "a3_cadence.png")
+    boxplot(cad, "Cadence by activity (valid windows)", "cadence (Hz)", "cadence.png")
 
     # eigen-ratios in the locomotion band (1.5–3 Hz)
     band_i = ACTIVE_BANDS.index((1.5, 3.0))
@@ -495,7 +494,8 @@ def a3_plots(windows: list[ProbeWindow], out_dir: Path) -> list[Path]:
                 v = feat_eigen_ratios(w.acc, w.gyro, w.rate)[band_i * 3 + d]
                 if np.isfinite(v):
                     vals[w.label].append(float(v))
-        boxplot(vals, f"Eigen-ratio {dim} (1.5-3 Hz band) by activity", dim, f"a3_eigen_{dim}.png")
+        boxplot(vals, f"Eigen-ratio {dim} (1.5-3 Hz band) by activity", dim,
+                f"eigen_{dim}.png")
     return made
 
 
@@ -537,7 +537,7 @@ def write_report(inv, disc, plots, n_windows, out_dir: Path) -> Path:
         "except cadence which is analytically corrected by the warp factor). The `12-25 Hz`",
         "band is truncated under `resample_half` by Nyquist — drift there is honest.",
         "",
-        "## A3-target separation plots",
+        "## Physical-primitive separation plots",
         "",
     ]
     lines += [f"![{p.stem}]({p.name})" for p in plots]
@@ -564,8 +564,8 @@ def main() -> None:
     inv = invariance_table(windows)
     print("scoring discriminability (kNN) ...", flush=True)
     disc = discriminability_table(windows)
-    print("rendering A3 separation plots ...", flush=True)
-    plots = a3_plots(windows, args.out)
+    print("rendering physical-primitive diagnostic plots ...", flush=True)
+    plots = physical_primitive_plots(windows, args.out)
 
     (args.out / "scores.json").write_text(json.dumps(
         {"invariance": inv, "discriminability": disc, "n_windows": len(windows),

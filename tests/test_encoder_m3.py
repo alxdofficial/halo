@@ -1,6 +1,6 @@
 """M3 gate tests (build plan M3): the set encoder must be permutation- and
 count-invariant over channels (identity = TEXT, not position), physical-time aware
-(RoPE over seconds), and support the A1 mask + causal (world-model) paths.
+(RoPE over seconds), and support the JEPA mask + causal (world-model) paths.
 """
 
 from __future__ import annotations

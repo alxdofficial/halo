@@ -1,6 +1,7 @@
 # Augmentation policy — what each model gets, and why
 
-> **Updated for the 2026-07-25 SSL recipe.** A2 is label-free VICReg; SO(3) rotation includes
+> **Updated for the consolidated SSL recipe.** The relation objective uses label-free VICReg;
+> SO(3) rotation includes
 > gravity-removed streams (`require_gravity=False`); a bounded **sensor-text dropout** was added.
 > The authoritative Phase-A recipe table is in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md).

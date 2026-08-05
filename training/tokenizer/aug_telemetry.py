@@ -25,7 +25,7 @@ import torch
 
 from data.scripts.augmentations import AugmentationConfig, IMUAugmenter, IMUSample
 from model.tokenizer.primitives import cadence
-from training.tokenizer.pretrain_data import CHANNELS, GRAVITY_AUG_P, CorpusIndex
+from training.tokenizer.pretrain_data import CHANNELS, CorpusIndex
 
 SEED = 20260718
 # The physics/text augs to profile, each forced on ALONE at its default_v2 params.

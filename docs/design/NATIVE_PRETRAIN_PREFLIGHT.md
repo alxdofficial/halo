@@ -1,9 +1,8 @@
 # Native Phase-A pretrain — pre-launch manifest (2026-07-19)
 
-> **RECIPE SUPERSEDED (2026-07-25).** This predates the current SSL recipe and describes the OLD objective
-> (SupCon, A3 0.1, balanced sampling, old batch/LR). The **authoritative** current launch recipe —
-> fixed/EMA A1 + augmentation/TF-C/placement VICReg + A3, temperature sampler, factored
-> conditioning — is the table in
+> **HISTORICAL MANIFEST.** This predates the consolidated objective and describes the old SupCon /
+> A3 / multi-rail recipe. The authoritative current launch recipe — JEPA + unified augmentation and
+> cross-placement relation learning, temperature sampling, and factored conditioning — is in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md), mirroring the live
 > `PretrainConfig`. Use that for any launch.
 
@@ -92,8 +91,8 @@ throughput knee is ~512 (no gain past it, and heavy patch scales ps=0.5 lose thr
 of 24. Step breakdown: backward 58%, two forwards ~25%, text-encode ~9%, filterbank ~2%. TF32 enabled
 for the fp32 regions. Full run ≈ ~1 hour.
 
-**Validation was the hidden cost and is fixed:** val loaders skip the unused A3 cadence/eigen DSP
-(`MultiScaleCollate(compute_targets=False)`), run parallel/persistent workers, and kNN is vectorized
+**Historical validation result:** val loaders skipped the then-present A3 cadence/eigen DSP and used
+parallel/persistent workers; A3 target computation has since been removed from the collator. kNN is vectorized
 (cdist) — one val went **~571 s → ~12.6 s** (~45×), bit-identical metrics. Added a live **ConSE
 text-cosine zero-shot probe** (`val_conse_ba`) alongside kNN-BA (best.pt still selects on kNN-BA).
 

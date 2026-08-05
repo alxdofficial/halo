@@ -247,6 +247,27 @@ def test_calibration_sets_frozen_stats(tok):
     assert not torch.allclose(tok.norm_sd, torch.ones_like(tok.norm_sd))
 
 
+def test_calibration_observability_uses_native_source_rate():
+    """Upsampled 25 Hz signals must not calibrate interpolation-only 25--50 Hz bands."""
+    tok = PhysicalFilterbankTokenizer(d_model=8, n_bands=32, dft_size=128)
+    patches = torch.randn(1, 1, 128, 1)
+    tok.reset_norm_accumulator()
+    tok.accumulate_norm_stats(
+        patches,
+        sampling_rate_hz=torch.tensor([50.0]),
+        patch_len_samples=torch.tensor([50]),
+        source_rate_hz=torch.tensor([25.0]),
+    )
+    observable, _ = tok.masks(
+        torch.tensor([50.0]), torch.tensor([50]), source_rate_hz=torch.tensor([25.0])
+    )
+    assert torch.equal(tok._acc_count > 0, observable[0].bool())
+    assert int((tok._acc_count == 0).sum()) == 5
+    tok.finalize_norm_stats()
+    assert torch.equal(tok.norm_mu[~observable[0].bool()], torch.zeros(5))
+    assert torch.equal(tok.norm_sd[~observable[0].bool()], torch.ones(5))
+
+
 def test_calibration_streaming_matches_oneshot():
     """Accumulate over two halves == one-shot fit over the whole batch."""
     a = PhysicalFilterbankTokenizer(d_model=64, n_bands=16, dft_size=256)

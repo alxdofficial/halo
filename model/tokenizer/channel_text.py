@@ -11,10 +11,8 @@ LearnableLabelBank was deliberately NOT ported — label-text encoding is a Pipe
 concern (the evidence head's `t`), not a tokenizer concern.
 """
 
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from typing import List, Optional, Dict, Tuple
 

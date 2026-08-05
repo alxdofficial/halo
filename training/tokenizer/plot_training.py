@@ -1,8 +1,8 @@
 """Live training-telemetry plots — read a run's log.jsonl and render a multi-panel PNG.
 
-Panels: per-objective + total loss · learning rate · per-module gradient norms (log) · val kNN-BA
-(overall + per data source) · per-source A1 loss. Pass --watch N to re-render every N seconds while a
-run is live (leave a terminal running it next to training).
+Panels: JEPA/relation + total loss · learning rate · per-module gradient norms (log) · val kNN-BA
+(overall + per data source) · per-source JEPA zero-supervision rate. Pass --watch N to re-render every
+N seconds while a run is live (leave a terminal running it next to training).
 
 Run:
   python -m training.tokenizer.plot_training \
@@ -56,8 +56,10 @@ def render(log_path: Path, out_path: Path):
     S, V = load(log_path)
     fig, ax = plt.subplots(3, 2, figsize=(15, 11))
 
-    for k, lbl in (("total", "total"), ("a1_masked", "A1"), ("a2_supcon", "A2"),
-                   ("a3_grounding", "A3")):
+    for k, lbl in (("total", "total"), ("jepa", "JEPA"),
+                   ("relation", "relation"),
+                   ("relation/augmentation", "augmentation"),
+                   ("relation/cross_placement_weighted", "cross-placement")):
         x, y = series(S, k)
         if x:
             ax[0, 0].plot(x, y, lw=0.9, label=lbl)
@@ -66,7 +68,7 @@ def render(log_path: Path, out_path: Path):
     x, y = series(S, "lr")
     ax[0, 1].plot(x, y); ax[0, 1].set_title("learning rate"); ax[0, 1].set_xlabel("step")
 
-    for k in ("grad/encoder", "grad/a1", "grad/a2", "grad/a3_cad", "grad/a3_eig"):
+    for k in ("grad/encoder", "grad/jepa_predictor", "grad/relation_projector"):
         x, y = series(S, k)
         if x:
             ax[1, 0].plot(x, y, lw=0.9, label=k.split("/")[1])
@@ -84,19 +86,25 @@ def render(log_path: Path, out_path: Path):
     ax[1, 1].set_title("val accuracy (bold=overall kNN & ConSE, thin gray=per-source kNN)")
     ax[1, 1].set_xlabel("step"); ax[1, 1].legend(fontsize=8)
 
-    for s, (xs, ys) in sorted(dict_series(S, "a1_by_source").items()):
+    for s, (xs, ys) in sorted(dict_series(S, "jepa_unmasked_frac_by_source").items()):
         ax[2, 0].plot(xs, ys, lw=0.8, label=s)
-    ax[2, 0].set_title("A1 loss per data source"); ax[2, 0].set_xlabel("step")
-    ax[2, 0].legend(fontsize=6, ncol=2)
+    ax[2, 0].set_title("JEPA zero-supervision fraction per source")
+    ax[2, 0].set_xlabel("step")
+    if ax[2, 0].lines:
+        ax[2, 0].legend(fontsize=6, ncol=2)
 
     ax[2, 1].axis("off")
     best = max((r["val_knn_ba"] for r in V), default=float("nan"))
     best_c = max((r.get("val_conse_ba", float("nan")) for r in V), default=float("nan"))
+    clip_values = series(S, "grad/clip_coefficient")[1]
+    clipped_fraction = (sum(v < 1.0 for v in clip_values) / len(clip_values)
+                        if clip_values else float("nan"))
     txt = (f"steps logged : {S[-1]['step'] if S else 0}\n"
            f"val points   : {len(V)}\n"
            f"best kNN-BA   : {best:.3f}\n"
            f"best ConSE-BA : {best_c:.3f}\n"
-           f"last total    : {series(S, 'total')[1][-1] if series(S, 'total')[1] else float('nan'):.3f}")
+           f"last total    : {series(S, 'total')[1][-1] if series(S, 'total')[1] else float('nan'):.3f}\n"
+           f"logged clipped: {clipped_fraction:.1%}")
     ax[2, 1].text(0.03, 0.92, txt, va="top", family="monospace", fontsize=12)
 
     fig.suptitle(f"training telemetry — {log_path.parent.name}")

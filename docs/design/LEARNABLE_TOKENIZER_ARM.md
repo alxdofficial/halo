@@ -66,8 +66,8 @@ all datasets, rates, devices, placements, channels, and resolutions.
 6. **Regularization.** Center shifts, log-bandwidth factors, log-compression gains, and shape
    displacement receive a small normalized quadratic penalty. The penalty is reported separately.
 
-The Phase-A A1 target remains the frozen, calibrated fixed filterbank. The adaptive frontend cannot
-move its own prediction target.
+The Phase-A JEPA target is a clean EMA teacher. This avoids giving the fixed frontend a home-field
+advantage through a target defined by that same filterbank.
 
 ## Simultaneous Multiresolution Tokens
 
@@ -119,25 +119,25 @@ period becomes 0.4 seconds when multiresolution is enabled; the fixed arm retain
 
 ## Objective Semantics
 
-- **A1:** choose a physical time interval and mask every token from every resolution whose support
+- **JEPA:** choose a physical time interval and mask every token from every resolution whose support
   overlaps it. Whole-channel masks also apply across all resolutions. During the masked forward,
   temporal attention is isolated within each resolution; otherwise the edge of a masked long token
-  could still read an overlapping short token outside the initially selected interval. Clean A2/A3
-  forwards retain cross-resolution attention. Average masked-prediction loss within each resolution,
-  then average active resolutions so the short scale does not dominate through token count.
-- **A2:** pool patches within each resolution, average active resolution summaries equally, and apply
-  SupCon to the resulting recording embedding.
-- **A3:** use that same scale-balanced recording embedding. Targets are still computed once from the
-  final augmented recording, not independently from patches.
+  could still read an overlapping short token outside the initially selected interval. Clean relation
+  forwards retain cross-resolution attention. A resolution whose temporal mask leaves no visible
+  token is excluded because the isolated branch has no signal context. Average
+  masked-prediction loss within each resolution with represented-duration weighting, then average
+  active resolutions so the short scale and partial tails do not dominate through token count.
+- **Relation:** pool patches within each resolution, average active resolution summaries equally,
+  and apply universal augmentation VICReg plus separately reduced verified cross-placement agreement.
 
-Short recordings may have one partial token per resolution. They remain valid for A2/A3; A1 skips a
+Short recordings may have one partial token per resolution. They remain valid for relation learning;
+JEPA skips a
 sample when no non-leaking visible/masked split exists.
 
 ## Configuration And Reproducibility
 
 Checkpoints and logs must record:
 
-- headline arm;
 - frontend kind and every adaptation bound;
 - single- versus multiresolution mode and duration choices;
 - sampled duration pair per logged batch;
@@ -159,14 +159,14 @@ Before a full run:
 4. Adaptive centers remain ordered and bounded; all adaptive parameters receive finite gradients.
 5. Duration encoding is bounded and changes tokens for equal-center, unequal-duration patches.
 6. Channel permutation invariance still holds with multiresolution metadata.
-7. A1 masks are overlap-coupled across scales and its reduction weights scales equally.
-8. A2/A3 pooling weights active resolutions equally.
+7. JEPA masks are overlap-coupled across scales and its reduction weights scales equally.
+8. Relation pooling weights active resolutions equally.
 9. Save/resume reconstructs the same frontend and multiresolution configuration.
 10. A CPU smoke step completes; no full GPU training is launched as part of implementation.
 
 ## Results (2026-07-20)
 
-The headline learnable arm (`--arm learnable` = constrained adaptive frontend **+** multiresolution)
+The historical learnable arm (constrained adaptive frontend **+** multiresolution)
 was trained on the exact headline budget — 30k steps, batch 512 (64×8), lr 4.2e-4, seed 20260718,
 full 12-dataset / 20-stream native corpus — so the arm is the single variable versus the fixed
 headline checkpoint (`pretrain_native/best.pt`). Debug sweep first: 122 tests pass, all three arms
@@ -210,7 +210,7 @@ attributable to **simultaneous multiresolution tokenization on the (effectively)
 frontend**, not to making the filterbank learnable. This is the better outcome for the thesis: two
 fixed temporal supports is still a fully physical, non-learned front end.
 
-**Conclusion (confirmed by the diagnostic):** the `--arm fixed --multiresolution` run (same 30k
+**Conclusion (confirmed by the diagnostic):** the fixed-front-end multiresolution run (same 30k
 budget) scored **0.835** held-out transfer — *above* the learnable arm's 0.824 — proving the entire
 gain is multiresolution tokenization, not filterbank learnability. **Recommendation: adopt
 multiresolution-on-fixed as the new Phase-A default and retire the learnable frontend.** The learnable
@@ -225,9 +225,9 @@ Reproduce:
 ```bash
 PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
 # learnable arm (30k, ~2h on a 24 GB card, peak ~20.5 GB):
-$PY -m training.tokenizer.pretrain --arm learnable --device cuda --out training/tokenizer/outputs/pretrain_learnable
+$PY -m training.tokenizer.pretrain --frontend learnable --device cuda --out training/tokenizer/outputs/pretrain_learnable
 # fixed + multiresolution attribution diagnostic:
-$PY -m training.tokenizer.pretrain --arm fixed --multiresolution --device cuda --out training/tokenizer/outputs/pretrain_fixed_mr
+$PY -m training.tokenizer.pretrain --frontend fixed --multiresolution --device cuda --out training/tokenizer/outputs/pretrain_fixed_mr
 # head-to-head held-out transfer (each checkpoint):
 $PY -m training.tokenizer.eval_transfer --checkpoint <out>/best.pt --device cuda
 ```

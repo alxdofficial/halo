@@ -1,5 +1,9 @@
 # Remediation plan — every issue found in the 2026-07-20/21 audits
 
+> **Historical issue ledger.** File locations, open/closed markers, and proposed objective rails are
+> not the current implementation contract. Use `training/tokenizer/README.md` for the live Phase-A
+> recipe.
+
 Consolidates the fairness audit (F-series), the independent pre-run audit (B/H-series), and the
 findings from our own diagnostics. Each item gives **exact location**, **what to do**, **effort**, and
 a **gate**. Ordered so that nothing expensive is paid for twice.
