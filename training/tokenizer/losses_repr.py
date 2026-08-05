@@ -466,12 +466,47 @@ def vicreg(
     )
 
 
+@torch.no_grad()
+def pair_contrast(a: torch.Tensor, b: torch.Tensor, generator=None) -> dict[str, float]:
+    """Positive-pair similarity MINUS the random-pair baseline, for any aligned-pair objective.
+
+    A bare positive similarity is uninterpretable. cos(a_i, b_i) = 0.95 means the objective is
+    working if a random pair sits at 0.1, and means the representation has collapsed into a
+    narrow cone -- so the objective is measuring nothing -- if a random pair ALSO sits at 0.95.
+    Every aligned-pair term here (A1's masked-latent prediction, A2's augmented views, A4's
+    cross-placement pairs) has that failure mode and none of them logged the baseline, so a
+    collapsed run and a converged run were indistinguishable from the loss value alone.
+
+    `margin` is the quantity to watch: it is the actual discriminative signal available to the
+    objective, and it going to ~0 while the loss looks healthy is the collapse signature.
+    """
+    if a.ndim != 2 or a.shape != b.shape or a.shape[0] < 2:
+        return {}
+    an = F.normalize(a.detach().float(), dim=-1)
+    bn = F.normalize(b.detach().float(), dim=-1)
+    pos = (an * bn).sum(-1).mean()
+    # derangement, so no "random" pair is accidentally the true pair
+    perm = (torch.arange(len(an), device=an.device) +
+            1 + int(torch.randint(len(an) - 1, (1,), generator=generator))) % len(an)
+    rnd = (an * bn[perm]).sum(-1).mean()
+    return {"positive_similarity": float(pos),
+            "random_similarity": float(rnd),
+            "margin": float(pos - rnd)}
+
+
 def masked_ema_latent_loss(
     prediction: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
 ) -> torch.Tensor:
-    """Cosine prediction of stop-gradient EMA latents at valid masked token positions."""
+    """Cosine prediction of stop-gradient EMA latents at valid masked token positions.
+
+    NOTE the collapse mode this cannot see on its own: if the EMA teacher's latents all lie in
+    a narrow cone, predicting them is trivial and this loss goes to ~0 while the representation
+    carries nothing. data2vec normalises its targets precisely to prevent that; we do not, so
+    the guard here is diagnostic -- `pair_contrast` on (prediction, target) at masked positions,
+    logged as `a1/margin`. Watch that, not this loss.
+    """
     if prediction.shape != target.shape:
         raise ValueError(
             f"EMA prediction/target shapes differ: {tuple(prediction.shape)} vs {tuple(target.shape)}"

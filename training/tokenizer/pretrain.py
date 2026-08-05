@@ -60,6 +60,7 @@ from training.tokenizer.losses_repr import (
     masked_latent_per_window,
     masked_ema_latent_loss,
     nt_xent,
+    pair_contrast,
     vicreg,
 )
 from training.tokenizer.time_encoder import TimeEncoder
@@ -122,18 +123,30 @@ class PretrainConfig:
     min_resolution_ratio: float = MIN_RESOLUTION_RATIO
     val_resolution_pair: tuple[float, float] = VAL_RESOLUTION_PAIR
     classes_per_batch: int = 64           # Balanced/SupCon control: 64x8 = batch 512.
-    samples_per_class: int = 8            # The 2026-07-19 '9.5 GB on the 4090' profile is STALE:
-                                          # it predates TF-C, the EMA teacher, placement VICReg and
-                                          # multiresolution-by-default. Re-measured 2026-07-26:
-                                          # batch >=32 OOMs on 24 GB, batch 16 peaks at 12.7 GB.
-                                          # See training/tokenizer/README.md.
-    steps: int = 30_000                   # ~10 corpus passes at batch 512 (3,013 steps/pass on the
-                                          # 1.54M-window corpus). The old '51 passes / 586 steps'
-                                          # note assumed a ~300k corpus, pre-capture24-uncapping.
-    lr: float = 4.2e-4                    # 3e-4 x sqrt(2): sqrt-scaling for the 256->512 batch doubling
+    samples_per_class: int = 8            # Balanced/SupCon control only (64x8). NB the 'batch >=32
+                                          # OOMs / batch 16 peaks at 12.7 GB' note that stood here
+                                          # was a TF-C-era measurement and contradicted the live
+                                          # default: re-measured 2026-08-05, batch 256 peaks at
+                                          # 12.03 GiB of 24. See training/tokenizer/README.md.
+    steps: int = 30_000                   # ~5 corpus passes at the live batch of 256 (6,025
+                                          # steps/pass on the 1.54M-window corpus). The previous
+                                          # '~10 passes at batch 512' note was written when
+                                          # batch_size was 512 and was not updated by fd3ae4d.
+    # LR / batch: fd3ae4d (2026-07-26) halved batch_size 512 -> 256 but left lr at the value that
+    # had been sqrt-scaled UP *for* 512, so the live config runs 1.41x the LR its own rule
+    # prescribes. Under that rule batch 256 wants 3e-4. Which value actually transfers better is
+    # unmeasured, and LR is the knob the MTO reality-check literature (Xin et al., NeurIPS 2022)
+    # found dominates loss-weight effects -- so LR is swept BEFORE any objective-weight sweep
+    # rather than silently pinned here.
+    lr: float = 4.2e-4                    # = 3e-4 x sqrt(2). See the LR / batch note above.
     weight_decay: float = 0.05
     warmup_steps: int = 1_000
     grad_clip: float = 1.0
+    # A2's weight was previously HARD-CODED: `EliteLossWeights.a2_supcon` defaulted to 1.0 and
+    # was never set from config, and `--a2-mode` has no 'off' choice -- so A2 was the one
+    # objective that could not be ablated or swept at all, and the paper's
+    # "- augmentation VICReg" ablation row had no way to be produced. Exposed 2026-08-05.
+    a2_weight: float = 1.0
     # All Phase-A targets remain label-free. A3 is a small physical rail, not an activity objective.
     a3_weight: float = 0.05
     # A1-physical — the RETIRED fixed-DSP target, kept switchable for the ablation
@@ -601,6 +614,11 @@ def main() -> None:
     parser.add_argument("--a2-mode", choices=("vicreg", "simclr", "supcon"), default=None,
                         help="A2 mode. DEFAULT 'vicreg' uses aligned augmented positives without "
                              "negatives. 'simclr' and label-based 'supcon' are controls.")
+    parser.add_argument("--a2-weight", type=float, default=None,
+                        help="A2 weight (default 1.0). --a2-weight 0 is the 'no augmentation "
+                             "agreement' ablation; it requires --a4-weight 0 too, because A4 is "
+                             "invariance-only and depends on A2's variance term for collapse "
+                             "prevention over the shared projection.")
     parser.add_argument("--a3-weight", type=float, default=None,
                         help="scale the A3 grounding rail (default 0.05; 0 disables its DSP/heads).")
     parser.add_argument("--simclr-temperature", type=float, default=None,
@@ -675,6 +693,8 @@ def main() -> None:
         cfg.a1_physical_weight = args.a1_physical_weight
     if args.a2_mode is not None:
         cfg.a2_mode = args.a2_mode
+    if args.a2_weight is not None:
+        cfg.a2_weight = args.a2_weight
     if args.a3_weight is not None:
         cfg.a3_weight = args.a3_weight
     if args.simclr_temperature is not None:
@@ -1009,7 +1029,8 @@ def main() -> None:
         * 0.5 * (1 + np.cos(np.pi * min(s / cfg.steps, 1.0))),
     )
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
-    weights = EliteLossWeights(a1_physical=cfg.a1_physical_weight, a3_grounding=cfg.a3_weight)
+    weights = EliteLossWeights(a1_physical=cfg.a1_physical_weight, a2_supcon=cfg.a2_weight,
+                               a3_grounding=cfg.a3_weight)
     log_path = args.out / "log.jsonl"
     best_ba = -1.0
     t0 = time.time()
@@ -1321,6 +1342,15 @@ def main() -> None:
                 ema_loss = masked_ema_latent_loss(
                     ema_pred, teacher_clean["tokens"], a1_loss_mask
                 )
+                # A1 has no negatives, so its loss alone cannot distinguish "learned to predict
+                # the teacher" from "the teacher collapsed and anything predicts it". Log the
+                # margin over a random masked-position pairing (see losses_repr.pair_contrast).
+                if bool(a1_loss_mask.any()):
+                    a1_diag = pair_contrast(ema_pred[a1_loss_mask].flatten(1),
+                                            teacher_clean["tokens"][a1_loss_mask].flatten(1))
+                    a1_parts = {f"a1/{k}": v for k, v in a1_diag.items()}
+                else:
+                    a1_parts = {}
 
             # --- A2 positive-view agreement + TF-C, both configurable for historical controls ---
             tfc_loss = None
@@ -1330,6 +1360,7 @@ def main() -> None:
                 augmentation_positive_similarity = float(
                     F.cosine_similarity(z.detach(), z_b.detach(), dim=-1).mean()
                 )
+                a2_contrast = pair_contrast(z, z_b)
                 if cfg.a2_mode == "vicreg":
                     a2_vr = vicreg(
                         z, z_b,
@@ -1375,6 +1406,24 @@ def main() -> None:
             pair_left, pair_right = verified_event_pairs(
                 batch["event_ids"], batch["event_verified"], batch["streams"], device
             )
+            # A4 is invariance-ONLY (see below), so it is a purely ATTRACTIVE loss whose global
+            # minimum is "map every window to one constant vector". Nothing inside A4 opposes
+            # that; the only thing that does is A2's VICReg variance/covariance terms acting on
+            # the SAME `z = a2_proj(...)`. So A4 is not independently well-posed -- it is
+            # well-posed only while A2 is on.
+            #
+            # That makes the `--a2-weight 0` ablation arm a trap: read naively it measures
+            # "A2 removed", but it actually measures "A2 removed AND A4 turned into an
+            # unopposed collapse driver", which is not an ablation of anything. Refuse it
+            # rather than silently produce a number nobody can interpret.
+            a2_on = cfg.a2_mode in {"vicreg", "simclr"} and cfg.a2_weight > 0
+            if cfg.a4_weight > 0 and not a2_on:
+                raise ValueError(
+                    "a4_weight > 0 requires A2 to be active: A4 is invariance-only and relies on "
+                    "A2's variance/covariance terms over the shared a2_proj output to prevent "
+                    "collapse. To ablate A2, pass --a4-weight 0 as well (and report it as the "
+                    "joint arm), or give A4 its own variance term first."
+                )
             if cfg.a4_weight > 0 and len(pair_left) >= 2:
                 # INVARIANCE-ONLY (2026-07-26). The variance/covariance terms estimate a
                 # d_proj x d_proj covariance, but this rail only ever sees the verified-pair
@@ -1400,6 +1449,12 @@ def main() -> None:
                         z[pair_left].detach(), z[pair_right].detach(), dim=-1
                     ).mean()),
                 }
+                # A4 is invariance-ONLY, i.e. purely attractive: its trivial minimum is a
+                # constant. The margin over a random pairing is the only evidence that it is
+                # learning placement invariance rather than riding a collapse.
+                placement_parts.update({f"placement/{k}": v for k, v in
+                                        pair_contrast(z[pair_left], z[pair_right]).items()
+                                        if k != "positive_similarity"})
             # A3 grounding rail. Setting a3_weight=0 skips both heads and the collate's A3 DSP.
             if cfg.a3_weight > 0:
                 a3_cad = model.a3_cadence(clean["pooled"]).squeeze(1)
@@ -1445,6 +1500,7 @@ def main() -> None:
             out.total = out.total + cfg.a1_weight * ema_loss
             out.terms["a1_masked_latent"] = cfg.a1_weight * ema_loss
             out.parts["a1_masked_latent"] = float(ema_loss.detach())
+            out.parts.update(a1_parts)
             frontend_reg = model.encoder.filterbank.adaptation_regularization()
             out.total = out.total + cfg.frontend_reg_weight * frontend_reg
             out.terms["frontend_reg"] = cfg.frontend_reg_weight * frontend_reg
@@ -1452,6 +1508,8 @@ def main() -> None:
             out.parts["frontend_reg_weighted"] = float(
                 (cfg.frontend_reg_weight * frontend_reg).detach())
             out.parts["a2/positive_similarity"] = augmentation_positive_similarity
+            out.parts.update({f"a2/{k}": v for k, v in a2_contrast.items()
+                              if k != "positive_similarity"})
 
         do_log = step % 50 == 0 or step == 1
         do_objective_grad_log = step == 1 or step % 500 == 0
