@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import statistics
 import subprocess
 import time
 from dataclasses import asdict, dataclass
@@ -147,6 +148,25 @@ class PretrainConfig:
     # objective that could not be ablated or swept at all, and the paper's
     # "- augmentation VICReg" ablation row had no way to be produced. Exposed 2026-08-05.
     a2_weight: float = 1.0
+    # --- gradient-share auto-calibration -------------------------------------------------------
+    # The four objectives' losses differ by ~100x in VALUE and their encoder gradients by ~154x
+    # (measured: ||grad L|| at unit weight, post-warmup -- A1 0.215, A2 8.118, A3 0.305, A4 33.2),
+    # so hand-set coefficients do not set relative influence at all: the shipped 1.0/1.0/0.05/0.1
+    # produced shares of 1.8% / 69.6% / 0.1% / 28.4%.
+    #
+    # ||grad (w*L)|| == w*||grad L|| EXACTLY, so there is nothing to search: measure once and
+    # solve. We calibrate AFTER warmup because the norms are not stationary through it (A1 drifts
+    # 0.1x, A4 29x between step 1 and step 500) and because A1 carries no discriminative signal
+    # for its first ~200-300 steps (a1/margin 0.004 -> 0.02 -> 0.71 by step 450) while its
+    # gradient is at its LARGEST -- calibrating at init would lock in that transient.
+    #
+    # Then FREEZE. Per Xin et al. (NeurIPS 2022) and Kurin et al. (NeurIPS 2022), adaptive
+    # multi-task optimisers do not beat tuned static weights and mostly rediscover a constant;
+    # freezing also keeps the run reproducible and each arm ablatable, which continuous
+    # reweighting does not.
+    autocalibrate_at: int = 2_000         # step at which to calibrate; 0 disables
+    autocalibrate_batches: int = 10       # measure over this many steps and take the median
+    autocalibrate_target: str = "equal"   # equal gradient share across active objectives
     # All Phase-A targets remain label-free. A3 is a small physical rail, not an activity objective.
     a3_weight: float = 0.05
     # A1-physical — the RETIRED fixed-DSP target, kept switchable for the ablation
@@ -180,7 +200,15 @@ class PretrainConfig:
     tfc_temperature: float = 0.1          # NT-Xent temperature for the time<->freq contrast
     # Verified cross-placement positives. pair_fraction is a WINDOW quota; two windows make one pair.
     a4_weight: float = 0.1
-    a4_pair_fraction: float = 0.1
+    # 0.1 -> 0.2 (2026-08-05). At 0.1 the quota is round(256*0.1/2) = 13 pairs, and A4's per-batch
+    # loss had CV 0.53 -- 5x every other objective (A1 0.11, A2 0.10, A3 0.15) and a 22x swing
+    # between logged steps -- because 13 samples is a very noisy gradient estimate for a term
+    # carrying ~28% of the update. The paired-event pool is 18,400 events, so the quota was the
+    # binding constraint, not the data. 0.2 gives ~26 pairs (CV ~1/sqrt(2) lower).
+    # COST, logged not free: the quota can only be filled from the three datasets that HAVE
+    # verified pairs, so raising it skews sampling toward them (at 0.1: nfi_fared 8.5% -> 14.8%,
+    # xrf_v2 9.0% -> 11.3% of draws). Check the measured draw shares after changing this.
+    a4_pair_fraction: float = 0.2
     # Contextual masked target from a slow teacher, alongside the fixed physical A1 target.
     # A1 — masked latent prediction against an EMA teacher (JEPA). PRIMARY objective as of
     # 2026-07-28, replacing the fixed-DSP target below. The teacher encodes the CLEAN view, the
@@ -1031,6 +1059,54 @@ def main() -> None:
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
     weights = EliteLossWeights(a1_physical=cfg.a1_physical_weight, a2_supcon=cfg.a2_weight,
                                a3_grounding=cfg.a3_weight)
+
+    # --- gradient-share auto-calibration state (see PretrainConfig.autocalibrate_at) -----------
+    # A2's coefficient lives on `weights` (built once, passed to elite3_loss) while the others are
+    # read off `cfg` each step, so the accessors below hide that split -- writing to only one of
+    # the two would silently no-op.
+    _WEIGHT_FIELDS = {
+        "a1_masked_latent": ("cfg", "a1_weight"),
+        "a1_physical": ("weights", "a1_physical"),
+        "a2_vicreg": ("weights", "a2_supcon"),
+        "a2_simclr": ("weights", "a2_supcon"),
+        "a2_supcon": ("weights", "a2_supcon"),
+        "a3_grounding": ("weights", "a3_grounding"),
+        "a4_placement": ("cfg", "a4_weight"),
+        "tfc": ("cfg", "tfc_weight"),
+    }
+
+    def live_weight(name: str) -> float:
+        holder, field = _WEIGHT_FIELDS.get(name, (None, None))
+        if holder is None:
+            return 0.0
+        return float(getattr(cfg if holder == "cfg" else weights, field))
+
+    def set_live_weight(name: str, value: float) -> None:
+        holder, field = _WEIGHT_FIELDS.get(name, (None, None))
+        if holder is None:
+            return
+        setattr(cfg if holder == "cfg" else weights, field, float(value))
+        if field == "a3_grounding":          # cfg.a3_weight also gates the collate's A3 DSP
+            cfg.a3_weight = float(value)
+
+    def solve_equal_share(samples: dict[str, list[float]], getter) -> dict[str, float]:
+        """w_i proportional to 1 / ||grad L_i||, rescaled to preserve the CURRENT total.
+
+        Preserving the total matters because grad-clip (1.0) is always active here -- measured
+        grad/encoder median 9.05, min 2.49 -- so changing the overall magnitude would silently
+        change the effective learning rate rather than the balance.
+        """
+        unit = {k: statistics.median(v) for k, v in samples.items() if statistics.median(v) > 0}
+        if not unit:
+            return {}
+        current_total = sum(getter(k) * u for k, u in unit.items())
+        raw = {k: 1.0 / u for k, u in unit.items()}
+        scale = current_total / max(sum(raw[k] * unit[k] for k in unit), 1e-12)
+        return {k: raw[k] * scale for k in unit}
+
+    calib_samples: dict[str, list[float]] = {}
+    calib_done = cfg.autocalibrate_at <= 0
+    weights_before = {n: live_weight(n) for n in _WEIGHT_FIELDS}
     log_path = args.out / "log.jsonl"
     best_ba = -1.0
     t0 = time.time()
@@ -1512,13 +1588,38 @@ def main() -> None:
                               if k != "positive_similarity"})
 
         do_log = step % 50 == 0 or step == 1
-        do_objective_grad_log = step == 1 or step % 500 == 0
+        # Measure over the `autocalibrate_batches` steps ENDING at autocalibrate_at and take the
+        # median: A4's per-batch loss has CV 0.53 (5x every other term, it sees only the verified
+        # -pair quota), so a single-step reading would set its weight off noise.
+        calibrating = (cfg.autocalibrate_at > 0 and not calib_done
+                       and cfg.autocalibrate_at - cfg.autocalibrate_batches < step
+                       <= cfg.autocalibrate_at)
+        do_objective_grad_log = step == 1 or step % 500 == 0 or calibrating
         objective_grad_norms = {}
         if do_objective_grad_log:
             objective_grad_norms = {
                 f"grad_objective/{name}": objective_encoder_grad_norm(term, model.encoder)
                 for name, term in out.terms.items()
             }
+        if calibrating:
+            for name, term in out.terms.items():
+                w = live_weight(name)
+                if w > 0:
+                    calib_samples.setdefault(name, []).append(
+                        objective_grad_norms[f"grad_objective/{name}"] / w)
+            if step == cfg.autocalibrate_at:
+                new_w = solve_equal_share(calib_samples, live_weight)
+                for name, w in new_w.items():
+                    set_live_weight(name, w)
+                calib_done = True
+                record = {"step": step, "event": "autocalibrate",
+                          "unit_grad_norm": {k: statistics.median(v)
+                                             for k, v in calib_samples.items()},
+                          "weights_before": {k: float(v) for k, v in weights_before.items()},
+                          "weights_after": new_w}
+                print(f"[autocalibrate] step {step}: {json.dumps(record['weights_after'])}")
+                with log_path.open("a") as fh:
+                    fh.write(json.dumps(record) + "\n")
         if not bool(torch.isfinite(out.total)):
             raise FloatingPointError(f"non-finite Phase-A loss at step {step}: {out.parts}")
         opt.zero_grad(set_to_none=True)
