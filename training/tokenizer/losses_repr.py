@@ -163,12 +163,42 @@ def make_multiresolution_mask_plan(
     causal_p: float = CAUSAL_FRACTION,
     channel_mask: Optional[torch.Tensor] = None,
     valid_patches: Optional[torch.Tensor] = None,
+    compensate_patch_length: bool = False,
 ) -> MaskPlan:
     """Mask one physical interval and every scale token whose support overlaps it.
 
     This is the non-leaking counterpart of ``make_mask_plan`` for simultaneous temporal
     resolutions. A masked short patch cannot be reconstructed by reading an overlapping long
     patch, and channel events apply to every resolution of that channel.
+
+    INTERVAL LENGTH vs MASKED FRACTION. Masking is by OVERLAP, so a token of support ``p`` is
+    caught whenever the interval comes within ``p`` of it: the realised fraction is
+    ``(L + p) / W``, not ``L / W``. Setting ``L = time_ratio * W`` therefore does NOT mask
+    ``time_ratio`` of the tokens. Measured at the live patch sizes (0.5 s / 1.4 s in a 6 s
+    window) it masked 0.558 of short tokens and 0.674 of long ones against a nominal 0.5.
+
+    ``compensate_patch_length`` subtracts the mean patch support so the AVERAGE realised fraction
+    matches ``time_ratio``. It is OFF by default, because measurement showed it is a TRADE and
+    not a fix -- see below. It cannot equalise the two resolutions in any case: their gap is
+    exactly ``(p_long - p_short) / W`` = 0.15 here, fixed by the patch geometry and independent
+    of L, and a separate interval per resolution would break the guarantee below.
+
+    WHAT IS AND IS NOT GUARANTEED. A masked SHORT token cannot be read off a long one: any long
+    token containing it also overlaps the interval, so it is masked too. The REVERSE does not
+    hold and never did -- a masked LONG token can have a visible short token inside its support,
+    because the short tokens near the far end of the long token's span may miss the interval.
+    Measured at (0.5 s, 1.4 s) in a 6 s window: 25.7% of masked long tokens have a visible short
+    token inside them. That is a pre-existing property of overlap masking, not a regression.
+
+    Compensation makes it worse, which is why it is off: shrinking the interval means fewer
+    tokens masked overall, hence MORE visible short tokens, hence more partial leakage --
+    measured 25.7% -> 40.1%. So the choice is:
+
+        uncompensated (default): long grid 0.67 masked, ~1.3 visible tokens, 25.7% leak
+        compensated:             long grid 0.58 masked, ~1.7 visible tokens, 40.1% leak
+
+    Neither dominates. Kept as a flag so the retrain can measure it as an arm instead of us
+    guessing, and so `MASK_RATIO_TIME` at least has a documented relationship to reality.
     """
     device = patch_starts.device
     B, T = patch_starts.shape
@@ -178,6 +208,12 @@ def make_multiresolution_mask_plan(
         valid &= valid_patches
     observed_end = patch_ends.masked_fill(~valid, 0.0).amax(dim=1)
     interval_len = observed_end * float(time_ratio)
+    if compensate_patch_length:
+        support = (patch_ends - patch_starts).clamp(min=0.0) * valid.to(patch_ends.dtype)
+        mean_support = support.sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+        # Floor at half the mean support: below that the interval is narrower than the tokens it
+        # is meant to hide and the mask degenerates to "whichever token happens to straddle it".
+        interval_len = (interval_len - mean_support).clamp(min=0.5 * mean_support)
     causal = rnd(B) < causal_p
     random_start = rnd(B) * (observed_end - interval_len).clamp(min=0.0)
     interval_start = torch.where(causal, observed_end - interval_len, random_start)
@@ -424,6 +460,7 @@ def vicreg(
     covariance_weight: float = 1.0,
     target_std: float = 1.0,
     eps: float = 1e-4,
+    invariance: str = "mse",
 ) -> VICRegOutput:
     """Variance-invariance-covariance regularization over aligned positive pairs.
 
@@ -431,6 +468,20 @@ def vicreg(
     while other rows only estimate per-feature variance/covariance. Inputs remain unnormalized because
     their per-dimension scale is part of the collapse-prevention objective. Computation is promoted to
     fp32 so AMP cannot underflow covariance statistics.
+
+    ``invariance`` selects how the positive pair is compared:
+
+    * ``'mse'`` -- VICReg as published (Bardes et al., ICLR 2022), and what lambda=25 was tuned
+      for. Keep this wherever the variance/covariance terms are also active.
+    * ``'cosine'`` -- ``1 - cos``, scale-free. For the INVARIANCE-ONLY configuration (A4), where
+      the variance hinge is off, MSE conflates "the two views disagree" with "the representation
+      got bigger": A2's variance term drives per-dim std 0.054 -> 0.88 over the first 2k steps,
+      and A4's MSE loss rose 0.095 -> 3.3 alongside it with the pair cosine essentially flat.
+      With no variance term of its own, that scale drift is 100% of A4's loss, so cosine is the
+      only formulation that measures what A4 claims to measure. Do NOT switch A2 to this without
+      re-tuning lambda: cosine lives on [0,2] where the MSE term sits near 0.03, so it silently
+      rescales the inv:var:cov balance ~10x, and the gradient-share auto-calibration cannot see
+      it (that balances A2 as a whole, never its sub-terms).
     """
     if z_a.shape != z_b.shape or z_a.ndim != 2:
         raise ValueError(
@@ -439,7 +490,12 @@ def vicreg(
     if z_a.shape[0] < 2:
         raise ValueError("VICReg needs at least two pairs to estimate variance/covariance")
     a, b = z_a.float(), z_b.float()
-    inv = F.mse_loss(a, b)
+    if invariance == "cosine":
+        inv = (1.0 - (F.normalize(a, dim=-1) * F.normalize(b, dim=-1)).sum(-1)).mean()
+    elif invariance == "mse":
+        inv = F.mse_loss(a, b)
+    else:
+        raise ValueError(f"invariance must be 'mse' or 'cosine', got {invariance!r}")
 
     std_a = torch.sqrt(a.var(dim=0, unbiased=False) + eps)
     std_b = torch.sqrt(b.var(dim=0, unbiased=False) + eps)

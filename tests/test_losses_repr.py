@@ -380,3 +380,44 @@ def test_a1_split_keeps_tokens_whose_bands_are_all_unobservable():
     # Without a magnitude half the same token is un-learnable and must drop out entirely.
     assert masked_latent_loss(pred[..., :K], tgt[..., :K], mask,
                               feature_valid=fv[..., :K], n_bands=None) == 0.0
+
+
+def test_mask_compensation_is_a_trade_not_a_fix():
+    """Pins the measured trade behind `compensate_patch_length` (default OFF).
+
+    Overlap masking means a token of support p is caught whenever the interval comes within p
+    of it, so nominal MASK_RATIO_TIME=0.5 does not mask 50%. Compensation fixes the average but
+    increases partial cross-resolution leakage. Both halves are asserted so a future change that
+    silently flips the default has to confront the cost.
+    """
+    torch.manual_seed(0)
+    B, W, short, long = 2000, 6.0, 0.5, 1.4
+    ns, nl = int(W / short), int(W / long)
+    st = torch.tensor([[i * short for i in range(ns)] + [j * long for j in range(nl)]]).repeat(B, 1)
+    en = torch.tensor([[(i + 1) * short for i in range(ns)]
+                       + [(j + 1) * long for j in range(nl)]]).repeat(B, 1)
+    rid = torch.tensor([[0] * ns + [1] * nl]).repeat(B, 1)
+
+    def measure(compensate):
+        plan = make_multiresolution_mask_plan(
+            st, en, rid, C=1, gyro_channels=None, channel_event_p=0.0,
+            compensate_patch_length=compensate)
+        m = plan.token_mask[:, :, 0]
+        leaked = total = 0
+        for j in range(nl):
+            lj = ns + j
+            inside = [i for i in range(ns)
+                      if st[0, i] >= st[0, lj] - 1e-6 and en[0, i] <= en[0, lj] + 1e-6]
+            total += int(m[:, lj].sum())
+            if inside:
+                leaked += int((m[:, lj] & (~m[:, inside]).any(dim=1)).sum())
+        return float(m[:, ns:].float().mean()), leaked / max(total, 1)
+
+    off_masked, off_leak = measure(False)
+    on_masked, on_leak = measure(True)
+    # the default masks the long grid HARDER than nominal, leaving little visible context ...
+    assert off_masked > 0.62, off_masked
+    # ... and compensation relieves that ...
+    assert on_masked < off_masked
+    # ... but strictly increases partial leakage, which is why it is not the default.
+    assert on_leak > off_leak + 0.10, (off_leak, on_leak)

@@ -209,6 +209,22 @@ class PretrainConfig:
     # verified pairs, so raising it skews sampling toward them (at 0.1: nfi_fared 8.5% -> 14.8%,
     # xrf_v2 9.0% -> 11.3% of draws). Check the measured draw shares after changing this.
     a4_pair_fraction: float = 0.2
+    # 'cosine' as of 2026-08-05 (was the implicit 'mse'). A4 runs variance_weight=0, so its
+    # invariance term IS the whole loss -- and MSE there conflates "the two placements disagree"
+    # with "the representation grew". Measured: A2's variance hinge drives per-dim std
+    # 0.054 -> 0.88 over 2k steps and A4's MSE loss rose 0.095 -> 3.3 alongside it while the pair
+    # cosine stayed ~0.87-0.99. Cosine makes A4 scale-free, so it measures placement agreement
+    # only. `--a4-invariance mse` restores the old behaviour for the ablation arm.
+    a4_invariance: str = "cosine"
+    # A1's masked interval is a FRACTION of the observed window (MASK_RATIO_TIME), but masking is
+    # by overlap, so the realised fraction is (L + patch)/W, not L/W: nominal 0.5 actually masks
+    # 0.56 of short tokens and 0.67 of long ones. Compensation subtracts the measured mean patch
+    # support so the average matches the configured ratio.
+    # OFF by default: measured, it is a trade rather than a fix. It buys the long grid context
+    # (0.67 -> 0.58 masked, ~1.3 -> ~1.7 visible tokens of 4) at the cost of more partial
+    # cross-resolution leakage (25.7% -> 40.1% of masked long tokens having a visible short token
+    # inside their support). Neither side dominates, so it ships as an arm, not a default.
+    mask_compensate_patch_length: bool = False
     # Contextual masked target from a slow teacher, alongside the fixed physical A1 target.
     # A1 — masked latent prediction against an EMA teacher (JEPA). PRIMARY objective as of
     # 2026-07-28, replacing the fixed-DSP target below. The teacher encodes the CLEAN view, the
@@ -664,6 +680,18 @@ def main() -> None:
                         help="VICReg weight for verified simultaneous cross-placement events.")
     parser.add_argument("--a4-pair-fraction", type=float, default=None,
                         help="fraction of temperature-sampled batch windows reserved for verified pairs.")
+    parser.add_argument("--a4-invariance", choices=("cosine", "mse"), default=None,
+                        help="A4 pair comparison. DEFAULT 'cosine' (scale-free: A4 has no "
+                             "variance term, so MSE confounded disagreement with the "
+                             "representation growing). 'mse' is the ablation arm.")
+    parser.add_argument("--mask-compensation", action=argparse.BooleanOptionalAction, default=None,
+                        help="Subtract mean patch support from A1's masked interval so the "
+                             "realised mask fraction matches MASK_RATIO_TIME. DEFAULT OFF: it "
+                             "buys long-grid context but raises partial cross-resolution leakage "
+                             "25.7%% -> 40.1%%. An arm, not a fix.")
+    parser.add_argument("--autocalibrate-at", type=int, default=None,
+                        help="Step at which to rebalance objective weights to equal gradient "
+                             "share, then freeze. 0 disables (keeps the configured weights).")
     parser.add_argument("--a1-weight", type=float, default=None,
                         help="masked contextual-latent prediction weight (0 disables the EMA teacher).")
     parser.add_argument("--a1-ema-decay", type=float, default=None,
@@ -723,6 +751,12 @@ def main() -> None:
         cfg.a2_mode = args.a2_mode
     if args.a2_weight is not None:
         cfg.a2_weight = args.a2_weight
+    if args.a4_invariance is not None:
+        cfg.a4_invariance = args.a4_invariance
+    if args.mask_compensation is not None:
+        cfg.mask_compensate_patch_length = args.mask_compensation
+    if args.autocalibrate_at is not None:
+        cfg.autocalibrate_at = args.autocalibrate_at
     if args.a3_weight is not None:
         cfg.a3_weight = args.a3_weight
     if args.simclr_temperature is not None:
@@ -1303,7 +1337,8 @@ def main() -> None:
             if cfg.multiresolution:
                 plan = make_multiresolution_mask_plan(
                     batch["patch_starts"].to(device), batch["patch_ends"].to(device),
-                    resolution_ids, C, GYRO_IDX, channel_mask=channel_mask, valid_patches=patch_pad)
+                    resolution_ids, C, GYRO_IDX, channel_mask=channel_mask, valid_patches=patch_pad,
+                    compensate_patch_length=cfg.mask_compensate_patch_length)
             else:
                 plan = make_mask_plan(B, P, C, GYRO_IDX, device=device,
                                       valid_patches=patch_pad, channel_mask=channel_mask)
@@ -1514,6 +1549,7 @@ def main() -> None:
                     variance_weight=0.0,
                     covariance_weight=0.0,
                     target_std=cfg.vicreg_target_std,
+                    invariance=cfg.a4_invariance,
                 )
                 placement_loss = placement_vr.total
                 placement_parts = {
