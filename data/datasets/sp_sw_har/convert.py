@@ -52,6 +52,20 @@ GAP_SPLIT_S = 0.05   # split the source timeline at gaps > 50 ms (~5 native peri
                      # interpolation — never fabricate signal/labels across a real acquisition gap
                      # (the raw stream has small holes up to ~188 ms; a window must not span one)
 
+# --- verified simultaneous phone<->watch pairing (events.json) -------------------------------
+# The phone and watch CSVs of one execution are stamped on a SHARED wall clock: measured over 40
+# executions, the two timestamp ranges overlap 100.0% of the shorter span (median), spans agreeing
+# to ~0.01 s. So a phone window and a watch window can be declared the SAME physical event when
+# their absolute intervals genuinely overlap -- this is a clock fact, never an array-index or
+# label inference.
+#
+# Contrast WISDM, which is also simultaneous phone+watch but stamps each device with its OWN
+# UPTIME counter: across subjects the two ranges do not intersect at all (offsets measured at
+# ~45 h, ~19 days, ~12 min). WISDM therefore emits NO events.json and supplies no A4 positives;
+# pairing it would require assuming both recordings start together, which is exactly the array
+# alignment the objective forbids.
+PAIR_MIN_OVERLAP = 0.75   # fraction of the 1.0 s window that must overlap in absolute time
+
 
 def create_manifest() -> dict:
     place = {"phone_pocket": "smartphone in the left front trouser pocket (orientation-variable)",
@@ -78,6 +92,8 @@ def main() -> None:
     sessions_dir.mkdir(parents=True)
 
     labels: dict[str, list[str]] = {}
+    # (subject, exec_id) -> device -> [(sid, t_start_abs, t_end_abs)]; drives events.json below.
+    spans: dict[tuple[str, str], dict[str, list[tuple[str, float, float]]]] = {}
     n_seg = 0
     subj_dirs = sorted(d for d in RAW.iterdir() if d.is_dir() and d.name.startswith("s"))
     for sdir in subj_dirs:
@@ -141,7 +157,45 @@ def main() -> None:
                         seg_dir.mkdir()
                         out.to_parquet(seg_dir / "data.parquet", index=False)
                         labels[sid] = [canon]
+                        # absolute wall-clock span of this window, for cross-device pairing
+                        spans.setdefault((subject, exec_id), {}).setdefault(device, []).append(
+                            (sid, float(grid[start]), float(grid[start + WIN - 1])))
                         n_seg += 1
+
+    # --- events.json: mutual-best temporal matching of phone <-> watch windows ----------------
+    # Within one execution both devices are on the same wall clock, so two windows are the same
+    # physical event when their absolute intervals overlap by >= PAIR_MIN_OVERLAP of a window.
+    # Matching is MUTUAL-best (each window used at most once), so a dense stream cannot claim the
+    # same partner repeatedly; unmatched windows get NO shared id and contribute no A4 positive.
+    events: dict[str, str] = {}
+    win_s = WIN / NATIVE_RATE
+    n_pairs = 0
+    for (subject, exec_id), by_dev in sorted(spans.items()):
+        sp, sw = by_dev.get("sp", []), by_dev.get("sw", [])
+        if not sp or not sw:
+            continue
+        cand = []
+        for i, (_, a0, a1) in enumerate(sp):
+            for j, (_, b0, b1) in enumerate(sw):
+                ov = min(a1, b1) - max(a0, b0)
+                if ov >= PAIR_MIN_OVERLAP * win_s:
+                    cand.append((ov, i, j))
+        cand.sort(key=lambda r: -r[0])
+        used_i: set[int] = set()
+        used_j: set[int] = set()
+        for ov, i, j in cand:
+            if i in used_i or j in used_j:
+                continue
+            used_i.add(i)
+            used_j.add(j)
+            key = f"{subject}_{exec_id}_pair{len(used_i):04d}"
+            events[sp[i][0]] = key
+            events[sw[j][0]] = key
+            n_pairs += 1
+    (HERE / "events.json").write_text(json.dumps(events, indent=2, sort_keys=True))
+    print(f"events.json: {n_pairs} verified simultaneous phone<->watch pairs "
+          f"({len(events)} of {n_seg} windows paired, "
+          f"{100.0 * len(events) / max(n_seg, 1):.1f}%)")
 
     (HERE / "labels.json").write_text(json.dumps(labels, indent=2))
     (HERE / "metadata.json").write_text(json.dumps(

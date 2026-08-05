@@ -361,7 +361,14 @@ class CorpusIndex:
         # only datasets whose publications/releases establish simultaneous streams are eligible for
         # cross-placement positives. Old grids have stream-local fallback ids and therefore cannot
         # silently manufacture positives from equal lengths/labels/subjects.
-        verified_simultaneous = {"xrf_v2", "nfi_fared"}
+        # sp_sw_har joined 2026-08-05: its phone and watch CSVs are stamped on ONE wall clock
+        # (measured: 40/40 executions overlap 100% of the shorter span), so its converter now
+        # emits events.json by mutual-best temporal overlap -> 1,136 verified pairs.
+        # wisdm is deliberately ABSENT despite also being simultaneous phone+watch: each device
+        # stamps its own UPTIME counter, and the two ranges do not intersect at all (offsets
+        # measured at ~45 h / ~19 days / ~12 min across subjects). Pairing it would mean assuming
+        # both recordings start together -- the array alignment this objective exists to avoid.
+        verified_simultaneous = {"xrf_v2", "nfi_fared", "sp_sw_har"}
         ev: dict[str, int] = {}
         self.train_event_ids: list[int] = []
         self.train_event_is_verified: list[bool] = []

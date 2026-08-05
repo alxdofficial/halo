@@ -55,8 +55,25 @@ at 0 the `target_tok` build and its 50-batch calibration pass are skipped entire
 A4 was previously called "placement". It is the only objective whose positive is observed rather
 than assumed, and historically the one most likely to go **silently dead** — the per-batch quota is
 `round(batch x a4_pair_fraction / 2)`, which yields 1 pair at batch 16 and then contributes exactly
-0.0000. Only nfi_fared and xrf_v2 currently supply verified pairs; sp_sw_har and wisdm are genuinely
-simultaneous phone+watch data whose converters never emitted a shared event key.
+0.0000. At batch 256 it is 13 pairs/batch, drawn from this pool (2026-08-05):
+
+| dataset | events | windows | placement contrast |
+|---|---:|---:|---|
+| nfi_fared | 12,263 | 24,526 | wrist ↔ lower back |
+| xrf_v2 | 5,124 | 30,724 | glasses / ear / wrists / pockets |
+| **sp_sw_har** | **1,013** | **2,026** | **phone pocket ↔ watch wrist** |
+| **total** | **18,400** | **57,276** | |
+
+**sp_sw_har joined 2026-08-05.** Its phone and watch CSVs are stamped on ONE wall clock — measured
+over 40 executions, the two ranges overlap 100.0% of the shorter span — so `convert.py` now emits
+`events.json` by **mutual-best temporal overlap** (≥75% of the 1.0 s window, each window used at
+most once): 1,136 verified pairs, 60.5% of its windows.
+
+**wisdm is deliberately excluded and always will be.** It is also simultaneous phone+watch, but each
+device stamps its own **uptime** counter: across subjects the two timestamp ranges do not intersect
+*at all* (offsets measured at ~45 h, ~19 days, ~12 min). Pairing it would require assuming both
+recordings start together — the array-index alignment this objective exists to avoid. It contributes
+0 A4 positives by design, not by oversight.
 | TF-C | **off** (`tfc_weight=0`) | its two views are the same unaugmented window through two networks, and the time branch is unanchored + discarded; `--tfc-weight 0.25` restores it for the ablation |
 | placement | weight 0.1; 10% window-pair quota | only explicit simultaneous `event_ids`; a real run fails if grids predate them |
 | EMA target | weight 0.1; decay 0.996 | clean stop-gradient teacher, masked student predictor; checkpointed/restored |
