@@ -197,6 +197,31 @@ the old advice to increase batch merely because the 24 GB card has free VRAM.
 Quality scans are fingerprinted to the current native grids and training fails closed when either
 cache is missing or stale. Grid construction must therefore precede both scans.
 
+## Live monitoring
+
+The trainer appends structured scalar records every 50 updates. A separate CPU-only monitor can
+refresh a human summary, a machine-readable health snapshot, and the dashboard once per minute
+without importing Torch or touching the training GPU:
+
+```bash
+python -m training.tokenizer.monitor_training \
+  --run-dir training/tokenizer/outputs/<run> --render --watch 60
+```
+
+This atomically writes `health.txt`, `health.json`, and `telemetry.png`. A periodically waking agent
+should run the same command once without `--watch`, then read `health.json`; its `status` is
+`green`, `warning`, or `critical`, and every alert has a stable code and explanation. The monitor
+checks heartbeat age, finite inputs/losses/gradients, JEPA target coverage, AMP update skips,
+representation collapse signals, objective-gradient balance, severe clipping, throughput changes,
+realized versus target dataset shares, validation regression, and checkpoint presence. Alerts are
+deliberately compound or sustained where a single noisy batch would otherwise cause false alarms.
+
+The dashboard shows weighted objective losses, VICReg components, positive-pair margins, module and
+per-objective encoder gradients, encoder/projector/EMA-teacher health, the actual label/stream
+checkpoint-selection metric, source and augmentation realization, throughput, VRAM, ETA, AMP skips,
+and input validity. Validation remains every 1,000 steps; the minute monitor does not run an extra
+model probe and therefore adds no training compute.
+
 The parser defaults to CPU, so `--device cuda` is required for a real run. Checkpoints contain the
 encoder, JEPA predictor and teacher, VICReg projector, optimizer/scheduler/scaler state, complete
 configuration, CPU/CUDA RNG state, corpus fingerprint, source provenance, and the Python/Torch/

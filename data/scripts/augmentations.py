@@ -285,6 +285,7 @@ class IMUSample:
     sensor_descriptions: Optional[List[str]] = None
     sensor_id: Optional[List[int]] = None
     gravity_state: Optional[str] = None
+    applied_augmentations: List[str] = field(default_factory=list)
 
 def _gravity_present(triad: "np.ndarray", descs=None) -> bool:
     """True if an accelerometer triad still contains the gravity DC component.
@@ -413,12 +414,14 @@ class IMUAugmenter:
     def _jitter(self, s, spec):
         scale = s.data.std(dim=0, unbiased=False, keepdim=True).clamp_min(1e-6)
         s.data = s.data + torch.randn_like(s.data) * (spec.sigma * scale)
+        s.applied_augmentations.append("jitter")
         return s
 
     def _scale(self, s, spec):
         C = s.data.shape[1]
         factors = torch.empty(1, C, device=s.data.device).uniform_(spec.low, spec.high)
         s.data = s.data * factors
+        s.applied_augmentations.append("scale")
         return s
 
     # ---------- P1: gravity add/remove ----------
@@ -461,6 +464,7 @@ class IMUAugmenter:
                 for sid in affected:
                     sensor_desc[sid] = _mark_gravity_removed(sensor_desc[sid])
                 s.sensor_descriptions = sensor_desc
+            s.applied_augmentations.append("gravity")
         return s
 
     # ---------- P2: full uniform-random SO(3) rotation ----------
@@ -479,6 +483,7 @@ class IMUAugmenter:
             for idxs, _gname in triads:
                 x[:, idxs] = torch.einsum("ij,tj->ti", R, x[:, idxs])
         s.data = x
+        s.applied_augmentations.append("rotation_3d")
         return s
 
     # ---------- P3: anti-aliased rate resample ----------
@@ -498,6 +503,7 @@ class IMUAugmenter:
         y = _sps.resample_poly(x, up, down, axis=0)     # polyphase, anti-aliased
         s.data = torch.from_numpy(np.ascontiguousarray(y)).float().to(s.data.device)
         s.sampling_rate = old * up / down               # actual achieved rate
+        s.applied_augmentations.append("rate")
         return s
 
     # ---------- P5: random temporal crop (variable observation length) ----------
@@ -510,6 +516,7 @@ class IMUAugmenter:
         length = int(np.random.randint(lo, T + 1))         # keep [lo, T] contiguous samples
         start = int(np.random.randint(0, T - length + 1))
         s.data = s.data[start:start + length].contiguous()
+        s.applied_augmentations.append("window_crop")
         return s
 
     # ---------- P4: channel / sensor-group dropout ----------
@@ -546,6 +553,7 @@ class IMUAugmenter:
                 s.sensor_id = [remap[sid] for sid in kept_ids]
             else:
                 s.sensor_id = kept_ids
+        s.applied_augmentations.append("channel_dropout")
         return s
 
     # ---------- text: channel-description phrase paraphrase ----------
@@ -558,6 +566,7 @@ class IMUAugmenter:
         # is decoration with no semantic content and just adds SBERT noise to a 3-way distinction.
         if s.sensor_descriptions is not None:
             s.sensor_descriptions = [_paraphrase_sensor(d) for d in s.sensor_descriptions]
+        s.applied_augmentations.append("channel_text_phrase")
         return s
 
     # ---------- text: channel-description dropout (neutralize, keep signal) ----------
@@ -586,6 +595,7 @@ class IMUAugmenter:
                 for i in dropped:
                     role_desc[i] = getattr(spec, "role_neutral", spec.neutral)
                 s.role_descriptions = role_desc
+            s.applied_augmentations.append("channel_text_dropout")
         return s
 
     # ---------- text: per-SENSOR identity dropout (device/placement/gravity) ----------
@@ -601,6 +611,7 @@ class IMUAugmenter:
             return s
         if n == 1:
             s.sensor_descriptions = [spec.neutral]
+            s.applied_augmentations.append("sensor_text_dropout")
             return s
         max_drop = max(1, int(spec.max_frac * n))
         k = min(rng.randint(1, max_drop), n - 1)          # keep >=1 sensor described
@@ -609,4 +620,5 @@ class IMUAugmenter:
         for i in dropped:
             desc[i] = spec.neutral
         s.sensor_descriptions = desc
+        s.applied_augmentations.append("sensor_text_dropout")
         return s

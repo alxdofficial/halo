@@ -78,7 +78,7 @@ def test_force_removes_all_known_run_artifacts_but_preserves_unknown_files(tmp_p
     for name in (
         "last.pt", "log.jsonl", "run_config.json", "objective_calibration.json",
         "objective_calibration_resolved.json", "source.patch", "source_provenance.json",
-        "runtime_provenance.json",
+        "runtime_provenance.json", "health.json", "health.txt", "telemetry.png",
     ):
         (tmp_path / name).write_text("stale")
     (tmp_path / "notes.txt").write_text("keep")

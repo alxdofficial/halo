@@ -39,6 +39,7 @@ def test_gravity_removal_updates_factored_sensor_text_and_state():
     assert "gravity removed" in out.sensor_descriptions[0].lower()
     assert "includes gravity" not in out.sensor_descriptions[0].lower()
     assert out.data[:, :3].mean(0).norm() < 0.1
+    assert out.applied_augmentations == ["gravity"]
 
 
 def test_gyro_dropout_drops_the_gyro_sensor():
@@ -53,6 +54,7 @@ def test_gyro_dropout_drops_the_gyro_sensor():
     assert len(out.sensor_descriptions) == 1
     assert "accelerometer" in out.sensor_descriptions[0].lower()
     assert "gyroscope" not in out.sensor_descriptions[0].lower()
+    assert out.applied_augmentations == ["channel_dropout"]
 
 
 def test_text_dropout_respects_channel_budget_without_erasing_sensor_identity():
@@ -76,6 +78,7 @@ def test_text_dropout_respects_channel_budget_without_erasing_sensor_identity():
     for i, text in enumerate(out.role_descriptions):
         if i not in dropped:
             assert text in {"x", "y", "z"}, f"role slot {i} is not an axis: {text!r}"
+    assert out.applied_augmentations == ["channel_text_dropout"]
 
 
 def test_sensor_text_dropout_is_bounded_and_keeps_one_with_two_sensors():

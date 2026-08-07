@@ -124,6 +124,16 @@ def test_multiresolution_collate_covers_signal_and_retains_partial_tails():
     )
 
 
+def test_collate_carries_realized_augmentation_trace_for_both_views(index):
+    ds = PretrainDataset(index, index.train[:4], augment=True, two_view=True)
+    items = [ds[i] for i in range(4)]
+    out = MultiResolutionCollate(
+        fixed_patch_seconds=(0.4, 1.4), two_view=True,
+    )(items)
+    assert out["augmentations"] == [item["augmentations"] for item in items]
+    assert out["augmentations_b"] == [item["view_b"]["augmentations"] for item in items]
+
+
 def test_stream_text_parses_placement():
     texts = stream_channel_descriptions("hhar", "phone_waist")
     assert len(texts) == 6

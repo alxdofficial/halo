@@ -492,6 +492,7 @@ class PretrainDataset(Dataset):
             "sensor_id": sensor_id6,
             "channel_mask": mask6,
             "gravity_state": sample.gravity_state,
+            "augmentations": tuple(sample.applied_augmentations),
         }
 
     def __getitem__(self, i: int) -> dict:
@@ -704,7 +705,7 @@ class MultiScaleCollate:
             out_b = self._collate_impl([item["view_b"] for item in batch], ps)
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "texts",
                       "role_texts", "sensor_texts", "sensor_id",
-                      "channel_mask", "patch_padding_mask"):
+                      "channel_mask", "patch_padding_mask", "augmentations"):
                 out[f"{k}_b"] = out_b[k]
         return out
 
@@ -770,6 +771,7 @@ class MultiScaleCollate:
             "streams": [item.get("stream", "?") for item in batch],
             "window_indices": torch.tensor([item.get("window_index", -1) for item in batch]),
             "subjects": [item.get("subject", "?") for item in batch],
+            "augmentations": [item.get("augmentations", ()) for item in batch],
             "channel_mask": torch.stack([item["channel_mask"] for item in batch]),
             "patch_padding_mask": patch_pad,
         }
@@ -849,7 +851,7 @@ class MultiResolutionCollate:
             out_b = self._collate_impl([item["view_b"] for item in batch], pair)
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "patch_durations",
                       "resolution_ids", "texts", "role_texts", "sensor_texts", "sensor_id",
-                      "channel_mask", "patch_padding_mask"):
+                      "channel_mask", "patch_padding_mask", "augmentations"):
                 out[f"{k}_b"] = out_b[k]
         return out
 
@@ -941,6 +943,7 @@ class MultiResolutionCollate:
             "streams": [item.get("stream", "?") for item in batch],
             "window_indices": torch.tensor([item.get("window_index", -1) for item in batch]),
             "subjects": [item.get("subject", "?") for item in batch],
+            "augmentations": [item.get("augmentations", ()) for item in batch],
             "channel_mask": channel_mask,
             "patch_padding_mask": patch_pad,
         }

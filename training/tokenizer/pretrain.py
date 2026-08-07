@@ -32,6 +32,7 @@ import platform
 import statistics
 import subprocess
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -271,8 +272,8 @@ def update_ema_encoder(student: nn.Module, teacher: nn.Module, decay: float) -> 
 
 
 @torch.no_grad()
-def representation_health(z: torch.Tensor) -> dict[str, float]:
-    """Small-batch collapse diagnostics over a projector output."""
+def representation_health(z: torch.Tensor, prefix: str = "repr") -> dict[str, float]:
+    """Small-batch collapse diagnostics over an embedding matrix."""
     x = z.detach().float()
     std = x.std(dim=0, unbiased=False)
     centered = x - x.mean(0)
@@ -281,10 +282,10 @@ def representation_health(z: torch.Tensor) -> dict[str, float]:
     probs = eig / eig.sum().clamp_min(1e-12)
     effective_rank = torch.exp(-(probs * probs.clamp_min(1e-12).log()).sum())
     offdiag = cov - torch.diag_embed(torch.diagonal(cov))
-    names = (
-        "repr/min_std", "repr/mean_std", "repr/effective_rank", "repr/mean_norm",
-        "repr/cov_offdiag_abs_mean", "repr/cov_max_eigenvalue",
-    )
+    names = tuple(f"{prefix}/{name}" for name in (
+        "min_std", "mean_std", "effective_rank", "mean_norm",
+        "cov_offdiag_abs_mean", "cov_max_eigenvalue",
+    ))
     # One device-to-host synchronization for the whole diagnostic instead of one per scalar.
     values = torch.stack((
         std.min(), std.mean(), effective_rank, x.norm(dim=1).mean(),
@@ -480,6 +481,7 @@ _SOURCE_SUFFIXES = {
 _RUN_ARTIFACT_NAMES = {
     "log.jsonl", "run_config.json", "objective_calibration.json",
     "source.patch", "source_provenance.json", "runtime_provenance.json",
+    "health.json", "health.txt", "telemetry.png",
 }
 
 
@@ -1481,6 +1483,26 @@ def main() -> None:
     print(f"jepa mask: independent contiguous block per resolution, "
           f"ratio={cfg.mask_ratio_time:g}", flush=True)
 
+    # Rolling CPU-side data telemetry. These counters cover every batch between scalar log records,
+    # rather than sampling only the batch that happens to land on a logging step.
+    data_batches = 0
+    data_examples = 0
+    source_counts: Counter = Counter()
+    stream_counts: Counter = Counter()
+    augmentation_counts: Counter = Counter()
+    augmentation_examples = 0
+    channel_count_counts: Counter = Counter()
+    patch_pair_counts: Counter = Counter()
+    observed_rates: list[float] = []
+    observed_source_rates: list[float] = []
+    last_log_wall = time.perf_counter()
+    last_log_step = start_step
+    amp_skipped_since_log = 0
+    amp_skipped_total = 0
+    amp_consecutive_skips = 0
+    zero_target_count = torch.zeros((), device=device)
+    zero_target_examples = 0
+
     model.train()
     for step, batch in enumerate(train_loader, start=start_step + 1):
         calibration_report = None
@@ -1497,6 +1519,22 @@ def main() -> None:
         channel_mask = batch["channel_mask"].to(device, non_blocking=True)
         patch_pad = batch["patch_padding_mask"].to(device, non_blocking=True)
         B, P, _, C = patches.shape
+
+        data_batches += 1
+        data_examples += B
+        source_counts.update(batch["sources"])
+        stream_counts.update(batch["streams"])
+        channel_count_counts.update(int(value) for value in batch["channel_mask"].sum(dim=1).tolist())
+        pair = batch["patch_seconds"]
+        pair_key = "+".join(f"{float(value):g}" for value in pair) \
+            if isinstance(pair, (tuple, list)) else f"{float(pair):g}"
+        patch_pair_counts[pair_key] += 1
+        observed_rates.extend(float(value) for value in batch["rates"].tolist())
+        observed_source_rates.extend(float(value) for value in batch["source_rates"].tolist())
+        for traces in (batch.get("augmentations", []), batch.get("augmentations_b", [])):
+            augmentation_examples += len(traces)
+            for names in traces:
+                augmentation_counts.update(names)
 
         if cfg.jepa_weight > 0:
             if cfg.multiresolution:
@@ -1568,8 +1606,13 @@ def main() -> None:
                 masked = clean
                 jepa_mask = torch.zeros(clean["tokens"].shape[:3], dtype=torch.bool, device=device)
 
+            if cfg.jepa_weight > 0:
+                zero_target_count = zero_target_count + jepa_mask.flatten(1).sum(dim=1).eq(0).sum()
+                zero_target_examples += B
+
             jepa_loss = clean["pooled"].new_zeros(())
             jepa_parts: dict[str, float] = {}
+            teacher_clean = None
             if jepa_teacher is not None:
                 # The teacher sees the clean view and never receives gradients. Reuse frozen text-LM
                 # outputs, but run the teacher's own frontend/fusion/transformer weights.
@@ -1612,6 +1655,19 @@ def main() -> None:
                     jepa_diag = pair_contrast(jepa_prediction[jepa_mask].flatten(1),
                                               teacher_clean["tokens"][jepa_mask].flatten(1))
                     jepa_parts = {f"jepa/{k}": v for k, v in jepa_diag.items()}
+                    if resolution_ids is not None:
+                        with torch.no_grad():
+                            real = patch_pad.unsqueeze(2) & enc_channel_mask.unsqueeze(1)
+                            for group, name in ((0, "short"), (1, "long")):
+                                group_tokens = resolution_ids.eq(group).unsqueeze(2) & real
+                                selected = jepa_mask & group_tokens
+                                jepa_parts[f"jepa/target_fraction_{name}"] = float(
+                                    selected.sum().float() / group_tokens.sum().clamp(min=1)
+                                )
+                                jepa_parts[f"jepa/loss_{name}"] = float(masked_ema_latent_loss(
+                                    jepa_prediction.detach(), teacher_clean["tokens"], selected,
+                                    token_durations=patch_durations,
+                                ))
 
             z_b = model.vicreg_projector(encode_clean_view_b(batch)["pooled"])
             vicreg_result = vicreg(
@@ -1657,6 +1713,10 @@ def main() -> None:
                 **{f"grad_cosine/{name.replace('|', '_vs_')}": value
                    for name, value in top_geometry["cosines"].items()},
             }
+            norm_sum = sum(top_geometry["norms"].values())
+            objective_grad_norms["grad_objective/jepa_share"] = (
+                top_geometry["norms"].get("jepa", 0.0) / max(norm_sum, 1e-12)
+            )
 
         calibrating = (
             cfg.objective_calibration_at > 0
@@ -1737,6 +1797,12 @@ def main() -> None:
         # LR schedule must advance only with real student updates, or the teacher drifts toward
         # unchanged weights while the optimizer trajectory silently loses a scheduler step.
         optimizer_stepped = scaler.get_scale() >= old_scale
+        if optimizer_stepped:
+            amp_consecutive_skips = 0
+        else:
+            amp_skipped_since_log += 1
+            amp_skipped_total += 1
+            amp_consecutive_skips += 1
         if jepa_teacher is not None and optimizer_stepped:
             update_ema_encoder(model.encoder, jepa_teacher, ema_decay_at(step))
         if optimizer_stepped:
@@ -1744,15 +1810,83 @@ def main() -> None:
 
         if do_log:
             lrs = sched.get_last_lr()
+            log_wall = time.perf_counter()
+            steps_in_window = max(step - last_log_step, 1)
+            seconds_in_window = max(log_wall - last_log_wall, 1e-9)
+            steps_per_second = steps_in_window / seconds_in_window
             rec = {"step": step, "lr": lrs[0],
                    "elapsed_s": round(time.time() - t0, 1),
                    "patch_seconds": batch["patch_seconds"],
                    "total": round(float(out.total.detach()), 4), **parts, **gnorms}
+            rec.update({
+                "loss_weighted/jepa": float(out.terms["jepa"].detach()),
+                "loss_weighted/vicreg": float(out.terms["vicreg"].detach()),
+                "objective_weight/jepa": float(cfg.jepa_weight),
+                "objective_weight/vicreg": float(cfg.vicreg_weight),
+                "perf/steps_per_s": steps_per_second,
+                "perf/examples_per_s": steps_per_second * cfg.batch_size,
+                "perf/eta_minutes": max(run_until_step - step, 0) / steps_per_second / 60.0,
+                "amp/scale": float(scaler.get_scale()),
+                "amp/skipped_updates_window": int(amp_skipped_since_log),
+                "amp/skipped_updates_total": int(amp_skipped_total),
+                "amp/consecutive_skips": int(amp_consecutive_skips),
+                "data/source_share_window": {
+                    key: value / max(data_examples, 1)
+                    for key, value in sorted(source_counts.items())
+                },
+                "data/batches_window": int(data_batches),
+                "data/examples_window": int(data_examples),
+                "data/source_share_target": dict(sorted(
+                    temperature_sampler.dataset_probabilities.items()
+                )),
+                "data/stream_share_window": {
+                    key: value / max(data_examples, 1)
+                    for key, value in sorted(stream_counts.items())
+                },
+                "data/channel_count_share_window": {
+                    str(key): value / max(data_examples, 1)
+                    for key, value in sorted(channel_count_counts.items())
+                },
+                "data/patch_pair_share_window": {
+                    key: value / max(data_batches, 1)
+                    for key, value in sorted(patch_pair_counts.items())
+                },
+                "data/augmentation_rate_window": {
+                    key: value / max(augmentation_examples, 1)
+                    for key, value in sorted(augmentation_counts.items())
+                },
+                "data/rate_hz_min": min(observed_rates, default=float("nan")),
+                "data/rate_hz_median": float(np.median(observed_rates)) if observed_rates else float("nan"),
+                "data/rate_hz_max": max(observed_rates, default=float("nan")),
+                "data/source_rate_hz_min": min(observed_source_rates, default=float("nan")),
+                "data/source_rate_hz_median": (
+                    float(np.median(observed_source_rates)) if observed_source_rates else float("nan")
+                ),
+                "data/source_rate_hz_max": max(observed_source_rates, default=float("nan")),
+                "jepa_zero_target_frac_window": (
+                    float(zero_target_count) / max(zero_target_examples, 1)
+                    if cfg.jepa_weight > 0 else 0.0
+                ),
+            })
+            input_values = patches.detach().float()
+            finite_input = torch.isfinite(input_values)
+            rec.update({
+                "data/input_finite_fraction": float(finite_input.float().mean()),
+                "data/input_abs_max": float(
+                    torch.where(finite_input, input_values.abs(), 0.0).max()
+                ),
+                "data/input_rms": float(torch.sqrt(
+                    torch.where(finite_input, input_values.square(), 0.0).mean()
+                )),
+            })
             rec["grad/total_preclip"] = float(total_grad_norm.detach())
             rec["grad/clip_coefficient"] = clip_coefficient
             rec["grad/clipped"] = float(clip_coefficient < 1.0)
             rec.update(objective_grad_norms)
-            rec.update(representation_health(z))
+            rec.update(representation_health(clean["pooled"], "repr_encoder"))
+            rec.update(representation_health(z, "repr_projector"))
+            if teacher_clean is not None and do_objective_grad_log:
+                rec.update(representation_health(teacher_clean["pooled"], "repr_teacher"))
             if cfg.jepa_weight > 0:
                 # Windows that get no masked token at all, per source. This should remain zero after
                 # the short-window mask-planning fix; keep it visible so future patch choices cannot
@@ -1768,9 +1902,30 @@ def main() -> None:
             if model.encoder.use_duration_embedding:
                 rec["duration/gate"] = float(torch.sigmoid(
                     model.encoder.duration_gate_logit.detach()))
+            if device.type == "cuda":
+                rec.update({
+                    "memory/allocated_gib": torch.cuda.memory_allocated(device) / 1e9,
+                    "memory/reserved_gib": torch.cuda.memory_reserved(device) / 1e9,
+                    "memory/peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 1e9,
+                })
             print(json.dumps(rec), flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
+            data_batches = 0
+            data_examples = 0
+            source_counts.clear()
+            stream_counts.clear()
+            augmentation_counts.clear()
+            augmentation_examples = 0
+            channel_count_counts.clear()
+            patch_pair_counts.clear()
+            observed_rates.clear()
+            observed_source_rates.clear()
+            amp_skipped_since_log = 0
+            zero_target_count.zero_()
+            zero_target_examples = 0
+            last_log_wall = log_wall
+            last_log_step = step
 
         if calibration_report is not None:
             report_path = args.out / "objective_calibration.json"
@@ -1847,6 +2002,10 @@ def main() -> None:
             if hetero_ba > best_ba:
                 best_ba = hetero_ba
                 checkpoint("best.pt", step, hetero_ba)
+            # The next throughput window measures training only, not this deliberately expensive
+            # validation/checkpoint interval.
+            last_log_wall = time.perf_counter()
+            last_log_step = step
         if step >= run_until_step:
             break
 

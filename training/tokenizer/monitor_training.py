@@ -1,0 +1,287 @@
+"""Minute-level, CPU-only health monitor for a running Phase-A pretrain.
+
+Reads ``log.jsonl`` and ``run_config.json`` from a run directory, writes atomic ``health.json`` and
+``health.txt`` snapshots, and optionally refreshes ``telemetry.png``. It never imports Torch or
+touches the training GPU.
+
+Run once (appropriate for a periodically waking agent):
+
+    python -m training.tokenizer.monitor_training --run-dir training/tokenizer/outputs/<run> --render
+
+Or keep a lightweight local watcher alive:
+
+    python -m training.tokenizer.monitor_training --run-dir ... --render --watch 60
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import statistics
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+SCHEMA_VERSION = 1
+SEVERITY = {"green": 0, "warning": 1, "critical": 2}
+
+
+def load_jsonl(path: Path) -> list[dict]:
+    rows = []
+    if not path.exists():
+        return rows
+    for line in path.read_text().splitlines():
+        try:
+            value = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def _atomic_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(value)
+    tmp.replace(path)
+
+
+def _finite(value) -> bool:
+    return isinstance(value, (float, int)) and math.isfinite(float(value))
+
+
+def _median(records: list[dict], key: str) -> float:
+    values = [float(row[key]) for row in records if key in row and _finite(row[key])]
+    return statistics.median(values) if values else float("nan")
+
+
+def _selection(row: dict) -> float:
+    return float(row.get("val_knn_label_stream_ba", row.get("val_knn_ba", float("nan"))))
+
+
+def assess(run_dir: Path, stale_seconds: float = 120.0) -> dict:
+    log_path = run_dir / "log.jsonl"
+    rows = load_jsonl(log_path)
+    train = [row for row in rows if "total" in row]
+    val = [row for row in rows if "val_knn_ba" in row]
+    events = [row for row in rows if "event" in row]
+    try:
+        config = json.loads((run_dir / "run_config.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        config = {}
+
+    now = time.time()
+    heartbeat_age = now - log_path.stat().st_mtime if log_path.exists() else float("inf")
+    latest = train[-1] if train else {}
+    latest_step = int(max((row.get("step", 0) for row in rows), default=0))
+    planned_steps = int(config.get("steps", latest_step or 0))
+    warmup_steps = int(config.get("warmup_steps", 1_000))
+    alerts: list[dict[str, str]] = []
+
+    def alert(level: str, code: str, message: str) -> None:
+        alerts.append({"severity": level, "code": code, "message": message})
+
+    if not train:
+        alert("critical", "no_training_records", "No scalar training record is available.")
+    elif heartbeat_age > stale_seconds and latest_step < planned_steps:
+        alert("critical", "stale_heartbeat",
+              f"Training log has not changed for {heartbeat_age:.0f} seconds.")
+
+    critical_numeric = (
+        "total", "jepa", "vicreg", "grad/total_preclip", "grad/encoder",
+        "repr_encoder/effective_rank", "repr_projector/effective_rank",
+    )
+    for row in train[-12:]:
+        bad = [key for key in critical_numeric if key in row and not _finite(row[key])]
+        if bad:
+            alert("critical", "nonfinite_telemetry",
+                  f"Non-finite values at step {row.get('step')}: {', '.join(bad)}.")
+            break
+
+    if latest.get("jepa_zero_target_frac_window", 0.0) > 0:
+        alert("critical", "jepa_zero_targets",
+              f"{latest['jepa_zero_target_frac_window']:.2%} of recent windows had no JEPA target.")
+    if latest.get("data/input_finite_fraction", 1.0) < 1.0:
+        alert("critical", "nonfinite_input",
+              f"Recent input finite fraction is {latest['data/input_finite_fraction']:.6f}.")
+    if int(latest.get("amp/consecutive_skips", 0)) >= 3:
+        alert("critical", "amp_repeated_skips", "At least three optimizer updates were skipped in a row.")
+    elif int(latest.get("amp/skipped_updates_window", 0)) > 0:
+        alert("warning", "amp_update_skip", "AMP skipped an optimizer update in the latest window.")
+
+    recent = train[-12:]
+    if latest_step > warmup_steps:
+        encoder_rank = float(latest.get("repr_encoder/effective_rank", float("nan")))
+        d_model = int(config.get("d_model", 256))
+        jepa_margin = _median(recent, "jepa/margin")
+        vicreg_margin = _median(recent, "vicreg/margin")
+        if (math.isfinite(encoder_rank) and encoder_rank < max(4.0, 0.05 * d_model)
+                and jepa_margin < 0.05 and vicreg_margin < 0.05):
+            alert("warning", "possible_representation_collapse",
+                  "Encoder rank and both aligned-pair margins are simultaneously low.")
+
+        geometry = [row for row in train if "grad_objective/jepa_share" in row]
+        if geometry:
+            share = _median(geometry[-3:], "grad_objective/jepa_share")
+            if share < 0.15 or share > 0.85:
+                alert("warning", "objective_gradient_imbalance",
+                      f"Recent JEPA encoder-gradient share is {share:.1%}.")
+
+        clip = _median(recent, "grad/clip_coefficient")
+        if math.isfinite(clip) and clip < 0.05:
+            alert("warning", "severe_gradient_clipping",
+                  f"Median recent gradient clip coefficient is {clip:.3f}.")
+
+    throughput = [float(row["perf/steps_per_s"]) for row in train
+                  if row.get("step", 0) > warmup_steps and _finite(row.get("perf/steps_per_s"))]
+    if len(throughput) >= 8:
+        baseline = statistics.median(throughput[:-3]) if len(throughput) > 3 else float("nan")
+        current = statistics.median(throughput[-3:])
+        if math.isfinite(baseline) and current < 0.7 * baseline:
+            alert("warning", "throughput_regression",
+                  f"Recent throughput {current:.2f} step/s is over 30% below baseline {baseline:.2f}.")
+
+    observed = latest.get("data/source_share_window", {})
+    target = latest.get("data/source_share_target", {})
+    source_errors = {key: float(observed.get(key, 0.0)) - float(value)
+                     for key, value in target.items()}
+    balance_examples = int(latest.get("data/examples_window", 0))
+    if (balance_examples >= 2_048 and source_errors
+            and max(abs(value) for value in source_errors.values()) > 0.05):
+        worst = max(source_errors, key=lambda key: abs(source_errors[key]))
+        alert("warning", "source_balance_drift",
+              f"Rolling share for {worst} differs from target by {source_errors[worst]:+.1%}.")
+
+    val_values = [_selection(row) for row in val if math.isfinite(_selection(row))]
+    if len(val_values) >= 3 and all(value < max(val_values) - 0.10 for value in val_values[-2:]):
+        alert("warning", "validation_regression",
+              "The last two checkpoint-selection scores are over 0.10 below the run best.")
+    if val and not (run_dir / "last.pt").exists():
+        alert("warning", "missing_last_checkpoint", "Validation exists but last.pt is absent.")
+
+    status = "green"
+    for item in alerts:
+        if SEVERITY[item["severity"]] > SEVERITY[status]:
+            status = item["severity"]
+
+    selection_values = [_selection(row) for row in val if math.isfinite(_selection(row))]
+    progress = latest_step / planned_steps if planned_steps > 0 else 0.0
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "run_dir": str(run_dir),
+        "step": latest_step,
+        "planned_steps": planned_steps,
+        "progress": progress,
+        "heartbeat_age_s": heartbeat_age,
+        "alerts": alerts,
+        "performance": {
+            "steps_per_s": latest.get("perf/steps_per_s"),
+            "examples_per_s": latest.get("perf/examples_per_s"),
+            "eta_minutes": latest.get("perf/eta_minutes"),
+            "allocated_gib": latest.get("memory/allocated_gib"),
+            "reserved_gib": latest.get("memory/reserved_gib"),
+        },
+        "loss": {
+            "total": latest.get("total"),
+            "jepa_weighted": latest.get("loss_weighted/jepa"),
+            "vicreg_weighted": latest.get("loss_weighted/vicreg"),
+            "jepa_margin": latest.get("jepa/margin"),
+            "vicreg_margin": latest.get("vicreg/margin"),
+            "vicreg_min_std": latest.get("vicreg/min_std"),
+        },
+        "gradients": {
+            "total_preclip": latest.get("grad/total_preclip"),
+            "clip_coefficient": latest.get("grad/clip_coefficient"),
+            "jepa_share": latest.get("grad_objective/jepa_share"),
+            "objective_cosine": latest.get("grad_cosine/jepa_vs_vicreg"),
+            "amp_scale": latest.get("amp/scale"),
+            "amp_skipped_total": latest.get("amp/skipped_updates_total"),
+        },
+        "representation": {
+            "encoder_effective_rank": latest.get("repr_encoder/effective_rank"),
+            "encoder_min_std": latest.get("repr_encoder/min_std"),
+            "projector_effective_rank": latest.get("repr_projector/effective_rank"),
+            "teacher_effective_rank": latest.get("repr_teacher/effective_rank"),
+        },
+        "data": {
+            "source_share": observed,
+            "source_target": target,
+            "source_error": source_errors,
+            "batches_window": latest.get("data/batches_window"),
+            "examples_window": latest.get("data/examples_window"),
+            "stream_share": latest.get("data/stream_share_window", {}),
+            "channel_count_share": latest.get("data/channel_count_share_window", {}),
+            "patch_pair_share": latest.get("data/patch_pair_share_window", {}),
+            "augmentation_rate": latest.get("data/augmentation_rate_window", {}),
+            "zero_target_fraction": latest.get("jepa_zero_target_frac_window"),
+            "input_finite_fraction": latest.get("data/input_finite_fraction"),
+            "input_abs_max": latest.get("data/input_abs_max"),
+            "input_rms": latest.get("data/input_rms"),
+        },
+        "validation": {
+            "points": len(val),
+            "latest_selection": selection_values[-1] if selection_values else None,
+            "best_selection": max(selection_values) if selection_values else None,
+            "latest_global_knn": val[-1].get("val_knn_ba") if val else None,
+            "latest_conse_label_stream": val[-1].get("val_conse_label_stream_ba") if val else None,
+        },
+        "events": events[-5:],
+    }
+
+
+def render_text(report: dict) -> str:
+    perf = report["performance"]
+    val = report["validation"]
+    lines = [
+        f"STATUS: {report['status'].upper()}",
+        f"step: {report['step']:,}/{report['planned_steps']:,} ({report['progress']:.1%})",
+        f"heartbeat: {report['heartbeat_age_s']:.0f}s ago",
+        f"throughput: {perf.get('steps_per_s') or float('nan'):.2f} step/s",
+        f"ETA: {perf.get('eta_minutes') or float('nan'):.1f} min",
+        f"selection: latest={val.get('latest_selection')} best={val.get('best_selection')}",
+    ]
+    if report["alerts"]:
+        lines.append("alerts:")
+        lines.extend(
+            f"- [{item['severity']}] {item['code']}: {item['message']}"
+            for item in report["alerts"]
+        )
+    else:
+        lines.append("alerts: none")
+    return "\n".join(lines) + "\n"
+
+
+def write_report(run_dir: Path, *, stale_seconds: float, render: bool) -> dict:
+    report = assess(run_dir, stale_seconds=stale_seconds)
+    _atomic_text(run_dir / "health.json", json.dumps(report, indent=2) + "\n")
+    summary = render_text(report)
+    _atomic_text(run_dir / "health.txt", summary)
+    if render and (run_dir / "log.jsonl").exists():
+        from training.tokenizer.plot_training import render as render_plot
+        render_plot(run_dir / "log.jsonl", run_dir / "telemetry.png")
+    print(summary, end="", flush=True)
+    return report
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--render", action="store_true", help="also refresh telemetry.png")
+    parser.add_argument("--watch", type=float, default=0.0,
+                        help="refresh every N seconds; 0 runs once")
+    parser.add_argument("--stale-seconds", type=float, default=120.0)
+    args = parser.parse_args()
+    while True:
+        write_report(args.run_dir, stale_seconds=args.stale_seconds, render=args.render)
+        if args.watch <= 0:
+            break
+        time.sleep(args.watch)
+
+
+if __name__ == "__main__":
+    main()
