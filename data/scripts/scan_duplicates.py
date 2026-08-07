@@ -63,18 +63,20 @@ def scan_stream(data, labels) -> tuple[list[int], int, int]:
 
 
 def scan(alignment: str = "native") -> dict:
-    from data.scripts.eda.grid_io import discover_grids
+    from data.scripts.eda.grid_io import discover_grids, grid_corpus_fingerprint
 
+    refs = discover_grids(alignment)
     bad: dict[str, list[int]] = {}
     stats = []
-    for ref in sorted(discover_grids(alignment), key=lambda r: r.key):
+    for ref in sorted(refs, key=lambda r: r.key):
         if ref.n_windows == 0:
             continue
         drop, n_groups, n_conflict = scan_stream(ref.load_data(), ref.labels)
         if drop:
             bad[ref.key] = drop
             stats.append((ref.key, len(drop), ref.n_windows, n_groups, n_conflict))
-    return {"alignment": alignment, "windows": bad, "summary": stats}
+    return {"alignment": alignment, "grid_fingerprint": grid_corpus_fingerprint(alignment, refs),
+            "windows": bad, "summary": stats}
 
 
 def load(alignment: str = "native", *, require: bool = False) -> dict[str, set[int]]:
@@ -98,6 +100,15 @@ def load(alignment: str = "native", *, require: bool = False) -> dict[str, set[i
             raise ValueError(
                 f"{OUT} was built for alignment {blob.get('alignment')!r}, not {alignment!r}; "
                 "re-run data.scripts.scan_duplicates for this alignment."
+            )
+        return {}
+    from data.scripts.eda.grid_io import grid_corpus_fingerprint
+    current = grid_corpus_fingerprint(alignment)
+    if blob.get("grid_fingerprint") != current:
+        if require:
+            raise ValueError(
+                f"{OUT} does not match the current {alignment} grids; re-run "
+                "`python -m data.scripts.scan_duplicates` after every grid rebuild."
             )
         return {}
     return {k: set(v) for k, v in blob.get("windows", {}).items()}

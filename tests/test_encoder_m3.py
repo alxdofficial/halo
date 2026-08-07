@@ -149,6 +149,23 @@ def test_channel_identity_comes_from_text(enc):
         "changing the placement text must change the representation"
 
 
+def test_forward_respects_native_source_bandwidth(enc):
+    patches, texts, positions = make_batch(b=2, p=3, c=6, seed=12)
+    rates = torch.tensor([50.0, 50.0])
+    lengths = torch.tensor([50, 50])
+    with torch.no_grad():
+        stored_clock = enc(
+            patches[:, :3], rates, lengths, texts, positions[:, :3],
+            source_rate_hz=rates,
+        )
+        acquisition_clock = enc(
+            patches[:, :3], rates, lengths, texts, positions[:, :3],
+            source_rate_hz=torch.tensor([25.0, 25.0]),
+        )
+    assert not torch.allclose(stored_clock["pooled"], acquisition_clock["pooled"]), \
+        "public forward ignored the acquisition-rate observability bound"
+
+
 # ------------------------------------------------------------------- physical time
 def test_rope_time_shift_invariance(enc):
     """RoPE is relative: shifting ALL patch times by a constant leaves attention —

@@ -21,9 +21,7 @@ from training.tokenizer.pretrain_data import (  # noqa: E402
     MultiScaleCollate,
     PretrainDataset,
     TemperatureSampler,
-    VERIFIED_SIMULTANEOUS_DATASETS,
     WindowKey,
-    _event_is_verified,
     stream_channel_descriptions,
 )
 
@@ -146,25 +144,19 @@ def test_stream_text_uses_rich_distinct_placement():
     assert "lower back" in t("nfi_fared", "back")
 
 
-def test_temperature_sampler_reserves_verified_event_pairs():
+def test_temperature_sampler_draws_unique_deterministic_batches():
     keys = [WindowKey(i % 2, i, 0) for i in range(100)]
-    # Ten events have two placements; all remaining windows are unrelated.
-    positive = [-1] * 100
-    event_ids = list(range(100))
-    for event in range(10):
-        positive[2 * event] = positive[2 * event + 1] = event
-        event_ids[2 * event] = event_ids[2 * event + 1] = event
-    sampler = TemperatureSampler(
+    sampler_a = TemperatureSampler(
         keys, ["a", "b"], num_samples=40, batch_size=40,
-        event_ids=event_ids, positive_event_ids=positive, pair_fraction=0.2, seed=3,
+        seed=3,
     )
-    batch = list(sampler)
-    counts = {}
-    for i in batch:
-        if positive[i] >= 0:
-            counts[positive[i]] = counts.get(positive[i], 0) + 1
-    assert sum(count == 2 for count in counts.values()) == 4
-    assert len(batch) == len(set(batch)) == 40
+    sampler_b = TemperatureSampler(
+        keys, ["a", "b"], num_samples=40, batch_size=40,
+        seed=3,
+    )
+    batch_a, batch_b = list(sampler_a), list(sampler_b)
+    assert batch_a == batch_b
+    assert len(batch_a) == len(set(batch_a)) == 40
 
 
 def test_temperature_sampler_caps_datasets_and_tempers_subjects():
@@ -191,28 +183,6 @@ def test_temperature_sampler_caps_datasets_and_tempers_subjects():
     subject0 = sampler.weights[d0_rows[:90]].sum() / d0_weight
     expected = 90**0.5 / (90**0.5 + 10**0.5)
     assert float(subject0) == pytest.approx(expected)
-
-
-def test_verified_event_pair_extraction_requires_distinct_streams():
-    from training.tokenizer.pretrain import verified_event_pairs
-    left, right = verified_event_pairs(
-        ["e1", "e1", "e2", "e2", "e3"],
-        torch.tensor([True, True, True, True, False]),
-        ["a", "b", "a", "a", "c"],
-        torch.device("cpu"),
-    )
-    assert left.tolist() == [0]
-    assert right.tolist() == [1]
-
-
-def test_verified_event_policy_includes_sp_sw_har_everywhere():
-    from types import SimpleNamespace
-
-    assert "sp_sw_har" in VERIFIED_SIMULTANEOUS_DATASETS
-    ref = SimpleNamespace(dataset="sp_sw_har", event_ids_explicit=True)
-    assert _event_is_verified(ref)
-    assert not _event_is_verified(SimpleNamespace(dataset="wisdm", event_ids_explicit=True))
-    assert not _event_is_verified(SimpleNamespace(dataset="sp_sw_har", event_ids_explicit=False))
 
 
 def test_no_hapt_uci_leak(index):
@@ -423,3 +393,23 @@ def test_token_budget_falls_back_to_the_coarsest_pair_when_nothing_fits():
     collate = MultiResolutionCollate(max_batch_tokens=1)
     short, long = collate._patch_seconds(batch)
     assert (short, long) == max(collate._valid_pairs, key=lambda p: p[0] + p[1])
+
+
+def test_patch_duration_draw_is_independent_of_activity_labels():
+    """Phase A is label-free, including the stochastic patch-resolution schedule."""
+    import torch
+    from training.tokenizer.pretrain_data import MultiResolutionCollate, MultiScaleCollate
+
+    base = [
+        {
+            "data": torch.zeros(300, 6), "rate": 50.0, "label_id": 0,
+            "source": "example", "stream": "watch_wrist", "window_index": index,
+        }
+        for index in range(16)
+    ]
+    relabeled = [{**item, "label_id": 91 - i} for i, item in enumerate(base)]
+
+    assert MultiScaleCollate(seed=5)._patch_seconds(base) == \
+        MultiScaleCollate(seed=5)._patch_seconds(relabeled)
+    assert MultiResolutionCollate(seed=5, max_batch_tokens=0)._patch_seconds(base) == \
+        MultiResolutionCollate(seed=5, max_batch_tokens=0)._patch_seconds(relabeled)

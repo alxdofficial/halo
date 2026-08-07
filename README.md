@@ -2,27 +2,37 @@
 
 **H**eterogeneity-**A**ware **L**anguage-aligned IMU model for **O**pen-set HAR.
 
-HALO is a language-aligned IMU foundation model for **real-world phone/watch human activity
-recognition**. A channel-independent, rate-invariant tokenizer produces per-patch embeddings that
-are contrastively aligned to natural-language activity labels, so activities are recognized
-**zero-shot** by similarity to label text — no per-dataset classifier — across heterogeneous
-sampling rates, channel sets, and sensor placements.
+HALO is an IMU foundation model for **real-world phone/watch human activity recognition** under
+heterogeneous acquisition. A channel-independent, rate-invariant tokenizer produces per-patch
+embeddings that survive changes in sampling rate, channel set, and sensor placement; activities are
+then recognized **zero-shot** from natural-language label text — no per-dataset classifier.
+
+Training is two phases:
+
+- **Phase A** — label-free representation pretraining (JEPA + augmentation VICReg). Activity labels
+  never enter the loss. See [`training/tokenizer/README.md`](training/tokenizer/README.md).
+- **Phase B** — the evidence engine: retrieval over a memory bank of Phase-A patches, non-negative
+  evidence accumulation per candidate label, prediction with an explicit rejection option. See
+  [`docs/design/EVIDENCE_ENGINE.md`](docs/design/EVIDENCE_ENGINE.md).
 
 This repo is a **clean rebuild** of the v2 work. It carries only the current, verified design; the
 prior tree lives beside it as `legacy_code/` (not part of this repo) and is mined for reference only.
 
 ## Design pillars
 
-- **Deployment-scoped data.** We support what a phone (pocket / waist / thigh) or a watch
-  (wrist / arm) actually records: one physical device per sample, accelerometer + co-located
-  gyroscope, gravity-present, in `g`. Placements and modalities we don't ship (ankle/chest/torso,
-  ECG, magnetometer, orientation) are pruned. See `halo/data/deployment_policy.py`.
+- **Deployment-scoped data.** The primary corpus uses phone, watch, and bounded consumer-wearable
+  placements: pockets/waist, wrist/forearm, lower back, smart glasses/head, and earbud/ear. Each
+  stream contains accelerometer and trustworthy co-located gyroscope when available; accel-only
+  streams are explicitly masked. ECG, magnetometer, orientation, and unrelated body rigs are pruned.
+  See `data/scripts/curate/deployment_policy.py`.
 - **Two dataset versions.** From the curated stream we build a **harmonised** view (fixed 6-channel
   `[acc_xyz, gyro_xyz]` canonical order, zero-pad + validity mask) and a **non-harmonised** view
-  (native 3/6-channel width). See `halo/baselines/baseline_view.py`.
-- **Unit canonicalization.** One convention — accelerometer in `g`, gravity present — via a single
-  source of truth (`halo/data/accel_units.py`); iOS `userAcceleration` is rebuilt as
-  `userAcc + gravity`, and the only unavoidable gravity-removed set is disclosed, never faked.
+  (native 3/6-channel width). See `data/scripts/assembly/baseline_view.py`.
+- **Unit canonicalization.** Accelerometer values use `g` via a single source of truth
+  (`data/scripts/curate/accel_units.py`); iOS `userAcceleration` is rebuilt as `userAcc + gravity`
+  when a gravity vector exists. Gravity-removed streams (KU-HAR and XRF AirPods) are explicitly
+  described and masked from gravity-dependent behavior rather than being silently treated as total
+  acceleration.
 - **Tiered, faithful baseline comparison.** Heterogeneity is compared as a stack — **T0** base model,
   **T1** rate, **T2** channels/placement, **T3** open-set labels — with an explicit faithfulness
   contract for what may/may not be done to a baseline. See
@@ -36,15 +46,20 @@ Organized by concern (top-level folders, not a single Python package):
 baselines/            # one subfolder per baseline: citation + paper, cloned repo (gitignored), adapter.py
 data/
   datasets/           # one subfolder per dataset: downloads (gitignored), converter, metadata, channel descriptions
-  scripts/            # shared cross-dataset logic (imported as data.scripts.*)
-    accel_units.py        # unit + gravity canonicalization (single source of truth)
-    deployment_policy.py  # phone/watch device-stream selection (channels/placement)
-    baseline_view.py      # harmonised vs non-harmonised assembly
-model/                # the HALO model (tokenizer + encoder + language-alignment head)
-training/             # training harness; harmonised + normal modes
+  scripts/            # shared cross-dataset logic (imported as data.scripts.*), grouped by stage
+    curate/             # deployment_policy.py (device/channel/placement), accel_units.py (unit → g)
+    assembly/           # baseline_view.py (harmonised vs non-harmonised), assemble.py
+    labels/             # canonical vocabulary + global label mapping
+model/
+  tokenizer/          # filterbank + encoder + text conditioning (Phase A)
+  evidence/           # retrieval, evidence head, decoder, confidence (Phase B)
+training/
+  tokenizer/          # Phase-A pretraining (JEPA + augmentation VICReg) + probes
+  evidence/           # Phase-B memory bank, episodic trainer/evaluator
+  diagnostics/        # cross-cutting analyses
+eval/                 # zero-shot / few-shot scoring, protocol stamping, table assembly
 experiments/          # isolated representation studies with their own configs and outputs
-eval/                 # (proposed) zero-shot / few-shot scoring + tiered ablations
-docs/                 # BASELINE_FAIRNESS_POLICY.md — design of record
+docs/                 # design / data / baselines — see docs/README.md for the reading order
 tests/                # regression tests (green)
 ```
 
@@ -52,25 +67,25 @@ Each folder has a short README describing exactly what belongs in it.
 
 ## Status
 
-**Landed (this repo):** the data-curation + baseline-view foundation and the fairness policy, with
-passing tests. This is the layer every model and every baseline reads from, so it comes first.
+All five layers below are **built and running**; the open questions are empirical, not structural.
 
-**Roadmap (rebuilding into this repo):**
-1. Dataset build: `deployment_policy` over raw sessions → windowed **harmonised** + **non-harmonised**
-   grids (60 Hz + native), per dataset. *(A few converters need re-runs first — e.g. PAMAP2 wrist
-   gyro/±16 g — tracked in the build.)*
-2. Model: physical-Hz filterbank tokenizer + dual-branch encoder + per-patch language-alignment head.
-3. Training: symmetric InfoNCE alignment to SBERT label text, channel-text + augmentation curriculum.
-4. Evaluation: zero-shot cross-dataset (macro-F1), subject-disjoint few-shot, tiered ablations.
-5. Baselines: CrossHAR / LiMU-BERT / DeepConvLSTM (we train) + ssl-wearables / UniMTS / NormWear
-   (frozen), each per its faithfulness contract, via the ConSE bridge or native text tower.
+1. **Data** — 12 training datasets (20 streams, native-rate grids) + 7 held-out zero-shot test sets;
+   93-label canonical vocabulary. `docs/data/DATA_PIPELINE.md`.
+2. **Model** — physical-Hz filterbank tokenizer + config-conditional dual-branch encoder.
+3. **Phase A** — label-free JEPA + augmentation-VICReg pretraining.
+4. **Phase B** — memory bank + per-patch retrieval + evidence decoder with rejection.
+5. **Baselines + eval** — 8 models scored on 7 test sets under a stamped protocol;
+   `python -m eval.assemble_table`.
+
+⚠️ **Before citing any number, read `docs/design/EVIDENCE_ENGINE_FINDINGS.md`.** Several headline
+claims have been retracted, and that doc — not this one — is the authoritative empirical position.
 
 ## Development
 
+Tests run against the interpreter in `legacy_code/.venv` (this tree has no `.venv` of its own):
+
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
-pytest -q
+/path/to/legacy_code/.venv/bin/python -m pytest tests -q
 ```
 
 Data, checkpoints, and vendored baseline repos are gitignored and regenerated from source.

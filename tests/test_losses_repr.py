@@ -1,4 +1,4 @@
-"""Unit tests for the consolidated JEPA + relation Phase-A losses."""
+"""Unit tests for the consolidated JEPA + augmentation-VICReg Phase-A losses."""
 
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ from training.tokenizer.losses_repr import (
     make_multiresolution_mask_plan,
     masked_ema_latent_loss,
     phase_a_loss,
-    relation_loss,
     vicreg,
 )
 from training.tokenizer.pretrain import (
+    PipelineAModel,
+    PretrainConfig,
+    objective_encoder_grad_geometry,
+    recommend_objective_weights,
     update_ema_encoder,
 )
 
@@ -77,6 +80,29 @@ def test_mask_adapts_to_small_T():
     plan = make_mask_plan(B=32, T=3, C=6, gyro_channels=GYRO, generator=gen(1))
     visible_t = (~plan.token_mask).any(dim=2).sum(dim=1)
     assert (visible_t >= MIN_VISIBLE_TIME).all()
+
+
+def test_one_patch_window_gets_cross_channel_jepa_target():
+    channels = torch.tensor([[True, True, True, False, False, False]])
+    plan = make_mask_plan(
+        B=1, T=1, C=6, gyro_channels=GYRO, generator=gen(9),
+        channel_event_p=0.0, valid_patches=torch.ones(1, 1, dtype=torch.bool),
+        channel_mask=channels,
+    )
+    assert int(plan.token_mask.sum()) == 1
+    assert not bool(plan.token_mask[..., 3:].any())
+
+
+def test_one_token_per_resolution_gets_shared_channel_target():
+    plan = make_multiresolution_mask_plan(
+        torch.tensor([[0.0, 0.0]]), torch.tensor([[1.0, 1.0]]),
+        torch.tensor([[0, 1]]), C=3, gyro_channels=None, generator=gen(10),
+        channel_event_p=0.0, valid_patches=torch.ones(1, 2, dtype=torch.bool),
+        channel_mask=torch.ones(1, 3, dtype=torch.bool),
+    )
+    assert int(plan.token_mask.sum()) == 2
+    assert torch.equal(plan.token_mask[0, 0], plan.token_mask[0, 1])
+    assert int(plan.token_mask[0, 0].sum()) == 1
 
 
 def test_gyro_triad_dropped_jointly():
@@ -151,34 +177,6 @@ def test_vicreg_gradient_flows_to_both_views():
     assert b.grad is not None and torch.isfinite(b.grad).all()
 
 
-def test_relation_uses_every_augmented_pair_and_sparse_placement_pairs():
-    torch.manual_seed(7)
-    z_a = torch.randn(16, 8, requires_grad=True)
-    z_b = (z_a.detach() + 0.05 * torch.randn(16, 8)).requires_grad_(True)
-    left, right = torch.tensor([0, 2]), torch.tensor([1, 3])
-    out = relation_loss(z_a, z_b, left, right, cross_placement_weight=0.2)
-    assert out.placement_pairs == 2
-    assert out.total > out.augmentation.total
-    assert out.cross_placement_weighted > 0
-    out.total.backward()
-    assert z_a.grad is not None and z_b.grad is not None
-
-
-def test_relation_accepts_one_verified_pair():
-    z = torch.eye(4)
-    out = relation_loss(z, z.clone(), torch.tensor([0]), torch.tensor([1]))
-    assert out.placement_pairs == 1
-    assert torch.isfinite(out.total) and out.cross_placement > 0
-
-
-def test_relation_without_placement_is_universal_vicreg():
-    z_a, z_b = torch.randn(8, 4), torch.randn(8, 4)
-    relation = relation_loss(z_a, z_b)
-    baseline = vicreg(z_a, z_b)
-    assert relation.placement_pairs == 0
-    assert torch.allclose(relation.total, baseline.total)
-
-
 def test_masked_ema_latent_is_stop_gradient_and_masked():
     pred = torch.randn(2, 3, 2, 8, requires_grad=True)
     target = pred.detach().clone().requires_grad_(True)
@@ -214,9 +212,9 @@ def test_masked_ema_latent_duration_weights_partial_tail():
 
 def test_phase_a_loss_has_exactly_two_weighted_terms():
     jepa = torch.tensor(2.0)
-    relation = torch.tensor(3.0)
-    out = phase_a_loss(jepa, relation, jepa_weight=0.5, relation_weight=2.0)
-    assert set(out.terms) == {"jepa", "relation"}
+    vicreg_loss = torch.tensor(3.0)
+    out = phase_a_loss(jepa, vicreg_loss, jepa_weight=0.5, vicreg_weight=2.0)
+    assert set(out.terms) == {"jepa", "vicreg"}
     assert out.total == pytest.approx(7.0)
 
 
@@ -237,31 +235,81 @@ def test_ema_teacher_updates_without_gradients_and_roundtrips_state():
     assert torch.equal(restored.weight, teacher.weight)
 
 
-def test_cross_placement_cosine_survives_a_large_common_mean():
-    """The cross-placement term must keep discriminating when the projector's mean drifts.
+def test_ema_accepts_a_fully_frozen_teacher():
+    """decay == 1.0 must be legal: BYOL's cosine ramp lands on it exactly at the final step.
 
-    Cosine is invariant to a global SCALE but not to a common MEAN offset, and nothing in VICReg
-    constrains that mean (variance and covariance are both computed mean-centred). A 3,000-step
-    run measured ||batch mean|| drifting 2.0 -> 39.6 while the spread stayed ~11, which drove the
-    uncentred cross-placement margin from 0.244 to 0.003. Centring makes the term invariant to
-    both, so the loss must be (near) unchanged by adding a constant vector to every row.
+    Rejecting it crashed every --jepa-ema-schedule cosine run at step == steps, after the last
+    checkpoint was written. The CLI still rejects 1.0 as a FIXED decay, where it would mean a
+    randomly-initialised teacher for the whole run.
     """
-    torch.manual_seed(0)
-    n, d = 64, 128
-    spread = torch.randn(n, d)
-    partner = spread + 0.3 * torch.randn(n, d)
-    z = torch.cat([spread, partner])
-    left = torch.arange(n)
-    right = torch.arange(n) + n
+    student, teacher = torch.nn.Linear(3, 2, bias=False), torch.nn.Linear(3, 2, bias=False)
+    with torch.no_grad():
+        student.weight.fill_(2.0)
+        teacher.weight.zero_()
+    update_ema_encoder(student, teacher, decay=1.0)
+    assert torch.equal(teacher.weight, torch.zeros_like(teacher.weight))
+    with pytest.raises(ValueError):
+        update_ema_encoder(student, teacher, decay=1.0 + 1e-6)
 
-    def cross_of(offset):
-        shifted = z + offset
-        out = relation_loss(shifted, shifted.roll(1, 0), left, right,
-                            cross_placement_weight=0.1)
-        return float(out.cross_placement)
 
-    base = cross_of(torch.zeros(d))
-    shifted = cross_of(torch.full((d,), 40.0 / d ** 0.5))   # ||mean|| = 40, the measured drift
-    assert abs(shifted - base) < 0.02 * max(base, 1e-6) + 1e-4, (base, shifted)
-    # and it must still be far from the no-information value of 1.0
-    assert base < 0.5, base
+def test_default_expander_is_the_historical_control_architecture():
+    """d_model -> d_model -> 128. Adding a width knob must not silently rewrite the default.
+
+    Folding hidden and output width into one flag turned the unchanged default command into
+    256 -> 128 -> 128 (49,408 params vs 98,688), so it stopped being control-equivalent to every
+    earlier run it was being compared against.
+    """
+    projector = PipelineAModel(PretrainConfig()).vicreg_projector
+    assert [projector[0].in_features, projector[0].out_features] == [256, 256]
+    assert [projector[2].in_features, projector[2].out_features] == [256, 128]
+    assert sum(p.numel() for p in projector.parameters()) == 98_688
+
+
+def test_objective_gradient_geometry_reports_direction_and_scale():
+    parameter = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    module = torch.nn.Module()
+    module.register_parameter("value", parameter)
+    losses = {
+        "parallel": 2.0 * parameter[0],
+        "same": 3.0 * parameter[0],
+        "orthogonal": 4.0 * parameter[1],
+    }
+    geometry = objective_encoder_grad_geometry(losses, module)
+    assert geometry["norms"] == pytest.approx({
+        "parallel": 2.0, "same": 3.0, "orthogonal": 4.0,
+    })
+    assert geometry["cosines"]["parallel|same"] == pytest.approx(1.0)
+    assert geometry["cosines"]["parallel|orthogonal"] == pytest.approx(0.0)
+
+
+def test_objective_calibration_hits_share_and_preserves_scale():
+    # Unit gradients are orthogonal with norms JEPA=1 and VICReg=4.
+    sample = {
+        "norms": {"jepa": 1.0, "vicreg": 4.0},
+        "dots": {"jepa|vicreg": 0.0},
+        "cosines": {"jepa|vicreg": 0.0},
+    }
+    report = recommend_objective_weights(
+        [sample] * 5,
+        current_jepa_weight=1.0,
+        current_vicreg_weight=1.0,
+        target_jepa_share=0.5,
+    )
+    recommended = report["recommended"]
+    weighted_jepa = recommended["jepa_weight"] * 1.0
+    weighted_vicreg = recommended["vicreg_weight"] * 4.0
+    assert weighted_jepa / (weighted_jepa + weighted_vicreg) == pytest.approx(0.5)
+    norms = report["median_combined_encoder_grad_norm"]
+    assert norms["recommended_weights"] == pytest.approx(norms["pilot_weights"])
+
+
+def test_objective_calibration_rejects_missing_vicreg_signal():
+    sample = {
+        "norms": {"jepa": 1.0, "vicreg": 0.0},
+        "dots": {"jepa|vicreg": 0.0},
+        "cosines": {"jepa|vicreg": 0.0},
+    }
+    with pytest.raises(ValueError, match="non-zero calibration gradients"):
+        recommend_objective_weights(
+            [sample], current_jepa_weight=1.0, current_vicreg_weight=1.0,
+        )

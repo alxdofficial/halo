@@ -30,7 +30,7 @@ from model.tokenizer.encoder import SetTokenizerEncoder
 from training.tokenizer.pretrain_data import (DFT_SIZE, stream_channel_descriptions,
                                               stream_sensor_texts, _stream_gravity_state,
                                               MultiResolutionCollate, MultiScaleCollate,
-                                              VAL_RESOLUTION_PAIR)
+                                              STREAM_SOURCE_RATE_HZ, VAL_RESOLUTION_PAIR)
 
 # Held-out eval datasets (never in TRAIN_DATASETS). tnda_har/ut_complex excluded
 # (degenerate subject ids -> can't do subject-disjoint kNN).
@@ -123,6 +123,7 @@ def patch_embedding_fingerprint(enc, device) -> torch.Tensor:
 @torch.no_grad()
 def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state=None,
                             channel_mask=None, dataset=None, stream=None,
+                            source_rate: float | None = None,
                             _require_patches: bool = True) -> dict[str, torch.Tensor]:
     """Encode windows and retain both pooled and valid per-patch representations.
 
@@ -147,6 +148,9 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
         if enc.use_duration_embedding else
         MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS)
     )
+    if source_rate is None:
+        source_rate = STREAM_SOURCE_RATE_HZ.get(f"{dataset}/{stream}", float(rate))
+    source_rate = min(float(source_rate), float(rate))
     enc_texts = texts
     cmask = (torch.ones(6, dtype=torch.bool) if channel_mask is None
              else torch.as_tensor(channel_mask, dtype=torch.bool))
@@ -175,7 +179,8 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
         block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
         items = []
         for window in block:
-            item = {"data": window, "rate": rate, "texts": enc_texts, "label_id": 0,
+            item = {"data": window, "rate": rate, "source_rate": source_rate,
+                    "texts": enc_texts, "label_id": 0,
                     "channel_mask": cmask, "gravity_state": gravity_state, "source": "eval"}
             if factored:
                 item["role_texts"] = role_texts
@@ -197,6 +202,7 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
             patch_padding_mask=batch["patch_padding_mask"].to(device),
             sensor_texts=(batch["sensor_texts"] if factored else None),
             sensor_id=(batch["sensor_id"].to(device) if factored else None),
+            source_rate_hz=batch["source_rates"].to(device),
         )
         embs.append(out["pooled"].cpu())
         if "per_patch" not in out:
@@ -256,11 +262,13 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
 
 @torch.no_grad()
 def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
-                   channel_mask=None, dataset=None, stream=None) -> torch.Tensor:
+                   channel_mask=None, dataset=None, stream=None,
+                   source_rate: float | None = None) -> torch.Tensor:
     """Compatibility API: raw windows at native rate -> pooled embeddings only."""
     return encode_dataset_detailed(
         enc, data, texts, device, rate, gravity_state=gravity_state,
         channel_mask=channel_mask, dataset=dataset, stream=stream,
+        source_rate=source_rate,
         _require_patches=False,
     )["pooled"]
 

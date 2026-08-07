@@ -17,17 +17,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from training.tokenizer.losses_repr import make_mask_plan
 from training.tokenizer.pretrain_data import (
     CHANNELS,
-    PATCH_SECONDS_CHOICES,
     CorpusIndex,
     PretrainDataset,
     TemperatureSampler,
 )
 
 OUT = Path(__file__).resolve().parent / "outputs" / "corpus_audit"
-SAMPLE_ITEMS = 800          # augmented items drawn for the task-distribution stats
+SAMPLE_ITEMS = 1024         # four actual Phase-A-sized sampler batches
 SEED = 7
 
 
@@ -103,7 +101,12 @@ def main() -> None:
 
     # -------------------------------------------- realized pretraining-task stats
     ds_train = PretrainDataset(index, index.train, augment=True)
-    picks = rng.choice(len(index.train), size=SAMPLE_ITEMS, replace=False)
+    task_sampler = TemperatureSampler(
+        index.train, index.stream_datasets, num_samples=SAMPLE_ITEMS, batch_size=256,
+        alpha=0.25, seed=SEED, subject_ids=index.train_subject_ids,
+        subject_alpha=0.5, max_dataset_share=0.25,
+    )
+    picks = list(task_sampler)
     stats = {"rate_changed": 0, "channels_dropped": 0, "gravity_absent": 0,
              "cadence_valid": 0, "eigen_valid": 0, "coherence_valid": 0,
              "rates": [], "lengths": []}
@@ -111,14 +114,16 @@ def main() -> None:
     label_seen = Counter()
     from model.tokenizer.primitives import compute_primitives
     for pi in picks:
+        key = index.train[int(pi)]
+        ref = index.refs[key.stream_i]
         item = ds_train[int(pi)]
         label = id_to_label[item["label_id"]]
         label_seen[label] += 1
         stats["rates"].append(item["rate"])
         stats["lengths"].append(item["data"].shape[0])
-        if abs(item["rate"] - 60.0) > 0.1:
+        if abs(item["rate"] - ref.rate_hz) > 0.1:
             stats["rate_changed"] += 1
-        if int(item["channel_mask"].sum()) < 6:
+        if int(item["channel_mask"].sum()) < sum(ref.mask):
             stats["channels_dropped"] += 1
         prims = compute_primitives(item["data"].unsqueeze(0), CHANNELS, item["rate"])
         if not prims["dc_tilt"].valid[0]:
@@ -144,36 +149,24 @@ def main() -> None:
         },
     }
 
-    # Mask-plan realized ratios for the JEPA task distribution.
-    ratios, gyro_drops = [], 0
-    for t_count in (3, 4, 6, 8, 12):
-        plan = make_mask_plan(512, t_count, 6, [3, 4, 5],
-                              generator=torch.Generator().manual_seed(1))
-        ratios.append(round(float(plan.token_mask.float().mean()), 3))
-        full = plan.token_mask.all(dim=1)
-        gyro_drops += int((full[:, 3:].sum(dim=1) == 3).sum())
     report["mask_plan"] = {
-        "realized_ratio_by_T[3,4,6,8,12]": ratios,
-        "gyro_triad_drop_frac": round(gyro_drops / (512 * 5), 3),
-        "patch_seconds_choices": list(PATCH_SECONDS_CHOICES),
+        "authority": "python -m training.tokenizer.objective_health",
+        "note": "The live recipe uses the multiresolution physical-time mask planner; its empirical "
+                "coverage is measured by objective_health rather than this corpus audit.",
     }
 
-    # Live label-free sampler: empirical source share and verified-pair quota.
+    # Live label-free sampler: empirical source share.
     sampler = TemperatureSampler(
         index.train, index.stream_datasets, num_samples=200 * 256, batch_size=256,
-        alpha=0.25, seed=3, event_ids=index.train_event_ids,
-        positive_event_ids=index.train_positive_event_ids, pair_fraction=0.2,
+        alpha=0.25, seed=3,
         subject_ids=index.train_subject_ids, subject_alpha=0.5, max_dataset_share=0.25,
     )
     draws = list(sampler)
     sampled_sources = Counter(index.stream_datasets[index.train[i].stream_i] for i in draws)
-    sampled_events = Counter(index.train_positive_event_ids[i] for i in draws
-                             if index.train_positive_event_ids[i] >= 0)
     report["sampler"] = {
         "sampled_windows": len(draws),
         "source_share": {source: round(count / len(draws), 4)
                          for source, count in sampled_sources.most_common()},
-        "complete_verified_pairs": sum(count == 2 for count in sampled_events.values()),
     }
 
     (OUT / "report.json").write_text(json.dumps(report, indent=2))

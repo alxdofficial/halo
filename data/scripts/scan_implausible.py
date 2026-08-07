@@ -34,10 +34,11 @@ OUT = Path(__file__).resolve().parents[2] / "data" / "quality" / "implausible_wi
 
 
 def scan(alignment: str = "native") -> dict:
-    from data.scripts.eda.grid_io import discover_grids
+    from data.scripts.eda.grid_io import discover_grids, grid_corpus_fingerprint
+    refs = discover_grids(alignment)
     bad: dict[str, list[int]] = {}
     stats = []
-    for ref in sorted(discover_grids(alignment), key=lambda r: r.key):
+    for ref in sorted(refs, key=lambda r: r.key):
         if ref.n_windows == 0:
             continue
         mask = np.asarray(ref.mask, dtype=bool)
@@ -59,16 +60,35 @@ def scan(alignment: str = "native") -> dict:
         if idx.size:
             bad[ref.key] = sorted(int(i) for i in idx)
             stats.append((ref.key, int(idx.size), ref.n_windows, gyro_peak, accel_peak))
-    return {"alignment": alignment, "gyro_rail_rad_s": GYRO_RAIL_RAD_S,
+    return {"alignment": alignment, "grid_fingerprint": grid_corpus_fingerprint(alignment, refs),
+            "gyro_rail_rad_s": GYRO_RAIL_RAD_S,
             "accel_rail_g": ACCEL_RAIL_G, "windows": bad, "summary": stats}
 
 
-def load(alignment: str = "native") -> dict[str, set[int]]:
-    """stream key -> set of window indices to exclude (empty if the scan was never run)."""
+def load(alignment: str = "native", *, require: bool = False) -> dict[str, set[int]]:
+    """Load exclusions, optionally requiring a cache for the exact current grid corpus."""
     if not OUT.exists():
+        if require:
+            raise FileNotFoundError(
+                f"{OUT} is missing — run `python -m data.scripts.scan_implausible`."
+            )
         return {}
     blob = json.loads(OUT.read_text())
     if blob.get("alignment") != alignment:
+        if require:
+            raise ValueError(
+                f"{OUT} was built for alignment {blob.get('alignment')!r}, not {alignment!r}; "
+                "re-run data.scripts.scan_implausible for this alignment."
+            )
+        return {}
+    from data.scripts.eda.grid_io import grid_corpus_fingerprint
+    current = grid_corpus_fingerprint(alignment)
+    if blob.get("grid_fingerprint") != current:
+        if require:
+            raise ValueError(
+                f"{OUT} does not match the current {alignment} grids; re-run "
+                "`python -m data.scripts.scan_implausible` after every grid rebuild."
+            )
         return {}
     return {k: set(v) for k, v in blob.get("windows", {}).items()}
 

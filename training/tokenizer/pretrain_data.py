@@ -23,6 +23,7 @@ Design decisions carried in from the gates:
 
 from __future__ import annotations
 
+import hashlib
 import random as stdlib_random
 from dataclasses import dataclass
 from typing import Iterator, Sequence
@@ -50,11 +51,6 @@ TRAIN_DATASETS = (
 OPTIONAL_PHASE_A_DATASETS = ("extrasensory", "nhanes", "hmog")
 PHASE_A_ONLY_DATASETS = frozenset({"nhanes"})
 UNLABELED_LABEL = "__unlabeled__"
-# The only datasets whose converter/grid metadata establishes that event IDs refer to the same
-# physical instant across streams. Keep this policy in one place: both the sampler index and the
-# materialized dataset item must agree, otherwise the sampler can reserve a relation pair that
-# the collator cannot validate.
-VERIFIED_SIMULTANEOUS_DATASETS = frozenset({"xrf_v2", "nfi_fared", "sp_sw_har"})
 WINDOW_SECONDS = 6.0
 VAL_SUBJECT_FRACTION = 0.10      # subject-disjoint val within the train datasets
 GRAVITY_AUG_P = 0.15             # DROP from default_v2's 0.5: the audit found gravity
@@ -239,13 +235,6 @@ class WindowKey:
     label_id: int
 
 
-def _event_is_verified(ref: GridRef) -> bool:
-    """Whether a grid's explicit event IDs are valid cross-stream physical positives."""
-    return bool(
-        ref.event_ids_explicit and ref.dataset in VERIFIED_SIMULTANEOUS_DATASETS
-    )
-
-
 class CorpusIndex:
     """Discover, curate, subject-split, and label the lazy pretraining corpus index."""
 
@@ -281,12 +270,12 @@ class CorpusIndex:
         # Windows the plausibility scan rejected as physically impossible (accel/gyro beyond any
         # consumer full-scale range). Cached by data.scripts.scan_implausible so indexing stays lazy.
         from data.scripts.scan_implausible import load as _load_implausible
-        self.implausible = _load_implausible(alignment)
+        self.implausible = _load_implausible(alignment, require=True)
         # Byte-identical repeated windows — a device re-emitting a stale buffer, not motion
         # (ExtraSensory's Pebble does this for hours at a time). Merged into the same drop set:
         # both are "this window is not an observation", and CorpusIndex applies one filter.
         from data.scripts.scan_duplicates import load as _load_duplicates
-        self.duplicates = _load_duplicates(alignment)
+        self.duplicates = _load_duplicates(alignment, require=True)
         self.excluded = {
             key: self.implausible.get(key, set()) | self.duplicates.get(key, set())
             for key in set(self.implausible) | set(self.duplicates)
@@ -356,34 +345,6 @@ class CorpusIndex:
                 else:
                     self.train.append(key)
         self.label_ids = label_ids
-        # Label-free physical-event identities. New grids persist session-id + local-window identity;
-        # only datasets whose publications/releases establish simultaneous streams are eligible for
-        # cross-placement positives. Old grids have stream-local fallback ids and therefore cannot
-        # silently manufacture positives from equal lengths/labels/subjects.
-        # sp_sw_har joined 2026-08-05: its phone and watch CSVs are stamped on ONE wall clock
-        # (measured: 40/40 executions overlap 100% of the shorter span), so its converter now
-        # emits events.json by mutual-best temporal overlap -> 1,136 verified pairs.
-        # wisdm is deliberately ABSENT despite also being simultaneous phone+watch: each device
-        # stamps its own UPTIME counter, and the two ranges do not intersect at all (offsets
-        # measured at ~45 h / ~19 days / ~12 min across subjects). Pairing it would mean assuming
-        # both recordings start together -- the array alignment this objective exists to avoid.
-        ev: dict[str, int] = {}
-        self.train_event_ids: list[int] = []
-        self.train_event_is_verified: list[bool] = []
-        for k in self.train:
-            ref = self.refs[k.stream_i]
-            verified = _event_is_verified(ref)
-            key = ref.event_ids[k.window_i] if verified else f"{ref.key}:{k.window_i}"
-            self.train_event_ids.append(ev.setdefault(key, len(ev)))
-            self.train_event_is_verified.append(verified)
-        counts: dict[int, int] = {}
-        for event_id, verified in zip(self.train_event_ids, self.train_event_is_verified):
-            if verified:
-                counts[event_id] = counts.get(event_id, 0) + 1
-        self.train_positive_event_ids = [
-            event_id if verified and counts.get(event_id, 0) > 1 else -1
-            for event_id, verified in zip(self.train_event_ids, self.train_event_is_verified)
-        ]
         subject_ids: dict[tuple[str, str], int] = {}
         self.train_subject_ids = []
         for key in self.train:
@@ -392,11 +353,6 @@ class CorpusIndex:
             self.train_subject_ids.append(
                 subject_ids.setdefault(subject, len(subject_ids))
             )
-        self.row_aligned_datasets = sorted({
-            self.refs[k.stream_i].dataset
-            for k, event_id in zip(self.train, self.train_positive_event_ids)
-            if event_id >= 0
-        })
         # Which labels the VAL split can actually score. best.pt is selected on val_knn_ba, so a
         # label with zero val windows is silently unscored — surface it instead of claiming
         # "all classes are scored" (audit F1).
@@ -443,7 +399,7 @@ def _seed_worker(worker_id: int) -> None:
 class PretrainDataset(Dataset):
     """One item = one augmented window: variable (T', 6) data + rate + texts + label.
 
-    ``two_view`` (relation objective): also emit an independently augmented second view
+    ``two_view`` (VICReg objective): also emit an independently augmented second view
     window under ``item["view_b"]`` (its own signal augmentation, rate, channel_mask and
     augmentation-consistent channel text). The collate patchifies it into the ``*_b`` keys."""
 
@@ -537,7 +493,7 @@ class PretrainDataset(Dataset):
             "rate": float(sample.sampling_rate),
             "source_rate": source_rate,
             "texts": texts6,
-            # Factored text (docs/design/TEXT_CONDITIONING.md §4b): carried per view so the relation
+            # Factored text (docs/design/TEXT_CONDITIONING.md §4b): carried per view so the VICReg
             # second view gets its OWN independently-augmented role/sensor text. label_id is
             # view-independent and lives in __getitem__ below.
             "role_texts": role_texts6,
@@ -555,7 +511,7 @@ class PretrainDataset(Dataset):
         # One CONFIG-text-dropout decision per window, shared by both positive views. The signal
         # augmentations still draw independently (that is what makes the pair a positive), but the
         # views never disagree on WHETHER the acquisition config was described — otherwise the
-        # relation loss would train embed(config) == embed(no config), i.e. to ignore that text,
+        # VICReg loss would train embed(config) == embed(no config), i.e. to ignore that text,
         # the opposite of the config-conditional thesis. See SensorTextDropoutCfg.shared_across_views.
         cfg_seed = stdlib_random.randrange(2 ** 31)
         view = self._augment_to_slots(ref, key, base_texts, slot, shared_config_seed=cfg_seed)
@@ -566,8 +522,6 @@ class PretrainDataset(Dataset):
             "stream": ref.key,
             "window_index": key.window_i,
             "subject": f"{ref.dataset}:{ref.subjects[key.window_i]}",
-            "event_id": ref.event_ids[key.window_i],
-            "event_verified": _event_is_verified(ref),
         }
         if self.two_view:
             # Second view: signal augmentation INDEPENDENT, config-text dropout SHARED (same seed).
@@ -630,9 +584,6 @@ class TemperatureSampler(Sampler[int]):
 
     def __init__(self, keys: list[WindowKey], stream_datasets: list[str], num_samples: int,
                  batch_size: int, alpha: float = 0.5, seed: int = SEED,
-                 event_ids: Sequence[int] | None = None,
-                 positive_event_ids: Sequence[int] | None = None,
-                 pair_fraction: float = 0.0,
                  subject_ids: Sequence[int] | None = None,
                  subject_alpha: float = 1.0,
                  max_dataset_share: float | None = None):
@@ -680,28 +631,6 @@ class TemperatureSampler(Sampler[int]):
             raise ValueError("batch_size cannot exceed the number of indexed windows")
         if self.num_samples % self.batch_size:
             raise ValueError("num_samples must be divisible by batch_size")
-        # Per-window EVENT id; two windows sharing one id are simultaneous recordings of the same
-        # physical event (different placements) and must not co-occur unless explicitly paired.
-        self.event_ids = None if event_ids is None else np.asarray(event_ids)
-        self.positive_event_ids = (
-            None if positive_event_ids is None else np.asarray(positive_event_ids)
-        )
-        self.pair_fraction = float(pair_fraction)
-        if not 0.0 <= self.pair_fraction < 1.0:
-            raise ValueError("pair_fraction must be in [0, 1)")
-        if self.event_ids is not None and len(self.event_ids) != len(keys):
-            raise ValueError("event_ids must align 1:1 with keys")
-        if self.positive_event_ids is not None and len(self.positive_event_ids) != len(keys):
-            raise ValueError("positive_event_ids must align 1:1 with keys")
-        self.positive_event_members: dict[int, list[int]] = {}
-        if self.positive_event_ids is not None:
-            for i, event_id in enumerate(self.positive_event_ids.tolist()):
-                if event_id >= 0:
-                    self.positive_event_members.setdefault(int(event_id), []).append(i)
-            self.positive_event_members = {
-                event_id: members for event_id, members in self.positive_event_members.items()
-                if len(members) >= 2
-            }
         self.epoch = 0
 
     def __len__(self) -> int:
@@ -713,68 +642,12 @@ class TemperatureSampler(Sampler[int]):
         gen = torch.Generator().manual_seed(self.seed + self.epoch)
         self.epoch += 1
         bs = self.batch_size
-        # Each batch is drawn without replacement so exact duplicates do not reduce relation
-        # diversity; sampling remains with replacement across batches.
+        # Each batch is drawn without replacement so exact duplicates do not reduce VICReg's
+        # variance/covariance sample diversity; sampling remains with replacement across batches.
         for _ in range(self.num_samples // bs):
-            take: list[int] = []
-            seen_windows: set[int] = set()
-            seen_events: set[int] = set()
-
-            # Reserve a controlled fraction of the batch for verified simultaneous positives.
-            # Each selected event contributes exactly two placements; remaining draws avoid that
-            # event so every event yields one unambiguous pair.
-            n_pairs = min(
-                int(round(bs * self.pair_fraction / 2.0)),
-                len(self.positive_event_members),
-            )
-            if n_pairs:
-                event_keys = sorted(self.positive_event_members)
-                chosen = torch.randperm(len(event_keys), generator=gen)[:n_pairs].tolist()
-                for j in chosen:
-                    event_id = event_keys[j]
-                    members = self.positive_event_members[event_id]
-                    order = torch.randperm(len(members), generator=gen)[:2].tolist()
-                    for pos in order:
-                        i = members[pos]
-                        take.append(i)
-                        seen_windows.add(i)
-                    seen_events.add(event_id)
-
-            # Oversample once, then keep unique windows and unique non-positive events. This
-            # preserves event hygiene while allowing only deliberately reserved positive pairs.
-            draw_n = min(4 * bs, self.weights.numel())
-            candidates = torch.multinomial(
-                self.weights, draw_n, replacement=False, generator=gen
+            take = torch.multinomial(
+                self.weights, bs, replacement=False, generator=gen
             ).tolist()
-            for i in candidates:
-                if len(take) >= bs:
-                    break
-                if i in seen_windows:
-                    continue
-                event_id = int(self.event_ids[i]) if self.event_ids is not None else i
-                positive_id = (
-                    int(self.positive_event_ids[i])
-                    if self.positive_event_ids is not None else -1
-                )
-                grouping_id = positive_id if positive_id >= 0 else event_id
-                if grouping_id in seen_events:
-                    continue
-                take.append(i)
-                seen_windows.add(i)
-                seen_events.add(grouping_id)
-            if len(take) < bs:
-                # Tiny synthetic corpora may not have enough distinct events. Preserve batch size
-                # without duplicating a window, even if distinct-event hygiene must relax.
-                for i in candidates:
-                    if len(take) >= bs:
-                        break
-                    if i not in seen_windows:
-                        take.append(i)
-                        seen_windows.add(i)
-            if len(take) != bs:
-                raise RuntimeError(
-                    f"could only draw {len(take)}/{bs} unique windows for a temperature batch"
-                )
             order = torch.randperm(bs, generator=gen).tolist()
             yield from [take[i] for i in order]
 
@@ -782,6 +655,22 @@ class TemperatureSampler(Sampler[int]):
 # ----------------------------------------------------------------------------------------------
 # Multi-scale collate
 # ----------------------------------------------------------------------------------------------
+def _batch_identity_seed(batch: list[dict], seed: int) -> int:
+    """Stable batch-local RNG seed that contains no activity-label information."""
+    digest = hashlib.blake2b(digest_size=8, person=b"halo-patch")
+    digest.update(int(seed).to_bytes(8, "little", signed=True))
+    for position, item in enumerate(batch):
+        identity = (
+            position,
+            item.get("source", "?"),
+            item.get("stream", "?"),
+            item.get("window_index", -1),
+        )
+        digest.update(repr(identity).encode("utf-8"))
+        digest.update(b"\0")
+    return int.from_bytes(digest.digest(), "little")
+
+
 class MultiScaleCollate:
     """Draw ONE patch_seconds per batch; patchify each sample at its OWN rate.
 
@@ -815,10 +704,10 @@ class MultiScaleCollate:
     def _patch_seconds(self, batch: list[dict]) -> float:
         if self.fixed is not None:
             return self.fixed
-        # Seed from the batch content (label ids) so the draw is deterministic yet
-        # DIFFERENT across batches/workers — a single cloned rng repeats across workers.
-        key = hash(tuple(item["label_id"] for item in batch)) ^ self.seed
-        return float(np.random.default_rng(key & 0xFFFFFFFF).choice(self.patch_choices))
+        # Key the deterministic draw to recording identity, never to activity labels. Using Python's
+        # randomized ``hash`` also made the same run differ across worker processes.
+        key = _batch_identity_seed(batch, self.seed)
+        return float(np.random.default_rng(key).choice(self.patch_choices))
 
     def __call__(self, batch: list[dict]) -> dict:
         ps = self._patch_seconds(batch)
@@ -861,7 +750,7 @@ class MultiScaleCollate:
                 # Window shorter than one patch at this scale (e.g. sp_sw_har's 1.0 s TUG
                 # windows in a ps=1.5 batch). Emit ONE short patch spanning the whole
                 # window rather than an all-padding window (which yields a degenerate
-                # pooled embedding that poisons the relation objective). patch_len is honest (< n); the
+                # pooled embedding that poisons VICReg). patch_len is honest (< n); the
                 # filterbank flags the under-resolved bands via its resolution mask.
                 per_patch, usable = data.shape[0], 1
                 positions[b, 0] = 0.5 * per_patch / rate   # true center of the short patch (F4a)
@@ -900,10 +789,6 @@ class MultiScaleCollate:
             "streams": [item.get("stream", "?") for item in batch],
             "window_indices": torch.tensor([item.get("window_index", -1) for item in batch]),
             "subjects": [item.get("subject", "?") for item in batch],
-            "event_ids": [item.get("event_id") for item in batch],
-            "event_verified": torch.tensor(
-                [bool(item.get("event_verified", False)) for item in batch]
-            ),
             "channel_mask": torch.stack([item["channel_mask"] for item in batch]),
             "patch_padding_mask": patch_pad,
         }
@@ -957,8 +842,8 @@ class MultiResolutionCollate:
     def _patch_seconds(self, batch: list[dict]) -> tuple[float, float]:
         if self.fixed is not None:
             return self.fixed
-        key = hash(tuple(item["label_id"] for item in batch)) ^ self.seed
-        rng = np.random.default_rng(key & 0xFFFFFFFF)
+        key = _batch_identity_seed(batch, self.seed)
+        rng = np.random.default_rng(key)
         pairs = self._valid_pairs
         if self.max_batch_tokens:
             # Peak VRAM scales with the TOKEN count B x P, and P is a function of the
@@ -1081,10 +966,6 @@ class MultiResolutionCollate:
             "streams": [item.get("stream", "?") for item in batch],
             "window_indices": torch.tensor([item.get("window_index", -1) for item in batch]),
             "subjects": [item.get("subject", "?") for item in batch],
-            "event_ids": [item.get("event_id") for item in batch],
-            "event_verified": torch.tensor(
-                [bool(item.get("event_verified", False)) for item in batch]
-            ),
             "channel_mask": channel_mask,
             "patch_padding_mask": patch_pad,
         }

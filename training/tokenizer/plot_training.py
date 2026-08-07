@@ -1,6 +1,6 @@
 """Live training-telemetry plots — read a run's log.jsonl and render a multi-panel PNG.
 
-Panels: JEPA/relation + total loss · learning rate · per-module gradient norms (log) · val kNN-BA
+Panels: JEPA/VICReg + total loss · learning rate · per-module gradient norms (log) · val kNN-BA
 (overall + per data source) · per-source JEPA zero-supervision rate. Pass --watch N to re-render every
 N seconds while a run is live (leave a terminal running it next to training).
 
@@ -56,10 +56,7 @@ def render(log_path: Path, out_path: Path):
     S, V = load(log_path)
     fig, ax = plt.subplots(3, 2, figsize=(15, 11))
 
-    for k, lbl in (("total", "total"), ("jepa", "JEPA"),
-                   ("relation", "relation"),
-                   ("relation/augmentation", "augmentation"),
-                   ("relation/cross_placement_weighted", "cross-placement")):
+    for k, lbl in (("total", "total"), ("jepa", "JEPA"), ("vicreg", "VICReg")):
         x, y = series(S, k)
         if x:
             ax[0, 0].plot(x, y, lw=0.9, label=lbl)
@@ -68,7 +65,7 @@ def render(log_path: Path, out_path: Path):
     x, y = series(S, "lr")
     ax[0, 1].plot(x, y); ax[0, 1].set_title("learning rate"); ax[0, 1].set_xlabel("step")
 
-    for k in ("grad/encoder", "grad/jepa_predictor", "grad/relation_projector"):
+    for k in ("grad/encoder", "grad/jepa_predictor", "grad/vicreg_projector"):
         x, y = series(S, k)
         if x:
             ax[1, 0].plot(x, y, lw=0.9, label=k.split("/")[1])

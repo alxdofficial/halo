@@ -1,7 +1,7 @@
 # Agreed Phase-A and Phase-B Implementation Plan
 
-Status: Phase B implemented as recorded below. Phase A was consolidated on 2026-08-05 to the
-two-objective JEPA + relation recipe documented in `training/tokenizer/README.md`; that recipe
+Status: Phase B implemented as recorded below. Phase A was consolidated on 2026-08-06 to the
+two-objective JEPA + augmentation-VICReg recipe documented in `training/tokenizer/README.md`; that recipe
 supersedes the earlier configurable objective menu in this plan.
 
 ## Implementation map and launch gates
@@ -9,8 +9,7 @@ supersedes the earlier configurable objective menu in this plan.
 Phase A:
 
 - objectives and train loop: `training/tokenizer/{losses_repr,pretrain}.py`;
-- verified event-aware data/sampling: `data/scripts/{build_grids,assembly/assemble}.py`,
-  `data/scripts/eda/grid_io.py`, and `training/tokenizer/pretrain_data.py`;
+- label-free hierarchical data/sampling: `training/tokenizer/pretrain_data.py`;
 - tests: `tests/{test_losses_repr,test_pretrain_data,test_build_grids}.py`;
 - CPU integration smoke passed:
   `python -m training.tokenizer.pretrain --smoke --steps 2 --out /tmp/halo_phase_a_smoke --force`.
@@ -36,10 +35,8 @@ Native-grid event migration completed on 2026-07-25:
 - NFI-FARED contributes 13,260 events shared across two placements;
 - the subject-disjoint training split contains 17,387 paired events / 55,270 paired windows.
 
-The XRF V2 and NFI-FARED converters write generated `events.json` sidecars mapping device-specific
-session IDs to physical events. `build_grids` consumes that map and appends the local window ordinal.
-A fresh checkout must run the converters before `python -m data.scripts.build_grids --alignment
-native`; a non-smoke pretrain still refuses to start if verified simultaneous events are absent.
+The XRF V2 and NFI-FARED converters still write event identities because Phase B uses them for bank
+guarding and episode construction. Phase A neither requires nor samples by those identities.
 
 Before a real Phase-B run, rebuild the bank with the selected frozen Phase-A checkpoint, then train
 and evaluate the patch arm:
@@ -62,10 +59,8 @@ eligible source windows in the active index, while repeated refreshes expose the
 training.
 
 Corpus scale is controlled without deleting windows. Phase A assigns dataset mass proportional to
-`n^0.25`, caps any ordinary dataset share at 25%, and splits each dataset's mass across subjects
-proportional to `n_subject^0.5`; the separate 20% verified-placement window quota remains intact. On the
-current 12-source corpus this reduces Capture-24 from 88.4% of raw windows / 43.7% under the old
-sampler to 21.2% of realized draws in a 50-batch audit. Phase B's 8,000-window label cap is
+`n^0.25`, caps any dataset share at 25%, and splits each dataset's mass across subjects
+proportional to `n_subject^0.5`. There is no source-specific pair quota. Phase B's 8,000-window label cap is
 water-filled across configurations, and patch-episode queries are uniform over selected labels and
 configurations with square-root subject tempering. Historical controls remain available through
 `--sampler-alpha 0.5 --sampler-max-dataset-share 1 --sampler-subject-alpha 1`,
@@ -80,28 +75,15 @@ The consolidated objective is:
 
 ```text
 JEPA masked contextual prediction
-+ unified relation learning
-    - augmentation VICReg for every window
-    - verified cross-placement cosine agreement where available
++ augmentation VICReg for every window
 ```
 
-### Unified relation learning
+### Augmentation VICReg
 
 - Use float32 VICReg over two independently augmented views of every sampled window.
 - Use raw projector outputs for VICReg's MSE invariance, variance, and covariance terms.
-- Reduce verified cross-placement cosine agreement separately and add it inside the same relation
-  objective. Do not estimate sparse-pair variance/covariance or let universal pairs dilute it.
-- Keep fixed top-level coefficients. There is no adaptive objective calibration.
-
-### Simultaneous-placement positives
-
-- Persist an explicit physical-event identity from conversion/grid assembly into the pretraining
-  index. Do not infer positive identity solely from equal array lengths or row numbers.
-- Reserve a quota of verified simultaneous placements as an additional positive relation source.
-- Apply the placement-consistency loss to pooled projection representations, not individual channel
-  tokens, because observability legitimately differs by placement.
-- Keep this subterm lower-weight and quota-controlled so six-placement recordings cannot dominate it.
-- Never use an activity label to manufacture Phase-A positives.
+- Measure post-warmup JEPA and VICReg encoder-gradient geometry once, then freeze the solved scalar
+  weights. Do not continuously adapt weights or alternate objectives.
 
 ### Masked targets
 

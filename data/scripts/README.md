@@ -40,4 +40,5 @@ and generated artifacts under `eda/outputs/`. See [`eda/README.md`](eda/README.m
 | `build_grids.py` | assemble converted sessions → windowed harmonised/non-harmonised grids |
 
 Per-dataset pieces (converter, `metadata.json`, `labels.json`) live under [`../datasets/<name>/`](../datasets).
-Harmonised vs non-harmonised: see `../../docs/BASELINE_FAIRNESS_POLICY.md` §2A and `../../docs/DATA_HETEROGENEITY.md`.
+Harmonised vs non-harmonised: see `../../docs/baselines/BASELINE_FAIRNESS_POLICY.md` §2A and
+`../../docs/data/DATA_HETEROGENEITY.md`.

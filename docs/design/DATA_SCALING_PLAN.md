@@ -24,33 +24,17 @@ multi-placement, gyro-bearing share. "More free-living data did not help" and "t
 heterogeneous" are not distinguishable from the headline number alone; report the per-source val
 breakdown alongside it.
 
-Draw shares must be measured from `TemperatureSampler`, not computed as `n^α / Σn^α`. The alpha=0.25
-weights are only half the story: `placement_pair_fraction=0.1` reserves ~10% of every batch for
-*verified simultaneous* events, which exist **only** in nfi_fared and xrf_v2, so those two are
-oversampled on top of their temperature weight. Measured over 256,000 draws in batches of 256 on the
-primary corpus:
-
-| dataset | pair_fraction=0 | **actual (0.1)** |
-|---|---:|---:|
-| capture24 | 23.3% | **21.0%** |
-| nfi_fared | 8.5% | **14.8%** |
-| xrf_v2 | 9.0% | **11.3%** |
-| wisdm | 10.8% | 9.7% |
-| harmes | 7.8% | 7.0% |
-| uci_har | 6.7% | 6.0% |
-| others | — | <=6.1% each |
-
-nfi_fared has 12,263 eligible paired events against xrf_v2's 5,124, so the quota lands mostly on
-nfi_fared. An earlier revision of this table quoted the analytic `n^α` shares (capture24 33.5%,
-extrasensory 22.0%) and was wrong on two counts: it ignored the pair quota and mixed the expanded
-roster into a primary-corpus claim.
+Phase A no longer reserves synchronous event pairs. Draw shares therefore follow the documented
+dataset `n^0.25` distribution with a 25% cap, followed by square-root subject tempering. Measure the
+realized finite-batch shares in `corpus_audit.py`; do not mix the optional expanded roster into a
+primary-corpus claim.
 
 ## Measured local corpus
 
 | Corpus | Streams | Materialised windows | Materialised hours | Train / val at the default data seed 20260718 | Semantic labels |
 |---|---:|---:|---:|---:|---:|
-| Primary 12 sources | 20 | 1,729,885 | 2,858.34 | 1,542,518 / 186,269 (95 implausible + 1,003 duplicate dropped) | 93 |
-| Expanded (+ExtraSensory + NHANES pilot + H-MOG) | 25 | 2,695,536 | 4,467.76 | 2,382,969 / 277,724 (95 implausible + 34,748 duplicate dropped) | 93 + reserved `__unlabeled__` |
+| Primary 12 sources | 20 | 1,730,241 | 2,858.93 | 1,542,518 / 186,625 (95 implausible + 1,003 duplicate dropped) | 93 |
+| Expanded (+ExtraSensory + NHANES pilot + H-MOG) | 25 | 2,695,892 | 4,468.35 | 2,382,969 / 278,080 (95 implausible + 34,748 duplicate dropped) | 93 + reserved `__unlabeled__` |
 
 The seed is `pretrain.py`'s `data_seed` default; an earlier revision of this table quoted 20260726,
 which no default command reproduces. Materialised counts are what `build_grids` wrote; the train/val
@@ -242,7 +226,7 @@ sampling.
 
 The earlier four-objective smoke record was superseded when Phase A was consolidated. Current
 verification is maintained in `training/tokenizer/README.md`: a launch must pass the objective-health
-diagnostic, gradient check, full tests, and a consolidated JEPA + relation CPU smoke. Optional-only
+diagnostic, gradient check, full tests, and a consolidated JEPA + augmentation-VICReg CPU smoke. Optional-only
 runs still require NHANES to have no semantic validation or Phase-B rows. No GPU training is implied
 by these checks.
 

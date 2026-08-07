@@ -81,5 +81,6 @@ rate is recorded per dataset. `build_grids` materialises **three** regimes (`_AL
 
 - Every dataset in `deployment_policy.STREAM_SPECS` is classified in **exactly one** of
   `accel_units.ACC_UNIT_G` / `ACC_UNIT_MS2` (a new dataset cannot land without a unit decision).
-- After the pipeline, a still window reads |acc| ≈ 1 g for gravity-present datasets, ≈ 0 for kuhar.
+- After the pipeline, a still window reads |acc| approximately 1 g for gravity-present datasets and
+  approximately 0 for the declared gravity-removed streams (KU-HAR and XRF V2 AirPods).
 - Gyroscope channels are never scaled by `accel_units`.

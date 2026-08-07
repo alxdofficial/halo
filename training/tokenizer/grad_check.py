@@ -1,6 +1,6 @@
 """Activation and gradient-flow diagnostic for the live Phase-A model.
 
-Runs one real CPU batch through JEPA and the unified relation objective. It checks fusion scale,
+Runs one real CPU batch through JEPA and augmentation VICReg. It checks fusion scale,
 per-module gradients, frozen text parameters, and dead trainable parameters.
 
 Run: /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.grad_check
@@ -20,7 +20,7 @@ from training.tokenizer.losses_repr import (
     make_mask_plan,
     masked_ema_latent_loss,
     phase_a_loss,
-    relation_loss,
+    vicreg,
 )
 from training.tokenizer.pretrain import PipelineAModel, PretrainConfig
 from training.tokenizer.pretrain_data import CorpusIndex, MultiScaleCollate, PretrainDataset
@@ -103,10 +103,10 @@ def main() -> None:
     jepa = masked_ema_latent_loss(
         jepa_prediction, clean["tokens"].detach(), plan.token_mask,
     )
-    z_a = model.relation_projector(clean["pooled"])
-    z_b = model.relation_projector(view_b["pooled"])
-    relation = relation_loss(z_a, z_b)
-    loss = phase_a_loss(jepa, relation.total)
+    z_a = model.vicreg_projector(clean["pooled"])
+    z_b = model.vicreg_projector(view_b["pooled"])
+    vicreg_result = vicreg(z_a, z_b)
+    loss = phase_a_loss(jepa, vicreg_result.total)
 
     model.zero_grad(set_to_none=True)
     loss.total.backward()
@@ -125,13 +125,13 @@ def main() -> None:
         "fused_tokens": rms(fused),
         "fusion_delta": rms(fused - tokens),
         "pooled": rms(clean["pooled"]),
-        "relation_projection": rms(z_a),
+        "vicreg_projection": rms(z_a),
     }
     fusion_ratio = magnitudes["fusion_delta"] / max(magnitudes["sensor_tokens"], 1e-9)
     gradients = {
         "encoder": module_grad_norm(encoder),
         "jepa_predictor": module_grad_norm(model.jepa_predictor),
-        "relation_projector": module_grad_norm(model.relation_projector),
+        "vicreg_projector": module_grad_norm(model.vicreg_projector),
         "transformer_layers": [module_grad_norm(layer) for layer in encoder.transformer.layers],
     }
     dead = [name for name, parameter in model.named_parameters()
@@ -150,7 +150,7 @@ def main() -> None:
     report = {
         "device": str(device),
         "batch": [batch_size, patches, channels],
-        "loss": {"jepa": float(jepa.detach()), "relation": float(relation.total.detach())},
+        "loss": {"jepa": float(jepa.detach()), "vicreg": float(vicreg_result.total.detach())},
         "activation_rms": {key: round(value, 5) for key, value in magnitudes.items()},
         "fusion_delta_ratio": round(fusion_ratio, 5),
         "gradient_norms": gradients,

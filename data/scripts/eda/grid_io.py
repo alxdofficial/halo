@@ -106,6 +106,43 @@ def discover_grids(
     return refs
 
 
+def grid_corpus_fingerprint(
+    alignment: str = "harmonised",
+    refs: Sequence[GridRef] | None = None,
+) -> str:
+    """Fingerprint the grids consumed by corpus-wide quality scans.
+
+    Labels and subjects are hashed in full. Signal content is sampled deterministically and paired
+    with file size/mtime, so a rebuilt or edited grid invalidates exclusion indices without forcing
+    every training process to hash tens of gigabytes.
+    """
+    selected = list(refs) if refs is not None else discover_grids(alignment)
+    digest = hashlib.sha256()
+
+    def add(value: object) -> None:
+        payload = str(value).encode("utf-8")
+        digest.update(len(payload).to_bytes(8, "little"))
+        digest.update(payload)
+
+    for ref in sorted(selected, key=lambda item: item.key):
+        add((ref.key, ref.alignment, ref.rate_hz, ref.channels, ref.mask, ref.shape))
+        for values in (ref.labels, ref.subjects):
+            values_digest = hashlib.sha256()
+            for value in values:
+                encoded = value.encode("utf-8")
+                values_digest.update(len(encoded).to_bytes(4, "little"))
+                values_digest.update(encoded)
+            add(values_digest.hexdigest())
+
+        data_path = ref.grid_dir / "data.npy"
+        stat = data_path.stat()
+        add((stat.st_size, stat.st_mtime_ns))
+        sampled = np.ascontiguousarray(ref.load_data()[::97, ::13, :], dtype=np.float32)
+        add(hashlib.sha256(sampled.tobytes()).hexdigest())
+
+    return digest.hexdigest()
+
+
 def triad_indices(ref: GridRef, modality: str) -> tuple[int, int, int] | None:
     """Return valid xyz indices for ``acc`` or ``gyro``, else ``None``."""
     names = tuple(f"{modality}_{axis}" for axis in "xyz")

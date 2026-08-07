@@ -4,50 +4,40 @@
   "jepa": {
     "supervised_tokens_per_window": {
       "n": 5120,
-      "min": 0.0,
+      "min": 2.0,
       "p10": 12.0,
-      "median": 33.0,
+      "median": 30.0,
       "p90": 66.0,
-      "max": 105.0,
-      "mean": 37.9242
+      "max": 102.0,
+      "mean": 35.4764
     },
     "masked_fraction_of_real_tokens": {
       "n": 5120,
-      "min": 0.0,
-      "p10": 0.5,
+      "min": 0.1667,
+      "p10": 0.4444,
       "median": 0.6111,
-      "p90": 0.7576,
+      "p90": 0.75,
       "max": 0.875,
-      "mean": 0.6007
+      "mean": 0.6014
     },
-    "zero_supervision_windows": 159,
-    "zero_supervision_fraction": 0.0311
+    "zero_supervision_windows": 0,
+    "zero_supervision_fraction": 0.0
   },
-  "relation": {
-    "augmentation_pairs_per_batch": 256,
-    "placement_pairs_per_batch": {
-      "n": 20,
-      "min": 26.0,
-      "p10": 26.0,
-      "median": 26.0,
-      "p90": 26.0,
-      "max": 26.0,
-      "mean": 26.0
-    },
-    "configured_pair_window_fraction": 0.2
+  "vicreg": {
+    "augmentation_pairs_per_batch": 256
   },
   "sampled_source_share": {
-    "capture24": 0.1857,
-    "harmes": 0.0613,
-    "hhar": 0.0549,
-    "kuhar": 0.0496,
-    "mhealth": 0.0303,
-    "nfi_fared": 0.2,
-    "pamap2": 0.035,
-    "sp_sw_har": 0.0441,
-    "uci_har": 0.057,
-    "unimib_shar": 0.0559,
-    "wisdm": 0.0912,
-    "xrf_v2": 0.135
+    "capture24": 0.2273,
+    "harmes": 0.0734,
+    "hhar": 0.0705,
+    "kuhar": 0.0699,
+    "mhealth": 0.0371,
+    "nfi_fared": 0.0865,
+    "pamap2": 0.0516,
+    "sp_sw_har": 0.0549,
+    "uci_har": 0.0656,
+    "unimib_shar": 0.0705,
+    "wisdm": 0.1039,
+    "xrf_v2": 0.0887
   }
 }

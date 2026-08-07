@@ -61,6 +61,7 @@ training/tokenizer/outputs/**/*.pt
 # Per-run training/eval artifacts (logs, eval jsons); .pt already ignored above.
 # Keep one-time analysis deliverables (m0_probe/, m2_gate/, corpus_audit/, objective_health/).
 training/tokenizer/outputs/pretrain*/
+training/tokenizer/outputs/*/
 training/tokenizer/outputs/**/*.log
 
 # agent worktrees / session scratch

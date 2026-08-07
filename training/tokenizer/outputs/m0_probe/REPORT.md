@@ -1,5 +1,10 @@
 # M0 robustness probe — invariance vs discriminability
 
+> **Dated artifact (seed 20260717).** Generated when the recipe still had four objectives; the
+> "A3-target" heading below refers to an objective that no longer exists. Phase A now trains two
+> objectives (JEPA + augmentation VICReg) — see [`../../README.md`](../../README.md). Kept as the record of
+> what the probe measured at the time; do not read it as a description of the current recipe.
+
 Probe sample: 1040 windows from 4 streams (motionsense/phone_front_pocket, pamap2/watch_wrist, realworld/phone_waist, shoaib/phone_right_pocket), seed 20260717.
 
 ## Invariance (mean cosine similarity / mean relative-L2 drift; cadence = exp(-|octave err|) / octave err)

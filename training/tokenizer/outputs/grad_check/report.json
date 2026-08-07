@@ -6,26 +6,26 @@
     6
   ],
   "loss": {
-    "jepa": 1.0599080324172974,
-    "relation": 23.75098419189453
+    "jepa": 1.0587775707244873,
+    "vicreg": 23.812597274780273
   },
   "activation_rms": {
     "sensor_tokens": 0.48773,
     "text_embeddings": 0.48145,
     "projected_text": 0.28763,
-    "fused_tokens": 0.48943,
-    "fusion_delta": 0.03542,
-    "pooled": 0.93566,
-    "relation_projection": 0.22048
+    "fused_tokens": 0.48956,
+    "fusion_delta": 0.03545,
+    "pooled": 0.93635,
+    "vicreg_projection": 0.19755
   },
-  "fusion_delta_ratio": 0.07262,
+  "fusion_delta_ratio": 0.07268,
   "gradient_norms": {
-    "encoder": 5.140115737915039,
-    "jepa_predictor": 1.9689276218414307,
-    "relation_projector": 2.3021788597106934,
+    "encoder": 4.32301664352417,
+    "jepa_predictor": 1.9501465559005737,
+    "vicreg_projector": 1.9258683919906616,
     "transformer_layers": [
-      2.6024909019470215,
-      2.0482773780822754
+      2.2923102378845215,
+      1.6577950716018677
     ]
   },
   "dead_parameters": [],

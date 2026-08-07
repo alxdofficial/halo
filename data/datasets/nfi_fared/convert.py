@@ -85,6 +85,41 @@ def create_manifest() -> dict:
     }
 
 
+def merge_duplicate_labels(label_arrays: list[np.ndarray], source_names: list[str]) \
+        -> tuple[np.ndarray, int]:
+    """Merge annotations for signal-identical files without discarding mapped activity.
+
+    NFI contains reruns whose IMU/time columns are identical but whose annotation columns differ.
+    A mapped activity is more informative than transition/idle (``no activity``). Two different
+    mapped canonical activities for the same row are ambiguous and therefore rejected.
+    """
+    if not label_arrays or len(label_arrays) != len(source_names):
+        raise ValueError("duplicate-label merge needs aligned non-empty arrays and source names")
+    lengths = {len(labels) for labels in label_arrays}
+    if len(lengths) != 1:
+        raise ValueError(f"signal-identical files have different label lengths: {source_names}")
+
+    merged = np.asarray(label_arrays[0], dtype=str).copy()
+    merged_canonical = np.asarray([LABEL_MAP.get(label) for label in merged], dtype=object)
+    promoted = 0
+    for labels, source in zip(label_arrays[1:], source_names[1:]):
+        labels = np.asarray(labels, dtype=str)
+        canonical = np.asarray([LABEL_MAP.get(label) for label in labels], dtype=object)
+        conflict = ((merged_canonical != None) & (canonical != None)  # noqa: E711
+                    & (merged_canonical != canonical))
+        if bool(conflict.any()):
+            rows = np.flatnonzero(conflict)[:5].tolist()
+            raise ValueError(
+                f"conflicting mapped labels in signal-identical NFI files {source_names}: "
+                f"rows {rows}, incoming source {source}"
+            )
+        take = (merged_canonical == None) & (canonical != None)       # noqa: E711
+        promoted += int(take.sum())
+        merged[take] = labels[take]
+        merged_canonical[take] = canonical[take]
+    return merged, promoted
+
+
 def main() -> None:
     sessions_dir = HERE / "sessions"
     if sessions_dir.exists():
@@ -96,29 +131,40 @@ def main() -> None:
     n_sess = 0
     dist: Counter = Counter()
     files = sorted(glob.glob(str(RAW / "**" / "*final*.csv"), recursive=True))
-    # NFI ships SIGNAL-identical reruns under different names that differ ONLY in the label column
-    # (e.g. pp10 exp1 vs exp4: identical acc/rot, one region labelled `train` vs `no activity`).
-    # Dedup on the signal + time columns (drop the label + index columns) so these collapse — a
-    # full-file-bytes hash misses them and double-counts the shared windows.
-    seen_sig: set[str] = set()
-    n_dup = 0
+    # Group signal-identical reruns before writing sessions. Their label columns can differ, so
+    # keeping the first file would make lexicographic filename order decide the ground truth.
+    signal_groups: dict[str, list[str]] = {}
     for csv in files:
-        name = Path(csv).stem                         # 20230608_exp1_final_pp01
-        parts = name.split("_")
-        date = parts[0]                                # disambiguates same-exp re-runs
-        exp = next((p for p in parts if p.startswith("exp")), "exp")
-        subject = next((p for p in parts if p.startswith("pp")), "pp00")
         df = pd.read_csv(csv)
         signal = df.drop(columns=[c for c in df.columns
                                   if "label" in str(c).lower() or str(c).startswith("Unnamed")],
                          errors="ignore")
         sig_h = hashlib.sha256(
             pd.util.hash_pandas_object(signal, index=False).values.tobytes()).hexdigest()
-        if sig_h in seen_sig:
-            n_dup += 1
-            continue
-        seen_sig.add(sig_h)
-        raw_lab = df["label activity"].astype(str).to_numpy()
+        signal_groups.setdefault(sig_h, []).append(csv)
+
+    n_dup = len(files) - len(signal_groups)
+    n_promoted = 0
+    for members in signal_groups.values():
+        csv = members[0]
+        name = Path(csv).stem                         # 20230608_exp1_final_pp01
+        parts = name.split("_")
+        date = parts[0]                                # disambiguates same-exp re-runs
+        exp = next((p for p in parts if p.startswith("exp")), "exp")
+        subject = next((p for p in parts if p.startswith("pp")), "pp00")
+        member_subjects = {
+            next((part for part in Path(path).stem.split("_") if part.startswith("pp")), "pp00")
+            for path in members
+        }
+        if member_subjects != {subject}:
+            raise ValueError(f"signal-identical files cross subjects: {members}")
+        frames = [pd.read_csv(path) for path in members]
+        df = frames[0]
+        raw_lab, promoted = merge_duplicate_labels(
+            [frame["label activity"].astype(str).to_numpy() for frame in frames],
+            [Path(path).name for path in members],
+        )
+        n_promoted += promoted
         change = np.flatnonzero(raw_lab[1:] != raw_lab[:-1]) + 1
         bounds = np.concatenate([[0], change, [len(raw_lab)]])
         for k in range(len(bounds) - 1):
@@ -151,7 +197,8 @@ def main() -> None:
         {"dataset": "nfi_fared", "sampling_rate_hz": NATIVE_RATE, "pre_windowed": False}, indent=2))
     (HERE / "manifest.json").write_text(json.dumps(create_manifest(), indent=2))
     print(f"nfi_fared: {n_sess} sessions ({sum('_back_' in s for s in labels)} back / "
-          f"{sum('_arm_' in s for s in labels)} wrist) from {len(files)} files; "
+          f"{sum('_arm_' in s for s in labels)} forearm) from {len(files)} files; "
+          f"{n_dup} signal-duplicate files merged, {n_promoted:,} activity rows recovered; "
           f"runs/label {dict(dist)}")
 
 

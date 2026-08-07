@@ -15,8 +15,8 @@
 > first, then `POSITIONING.md` for what the whole thing is for.
 >
 > **Phase-A objective warning (2026-08-05):** the numbered A1/A2/A3 recipe later in this document is
-> historical design rationale, not runnable configuration. The live trainer has exactly JEPA and a
-> unified relation objective; see `training/tokenizer/README.md`.
+> historical design rationale, not runnable configuration. The live trainer has exactly JEPA and
+> augmentation VICReg; see `training/tokenizer/README.md`.
 
 ## 0. The shift
 From an **activity classifier** (emit one label) to a **human-activity foundation model**
@@ -154,7 +154,7 @@ online write-on-GT.
 **Voting mechanism (precise):** a neighbor does NOT run a per-neighbor MLP over labels. It carries one
 **text** label; the **shared** `t` kernel spreads that label's weight across *all* candidates by text
 similarity (`relu⟨t(label_i), t(c)⟩`), scaled by the neighbor's query-similarity weight. Candidates are a
-**runtime argument** = the target task's label list (train: ~86-way global vocab; eval: the dataset's small
+**runtime argument** = the target task's label list (train: the 93-way global vocab; eval: the dataset's small
 set). Two distinct "open" axes: **open-vocabulary** (novel candidate *label* still scored via text sim —
 the voting kernel) vs **open-set novelty** (no candidate supported → vacuity → abstain — a separate path).
 Text geometry is **load-bearing**: transfer is only as good as `t` places candidate labels vs seen labels

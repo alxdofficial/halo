@@ -1,8 +1,8 @@
 # Native Phase-A pretrain — pre-launch manifest (2026-07-19)
 
 > **HISTORICAL MANIFEST.** This predates the consolidated objective and describes the old SupCon /
-> A3 / multi-rail recipe. The authoritative current launch recipe — JEPA + unified augmentation and
-> cross-placement relation learning, temperature sampling, and factored conditioning — is in
+> A3 / multi-rail recipe. The authoritative current launch recipe — JEPA + augmentation VICReg,
+> temperature sampling, and factored conditioning — is in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md), mirroring the live
 > `PretrainConfig`. Use that for any launch.
 

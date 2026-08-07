@@ -200,8 +200,8 @@ def main() -> None:
     # contradict each other (see data/scripts/scan_duplicates).
     from data.scripts.scan_duplicates import load as _load_duplicates
     from data.scripts.scan_implausible import load as _load_implausible
-    excluded_by_stream = _load_duplicates("native")
-    for _key, _idx in _load_implausible("native").items():
+    excluded_by_stream = _load_duplicates("native", require=True)
+    for _key, _idx in _load_implausible("native", require=True).items():
         excluded_by_stream[_key] = excluded_by_stream.get(_key, set()) | _idx
 
     for ref in refs:

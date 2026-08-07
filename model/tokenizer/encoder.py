@@ -2,7 +2,7 @@
 
 Assembly (build plan M3; EVIDENCE_ENGINE.md §5.2.1):
 
-    gravity-aligned patches ── PhysicalFilterbankTokenizer ──> sensor tokens (B,P,C,d)
+    device-frame IMU patches ── PhysicalFilterbankTokenizer ──> sensor tokens (B,P,C,d)
                                                       │
     channel descriptions ──frozen LM──> text embeddings ──ChannelTextFusion──> identity
                                                       │
@@ -309,8 +309,14 @@ class SetTokenizerEncoder(nn.Module):
         patch_padding_mask: Optional[torch.Tensor] = None,  # (B, P) True = real patch
         sensor_texts: Optional[Sequence[Sequence[str]]] = None,  # factored: B lists of N_sensor strings
         sensor_id: Optional[torch.Tensor] = None,                # factored: (B, C) long
+        source_rate_hz=None,                         # scalar | (B,) acquisition bandwidth bound
     ) -> dict[str, torch.Tensor]:
-        sensor_tokens = self.tokenize(patches, sampling_rate_hz, patch_len_samples)
+        sensor_tokens = self.tokenize(
+            patches,
+            sampling_rate_hz,
+            patch_len_samples,
+            source_rate_hz=source_rate_hz,
+        )
         device = sensor_tokens.device
         s_embs = s_masks = None
         if self.text_conditioning == "factored":

@@ -1,10 +1,8 @@
-"""The two label-free Phase-A objectives.
+"""The two universal, label-free Phase-A objectives.
 
 ``JEPA`` masks physical-time intervals and channels in a student view, then predicts the
-corresponding contextual tokens from a clean EMA teacher. ``relation`` uses VICReg over two
-independent augmentations of every window and adds scale-free agreement for the subset of
-verified simultaneous cross-placement recordings. The relation types are reduced separately,
-so sparse physical pairs are not diluted by the universal augmentation pairs.
+corresponding contextual tokens from a clean EMA teacher. ``VICReg`` aligns two independent
+augmentations of every window while preserving per-dimension variance and reducing redundancy.
 """
 
 from __future__ import annotations
@@ -35,6 +33,23 @@ class MaskPlan:
     token_mask: torch.Tensor          # (B, T, C) bool
 
 
+def _ensure_learnable_target(mask: torch.Tensor, valid: torch.Tensor,
+                             channel_mask: Optional[torch.Tensor], rnd) -> torch.Tensor:
+    """Give otherwise-unsupervised short windows one cross-channel prediction target."""
+    B, _, C = mask.shape
+    real_channels = (channel_mask if channel_mask is not None else
+                     torch.ones(B, C, dtype=torch.bool, device=mask.device))
+    empty = ~mask.flatten(1).any(dim=1)
+    eligible = empty & valid.any(dim=1) & (real_channels.sum(dim=1) >= 2)
+    if not bool(eligible.any()):
+        return mask
+    scores = rnd(B, C).masked_fill(~real_channels, -1.0)
+    channel = scores.argmax(dim=1)
+    rows = torch.nonzero(eligible).squeeze(1)
+    mask[rows, :, channel[rows]] = valid[rows]
+    return mask
+
+
 def make_mask_plan(
     B: int,
     T: int,
@@ -58,9 +73,9 @@ def make_mask_plan(
       predict the future = the world-model objective).
 
     VALIDITY-AWARE (pass valid_patches + channel_mask): the temporal block lands only on
-    REAL patches (per-sample `usable` count) and channel drops hit only REAL channels, so
-    JEPA supervision (masked ∩ real) is non-empty for every window with >= 2 real patches.
-    When validity masks are omitted, every patch and channel is treated as real.
+    REAL patches (per-sample `usable` count) and channel drops hit only REAL channels. If a short
+    window has only one real patch, a fallback masks one real channel while leaving at least one
+    other channel visible. When validity masks are omitted, every patch and channel is real.
     """
     rnd = lambda *s: torch.rand(*s, generator=generator, device=device)  # noqa: E731
     mask = torch.zeros(B, T, C, dtype=torch.bool, device=device)
@@ -112,6 +127,9 @@ def make_mask_plan(
         mask &= valid_patches.unsqueeze(2)
     if channel_mask is not None:
         mask &= channel_mask.unsqueeze(1)
+    valid = (valid_patches if valid_patches is not None else
+             torch.ones(B, T, dtype=torch.bool, device=device))
+    mask = _ensure_learnable_target(mask, valid, channel_mask, rnd)
 
     return MaskPlan(token_mask=mask)
 
@@ -203,6 +221,7 @@ def make_multiresolution_mask_plan(
     mask &= valid.unsqueeze(2)
     if channel_mask is not None:
         mask &= channel_mask.unsqueeze(1)
+    mask = _ensure_learnable_target(mask, valid, channel_mask, rnd)
     return MaskPlan(token_mask=mask)
 
 
@@ -241,9 +260,7 @@ def vicreg(
     their per-dimension scale is part of the collapse-prevention objective. Computation is promoted to
     fp32 so AMP cannot underflow covariance statistics.
 
-    This is the published MSE invariance term. Cross-placement agreement uses a separate cosine
-    reduction in ``relation_loss`` because it is an attractive-only sparse relation whose value
-    must not drift with the projector scale.
+    This is the published MSE invariance term.
     """
     if z_a.shape != z_b.shape or z_a.ndim != 2:
         raise ValueError(
@@ -279,86 +296,6 @@ def vicreg(
     )
 
 
-@dataclass
-class RelationLossOutput:
-    """Unified relation objective and its independently auditable components."""
-
-    total: torch.Tensor
-    augmentation: VICRegOutput
-    cross_placement: torch.Tensor
-    cross_placement_weighted: torch.Tensor
-    placement_pairs: int
-
-
-def relation_loss(
-    z_a: torch.Tensor,
-    z_b: torch.Tensor,
-    pair_left: Optional[torch.Tensor] = None,
-    pair_right: Optional[torch.Tensor] = None,
-    *,
-    cross_placement_weight: float = 0.1,
-    invariance_weight: float = 25.0,
-    variance_weight: float = 25.0,
-    covariance_weight: float = 1.0,
-    target_std: float = 1.0,
-) -> RelationLossOutput:
-    """VICReg for every augmented pair plus verified cross-placement agreement.
-
-    The augmentation relation supplies VICReg's global anti-collapse statistics over the full
-    batch. Cross-placement pairs are sparse, so they contribute only a separately reduced cosine
-    invariance term; estimating a 128-dimensional covariance from roughly 26 pairs would fit noise.
-    ``invariance_weight`` is shared so ``cross_placement_weight`` has the same semantics as the
-    former placement coefficient. A single verified pair is useful and is not discarded.
-    """
-    if cross_placement_weight < 0:
-        raise ValueError("cross_placement_weight must be nonnegative")
-    augmentation = vicreg(
-        z_a, z_b,
-        invariance_weight=invariance_weight,
-        variance_weight=variance_weight,
-        covariance_weight=covariance_weight,
-        target_std=target_std,
-    )
-    if pair_left is None:
-        pair_left = torch.empty(0, dtype=torch.long, device=z_a.device)
-    if pair_right is None:
-        pair_right = torch.empty(0, dtype=torch.long, device=z_a.device)
-    if pair_left.ndim != 1 or pair_right.ndim != 1 or pair_left.shape != pair_right.shape:
-        raise ValueError("placement pair indices must be matching one-dimensional tensors")
-    if pair_left.numel() and (
-        int(pair_left.min()) < 0 or int(pair_right.min()) < 0
-        or int(pair_left.max()) >= len(z_a) or int(pair_right.max()) >= len(z_a)
-    ):
-        raise IndexError("placement pair index is outside the relation batch")
-
-    if pair_left.numel():
-        # CENTRE on the batch mean before the cosine. Cosine measures the angle FROM THE ORIGIN,
-        # so it is invariant to a global SCALE but NOT to a common MEAN offset -- and nothing in
-        # VICReg constrains that mean: its variance and covariance terms are both computed on
-        # mean-centred data. Measured over 3,000 uncentred steps, ||batch mean|| drifted 2.0 ->
-        # 39.6 while the informative spread stayed at ~11, so every pair sat at cos ~0.95
-        # regardless of content: this term's margin over a RANDOM pairing fell 0.244 (step 300)
-        # to 0.003, i.e. the objective stopped discriminating and its gradient went with it.
-        # Centring is invariant to both scale and offset (verified: margin 0.074 -> 0.943 at
-        # ||mean|| = 40). Note the published MSE invariance term does not need this -- it is
-        # translation-invariant already, which is why the augmentation relation was unaffected.
-        # Mean over the actual pair rows, detached: this is a reference frame, not a target.
-        centre = torch.cat([z_a[pair_left], z_a[pair_right]]).float().mean(0, keepdim=True).detach()
-        left = F.normalize(z_a[pair_left].float() - centre, dim=-1)
-        right = F.normalize(z_a[pair_right].float() - centre, dim=-1)
-        cross = (1.0 - (left * right).sum(dim=-1)).mean()
-    else:
-        cross = z_a.new_zeros((), dtype=torch.float32)
-    cross_weighted = float(cross_placement_weight) * float(invariance_weight) * cross
-    return RelationLossOutput(
-        total=augmentation.total + cross_weighted,
-        augmentation=augmentation,
-        cross_placement=cross,
-        cross_placement_weighted=cross_weighted,
-        placement_pairs=int(pair_left.numel()),
-    )
-
-
 @torch.no_grad()
 def pair_contrast(a: torch.Tensor, b: torch.Tensor, generator=None) -> dict[str, float]:
     """Positive-pair similarity MINUS the random-pair baseline, for any aligned-pair objective.
@@ -366,8 +303,8 @@ def pair_contrast(a: torch.Tensor, b: torch.Tensor, generator=None) -> dict[str,
     A bare positive similarity is uninterpretable. cos(a_i, b_i) = 0.95 means the objective is
     working if a random pair sits at 0.1, and means the representation has collapsed into a
     narrow cone -- so the objective is measuring nothing -- if a random pair ALSO sits at 0.95.
-    Every aligned-pair term here (JEPA, augmentation agreement, and cross-placement agreement)
-    has that failure mode; without this baseline, a
+    Both aligned-pair terms here (JEPA and augmentation agreement) have that failure mode; without
+    this baseline, a
     collapsed run and a converged run were indistinguishable from the loss value alone.
 
     `margin` is the quantity to watch: it is the actual discriminative signal available to the
@@ -375,10 +312,9 @@ def pair_contrast(a: torch.Tensor, b: torch.Tensor, generator=None) -> dict[str,
     """
     if a.ndim != 2 or a.shape != b.shape or a.shape[0] < 2:
         return {}
-    # Centre first, for the same reason the cross-placement loss does: an un-centred cosine
-    # saturates once the representation's common mean grows past its spread, so the margin decays
-    # toward 0 even when the objective is perfectly healthy. That produced a FALSE alarm on the
-    # augmentation relation, whose MSE loss is translation-invariant and was learning fine
+    # Centre first because an un-centred cosine saturates once the representation's common mean
+    # grows past its spread, so the margin decays toward 0 even when the objective is healthy. That
+    # produced a false alarm on VICReg, whose MSE invariance loss is translation-invariant
     # (augmented pairs reached 1.5% of random-pair distance while this reported margin 0.073).
     centre = torch.cat([a, b]).detach().float().mean(0, keepdim=True)
     an = F.normalize(a.detach().float() - centre, dim=-1)
@@ -463,21 +399,21 @@ class PhaseALossOutput:
 
 def phase_a_loss(
     jepa: torch.Tensor,
-    relation: torch.Tensor,
+    vicreg_loss: torch.Tensor,
     *,
     jepa_weight: float = 1.0,
-    relation_weight: float = 1.0,
+    vicreg_weight: float = 1.0,
 ) -> PhaseALossOutput:
-    """Combine the fixed-weight JEPA and relation objectives.
+    """Combine the fixed-weight JEPA and augmentation-VICReg objectives.
 
     Keeping exactly two named terms makes gradient telemetry and ablations unambiguous. Frontend
     adaptation regularization is model regularization and is added by the trainer, not represented
     as a third pretraining objective.
     """
-    if jepa_weight < 0 or relation_weight <= 0:
-        raise ValueError("jepa_weight must be nonnegative and relation_weight must be positive")
+    if jepa_weight < 0 or vicreg_weight <= 0:
+        raise ValueError("jepa_weight must be nonnegative and vicreg_weight must be positive")
     terms = {
         "jepa": float(jepa_weight) * jepa,
-        "relation": float(relation_weight) * relation,
+        "vicreg": float(vicreg_weight) * vicreg_loss,
     }
-    return PhaseALossOutput(total=terms["jepa"] + terms["relation"], terms=terms)
+    return PhaseALossOutput(total=terms["jepa"] + terms["vicreg"], terms=terms)

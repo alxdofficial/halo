@@ -11,12 +11,17 @@ Organized into subfolders by concern.
 >    the authoritative current empirical position. **Any number in any other doc is subordinate to
 >    this one.**
 >
-> ### ⚠️ State of results as of 2026-07-21
-> **`eval/results/` is EMPTY and every headline number in these docs is provisional.** The split
-> manifest changed (452 → 482 subjects, `hapt` cohort-aliased), the probe is now seeded, and cache
-> fingerprints are now enforced — so all four ConSE heads are stale and must be refit **together**
-> before any table is valid. Pre-fix numbers are preserved byte-identical in
-> `eval/results_archive/2026-07-20_pre-vocab-fix/` (tag `results-pre-vocab-fix`).
+> ### State of results as of 2026-08-06
+> **`eval/results/` is populated and consistent** — 56 cells (8 models × 7 zero-shot test sets), all
+> stamped **protocol v4** (93 labels). Regenerate the table with `python -m eval.assemble_table`,
+> which refuses to assemble a mixed-protocol table. Current means:
+>
+> | harnet | halo_evidence | crosshar | unimts | halo | limubert | imagebind | normwear |
+> |---:|---:|---:|---:|---:|---:|---:|---:|
+> | **45.7** | 42.9 | 42.8 | 34.7 | 34.4 | 32.2 | 11.4 | 5.1 |
+>
+> **harnet (frozen UK-Biobank) is still ahead.** The evidence engine is second and beats the
+> Phase-A + ConSE path (34.4) by 8.5 points, but does not beat the strongest baseline.
 >
 > **Retracted claims — do not cite:** the 49.5 "beats harnet" evidence-decoder headline (twice: first
 > for eval-label text contamination + eval-tuned hyperparameters, then again after the vocabulary
@@ -24,10 +29,8 @@ Organized into subfolders by concern.
 > filterbank as a contribution (measured **inert** — the gain was multiresolution).
 >
 > **⚠️ Never pair a number from `pretrain_native` with one from `pretrain_fixed_mr`.** They are
-> different encoders. The valid same-encoder pairs are **84.3 / 39.6** (`pretrain_native`, supervised
-> probe vs zero-shot ConSE) and **42.7 / 45.1 / 46.1** (`pretrain_fixed_mr`, ConSE vs untrained
-> retrieval vs trained decoder). `RESULTS_V2.md` reports HALO at **40.4** because it uses
-> `pretrain_native`.
+> different encoders. Any pre-v4 number in the docs below (40.4, 47.3, 42.7, 45.1, 46.1, 49.5) was
+> produced under the 59-label vocabulary and is **not** comparable to the table above.
 
 ## `design/` — the contribution: what we're building and why
 
@@ -36,6 +39,9 @@ Organized into subfolders by concern.
   acquisition configs; open-set-labels-alone is table stakes (ConSE); channel-count is not a claim.
 - [**POSITIONING.md**](design/POSITIONING.md) — is zero-shot HAR worth pursuing, what the deliverable
   is *for* (operational properties, not accuracy), the k-curve, the controlled-shift protocol.
+- [APPLICATIONS.md](design/APPLICATIONS.md) — what a HAR foundation model makes *possible*
+  downstream, chosen so the comparison does not rest on accuracy we do not have. Brainstorm; no
+  decision taken.
 - [LANGUAGE_HIERARCHY.md](design/LANGUAGE_HIERARCHY.md) — second-act design: language at every level.
 - [**TEXT_CONDITIONING.md**](design/TEXT_CONDITIONING.md) — factoring channel text into a
   per-sensor identity (device+placement+modality) + trivial intra-sensor role; current-code mapping
@@ -53,6 +59,10 @@ Organized into subfolders by concern.
 - [EVIDENCE_ENGINE_RESEARCH.md](design/EVIDENCE_ENGINE_RESEARCH.md) — 2026-07-14 literature synthesis.
 
 **Pretraining / tokenizer**
+- [**PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md**](design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md) —
+  the agreed contract for both phases: objectives, sampling, memory/decoder rules,
+  and required controls. Phase A consolidated to JEPA + augmentation VICReg on 2026-08-06.
+  The executable recipe lives in [`training/tokenizer/README.md`](../training/tokenizer/README.md).
 - [AUGMENTATIONS.md](design/AUGMENTATIONS.md) — augmentation policy + the told-vs-not-told experiment.
 - [LEARNABLE_TOKENIZER_ARM.md](design/LEARNABLE_TOKENIZER_ARM.md) — ⚠️ hypothesis **falsified**: the
   learnable filterbank is inert; multiresolution did the work.
@@ -72,6 +82,7 @@ Organized into subfolders by concern.
 ## `data/` — the corpus and how it's built
 - [DATA_PIPELINE.md](data/DATA_PIPELINE.md) — source → curate → unit→g → resample → window → grids.
 - [DATA_HETEROGENEITY.md](data/DATA_HETEROGENEITY.md) — per-dataset normalization decisions and why.
+- [STORAGE_AUDIT_2026-07-26.md](data/STORAGE_AUDIT_2026-07-26.md) — on-disk footprint by dataset.
 
 ## `baselines/` — who we compare against and how
 - [BASELINES.md](baselines/BASELINES.md) — roster, verified input contracts, frozen-vs-self-train.

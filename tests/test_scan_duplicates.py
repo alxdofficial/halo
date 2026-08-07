@@ -82,3 +82,19 @@ def test_load_require_refuses_to_silently_return_an_empty_screen(tmp_path, monke
     assert sd.load("native", require=False) == {}
     with pytest.raises(ValueError):
         sd.load("native", require=True)
+
+
+def test_load_require_rejects_a_cache_for_old_grid_content(tmp_path, monkeypatch):
+    from data.scripts import scan_duplicates as sd
+    from data.scripts.eda import grid_io
+
+    cache = tmp_path / "duplicate_windows.json"
+    cache.write_text(json.dumps({
+        "alignment": "native", "grid_fingerprint": "old", "windows": {},
+    }))
+    monkeypatch.setattr(sd, "OUT", cache)
+    monkeypatch.setattr(grid_io, "grid_corpus_fingerprint", lambda alignment: "current")
+
+    assert sd.load("native", require=False) == {}
+    with pytest.raises(ValueError, match="does not match"):
+        sd.load("native", require=True)

@@ -1,8 +1,8 @@
-"""Pipeline A pretraining with two label-free objectives.
+"""Pipeline A pretraining with two universal, label-free objectives.
 
   * JEPA: a masked student predicts a clean EMA teacher's contextual tokens.
-  * Relation: VICReg between two augmentations of every window, plus separately reduced
-    scale-free agreement for verified simultaneous cross-placement recordings.
+  * VICReg: invariance, variance, and covariance regularization over two independently
+    augmented views of every window.
 
 Labels are used only by the validation probes. The corpus sampler is hierarchical and label-free:
 capped dataset-temperature mass, subject-temperature mass, then windows.
@@ -14,7 +14,7 @@ Other invariants:
     augmentation supplies orientation robustness.           (2026-07-19 decision)
   * The encoder's inner filterbank norm is CALIBRATED before training.  (M3 lesson)
 
-Model selection: subject-disjoint val kNN balanced accuracy (macro), not loss.
+Model selection: subject-disjoint val kNN recall macro-averaged over label/stream cells, not loss.
 Checkpoints carry config + label map + filterbank norm stats + provenance.
 
 Run (CPU smoke):   .../python -m training.tokenizer.pretrain --steps 20 --smoke
@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
+import math
+import statistics
 import subprocess
 import time
 from dataclasses import asdict, dataclass, replace
@@ -38,12 +41,13 @@ from torch.utils.data import DataLoader
 
 from model.tokenizer.encoder import SetTokenizerEncoder
 from training.tokenizer.losses_repr import (
+    MASK_RATIO_TIME,
     make_mask_plan,
     make_multiresolution_mask_plan,
     masked_ema_latent_loss,
     pair_contrast,
     phase_a_loss,
-    relation_loss,
+    vicreg,
 )
 from training.tokenizer.pretrain_data import (
     DFT_SIZE,
@@ -99,28 +103,51 @@ class PretrainConfig:
                                           # steps/pass on the 1.54M-window corpus). The previous
                                           # '~10 passes at batch 512' note was written when
                                           # batch_size was 512 and was not updated by fd3ae4d.
-    # LR / batch: fd3ae4d (2026-07-26) halved batch_size 512 -> 256 but left lr at the value that
-    # had been sqrt-scaled UP *for* 512, so the live config runs 1.41x the LR its own rule
-    # prescribes. Under that rule batch 256 wants 3e-4. Which value actually transfers better is
-    # unmeasured, and LR is the knob the MTO reality-check literature (Xin et al., NeurIPS 2022)
-    # found dominates loss-weight effects -- so LR is swept BEFORE any objective-weight sweep
-    # rather than silently pinned here.
-    lr: float = 4.2e-4                    # = 3e-4 x sqrt(2). See the LR / batch note above.
+    # Batch 256 uses the original 3e-4 reference LR. The stale 4.2e-4 default was the sqrt-scaled
+    # value for batch 512 and survived when the batch was halved; it remains an explicit sweep arm.
+    lr: float = 3e-4
     weight_decay: float = 0.05
     warmup_steps: int = 1_000
     grad_clip: float = 1.0
-    # Two fixed-weight objectives. ``jepa_weight=0`` gives the relation-only R0/R1 controls;
-    # ``cross_placement_weight=0`` gives R0 without changing which ordinary windows are sampled.
+    # Two fixed-weight objectives. ``jepa_weight=0`` gives the VICReg-only control.
     jepa_weight: float = 1.0
-    relation_weight: float = 1.0
+    vicreg_weight: float = 1.0
     jepa_ema_decay: float = 0.996
+    # BYOL RAMPS the teacher decay rather than fixing it (cosine to exactly 1.0):
+    #     tau_k = 1 - (1 - tau_base) * (cos(pi*k/K) + 1) / 2,  tau_base=0.996 -> 1.0
+    # data2vec also anneals but is NOT the source of this shape: it uses a LINEAR ramp for speech
+    # and NLP, and a constant 0.9998 for vision. The 'cosine' arm here is BYOL's.
+    # The trade-off is real -- early training wants a teacher that moves (the student has
+    # nothing to learn from a frozen random target), late training wants one that is stable.
+    # Our 0.996 is exactly BYOL's STARTING value held constant for all 30k steps, i.e. pinned
+    # at the fast end throughout. Plausibly related to JEPA converging by ~step 500 and then
+    # contributing 0.7% of the encoder gradient. Off by default until measured on our data --
+    # three literature transfers already failed at our scale this session.
+    jepa_ema_schedule: str = "fixed"      # fixed | cosine (BYOL/data2vec ramp to 1.0)
+    # Realised mask fraction is (L + patch)/W, so nominal 0.5 currently masks ~0.56 of short
+    # tokens and ~0.63 of long ones. Comparable methods sit HIGHER: BEiT 40%, MAE 75%
+    # (its ablation shows linear-probe accuracy climbing steadily to 75%, a ~20-point gap over
+    # low ratios), data2vec 2.0 ~80%, I-JEPA context 0.7-1.0. Raising this also reduces the
+    # cross-resolution leak, since fewer short tokens stay visible inside a masked long one.
+    mask_ratio_time: float = MASK_RATIO_TIME
     vicreg_invariance_weight: float = 25.0
     vicreg_variance_weight: float = 25.0
     vicreg_covariance_weight: float = 1.0
     vicreg_target_std: float = 1.0
-    # Pair quota is a fraction of BATCH WINDOWS; two windows form one verified relation.
-    cross_placement_weight: float = 0.1
-    relation_pair_fraction: float = 0.2
+    # VICReg expander, hidden and output widths kept separate; see PipelineAModel. Both defaults
+    # reproduce the historical hard-coded 256->256->128 exactly, so `pretrain` with no width flag
+    # is the control. Output 128 is HALF d_model -- the literature ratio is several times LARGER
+    # -- so this is swept, not assumed. Sweep caveat: the 128/512/1024 arms already run moved
+    # hidden and output TOGETHER, and only the 512/1024 arms differed from the historical hidden
+    # width, so they do not isolate which of the two widths mattered.
+    vicreg_proj_hidden: int = 256
+    vicreg_proj_dim: int = 128
+    # Optional one-time post-warmup calibration. Report mode writes the recommendation and stops;
+    # apply mode installs it after the calibration step, freezes it, and continues the same run.
+    objective_calibration_at: int = 0       # 0 disables; recommended full pilot: 2_000
+    objective_calibration_batches: int = 50
+    objective_target_jepa_share: float = 0.45
+    objective_calibration_mode: str = "report"  # report (stop) | apply (freeze and continue)
     # Label-free hierarchical corpus sampler. Dataset mass is tempered and capped, then distributed
     # within each dataset as P(subject) ∝ n_subject^subject_alpha. This keeps Capture-24's useful
     # scale without letting one acc-only wrist corpus or its longest subjects define the encoder.
@@ -155,6 +182,35 @@ class PretrainConfig:
     device: str = "cpu"
 
 
+def hydrate_calibrated_objective_weights(
+    cfg: PretrainConfig,
+    saved_cfg: dict,
+    saved_step: int,
+    explicit_fields: set[str] | None = None,
+) -> bool:
+    """Restore calibration trajectory state before strict resume validation.
+
+    This applies both before and after the calibration step. Explicit CLI overrides are left alone
+    so the ordinary resume validator can reject an attempted trajectory change.
+    """
+    del saved_step  # The schedule is immutable from step zero, even before calibration executes.
+    explicit = explicit_fields or set()
+    fields = {
+        "objective_calibration_at": int,
+        "objective_calibration_batches": int,
+        "objective_target_jepa_share": float,
+        "objective_calibration_mode": str,
+        "jepa_weight": float,
+        "vicreg_weight": float,
+    }
+    applied = False
+    for key, cast in fields.items():
+        if key in saved_cfg and key not in explicit:
+            setattr(cfg, key, cast(saved_cfg[key]))
+            applied = True
+    return applied
+
+
 class PipelineAModel(nn.Module):
     def __init__(self, cfg: PretrainConfig):
         super().__init__()
@@ -180,47 +236,42 @@ class PipelineAModel(nn.Module):
             nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
             nn.Linear(cfg.d_model, cfg.d_model),
         )
-        self.relation_projector = nn.Sequential(
-            nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
-            nn.Linear(cfg.d_model, 128),
+        # VICReg/Barlow-Twins expander. Width is a measured knob, not a detail: VICReg Table 12
+        # reports ImageNet linear top-1 of 55.9 / 59.2 / 62.4 / 65.1 / 67.3 / 68.6 / 68.8 at
+        # expander dims 256 / 512 / 1024 / 2048 / 4096 / 8192 / 16384 -- monotonic, +12.7 points
+        # from 256 to 8192 -- and states the rule directly: "performance improves when the size of
+        # the expander layers is larger than the dimension of the representation" (their encoder
+        # is 2048, their expander 8192, i.e. 4x WIDER). The hard-coded 128 here was HALF our
+        # d_model=256, the opposite ratio, and below the smallest point they tested.
+        # Caveat kept in view: that curve is ImageNet-scale. On CIFAR/STL-scale corpora wide
+        # expanders overfit (Guarding Barlow Twins Against Overfitting, 2023), and our corpus is
+        # 1.5M windows -- so this is swept, not assumed.
+        # Hidden and output widths are separate. Folding them into one knob silently rewrote the
+        # DEFAULT architecture (256->256->128, 98,688 params) into 256->128->128 (49,408), so the
+        # unchanged default command stopped being a control-equivalent run.
+        self.vicreg_projector = nn.Sequential(
+            nn.Linear(cfg.d_model, cfg.vicreg_proj_hidden), nn.GELU(),
+            nn.Linear(cfg.vicreg_proj_hidden, cfg.vicreg_proj_dim),
         )
 
 
 @torch.no_grad()
 def update_ema_encoder(student: nn.Module, teacher: nn.Module, decay: float) -> None:
-    """Update teacher parameters by EMA and copy non-parameter state exactly."""
-    if not 0.0 <= float(decay) < 1.0:
-        raise ValueError("EMA decay must be in [0, 1)")
+    """Update teacher parameters by EMA and copy non-parameter state exactly.
+
+    ``decay == 1.0`` (a frozen teacher) is accepted because the BYOL cosine ramp reaches exactly
+    1.0 on its final step; rejecting it crashed every cosine run at ``step == cfg.steps``, after
+    the last checkpoint. It is still rejected as a *fixed* value by the CLI, where it would mean
+    a randomly-initialised teacher for the entire run.
+    """
+    if not 0.0 <= float(decay) <= 1.0:
+        raise ValueError("EMA decay must be in [0, 1]")
     student_params = dict(student.named_parameters())
     for name, target in teacher.named_parameters():
         target.mul_(float(decay)).add_(student_params[name], alpha=1.0 - float(decay))
     student_buffers = dict(student.named_buffers())
     for name, target in teacher.named_buffers():
         target.copy_(student_buffers[name])
-
-
-def verified_event_pairs(event_ids: list, verified: torch.Tensor, streams: list,
-                         device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    """One deterministic cross-stream pair per verified simultaneous event in a batch."""
-    groups: dict[str, list[int]] = {}
-    for i, (event_id, ok) in enumerate(zip(event_ids, verified.tolist())):
-        if ok and event_id is not None:
-            groups.setdefault(str(event_id), []).append(i)
-    left, right = [], []
-    for event_id in sorted(groups):
-        members = groups[event_id]
-        pair = next(
-            ((a, b) for pos, a in enumerate(members) for b in members[pos + 1:]
-             if streams[a] != streams[b]),
-            None,
-        )
-        if pair is not None:
-            left.append(pair[0])
-            right.append(pair[1])
-    return (
-        torch.tensor(left, device=device, dtype=torch.long),
-        torch.tensor(right, device=device, dtype=torch.long),
-    )
 
 
 @torch.no_grad()
@@ -244,33 +295,284 @@ def representation_health(z: torch.Tensor) -> dict[str, float]:
     }
 
 
-def objective_encoder_grad_norm(loss: torch.Tensor, encoder: nn.Module) -> float:
-    """Gradient norm contributed by one weighted objective to the shared encoder."""
-    if not loss.requires_grad:
-        return 0.0
+def objective_encoder_grad_geometry(
+    losses: dict[str, torch.Tensor], encoder: nn.Module,
+) -> dict[str, dict[str, float]]:
+    """Norms, dots, and cosines of objective gradients on the shared encoder.
+
+    Loss values are not comparable across objectives. This geometry is computed before clipping and
+    after every configured loss coefficient already present in ``losses``. Callers that need unit
+    coefficients must pass unit-weight tensors explicitly.
+    """
     parameters = [parameter for parameter in encoder.parameters() if parameter.requires_grad]
-    gradients = torch.autograd.grad(
-        loss, parameters, retain_graph=True, allow_unused=True
+    gradients: dict[str, list[torch.Tensor | None]] = {}
+    for name, loss in losses.items():
+        if loss.requires_grad:
+            gradients[name] = list(torch.autograd.grad(
+                loss, parameters, retain_graph=True, allow_unused=True,
+            ))
+        else:
+            gradients[name] = [None] * len(parameters)
+
+    norms: dict[str, float] = {}
+    for name, values in gradients.items():
+        squared = sum(
+            float(value.detach().float().square().sum())
+            for value in values if value is not None
+        )
+        norms[name] = math.sqrt(squared)
+
+    dots: dict[str, float] = {}
+    cosines: dict[str, float] = {}
+    names = list(losses)
+    for position, left in enumerate(names):
+        for right in names[position + 1:]:
+            key = f"{left}|{right}"
+            dot = sum(
+                float((a.detach().float() * b.detach().float()).sum())
+                for a, b in zip(gradients[left], gradients[right])
+                if a is not None and b is not None
+            )
+            dots[key] = dot
+            denom = norms[left] * norms[right]
+            cosines[key] = dot / denom if denom > 0 else 0.0
+    return {"norms": norms, "dots": dots, "cosines": cosines}
+
+
+def recommend_objective_weights(
+    samples: list[dict[str, dict[str, float]]],
+    *,
+    current_jepa_weight: float,
+    current_vicreg_weight: float,
+    target_jepa_share: float = 0.45,
+) -> dict[str, object]:
+    """Solve one frozen JEPA/VICReg scalarization from post-warmup gradient samples.
+
+    ``samples`` contain unit-weight gradients named ``jepa`` and ``vicreg``. A common scale
+    preserves the pilot's median combined encoder gradient, avoiding an accidental effective
+    learning-rate or clipping change when the relative coefficient is corrected.
+    """
+    if not samples:
+        raise ValueError("objective calibration needs at least one gradient sample")
+    if not 0 < target_jepa_share < 1:
+        raise ValueError("target JEPA gradient share must be in (0,1)")
+
+    required = {"jepa", "vicreg"}
+    for sample in samples:
+        if set(sample.get("norms", {})) != required:
+            raise ValueError("calibration samples must contain JEPA and VICReg gradients")
+
+    def _median_norm(name: str) -> float:
+        return statistics.median(float(sample["norms"][name]) for sample in samples)
+
+    jepa_norm = _median_norm("jepa")
+    vicreg_norm = _median_norm("vicreg")
+    if jepa_norm <= 0 or vicreg_norm <= 0:
+        raise ValueError("JEPA and VICReg must both produce non-zero calibration gradients")
+
+    def _dot(sample: dict[str, dict[str, float]], left: str, right: str) -> float:
+        direct = f"{left}|{right}"
+        reverse = f"{right}|{left}"
+        return float(sample["dots"].get(direct, sample["dots"].get(reverse, 0.0)))
+
+    def _combined_norm(sample: dict[str, dict[str, float]], coefficients: dict[str, float]) -> float:
+        total = 0.0
+        names = list(coefficients)
+        for name in names:
+            total += coefficients[name] ** 2 * float(sample["norms"][name]) ** 2
+        for position, left in enumerate(names):
+            for right in names[position + 1:]:
+                total += 2.0 * coefficients[left] * coefficients[right] * _dot(
+                    sample, left, right
+                )
+        return math.sqrt(max(total, 0.0))
+
+    def _solve_median_share(share_at, target: float) -> float:
+        """Monotonic bisection for a coefficient whose median per-batch share is ``target``."""
+        if target <= 0:
+            return 0.0
+        low, high = 0.0, 1.0
+        while statistics.median(share_at(high)) < target:
+            high *= 2.0
+            if high > 1e12:
+                raise ValueError("could not bracket objective calibration coefficient")
+        for _ in range(80):
+            middle = 0.5 * (low + high)
+            if statistics.median(share_at(middle)) < target:
+                low = middle
+            else:
+                high = middle
+        return 0.5 * (low + high)
+
+    jepa_to_vicreg = _solve_median_share(
+        lambda weight: [
+            weight * float(sample["norms"]["jepa"])
+            / max(weight * float(sample["norms"]["jepa"])
+                  + float(sample["norms"]["vicreg"]), 1e-12)
+            for sample in samples
+        ],
+        target_jepa_share,
     )
-    total = sum(
-        gradient.detach().float().square().sum()
-        for gradient in gradients if gradient is not None
+
+    baseline_coefficients = {
+        "jepa": float(current_jepa_weight),
+        "vicreg": float(current_vicreg_weight),
+    }
+    proposed_coefficients = {
+        "jepa": jepa_to_vicreg,
+        "vicreg": 1.0,
+    }
+    baseline_norm = statistics.median(
+        _combined_norm(sample, baseline_coefficients) for sample in samples
     )
-    return float(total.sqrt()) if not isinstance(total, int) else 0.0
+    proposed_norm = statistics.median(
+        _combined_norm(sample, proposed_coefficients) for sample in samples
+    )
+    common_scale = baseline_norm / proposed_norm if proposed_norm > 0 else 1.0
+
+    jepa_shares = [
+        jepa_to_vicreg * float(sample["norms"]["jepa"])
+        / max(jepa_to_vicreg * float(sample["norms"]["jepa"])
+              + float(sample["norms"]["vicreg"]), 1e-12)
+        for sample in samples
+    ]
+
+    def _distribution(values: list[float]) -> dict[str, float]:
+        return {
+            "min": min(values),
+            "p10": float(np.percentile(values, 10)),
+            "p25": float(np.percentile(values, 25)),
+            "median": statistics.median(values),
+            "p75": float(np.percentile(values, 75)),
+            "p90": float(np.percentile(values, 90)),
+            "max": max(values),
+        }
+
+    return {
+        "recommended": {
+            "jepa_weight": common_scale * jepa_to_vicreg,
+            "vicreg_weight": common_scale,
+        },
+        "target_norm_shares": {
+            "jepa_vs_vicreg": float(target_jepa_share),
+        },
+        "median_unit_gradient_norms": {
+            "jepa": jepa_norm,
+            "vicreg": vicreg_norm,
+        },
+        "median_combined_encoder_grad_norm": {
+            "pilot_weights": baseline_norm,
+            "recommended_weights": proposed_norm * common_scale,
+        },
+        "realized_norm_share_distribution": {
+            "jepa_vs_vicreg": _distribution(jepa_shares),
+        },
+        "common_scale": common_scale,
+    }
+
+
+_OUTPUT_PREFIX = "training/tokenizer/outputs/"
+_SOURCE_SUFFIXES = {
+    ".py", ".md", ".toml", ".yaml", ".yml", ".json", ".txt", ".sh", ".ini", ".cfg",
+}
+_RUN_ARTIFACT_NAMES = {
+    "log.jsonl", "run_config.json", "objective_calibration.json",
+    "source.patch", "source_provenance.json",
+}
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _git(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], cwd=_repo_root(), capture_output=True, check=check, timeout=30,
+    )
 
 
 def git_commit() -> str:
-    """Short HEAD, suffixed '-dirty' when the working tree has uncommitted changes, so a checkpoint
-    honestly records that its source was not a clean commit (F5 — converters/loader are often dirty)."""
+    """Short HEAD plus source-dirty state, excluding generated Phase-A output directories."""
     try:
-        repo = Path(__file__).resolve().parents[2]
-        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
-                              text=True, timeout=5, cwd=repo).stdout.strip()
-        dirty = subprocess.run(["git", "status", "--porcelain"], capture_output=True,
-                              text=True, timeout=5, cwd=repo).stdout.strip()
+        head = _git(["rev-parse", "--short", "HEAD"]).stdout.decode().strip()
+        dirty = _git([
+            "status", "--porcelain", "--untracked-files=all", "--", ".",
+            ":(exclude)training/tokenizer/outputs/**",
+        ]).stdout.strip()
         return f"{head}-dirty" if dirty else (head or "unknown")
     except Exception:
         return "unknown"
+
+
+def capture_source_provenance(out: Path, *, write: bool = True) -> dict:
+    """Persist a reconstructable patch for tracked and untracked source files."""
+    head = _git(["rev-parse", "HEAD"]).stdout.decode().strip()
+    tracked = _git([
+        "diff", "HEAD", "--binary", "--", ".",
+        ":(exclude)training/tokenizer/outputs/**",
+    ]).stdout
+    untracked_raw = _git(["ls-files", "--others", "--exclude-standard", "-z"]).stdout
+    untracked = []
+    chunks = [tracked]
+    for raw in untracked_raw.split(b"\0"):
+        if not raw:
+            continue
+        rel = raw.decode("utf-8")
+        path = _repo_root() / rel
+        if rel.startswith(_OUTPUT_PREFIX) or path.suffix.lower() not in _SOURCE_SUFFIXES:
+            continue
+        # Source/config files should be small. Fail rather than silently omit a file required to
+        # reconstruct this worktree.
+        if path.stat().st_size > 10 * 1024 * 1024:
+            raise RuntimeError(f"untracked source file is too large for provenance patch: {rel}")
+        diff = _git(["diff", "--no-index", "--binary", "--", "/dev/null", rel], check=False)
+        if diff.returncode not in (0, 1):
+            raise RuntimeError(diff.stderr.decode(errors="replace"))
+        chunks.append(diff.stdout)
+        untracked.append(rel)
+    patch = b"".join(chunks)
+    patch_sha256 = hashlib.sha256(patch).hexdigest()
+    metadata = {
+        "git": f"{head[:7]}-dirty" if patch else head[:7],
+        "head": head,
+        "dirty": bool(patch),
+        "patch_sha256": patch_sha256,
+        "patch_bytes": len(patch),
+        "untracked_source_files": sorted(untracked),
+    }
+    if write:
+        (out / "source.patch").write_bytes(patch)
+        (out / "source_provenance.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    metadata["_patch"] = patch
+    return metadata
+
+
+def write_source_provenance(out: Path, metadata: dict) -> dict:
+    """Write a previously captured source snapshot and return its serializable metadata."""
+    serializable = {key: value for key, value in metadata.items() if key != "_patch"}
+    (out / "source.patch").write_bytes(metadata.get("_patch", b""))
+    (out / "source_provenance.json").write_text(json.dumps(serializable, indent=2) + "\n")
+    return serializable
+
+
+def prepare_output_dir(out: Path, *, force: bool, smoke: bool, resume: bool) -> list[Path]:
+    """Create a run directory and remove every known artifact for an explicit fresh overwrite."""
+    out.mkdir(parents=True, exist_ok=True)
+    stale = sorted(
+        {path for path in out.glob("*.pt")}
+        | {path for path in out.glob("objective_calibration*.json")}
+        | {out / name for name in _RUN_ARTIFACT_NAMES if (out / name).exists()}
+    )
+    if stale and not resume:
+        if force or smoke:
+            for path in stale:
+                path.unlink()
+        else:
+            raise SystemExit(
+                f"output dir {out} already contains {[path.name for path in stale]}; "
+                "choose a fresh --out or pass --force to overwrite (or --resume)."
+            )
+    return stale
 
 
 def corpus_fingerprint(index) -> str:
@@ -302,6 +604,55 @@ def corpus_fingerprint(index) -> str:
     return hashlib.sha256("|".join(sig).encode()).hexdigest()[:16]
 
 
+def stratified_eval_subset(keys, per_label: int, seed: int, allowed_labels=None):
+    """Select a deterministic, stream-covered validation/support subset.
+
+    Every available ``(label, stream)`` cell receives one row before a second row is assigned to
+    any cell, then the round-robin repeats until the per-label cap is full. Stream IDs are global
+    within a corpus, so this covers both dataset and placement/configuration heterogeneity.
+    """
+    from collections import defaultdict
+
+    if per_label <= 0:
+        raise ValueError("per_label must be positive")
+    groups = defaultdict(lambda: defaultdict(list))
+    for key in keys:
+        if allowed_labels is None or key.label_id in allowed_labels:
+            groups[key.label_id][key.stream_i].append(key)
+
+    rng = np.random.default_rng(seed)
+    selected = []
+    for label in sorted(groups):
+        cells = groups[label]
+        for stream_i in cells:
+            order = rng.permutation(len(cells[stream_i]))
+            cells[stream_i] = [cells[stream_i][int(i)] for i in order]
+        target = min(per_label, sum(len(rows) for rows in cells.values()))
+        cursor = {stream_i: 0 for stream_i in cells}
+        n_selected = 0
+        while n_selected < target:
+            active = [stream_i for stream_i in sorted(cells)
+                      if cursor[stream_i] < len(cells[stream_i])]
+            if not active:
+                break
+            for position in rng.permutation(len(active)):
+                stream_i = active[int(position)]
+                selected.append(cells[stream_i][cursor[stream_i]])
+                cursor[stream_i] += 1
+                n_selected += 1
+                if n_selected >= target:
+                    break
+    return selected
+
+
+def knn_predict(train_z, train_y, test_z, k: int) -> torch.Tensor:
+    if not len(test_z):
+        return torch.empty(0, dtype=train_y.dtype)
+    d = torch.cdist(test_z.float(), train_z.float())
+    nn_lab = train_y[d.topk(min(k, d.shape[1]), largest=False).indices]
+    return nn_lab.mode(dim=1).values
+
+
 def knn_balanced_acc(train_z, train_y, test_z, test_y, k: int) -> float:
     # Score EVERY query label (F1 fix). A query class absent from the support scores 0 — kNN
     # retrieves other-class neighbours — instead of being dropped from the metric. The old
@@ -311,9 +662,7 @@ def knn_balanced_acc(train_z, train_y, test_z, test_y, k: int) -> float:
     labels = sorted(set(test_y.tolist()))
     if not labels:
         return float("nan")
-    d = torch.cdist(test_z.float(), train_z.float())            # (Nq, Ns) euclidean
-    nn_lab = train_y[d.topk(min(k, d.shape[1]), largest=False).indices]   # (Nq, k)
-    pred = nn_lab.mode(dim=1).values                            # majority (ties -> smallest id)
+    pred = knn_predict(train_z, train_y, test_z, k)
     per_class = [float((pred[test_y == label] == label).float().mean())
                  for label in labels if (test_y == label).any()]
     return float(np.mean(per_class)) if per_class else float("nan")
@@ -327,6 +676,18 @@ def balanced_acc(pred: torch.Tensor, true: torch.Tensor) -> float:
         if m.any():
             per_class.append(float((pred[m] == label).float().mean()))
     return float(np.mean(per_class)) if per_class else float("nan")
+
+
+def label_group_balanced_acc(pred: torch.Tensor, true: torch.Tensor, groups) -> float:
+    """Macro recall over observed ``(label, group)`` cells."""
+    if len(pred) != len(true) or len(groups) != len(true):
+        raise ValueError("predictions, labels, and groups must have equal length")
+    cells = {}
+    for row, (label, group) in enumerate(zip(true.tolist(), groups)):
+        cells.setdefault((int(label), str(group)), []).append(row)
+    recalls = [float((pred[rows] == true[rows]).float().mean())
+               for rows in cells.values()]
+    return float(np.mean(recalls)) if recalls else float("nan")
 
 
 @torch.no_grad()
@@ -387,7 +748,7 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
     """
     from collections import Counter
     model.eval()
-    zs, ys, srcs = [], [], []
+    zs, ys, srcs, streams = [], [], [], []
     counts: Counter = Counter()
     done: set = set()
 
@@ -426,11 +787,13 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
                 patch_padding_mask=batch["patch_padding_mask"].to(device),
                 sensor_texts=(batch["sensor_texts"] if factored else None),
                 sensor_id=(batch["sensor_id"].to(device) if factored else None),
+                source_rate_hz=batch.get("source_rates", batch["rates"]).to(device),
             )
             pooled = out["pooled"].cpu()
             zs.append(pooled[take])
             ys.append(lab[take])
             srcs.extend(batch["sources"][j] for j in take)      # per-window source (telemetry)
+            streams.extend(batch["streams"][j] for j in take)
             for l in lab[take].tolist():
                 counts[l] += 1
                 if counts[l] >= _target_for(l):
@@ -441,7 +804,7 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
         if wanted is None and label_totals is not None and set(label_totals) <= done:
             break
     model.train()
-    return torch.cat(zs), torch.cat(ys), srcs
+    return torch.cat(zs), torch.cat(ys), srcs, streams
 
 
 def module_grad_norms(model) -> dict:
@@ -453,7 +816,7 @@ def module_grad_norms(model) -> dict:
         return sq ** 0.5
 
     mods = (("encoder", model.encoder), ("jepa_predictor", model.jepa_predictor),
-            ("relation_projector", model.relation_projector))
+            ("vicreg_projector", model.vicreg_projector))
     return {f"grad/{name}": _gn(mod.parameters()) for name, mod in mods}
 
 
@@ -470,6 +833,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--stop-after", type=int, default=None,
+                        help="stop and checkpoint at this step while retaining --steps as the full "
+                             "LR/EMA schedule (for bounded trajectory monitors)")
+    parser.add_argument("--lr", type=float, default=None,
+                        help="optimizer peak learning rate (default 3e-4)")
+    parser.add_argument("--weight-decay", type=float, default=None,
+                        help="AdamW weight decay (default 0.05)")
+    parser.add_argument("--warmup-steps", type=int, default=None,
+                        help="linear LR warmup steps (default 1000)")
+    parser.add_argument("--grad-clip", type=float, default=None,
+                        help="global gradient-norm clipping threshold (default 1.0)")
     parser.add_argument("--smoke", action="store_true",
                         help="tiny corpus + tiny model for a fast CPU end-to-end check")
     parser.add_argument("--out", type=Path, default=OUT_DIR)
@@ -490,15 +864,41 @@ def main() -> None:
                         help="override multiresolution (default ON); --no-multiresolution is the "
                              "single-resolution ablation")
     parser.add_argument("--jepa-weight", type=float, default=None,
-                        help="masked contextual prediction weight; 0 selects relation-only R0/R1")
-    parser.add_argument("--relation-weight", type=float, default=None,
-                        help="unified relation objective weight (must be positive)")
+                        help="masked contextual prediction weight; 0 selects VICReg-only")
+    parser.add_argument("--vicreg-weight", type=float, default=None,
+                        help="augmentation VICReg objective weight (must be positive)")
+    parser.add_argument("--num-heads", type=int, default=None,
+                        help="Attention heads (default 8 -> head dim d_model/heads = 32). The "
+                             "literature range for head dim is 64-128; 4 heads gives 64 at "
+                             "IDENTICAL parameter count.")
+    parser.add_argument("--jepa-ema-schedule", choices=("fixed", "cosine"), default=None,
+                        help="Teacher decay schedule. 'cosine' is the BYOL ramp from "
+                             "jepa_ema_decay to 1.0. Default 'fixed' (unmeasured on our data).")
+    parser.add_argument("--mask-ratio-time", type=float, default=None,
+                        help="Nominal JEPA temporal mask fraction (default 0.5 -> ~0.6 realised). "
+                             "MAE/data2vec use 0.75-0.8.")
     parser.add_argument("--jepa-ema-decay", type=float, default=None,
                         help="EMA teacher momentum (default 0.996).")
-    parser.add_argument("--cross-placement-weight", type=float, default=None,
-                        help="cross-placement subterm weight; 0 selects augmentation-only R0")
-    parser.add_argument("--relation-pair-fraction", type=float, default=None,
-                        help="batch-window fraction reserved for verified cross-placement pairs")
+    parser.add_argument("--vicreg-proj-dim", type=int, default=None,
+                        help="VICReg expander OUTPUT width (default 128); also the width of the "
+                             "DxD covariance matrices, so memory grows quadratically. "
+                             "VICReg/Barlow-Twins both find wider is better and recommend it "
+                             "exceed the representation dim (ours is d_model=256).")
+    parser.add_argument("--vicreg-proj-hidden", type=int, default=None,
+                        help="VICReg expander HIDDEN width (default 256 = d_model). Separate from "
+                             "--vicreg-proj-dim so the default stays the historical control.")
+    parser.add_argument("--calibrate-objectives-at", type=int, default=None,
+                        help="collect post-warmup objective gradients ending at this step and "
+                             "resolve one frozen scalarization (real-run default: 2000; 0 disables)")
+    parser.add_argument("--objective-calibration-batches", type=int, default=None,
+                        help="number of consecutive post-warmup batches used by calibration "
+                             "(default 50)")
+    parser.add_argument("--objective-calibration-mode", choices=("report", "apply"), default=None,
+                        help="'report' writes the recommendation and stops; 'apply' installs it "
+                             "once after the calibration step, freezes it, and continues training "
+                             "(real-run default: apply)")
+    parser.add_argument("--target-jepa-gradient-share", type=float, default=None,
+                        help="target JEPA norm share versus augmentation VICReg (default 0.45)")
     parser.add_argument("--sampler-alpha", type=float, default=None,
                         help="temperature-sampler exponent: 1=proportional, 0=uniform-per-source, "
                              "0.25 is the default.")
@@ -536,6 +936,8 @@ def main() -> None:
         text_conditioning="factored",  # PAPER default (F8): factored role+sensor conditioning is the
                                        # committed arm; --text-conditioning per_channel is the ablation.
                                        # (The dataclass default stays per_channel for direct/test ctors.)
+        objective_calibration_at=2_000,
+        objective_calibration_mode="apply",
     )
     if args.text_conditioning is not None:
         cfg.text_conditioning = args.text_conditioning
@@ -543,14 +945,28 @@ def main() -> None:
         cfg.multiresolution = args.multiresolution
     if args.jepa_weight is not None:
         cfg.jepa_weight = args.jepa_weight
-    if args.relation_weight is not None:
-        cfg.relation_weight = args.relation_weight
+    if args.vicreg_weight is not None:
+        cfg.vicreg_weight = args.vicreg_weight
+    if args.num_heads is not None:
+        cfg.num_heads = args.num_heads
+    if args.jepa_ema_schedule is not None:
+        cfg.jepa_ema_schedule = args.jepa_ema_schedule
+    if args.mask_ratio_time is not None:
+        cfg.mask_ratio_time = args.mask_ratio_time
     if args.jepa_ema_decay is not None:
         cfg.jepa_ema_decay = args.jepa_ema_decay
-    if args.cross_placement_weight is not None:
-        cfg.cross_placement_weight = args.cross_placement_weight
-    if args.relation_pair_fraction is not None:
-        cfg.relation_pair_fraction = args.relation_pair_fraction
+    if args.vicreg_proj_dim is not None:
+        cfg.vicreg_proj_dim = args.vicreg_proj_dim
+    if args.vicreg_proj_hidden is not None:
+        cfg.vicreg_proj_hidden = args.vicreg_proj_hidden
+    if args.calibrate_objectives_at is not None:
+        cfg.objective_calibration_at = args.calibrate_objectives_at
+    if args.objective_calibration_batches is not None:
+        cfg.objective_calibration_batches = args.objective_calibration_batches
+    if args.objective_calibration_mode is not None:
+        cfg.objective_calibration_mode = args.objective_calibration_mode
+    if args.target_jepa_gradient_share is not None:
+        cfg.objective_target_jepa_share = args.target_jepa_gradient_share
     if args.sampler_alpha is not None:
         cfg.sampler_alpha = args.sampler_alpha
     if args.sampler_max_dataset_share is not None:
@@ -579,16 +995,52 @@ def main() -> None:
         cfg.max_per_stream = args.max_per_stream
     if args.steps is not None:
         cfg.steps = args.steps
+    if args.lr is not None:
+        cfg.lr = args.lr
+    if args.weight_decay is not None:
+        cfg.weight_decay = args.weight_decay
+    if args.warmup_steps is not None:
+        cfg.warmup_steps = args.warmup_steps
+    if args.grad_clip is not None:
+        cfg.grad_clip = args.grad_clip
+    # The paper recipe calibrates by default. Tiny smoke runs cannot reach step 2,000, and the
+    # VICReg-only control has no second objective to balance; disable only when the user did not
+    # explicitly request a calibration experiment.
+    if args.smoke and args.calibrate_objectives_at is None:
+        cfg.objective_calibration_at = 0
+    if cfg.jepa_weight <= 0 and args.calibrate_objectives_at is None:
+        cfg.objective_calibration_at = 0
+    # Architecture/masking validation runs BEFORE --smoke so a smoke rejects the same configs a
+    # real run does. An unvalidated --mask-ratio-time -1 previously trained to completion, leaving
+    # 75% of windows with no JEPA mask at all -- a silently different experiment, not an error.
+    if cfg.num_heads <= 0 or cfg.d_model % cfg.num_heads:
+        parser.error(f"--num-heads must be positive and divide d_model={cfg.d_model}")
+    if not 0 < cfg.mask_ratio_time < 1:
+        parser.error("--mask-ratio-time must be in (0,1)")
+    if cfg.vicreg_proj_dim <= 0 or cfg.vicreg_proj_hidden <= 0:
+        parser.error("expander widths must be positive")
+    if cfg.vicreg_proj_dim > 2048:
+        # VICReg materialises two dense DxD covariance matrices per step (losses_repr.vicreg), so
+        # fp32 memory is 8*D^2 bytes before autograd: 128MiB at 4096, 512MiB at 8192.
+        print(f"[warn] vicreg_proj_dim={cfg.vicreg_proj_dim} -> VICReg covariance matrices "
+              f"alone need {8 * cfg.vicreg_proj_dim ** 2 / 2**20:.0f} MiB", flush=True)
     if args.smoke:
         # Preserve every experimental override and change only resource/budget knobs. Rebuilding
         # PretrainConfig field-by-field repeatedly dropped newly added objective settings, so a
         # passing smoke could exercise a different arm than the requested run.
+        # d_model shrinks to 64, so the requested head count only survives if it still divides it.
+        # Silently pinning num_heads=4 here meant a smoke "passed" for an arm nobody requested.
+        if 64 % cfg.num_heads:
+            parser.error(f"--smoke uses d_model=64, which --num-heads {cfg.num_heads} "
+                         f"does not divide; smoke cannot exercise this arm")
         cfg = replace(
             cfg,
-            d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
+            d_model=64, num_layers=2, dim_feedforward=128,
             batch_size=32,
             steps=args.steps if args.steps is not None else 10,
-            warmup_steps=2, calib_batches=3,
+            warmup_steps=(args.warmup_steps if args.warmup_steps is not None
+                          else min(2, max((args.steps if args.steps is not None else 10) - 1, 0))),
+            calib_batches=3,
             val_every=max(args.steps if args.steps is not None else 10, 5), val_per_label=10,
             num_workers=0, max_per_stream=200,
         )
@@ -598,21 +1050,39 @@ def main() -> None:
         parser.error("--sampler-max-dataset-share must be in (0,1]")
     if not 0 <= cfg.sampler_subject_alpha <= 1:
         parser.error("--sampler-subject-alpha must be in [0,1]")
-    for field in ("jepa_weight", "cross_placement_weight", "frontend_reg_weight"):
+    for field in ("jepa_weight", "frontend_reg_weight"):
         if float(getattr(cfg, field)) < 0:
             parser.error(f"--{field.replace('_', '-')} must be nonnegative")
-    if cfg.relation_weight <= 0:
-        parser.error("--relation-weight must be positive")
+    if cfg.vicreg_weight <= 0:
+        parser.error("--vicreg-weight must be positive")
     if cfg.steps <= 0 or cfg.batch_size <= 0:
         parser.error("--steps and --batch must be positive")
+    if args.stop_after is not None and args.stop_after <= 0:
+        parser.error("--stop-after must be positive")
     if cfg.max_per_stream is not None and cfg.max_per_stream <= 0:
         parser.error("--max-per-stream must be positive when provided")
     if not 0 <= cfg.jepa_ema_decay < 1:
         parser.error("--jepa-ema-decay must be in [0,1)")
     if cfg.lr <= 0 or cfg.grad_clip <= 0:
         parser.error("learning rate and gradient clipping threshold must be positive")
-    if not 0 <= cfg.relation_pair_fraction < 1:
-        parser.error("--relation-pair-fraction must be in [0,1)")
+    if cfg.weight_decay < 0:
+        parser.error("--weight-decay must be nonnegative")
+    if not 0 <= cfg.warmup_steps < cfg.steps:
+        parser.error("--warmup-steps must be nonnegative and smaller than --steps")
+    if cfg.objective_calibration_at < 0 or cfg.objective_calibration_batches <= 0:
+        parser.error("objective calibration step must be nonnegative and batch count positive")
+    if cfg.objective_calibration_at:
+        first_calibration_step = (
+            cfg.objective_calibration_at - cfg.objective_calibration_batches + 1
+        )
+        if cfg.objective_calibration_at > cfg.steps:
+            parser.error("--calibrate-objectives-at cannot exceed --steps")
+        if first_calibration_step <= cfg.warmup_steps:
+            parser.error("objective calibration batches must all occur after warmup")
+        if cfg.jepa_weight <= 0:
+            parser.error("objective calibration requires an active JEPA objective")
+    if not 0 < cfg.objective_target_jepa_share < 1:
+        parser.error("--target-jepa-gradient-share must be in (0,1)")
     device = torch.device(cfg.device)
     if device.type == "cuda":
         # TF32 for the fp32 regions autocast doesn't cover (filterbank einsum/proj, val ridge
@@ -621,18 +1091,10 @@ def main() -> None:
         torch.backends.cudnn.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
     torch.manual_seed(cfg.seed)
-    args.out.mkdir(parents=True, exist_ok=True)
-    # F5: never silently append to / overwrite a prior run. A stale checkpoint or log in the out dir
-    # means a fresh run would mix results and append to the old log — refuse unless --force/--smoke.
-    # --resume KEEPS the dir (that is where the checkpoint we continue from lives).
-    stale = list(args.out.glob("*.pt")) + list(args.out.glob("log.jsonl"))
-    if stale and not args.resume:
-        if args.force or args.smoke:
-            for p in stale:
-                p.unlink()
-        else:
-            raise SystemExit(f"output dir {args.out} already contains {[p.name for p in stale]}; "
-                             f"choose a fresh --out or pass --force to overwrite (or --resume).")
+    prepare_output_dir(
+        args.out, force=args.force, smoke=args.smoke, resume=args.resume is not None,
+    )
+    source_provenance = capture_source_provenance(args.out, write=False)
     print(f"frontend={cfg.frontend} multiresolution={cfg.multiresolution}", flush=True)
     # NB: run_config.json is written AFTER resume validation (below), so a rejected --resume can't
     # overwrite the metadata with the bad attempted config (audit 2026-07-23 #6).
@@ -644,49 +1106,10 @@ def main() -> None:
                         datasets=cfg.train_datasets or TRAIN_DATASETS)
     print(f"corpus: {index.summary()}  (datasets={sorted(cfg.train_datasets or TRAIN_DATASETS)})",
           flush=True)
-    positive_events = {
-        event_id for event_id in index.train_positive_event_ids if event_id >= 0
-    }
-    if cfg.cross_placement_weight > 0 and not positive_events:
-        message = (
-            "cross-placement relation learning is enabled but the corpus has no verified simultaneous "
-            "events. Rebuild native grids with `python -m data.scripts.build_grids --alignment "
-            "native` so explicit event_ids are persisted; refusing to silently train without the "
-            "configured relation type. Pass --cross-placement-weight 0 for the R0 control."
-        )
-        if args.smoke:
-            print(f"[smoke warning] {message}", flush=True)
-        else:
-            raise RuntimeError(message)
     train_ds = PretrainDataset(index, index.train, augment=True, two_view=True)
-    def _stratified_subset(keys, per_label: int, seed: int, allowed_labels=None):
-        """Deterministically pick min(per_label, available) keys per label.
-
-        Preselecting is what makes evaluation cheap. Capping inside the embed loop cannot: the val
-        keys are shuffled, so the last window of the rarest label sits near the end and the loop
-        still drags all 186k val / 1.5M train rows through collate + encoder on every evaluation
-        (measured: 99.8% of rows still scanned even with an exact achievable-target exit). Choosing
-        the rows up front turns both loaders into ~3k-row passes.
-
-        Sampled with a fixed RNG rather than taken in order: index.train is stream-ordered, so the
-        first N windows of a label would all come from one dataset/subject. The fixed seed keeps the
-        support bank identical at every val and across arms/replicates (audit #4/#5).
-        """
-        from collections import defaultdict
-        groups = defaultdict(list)
-        for k in keys:
-            if allowed_labels is None or k.label_id in allowed_labels:
-                groups[k.label_id].append(k)
-        rng = np.random.default_rng(seed)
-        out = []
-        for label in sorted(groups):
-            g = groups[label]
-            if len(g) > per_label:
-                g = [g[int(i)] for i in rng.choice(len(g), size=per_label, replace=False)]
-            out.extend(g)
-        return out
-
-    val_keys = _stratified_subset(index.val, cfg.val_per_label, cfg.data_seed)
+    # Preselecting keeps evaluation cheap. The helper covers every label/stream cell before filling
+    # additional slots, preventing a large source from monopolizing a common label's cap.
+    val_keys = stratified_eval_subset(index.val, cfg.val_per_label, cfg.data_seed)
     val_ds = PretrainDataset(index, val_keys, augment=False)
     train_collate = (MultiResolutionCollate(
         short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
@@ -702,10 +1125,6 @@ def main() -> None:
         num_samples=cfg.steps * cfg.batch_size,
         alpha=cfg.sampler_alpha, seed=cfg.seed,
         batch_size=cfg.batch_size,
-        event_ids=index.train_event_ids,
-        positive_event_ids=index.train_positive_event_ids,
-        pair_fraction=(cfg.relation_pair_fraction
-                       if cfg.cross_placement_weight > 0 else 0.0),
         subject_ids=index.train_subject_ids,
         subject_alpha=cfg.sampler_subject_alpha,
         max_dataset_share=cfg.sampler_max_dataset_share,
@@ -747,8 +1166,8 @@ def main() -> None:
     from collections import Counter as _Counter
     val_label_totals = dict(_Counter(k.label_id for k in val_keys))
     _val_label_set = set(val_label_totals)
-    train_keys = _stratified_subset(index.train, cfg.val_per_label, cfg.data_seed,
-                                    allowed_labels=_val_label_set)
+    train_keys = stratified_eval_subset(index.train, cfg.val_per_label, cfg.data_seed,
+                                        allowed_labels=_val_label_set)
     train_label_totals = dict(_Counter(k.label_id for k in train_keys))
     print(f"eval subsets: val {len(index.val):,} -> {len(val_keys):,} rows · "
           f"support {len(index.train):,} -> {len(train_keys):,} rows "
@@ -817,9 +1236,23 @@ def main() -> None:
         * 0.5 * (1 + np.cos(np.pi * min(s / cfg.steps, 1.0))),
     )
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
+    def ema_decay_at(step: int) -> float:
+        """BYOL cosine ramp from cfg.jepa_ema_decay to 1.0, or the fixed value.
+
+        Reaches exactly 1.0 at ``step == cfg.steps``; ``update_ema_encoder`` accepts that.
+        """
+        if cfg.jepa_ema_schedule != "cosine":
+            return cfg.jepa_ema_decay
+        progress = min(max(step / max(cfg.steps, 1), 0.0), 1.0)
+        return 1.0 - (1.0 - cfg.jepa_ema_decay) * (math.cos(math.pi * progress) + 1.0) / 2.0
+
     log_path = args.out / "log.jsonl"
     best_ba = -1.0
     t0 = time.time()
+    calibration_samples: list[dict[str, dict[str, float]]] = []
+    calibration_steps: list[int] = []
+    calibration_source_counts: dict[str, int] = {}
+    calibration_completed = False
 
     def checkpoint(name: str, step: int, val_ba: float):
         import random as _stdrandom
@@ -827,13 +1260,15 @@ def main() -> None:
             "encoder": model.encoder.state_dict(),
             "heads": {k: v.state_dict() for k, v in
                       (("jepa_predictor", model.jepa_predictor),
-                       ("relation_projector", model.relation_projector))},
+                       ("vicreg_projector", model.vicreg_projector))},
             "config": asdict(cfg),
             "jepa_teacher": (jepa_teacher.state_dict() if jepa_teacher is not None else None),
             "label_ids": index.label_ids,
             "step": step, "val_ba": val_ba,
+            "selection_metric": "val_knn_label_stream_ba",
             "best_ba": max(best_ba, val_ba),   # running best so a resume can't overwrite a better best.pt (#6)
-            "git": git_commit(),
+            "git": source_provenance["git"],
+            "source_provenance": source_provenance,
             "corpus": index.summary(),
             "corpus_fingerprint": corpus_fingerprint(index),   # which corpus produced this (F5)
             # Full restart state so a killed run resumes without silently diverging (F5).
@@ -841,6 +1276,7 @@ def main() -> None:
             "scheduler": sched.state_dict(),
             "scaler": scaler.state_dict(),
             "rng": {"torch": torch.get_rng_state(),
+                    "cuda": (torch.cuda.get_rng_state_all() if device.type == "cuda" else None),
                     "numpy": np.random.get_state(),
                     "python": _stdrandom.getstate()},
         }, args.out / name)
@@ -852,6 +1288,23 @@ def main() -> None:
     if args.resume:
         rk = torch.load(args.resume, map_location=device, weights_only=False)
         saved_cfg = rk.get("config", {})
+        saved_step = int(rk["step"])
+        # One-time calibration legitimately changes these scalar coefficients after the original
+        # command is parsed. They are immutable checkpoint trajectory state on resume; all other
+        # structural and user settings remain strictly validated below.
+        explicit_resume_fields = {
+            key for key, value in {
+                "objective_calibration_at": args.calibrate_objectives_at,
+                "objective_calibration_batches": args.objective_calibration_batches,
+                "objective_target_jepa_share": args.target_jepa_gradient_share,
+                "objective_calibration_mode": args.objective_calibration_mode,
+                "jepa_weight": args.jepa_weight,
+                "vicreg_weight": args.vicreg_weight,
+            }.items() if value is not None
+        }
+        hydrate_calibrated_objective_weights(
+            cfg, saved_cfg, saved_step, explicit_fields=explicit_resume_fields,
+        )
         # A faithful resume must reproduce the SAME optimization trajectory, so validate the ENTIRE
         # serialized config against the checkpoint — NOT a hand-listed subset. Only knobs that touch
         # neither the training trajectory
@@ -884,15 +1337,23 @@ def main() -> None:
                 raise ValueError(
                     f"resume configuration mismatch for {key}: checkpoint={saved!r}, requested={cur!r} "
                     f"— a resume must reproduce the run; only {sorted(_RESUME_RUNTIME_ONLY)} may differ.")
-        saved_step = int(rk["step"])
         saved_fp = rk.get("corpus_fingerprint")
         if saved_fp is not None and saved_fp != corpus_fingerprint(index):
             raise ValueError(
                 f"resume corpus fingerprint mismatch: checkpoint={saved_fp}, "
                 f"current={corpus_fingerprint(index)} — the corpus/cap/seed changed since the run started.")
+        saved_source = rk.get("source_provenance")
+        if saved_source is not None:
+            if saved_source.get("patch_sha256") != source_provenance.get("patch_sha256"):
+                raise ValueError(
+                    "resume source fingerprint mismatch: the tracked/untracked source patch differs "
+                    "from the checkpoint; resume from the recorded source or start a new run."
+                )
+        else:
+            print("[warn] resume checkpoint predates reconstructable source provenance", flush=True)
         model.encoder.load_state_dict(rk["encoder"])
         for key, head in (("jepa_predictor", model.jepa_predictor),
-                          ("relation_projector", model.relation_projector)):
+                          ("vicreg_projector", model.vicreg_projector)):
             if key not in rk.get("heads", {}):
                 raise ValueError(
                     f"resume checkpoint predates the consolidated Phase-A objective: missing {key!r}"
@@ -908,7 +1369,9 @@ def main() -> None:
         scaler.load_state_dict(rk["scaler"])
         if "rng" in rk:
             import random as _sr
-            torch.set_rng_state(rk["rng"]["torch"])
+            torch.set_rng_state(rk["rng"]["torch"].cpu())
+            if device.type == "cuda" and rk["rng"].get("cuda") is not None:
+                torch.cuda.set_rng_state_all([state.cpu() for state in rk["rng"]["cuda"]])
             np.random.set_state(rk["rng"]["numpy"])
             _sr.setstate(rk["rng"]["python"])
         start_step = saved_step
@@ -925,11 +1388,17 @@ def main() -> None:
         print(f"resumed from {args.resume} at step {start_step} (best_ba {best_ba:.3f})", flush=True)
 
     # Write run metadata only AFTER resume validation passed, so a rejected resume leaves it untouched (#6).
+    source_provenance = write_source_provenance(args.out, source_provenance)
     (args.out / "run_config.json").write_text(json.dumps(asdict(cfg), indent=2))
+    run_until_step = min(args.stop_after or cfg.steps, cfg.steps)
+    if start_step >= run_until_step:
+        print(f"checkpoint already reached requested stop step {run_until_step}; nothing to resume",
+              flush=True)
+        return
 
     def encode_clean_view_b(batch: dict) -> dict:
         """Encode the SECOND augmentation-positive view (the collate's ``*_b`` keys), clean/no mask.
-        Only ['pooled'] is consumed by the relation projector. Tokenization runs fp32 (autocast
+        Only ['pooled'] is consumed by the VICReg projector. Tokenization runs fp32 (autocast
         off) like view A; the transformer runs under whatever autocast the caller is in. The
         conditioning path MATCHES view A (per_channel vs factored), so the encoder sees the same
         text mode — factored view B carries its OWN independently-augmented role/sensor text."""
@@ -973,6 +1442,7 @@ def main() -> None:
 
     model.train()
     for step, batch in enumerate(train_loader, start=start_step + 1):
+        calibration_report = None
         patches = batch["patches"].to(device, non_blocking=True)   # NOT gravity-aligned (2026-07-19 design)
         rates = batch["rates"].to(device)
         patch_len = batch["patch_len"].to(device)
@@ -990,9 +1460,10 @@ def main() -> None:
                 plan = make_multiresolution_mask_plan(
                     batch["patch_starts"].to(device), batch["patch_ends"].to(device),
                     resolution_ids, C, GYRO_IDX, channel_mask=channel_mask,
-                    valid_patches=patch_pad)
+                    valid_patches=patch_pad, time_ratio=cfg.mask_ratio_time)
             else:
                 plan = make_mask_plan(B, P, C, GYRO_IDX, device=device,
+                                      time_ratio=cfg.mask_ratio_time,
                                       valid_patches=patch_pad, channel_mask=channel_mask)
 
         with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
@@ -1035,7 +1506,7 @@ def main() -> None:
                                          sensor_text_embs=sensor_text_embs,
                                          sensor_text_masks=sensor_text_masks,
                                          sensor_id=enc_sensor_id)
-            z = model.relation_projector(clean["pooled"])
+            z = model.vicreg_projector(clean["pooled"])
             if cfg.jepa_weight > 0:
                 masked = encode_fn(sensor_tokens, text_embs, text_masks, positions,
                                               patch_durations=patch_durations,
@@ -1094,13 +1565,9 @@ def main() -> None:
                                               teacher_clean["tokens"][jepa_mask].flatten(1))
                     jepa_parts = {f"jepa/{k}": v for k, v in jepa_diag.items()}
 
-            z_b = model.relation_projector(encode_clean_view_b(batch)["pooled"])
-            pair_left, pair_right = verified_event_pairs(
-                batch["event_ids"], batch["event_verified"], batch["streams"], device
-            )
-            relation = relation_loss(
-                z, z_b, pair_left, pair_right,
-                cross_placement_weight=cfg.cross_placement_weight,
+            z_b = model.vicreg_projector(encode_clean_view_b(batch)["pooled"])
+            vicreg_result = vicreg(
+                z, z_b,
                 invariance_weight=cfg.vicreg_invariance_weight,
                 variance_weight=cfg.vicreg_variance_weight,
                 covariance_weight=cfg.vicreg_covariance_weight,
@@ -1108,46 +1575,96 @@ def main() -> None:
             )
 
             out = phase_a_loss(
-                jepa_loss, relation.total,
+                jepa_loss, vicreg_result.total,
                 jepa_weight=cfg.jepa_weight,
-                relation_weight=cfg.relation_weight,
+                vicreg_weight=cfg.vicreg_weight,
             )
             frontend_reg = model.encoder.filterbank.adaptation_regularization()
             out.total = out.total + cfg.frontend_reg_weight * frontend_reg
             parts = {
                 "jepa": float(jepa_loss.detach()),
-                "relation": float(relation.total.detach()),
-                "relation/augmentation": float(relation.augmentation.total.detach()),
-                "relation/augmentation_invariance": float(
-                    relation.augmentation.invariance.detach()),
-                "relation/variance": float(relation.augmentation.variance.detach()),
-                "relation/covariance": float(relation.augmentation.covariance.detach()),
-                "relation/min_std": float(relation.augmentation.min_std.detach()),
-                "relation/cross_placement_invariance": float(
-                    relation.cross_placement.detach()),
-                "relation/cross_placement_weighted": float(
-                    relation.cross_placement_weighted.detach()),
-                "relation/placement_pairs": relation.placement_pairs,
+                "vicreg": float(vicreg_result.total.detach()),
+                "vicreg/invariance": float(vicreg_result.invariance.detach()),
+                "vicreg/variance": float(vicreg_result.variance.detach()),
+                "vicreg/covariance": float(vicreg_result.covariance.detach()),
+                "vicreg/min_std": float(vicreg_result.min_std.detach()),
                 "frontend_reg": float(frontend_reg.detach()),
                 "frontend_reg_weighted": float(
                     (cfg.frontend_reg_weight * frontend_reg).detach()),
             }
             parts.update(jepa_parts)
-            parts.update({f"relation/augmentation_{key}": value
+            parts.update({f"vicreg/{key}": value
                           for key, value in pair_contrast(z, z_b).items()})
-            if relation.placement_pairs >= 2:
-                parts.update({f"relation/placement_{key}": value
-                              for key, value in pair_contrast(
-                                  z[pair_left], z[pair_right]).items()})
 
         do_log = step % 50 == 0 or step == 1
         do_objective_grad_log = step == 1 or step % 500 == 0
         objective_grad_norms = {}
         if do_objective_grad_log:
+            top_geometry = objective_encoder_grad_geometry(out.terms, model.encoder)
             objective_grad_norms = {
-                f"grad_objective/{name}": objective_encoder_grad_norm(term, model.encoder)
-                for name, term in out.terms.items()
+                **{f"grad_objective/{name}": value
+                   for name, value in top_geometry["norms"].items()},
+                **{f"grad_cosine/{name.replace('|', '_vs_')}": value
+                   for name, value in top_geometry["cosines"].items()},
             }
+
+        calibrating = (
+            cfg.objective_calibration_at > 0
+            and cfg.objective_calibration_at - cfg.objective_calibration_batches < step
+            <= cfg.objective_calibration_at
+        )
+        if calibrating:
+            # Unit-weight geometry. VICReg retains its published internal 25/25/1 coefficients.
+            unit_geometry = objective_encoder_grad_geometry({
+                "jepa": jepa_loss,
+                "vicreg": vicreg_result.total,
+            }, model.encoder)
+            calibration_samples.append(unit_geometry)
+            calibration_steps.append(step)
+            for source in batch["sources"]:
+                calibration_source_counts[source] = calibration_source_counts.get(source, 0) + 1
+
+            if step == cfg.objective_calibration_at:
+                calibration_report = recommend_objective_weights(
+                    calibration_samples,
+                    current_jepa_weight=cfg.jepa_weight,
+                    current_vicreg_weight=cfg.vicreg_weight,
+                    target_jepa_share=cfg.objective_target_jepa_share,
+                )
+                cosine_names = sorted({
+                    name for sample in calibration_samples for name in sample["cosines"]
+                })
+                calibration_report.update({
+                    "mode": cfg.objective_calibration_mode,
+                    "sample_steps": calibration_steps,
+                    "n_batches": len(calibration_samples),
+                    "current": {
+                        "jepa_weight": cfg.jepa_weight,
+                        "vicreg_weight": cfg.vicreg_weight,
+                    },
+                    "gradient_cosine": {
+                        name: {
+                            "median": statistics.median(
+                                sample["cosines"].get(name, 0.0)
+                                for sample in calibration_samples
+                            ),
+                            "min": min(sample["cosines"].get(name, 0.0)
+                                       for sample in calibration_samples),
+                            "max": max(sample["cosines"].get(name, 0.0)
+                                       for sample in calibration_samples),
+                        }
+                        for name in cosine_names
+                    },
+                    "sampled_source_share": {
+                        source: count / sum(calibration_source_counts.values())
+                        for source, count in sorted(calibration_source_counts.items())
+                    },
+                    "config": asdict(cfg),
+                    "git": source_provenance["git"],
+                    "source_provenance": source_provenance,
+                    "corpus_fingerprint": corpus_fingerprint(index),
+                    "samples": calibration_samples,
+                })
         if not bool(torch.isfinite(out.total)):
             raise FloatingPointError(f"non-finite Phase-A loss at step {step}: {parts}")
         opt.zero_grad(set_to_none=True)
@@ -1166,7 +1683,7 @@ def main() -> None:
         # unchanged weights while the optimizer trajectory silently loses a scheduler step.
         optimizer_stepped = scaler.get_scale() >= old_scale
         if jepa_teacher is not None and optimizer_stepped:
-            update_ema_encoder(model.encoder, jepa_teacher, cfg.jepa_ema_decay)
+            update_ema_encoder(model.encoder, jepa_teacher, ema_decay_at(step))
         if optimizer_stepped:
             sched.step()
 
@@ -1182,12 +1699,9 @@ def main() -> None:
             rec.update(objective_grad_norms)
             rec.update(representation_health(z))
             if cfg.jepa_weight > 0:
-                # Windows that get NO masked token at all, per source. The mask planner correctly
-                # refuses to mask when every real token overlaps the interval (there is no honest
-                # visible/masked split), but that is silent, and it is systematic on the
-                # short-window sources: sp_sw_har is 1.00 s windows and loses ~30-50% of its JEPA
-                # supervision, uci_har (2.56 s) ~10%, unimib_shar (3.02 s) ~1%.
-                # This depends only on the mask and remains comparable across tokenizer arms.
+                # Windows that get no masked token at all, per source. This should remain zero after
+                # the short-window mask-planning fix; keep it visible so future patch choices cannot
+                # silently remove JEPA supervision from a source.
                 with torch.no_grad():
                     unmasked = (jepa_mask.flatten(1).sum(dim=1) == 0).float()
                 rec["jepa_unmasked_frac_by_source"] = per_source_mean(
@@ -1203,21 +1717,58 @@ def main() -> None:
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
 
-        if step % cfg.val_every == 0 or step == cfg.steps:
-            # Query = every val label (stratified, so all classes are scored); support = the same
-            # labels drawn from the train set (early-stops once saturated). F1: covers all classes.
-            val_z, val_y, val_src = embed_stratified(model, val_loader, device, cfg.val_per_label,
-                                                     label_totals=val_label_totals)
+        if calibration_report is not None:
+            report_path = args.out / "objective_calibration.json"
+            report_path.write_text(json.dumps(calibration_report, indent=2))
+            if cfg.objective_calibration_mode == "apply":
+                recommended = calibration_report["recommended"]
+                cfg.jepa_weight = float(recommended["jepa_weight"])
+                cfg.vicreg_weight = float(recommended["vicreg_weight"])
+                # This is now the resolved trajectory configuration used from step+1 onward.
+                # Rewriting run_config makes a later resume pass the same frozen coefficients.
+                (args.out / "run_config.json").write_text(json.dumps(asdict(cfg), indent=2))
+            event = {
+                "step": step,
+                "event": ("objective_calibration_applied"
+                          if cfg.objective_calibration_mode == "apply"
+                          else "objective_calibration_complete"),
+                "recommended": calibration_report["recommended"],
+                "report": str(report_path),
+            }
+            print(json.dumps(event), flush=True)
+            with log_path.open("a") as f:
+                f.write(json.dumps(event) + "\n")
+            if cfg.objective_calibration_mode == "report":
+                print("calibration pilot complete; recommendation written without changing weights",
+                      flush=True)
+                calibration_completed = True
+                break
+            print("objective coefficients applied once and frozen for the remaining steps", flush=True)
+
+        if not (
+            cfg.objective_calibration_at > 0 and cfg.objective_calibration_mode == "report"
+        ) and (
+            step % cfg.val_every == 0 or step == run_until_step
+        ):
+            # Query/support cover every available label/stream cell up to the fixed per-label cap.
+            val_z, val_y, val_src, val_stream = embed_stratified(
+                model, val_loader, device, cfg.val_per_label,
+                label_totals=val_label_totals,
+            )
             train_eval_gen.manual_seed(cfg.data_seed)   # same support bank at every val + across arms (#4)
-            train_z, train_y, _ = embed_stratified(model, train_eval_loader, device,
-                                                   cfg.val_per_label, target_labels=set(val_y.tolist()),
-                                                   label_totals=train_label_totals)
-            ba = knn_balanced_acc(train_z, train_y, val_z, val_y, cfg.knn_k)
+            train_z, train_y, _, _ = embed_stratified(
+                model, train_eval_loader, device, cfg.val_per_label,
+                target_labels=set(val_y.tolist()), label_totals=train_label_totals,
+            )
+            knn_pred = knn_predict(train_z, train_y, val_z, cfg.knn_k)
+            ba = balanced_acc(knn_pred, val_y)
+            hetero_ba = label_group_balanced_acc(knn_pred, val_y, val_stream)
             # ConSE-style text-cosine probe: ridge-map sensor->label-text space on the train
             # support, cosine-classify val against the label prototypes. A live proxy for the
             # downstream zero-shot metric (comparable to the ConSE baselines), fit fresh each val.
             conse_pred = conse_probe_predict(train_z, train_y, val_z, val_y, label_protos)
             conse_ba = balanced_acc(conse_pred, val_y)
+            conse_hetero_ba = label_group_balanced_acc(conse_pred, val_y, val_stream)
             # per-source val BA — which datasets cluster (kNN) / align to text (conse) well
             vs = np.asarray(val_src)
             ba_by_src, conse_by_src = {}, {}
@@ -1227,7 +1778,10 @@ def main() -> None:
                     ba_by_src[s] = round(knn_balanced_acc(train_z, train_y, val_z[mt], val_y[mt],
                                                           cfg.knn_k), 4)
                     conse_by_src[s] = round(balanced_acc(conse_pred[mt], val_y[mt]), 4)
-            rec = {"step": step, "val_knn_ba": ba, "val_conse_ba": round(conse_ba, 4),
+            rec = {"step": step, "val_knn_ba": ba,
+                   "val_knn_label_stream_ba": round(hetero_ba, 4),
+                   "val_conse_ba": round(conse_ba, 4),
+                   "val_conse_label_stream_ba": round(conse_hetero_ba, 4),
                    "val_ba_by_source": ba_by_src, "val_conse_by_source": conse_by_src}
             if device.type == "cuda":
                 # peak so far (train step + val embedding) — memory telemetry.
@@ -1235,14 +1789,21 @@ def main() -> None:
             print(json.dumps(rec), flush=True)
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
-            checkpoint("last.pt", step, ba)
-            if ba > best_ba:
-                best_ba = ba
-                checkpoint("best.pt", step, ba)
-        if step >= cfg.steps:
+            checkpoint("last.pt", step, hetero_ba)
+            if hetero_ba > best_ba:
+                best_ba = hetero_ba
+                checkpoint("best.pt", step, hetero_ba)
+        if step >= run_until_step:
             break
 
-    print(f"done: best val kNN-BA {best_ba:.3f} · checkpoints in {args.out}", flush=True)
+    if calibration_completed:
+        print(f"done: objective calibration report in {args.out}", flush=True)
+    else:
+        if run_until_step < cfg.steps:
+            print(f"bounded monitor stopped at step {run_until_step}; full schedule remains "
+                  f"{cfg.steps} steps and this checkpoint can be resumed", flush=True)
+        print(f"done: best val label/stream-macro kNN {best_ba:.3f} · checkpoints in {args.out}",
+              flush=True)
 
 
 if __name__ == "__main__":

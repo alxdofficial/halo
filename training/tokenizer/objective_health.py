@@ -1,8 +1,7 @@
-"""Empirical health report for the consolidated JEPA + relation objectives.
+"""Empirical health report for the consolidated JEPA + augmentation-VICReg objectives.
 
 This is a CPU/data diagnostic: it draws real temperature-sampled batches, measures honest JEPA
-supervision after validity masking, and verifies that the universal augmentation relation and sparse
-cross-placement relation are both populated as configured.
+supervision after validity masking, and verifies that both augmented VICReg views are populated.
 
 Run: /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.objective_health
 """
@@ -18,7 +17,6 @@ import torch
 from torch.utils.data import DataLoader
 
 from training.tokenizer.losses_repr import make_multiresolution_mask_plan
-from training.tokenizer.pretrain import verified_event_pairs
 from training.tokenizer.pretrain_data import (
     CorpusIndex,
     MultiResolutionCollate,
@@ -31,7 +29,6 @@ OUT = Path(__file__).resolve().parent / "outputs" / "objective_health"
 GYRO = [3, 4, 5]
 N_BATCHES = 20
 BATCH_SIZE = 256
-PAIR_FRACTION = 0.2
 
 
 def distribution(values: list[float]) -> dict[str, float]:
@@ -61,9 +58,6 @@ def main() -> None:
         alpha=0.25,
         seed=0,
         batch_size=BATCH_SIZE,
-        event_ids=index.train_event_ids,
-        positive_event_ids=index.train_positive_event_ids,
-        pair_fraction=PAIR_FRACTION,
         subject_ids=index.train_subject_ids,
         subject_alpha=0.5,
         max_dataset_share=0.25,
@@ -81,7 +75,6 @@ def main() -> None:
     supervised_tokens: list[float] = []
     masked_fractions: list[float] = []
     dead_windows = 0
-    placement_pairs: list[float] = []
     source_counts: dict[str, int] = {}
 
     for batch in loader:
@@ -100,10 +93,6 @@ def main() -> None:
         masked_fractions.extend((counts / totals).tolist())
         dead_windows += int(counts.eq(0).sum())
 
-        left, _ = verified_event_pairs(
-            batch["event_ids"], batch["event_verified"], batch["streams"], torch.device("cpu")
-        )
-        placement_pairs.append(float(len(left)))
         for source in batch["sources"]:
             source_counts[source] = source_counts.get(source, 0) + 1
 
@@ -112,7 +101,7 @@ def main() -> None:
         }
         missing = required_view_b - set(batch)
         if missing:
-            raise RuntimeError(f"universal relation view is missing collate fields {sorted(missing)}")
+            raise RuntimeError(f"VICReg view is missing collate fields {sorted(missing)}")
 
     windows = N_BATCHES * BATCH_SIZE
     report = {
@@ -124,10 +113,8 @@ def main() -> None:
             "zero_supervision_windows": dead_windows,
             "zero_supervision_fraction": round(dead_windows / windows, 4),
         },
-        "relation": {
+        "vicreg": {
             "augmentation_pairs_per_batch": BATCH_SIZE,
-            "placement_pairs_per_batch": distribution(placement_pairs),
-            "configured_pair_window_fraction": PAIR_FRACTION,
         },
         "sampled_source_share": {
             source: round(count / windows, 4) for source, count in sorted(source_counts.items())

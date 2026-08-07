@@ -10,8 +10,12 @@ training path** so the two never conflate.
 - **Shared with the rest of HALO:** the tokenizer (`model/tokenizer/`, physical filterbank +
   extensions). Everything else here — the archetypal memory, the evidence decoder, the training
   loop — is bespoke to this approach.
-- **Status:** design only; no implementation yet. The design is not finalized (see the open
-  forks in the design doc). Name "evidence" is a placeholder.
+- **Status:** implemented — memory bank, per-patch retrieval with learned subspaces, candidate-aware
+  decoder, confidence/EDL, and the episodic trainer/evaluator all exist and have CPU smokes. What is
+  *not* settled is whether training the decoder helps: the untrained retrieval + text-ensemble
+  configuration remains the strongest evidence arm, and the trained decoder has been measured
+  net-negative against its control. See `docs/design/EVIDENCE_ENGINE_FINDINGS.md` for the current
+  position and the retracted claims.
 
 Nothing here should import or be imported by a conventional classifier trainer; the only shared
 dependency is the tokenizer.

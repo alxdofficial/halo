@@ -1,6 +1,6 @@
 # Augmentation policy — what each model gets, and why
 
-> **Updated for the consolidated SSL recipe.** The relation objective uses label-free VICReg;
+> **Updated for the consolidated SSL recipe.** The augmentation objective uses label-free VICReg;
 > SO(3) rotation includes
 > gravity-removed streams (`require_gravity=False`); a bounded **sensor-text dropout** was added.
 > The authoritative Phase-A recipe table is in
