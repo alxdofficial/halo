@@ -2,26 +2,60 @@
   "batches": 20,
   "windows": 5120,
   "jepa": {
+    "mask_mode": "per_resolution",
     "supervised_tokens_per_window": {
       "n": 5120,
-      "min": 2.0,
+      "min": 3.0,
       "p10": 12.0,
-      "median": 30.0,
-      "p90": 66.0,
-      "max": 102.0,
-      "mean": 35.4764
+      "median": 27.0,
+      "p90": 54.0,
+      "max": 93.0,
+      "mean": 31.1549
     },
     "masked_fraction_of_real_tokens": {
       "n": 5120,
-      "min": 0.1667,
-      "p10": 0.4444,
-      "median": 0.6111,
-      "p90": 0.75,
+      "min": 0.4286,
+      "p10": 0.4615,
+      "median": 0.5,
+      "p90": 0.7308,
       "max": 0.875,
-      "mean": 0.6014
+      "mean": 0.5544
     },
     "zero_supervision_windows": 0,
-    "zero_supervision_fraction": 0.0
+    "zero_supervision_fraction": 0.0,
+    "realised_masked_fraction_short": {
+      "n": 5120,
+      "min": 0.4,
+      "p10": 0.4444,
+      "median": 0.5,
+      "p90": 1.0,
+      "max": 1.0,
+      "mean": 0.6289
+    },
+    "realised_masked_fraction_long": {
+      "n": 5120,
+      "min": 0.0,
+      "p10": 0.4,
+      "median": 0.5,
+      "p90": 1.0,
+      "max": 1.0,
+      "mean": 0.643
+    },
+    "masked_long_tokens_with_all_short_visible": 0.1604,
+    "mean_temporally_masked_tokens_by_source": {
+      "capture24": 8.99,
+      "harmes": 8.68,
+      "hhar": 8.79,
+      "kuhar": 9.06,
+      "mhealth": 9.31,
+      "nfi_fared": 8.91,
+      "pamap2": 8.9,
+      "sp_sw_har": 2.07,
+      "uci_har": 4.18,
+      "unimib_shar": 4.69,
+      "wisdm": 9.1,
+      "xrf_v2": 8.64
+    }
   },
   "vicreg": {
     "augmentation_pairs_per_batch": 256

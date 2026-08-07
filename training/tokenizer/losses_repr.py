@@ -150,9 +150,12 @@ def make_multiresolution_mask_plan(
 ) -> MaskPlan:
     """Mask one physical interval and every scale token whose support overlaps it.
 
-    This is the non-leaking counterpart of ``make_mask_plan`` for simultaneous temporal
-    resolutions. A masked short patch cannot be reconstructed by reading an overlapping long
-    patch, and channel events apply to every resolution of that channel.
+    CONTROL ARM (``--jepa-mask-mode shared_interval``). The default is now
+    ``make_per_resolution_mask_plan``; this remains selectable so the two schemes can be compared
+    on one corpus. It is the counterpart of ``make_mask_plan`` for a student whose attention is
+    ISOLATED per resolution: coupling the two grids' masked spans is what makes a masked short
+    patch unreadable from an overlapping long patch. Do not pair it with cross-resolution
+    attention -- the guarantee is one-directional (see below) and the pairing leaks.
 
     INTERVAL LENGTH vs MASKED FRACTION. Masking is by OVERLAP, so a token of support ``p`` is
     caught whenever the interval comes within ``p`` of it: the realised fraction is
@@ -222,6 +225,111 @@ def make_multiresolution_mask_plan(
     if channel_mask is not None:
         mask &= channel_mask.unsqueeze(1)
     mask = _ensure_learnable_target(mask, valid, channel_mask, rnd)
+    return MaskPlan(token_mask=mask)
+
+
+def make_per_resolution_mask_plan(
+    resolution_ids: torch.Tensor,
+    C: int,
+    gyro_channels: Optional[list[int]],
+    generator: Optional[torch.Generator] = None,
+    time_ratio: float = MASK_RATIO_TIME,
+    channel_event_p: float = MASK_RATIO_CHANNEL,
+    gyro_bias: float = GYRO_DROP_BIAS,
+    causal_p: float = CAUSAL_FRACTION,
+    channel_mask: Optional[torch.Tensor] = None,
+    valid_patches: Optional[torch.Tensor] = None,
+) -> MaskPlan:
+    """Mask ONE contiguous block per temporal resolution, drawn independently per grid.
+
+    This is the counterpart of ``make_multiresolution_mask_plan`` for a student that is ALLOWED
+    to attend across resolutions. Inferring a hidden fine-grained token from a visible coarse
+    summary of the same seconds (or the reverse) is treated as legitimate inference, not
+    leakage, so nothing here couples the two grids' masked spans.
+
+    Three consequences, all deliberate:
+
+    * ``time_ratio`` is REALISED EXACTLY (up to token rounding) in each grid. The shared-interval
+      scheme masks by overlap, so a token of support ``p`` is caught whenever the interval comes
+      within ``p`` -- realised ``(L + p)/W``, measured 0.558 short / 0.674 long against a nominal
+      0.5. Here the block is counted in tokens, so 0.5 means 0.5 in both grids. To hold the
+      realised difficulty of the old scheme roughly constant, raise ``time_ratio`` to ~0.6.
+    * A resolution may be masked in FULL. Under isolation that was unlearnable and had to be
+      undone by a guard, which is precisely why a one-token long grid (sp_sw_har's 1.0 s windows,
+      100% of them) could never receive temporal supervision and silently fell back to a
+      cross-channel task. With cross-resolution attention the other grid supplies the context,
+      so every source trains on the same objective.
+    * Blocks stay CONTIGUOUS within each grid's own physical-time ordering. Scattered i.i.d.
+      masking degenerates for quasi-stationary motion: an adjacent 0.5 s token is nearly a copy,
+      so the task collapses to interpolate-from-neighbours.
+
+    The only remaining floor is global: a window must keep at least one visible real token, or
+    the student sees nothing but mask tokens and text conditioning.
+    """
+    device = resolution_ids.device
+    B, T = resolution_ids.shape
+    rnd = lambda *s: torch.rand(*s, generator=generator, device=device)  # noqa: E731
+    valid = resolution_ids.ge(0)
+    if valid_patches is not None:
+        valid = valid & valid_patches
+
+    # Causal ("predict the future") is drawn PER SAMPLE, not per grid, so the world-model variant
+    # hides the same physical tail at both scales instead of two unrelated spans.
+    causal = rnd(B) < causal_p
+    temporal = torch.zeros(B, T, dtype=torch.bool, device=device)
+    for group in (0, 1):
+        group_valid = valid & resolution_ids.eq(group)
+        n_group = group_valid.sum(dim=1)                                  # (B,)
+        # Rank within this grid's own time order. The collate emits tokens sorted by physical
+        # centre time, so a contiguous rank range IS a contiguous span of seconds.
+        rank = group_valid.cumsum(dim=1) - 1                              # (B, T)
+        block = torch.clamp(torch.round(float(time_ratio) * n_group.float()).long(), min=1)
+        block = torch.minimum(block, n_group)                             # 0 where the grid is absent
+        max_start = (n_group - block).clamp(min=0)
+        start = (rnd(B) * (max_start + 1).float()).long().clamp(max=max_start)
+        start = torch.where(causal, max_start, start)                     # causal -> anchor at the end
+        in_block = group_valid & (rank >= start.unsqueeze(1)) \
+            & (rank < (start + block).unsqueeze(1)) & (block > 0).unsqueeze(1)
+        temporal |= in_block
+
+    mask = temporal.unsqueeze(2).expand(B, T, C).clone()
+
+    # Whole-channel events are unchanged: they span every token of both grids.
+    event = rnd(B) < channel_event_p
+    coin = rnd(B)
+    if gyro_channels:
+        gyro_real = (channel_mask[:, gyro_channels].all(dim=1) if channel_mask is not None
+                     else torch.ones(B, dtype=torch.bool, device=device))
+        drop_gyro = event & (coin < gyro_bias) & gyro_real
+        for c in gyro_channels:
+            mask[drop_gyro, :, c] = True
+        single = event & ~((coin < gyro_bias) & gyro_real)
+    else:
+        single = event
+    scores = rnd(B, C)
+    if channel_mask is not None:
+        scores = scores.masked_fill(~channel_mask, -1.0)
+    chan = scores.argmax(dim=1)
+    rows = torch.nonzero(single).squeeze(1)
+    if rows.numel():
+        mask[rows, :, chan[rows]] = True
+
+    mask &= valid.unsqueeze(2)
+    if channel_mask is not None:
+        mask &= channel_mask.unsqueeze(1)
+
+    # Global floor. A fully masked RESOLUTION is fine here -- the other grid is the context -- but
+    # a fully masked WINDOW leaves the student only mask tokens. Reveal that window's last real
+    # patch rather than dropping its supervision entirely.
+    observable = valid.unsqueeze(2)
+    if channel_mask is not None:
+        observable = observable & channel_mask.unsqueeze(1)
+    blind = observable.flatten(1).any(dim=1) & ~(observable & ~mask).flatten(1).any(dim=1)
+    if bool(blind.any()):
+        rows = torch.nonzero(blind).squeeze(1)
+        index = torch.arange(T, device=device).unsqueeze(0).expand(rows.numel(), T)
+        last = index.masked_fill(~valid[rows], -1).amax(dim=1)
+        mask[rows, last] = False
     return MaskPlan(token_mask=mask)
 
 

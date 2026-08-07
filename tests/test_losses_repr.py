@@ -9,6 +9,7 @@ from training.tokenizer.losses_repr import (
     MIN_VISIBLE_TIME,
     make_mask_plan,
     make_multiresolution_mask_plan,
+    make_per_resolution_mask_plan,
     masked_ema_latent_loss,
     phase_a_loss,
     vicreg,
@@ -103,6 +104,90 @@ def test_one_token_per_resolution_gets_shared_channel_target():
     assert int(plan.token_mask.sum()) == 2
     assert torch.equal(plan.token_mask[0, 0], plan.token_mask[0, 1])
     assert int(plan.token_mask[0, 0].sum()) == 1
+
+
+# ------------------------------------------------- per-resolution (default) mask plan
+def _per_res_grid(n_short: int, n_long: int):
+    """Interleaved (B=1) resolution ids: the collate sorts tokens by physical centre time, so a
+    grid's tokens are NOT contiguous along the patch axis. Alternate them to prove the block is
+    contiguous in each grid's OWN order, not in the raw patch index."""
+    ids = [0] * n_short + [1] * n_long
+    ids = [x for pair in zip(ids[:min(n_short, n_long)], ids[n_short:]) for x in pair] \
+        + ids[min(n_short, n_long):n_short] + ids[n_short + min(n_short, n_long):]
+    return torch.tensor([ids])
+
+
+def test_per_resolution_block_is_contiguous_within_each_grid():
+    rids = _per_res_grid(12, 4)
+    T = rids.shape[1]
+    plan = make_per_resolution_mask_plan(
+        rids, C=3, gyro_channels=None, generator=gen(3), channel_event_p=0.0,
+        valid_patches=torch.ones(1, T, dtype=torch.bool),
+        channel_mask=torch.ones(1, 3, dtype=torch.bool),
+    )
+    masked = plan.token_mask[0, :, 0]
+    for group in (0, 1):
+        hits = [bool(masked[p]) for p in range(T) if int(rids[0, p]) == group]
+        runs = sum(1 for i in range(1, len(hits)) if hits[i] and not hits[i - 1]) + int(hits[0])
+        assert runs == 1, f"grid {group} masked in {runs} runs, expected one contiguous block"
+        assert any(hits) and not all(hits)
+
+
+def test_per_resolution_realises_the_requested_ratio_in_each_grid():
+    """The shared-interval scheme masks by OVERLAP, so nominal 0.5 realised 0.558/0.674. Counting
+    the block in tokens is what makes the knob mean what it says."""
+    rids = _per_res_grid(12, 4)
+    T = rids.shape[1]
+    for ratio, want_short, want_long in ((0.5, 6, 2), (0.75, 9, 3)):
+        plan = make_per_resolution_mask_plan(
+            rids, C=3, gyro_channels=None, generator=gen(4), channel_event_p=0.0,
+            time_ratio=ratio, valid_patches=torch.ones(1, T, dtype=torch.bool),
+            channel_mask=torch.ones(1, 3, dtype=torch.bool),
+        )
+        masked = plan.token_mask[0, :, 0]
+        got = {g: sum(bool(masked[p]) for p in range(T) if int(rids[0, p]) == g) for g in (0, 1)}
+        assert got == {0: want_short, 1: want_long}, (ratio, got)
+
+
+def test_per_resolution_masks_a_one_token_grid_in_full():
+    """The sp_sw_har case: a 1.0 s window gives a single long token. Under the isolated
+    shared-interval scheme masking it was unlearnable and a guard removed the mask, so 100% of
+    that source silently trained on a cross-channel task instead. With cross-resolution attention
+    the visible short grid is the context, so the token can and must be masked."""
+    rids = torch.tensor([[0, 1, 0]])            # 2 short tokens, 1 long token
+    plan = make_per_resolution_mask_plan(
+        rids, C=3, gyro_channels=None, generator=gen(5), channel_event_p=0.0,
+        valid_patches=torch.ones(1, 3, dtype=torch.bool),
+        channel_mask=torch.ones(1, 3, dtype=torch.bool),
+    )
+    # ALL channels, not merely any: the shared-interval guard also leaves a mark here, but only
+    # via the one-channel fallback. Requiring the whole token is what separates real temporal
+    # supervision from the cross-channel consolation prize.
+    assert bool(plan.token_mask[0, 1].all()), "the single long token got no temporal mask"
+    assert not bool(plan.token_mask[0].all()), "nothing visible left to predict from"
+
+
+def test_per_resolution_always_leaves_one_visible_real_token():
+    for seed in range(25):
+        rids = torch.tensor([[0, 1]])           # smallest possible grid: one token each
+        plan = make_per_resolution_mask_plan(
+            rids, C=2, gyro_channels=None, generator=gen(seed), channel_event_p=1.0,
+            time_ratio=0.9, valid_patches=torch.ones(1, 2, dtype=torch.bool),
+            channel_mask=torch.ones(1, 2, dtype=torch.bool),
+        )
+        assert not bool(plan.token_mask.all()), f"seed {seed} masked every real token"
+
+
+def test_per_resolution_never_masks_padded_or_absent_entries():
+    rids = torch.tensor([[0, 0, 1, -1]])
+    valid = torch.tensor([[True, True, True, False]])
+    channels = torch.tensor([[True, True, False]])
+    plan = make_per_resolution_mask_plan(
+        rids, C=3, gyro_channels=None, generator=gen(6), channel_event_p=1.0,
+        valid_patches=valid, channel_mask=channels,
+    )
+    assert not bool(plan.token_mask[0, 3].any())        # padded patch
+    assert not bool(plan.token_mask[..., 2].any())      # absent channel
 
 
 def test_gyro_triad_dropped_jointly():

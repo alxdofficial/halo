@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from training.tokenizer.losses_repr import make_multiresolution_mask_plan
+from training.tokenizer.losses_repr import make_per_resolution_mask_plan
 from training.tokenizer.pretrain_data import (
     CorpusIndex,
     MultiResolutionCollate,
@@ -77,13 +77,17 @@ def main() -> None:
     dead_windows = 0
     source_counts: dict[str, int] = {}
 
+    per_resolution: dict[int, list[float]] = {0: [], 1: []}
+    temporal_by_source: dict[str, list[int]] = {}
+    copyable_long, masked_long = 0, 0
+
     for batch in loader:
         _, _, _, channels = batch["patches"].shape
         valid = batch["patch_padding_mask"]
         channel_mask = batch["channel_mask"]
-        plan = make_multiresolution_mask_plan(
-            batch["patch_starts"], batch["patch_ends"], batch["resolution_ids"],
-            channels, GYRO, valid_patches=valid, channel_mask=channel_mask,
+        rids = batch["resolution_ids"]
+        plan = make_per_resolution_mask_plan(
+            rids, channels, GYRO, valid_patches=valid, channel_mask=channel_mask,
         )
         real = valid.unsqueeze(2) & channel_mask.unsqueeze(1)
         supervised = plan.token_mask & real
@@ -93,8 +97,34 @@ def main() -> None:
         masked_fractions.extend((counts / totals).tolist())
         dead_windows += int(counts.eq(0).sum())
 
-        for source in batch["sources"]:
+        # Realised fraction PER GRID. 'per_resolution' counts the block in tokens, so this should
+        # track mask_ratio_time directly instead of the shared-interval scheme's (L+p)/W inflation.
+        token_masked = supervised.any(dim=2)
+        for group in (0, 1):
+            sel = valid & rids.eq(group)
+            n = sel.sum(dim=1)
+            hit = (token_masked & sel).sum(dim=1)
+            per_resolution[group].extend(
+                (hit[n > 0].float() / n[n > 0].float()).tolist()
+            )
+
+        # The cost 'per_resolution' knowingly accepts: a masked LONG token whose overlapping short
+        # tokens are ALL visible is close to copyable, because a coarse band summary of a
+        # quasi-stationary second is nearly its own fine summary. Track it rather than assume.
+        starts, ends = batch["patch_starts"], batch["patch_ends"]
+        for b in range(rids.shape[0]):
+            longs = torch.nonzero(valid[b] & rids[b].eq(1) & token_masked[b]).squeeze(1)
+            shorts = torch.nonzero(valid[b] & rids[b].eq(0)).squeeze(1)
+            for p in longs.tolist():
+                masked_long += 1
+                inside = shorts[(starts[b, shorts] >= starts[b, p] - 1e-6)
+                                & (ends[b, shorts] <= ends[b, p] + 1e-6)]
+                if inside.numel() and not bool(token_masked[b, inside].any()):
+                    copyable_long += 1
+
+        for source, row in zip(batch["sources"], token_masked):
             source_counts[source] = source_counts.get(source, 0) + 1
+            temporal_by_source.setdefault(source, []).append(int(row.sum()))
 
         required_view_b = {
             "patches_b", "rates_b", "positions_b", "channel_mask_b", "patch_padding_mask_b"
@@ -108,10 +138,22 @@ def main() -> None:
         "batches": N_BATCHES,
         "windows": windows,
         "jepa": {
+            "mask_mode": "per_resolution",
             "supervised_tokens_per_window": distribution(supervised_tokens),
             "masked_fraction_of_real_tokens": distribution(masked_fractions),
             "zero_supervision_windows": dead_windows,
             "zero_supervision_fraction": round(dead_windows / windows, 4),
+            "realised_masked_fraction_short": distribution(per_resolution[0]),
+            "realised_masked_fraction_long": distribution(per_resolution[1]),
+            # Accepted by design: cross-scale inference is the objective, not a leak. Reported so
+            # the trade stays visible if it ever grows.
+            "masked_long_tokens_with_all_short_visible": round(
+                copyable_long / max(masked_long, 1), 4
+            ),
+            "mean_temporally_masked_tokens_by_source": {
+                source: round(float(np.mean(values)), 2)
+                for source, values in sorted(temporal_by_source.items())
+            },
         },
         "vicreg": {
             "augmentation_pairs_per_batch": BATCH_SIZE,
