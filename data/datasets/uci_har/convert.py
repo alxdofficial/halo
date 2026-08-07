@@ -8,7 +8,6 @@ Output: data/datasets/uci_har/
   - sessions/session_XXX/data.parquet (all channels as DataFrame)
 """
 
-import os
 import json
 import numpy as np
 import pandas as pd
@@ -216,8 +215,8 @@ def main():
     print(f"{'=' * 80}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"  - {len(all_labels)} sessions")
-    print(f"  - 9 channels (accel + gyro)")
-    print(f"  - 50 Hz sampling rate")
+    print("  - 9 channels (accel + gyro)")
+    print("  - 50 Hz sampling rate")
 
     # Generate debug visualizations
     try:

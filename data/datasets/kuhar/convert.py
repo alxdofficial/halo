@@ -270,14 +270,14 @@ def convert_kuhar():
     print(f"  - {skipped_count} files skipped")
     print(f"  - {len(activity_counts)} unique activities")
     print(f"  - {SAMPLE_RATE} Hz sampling rate")
-    print(f"\nActivity distribution:")
+    print("\nActivity distribution:")
     for activity, count in sorted(activity_counts.items(), key=lambda x: -x[1]):
         print(f"  {activity}: {count}")
 
     # Surface per-subject over-representation (subject 1101 held ~8.7% of windows).
     if subject_window_counts and session_count > 0:
         top = sorted(subject_window_counts.items(), key=lambda x: -x[1])[:5]
-        print(f"\nTop subjects by window share (watch for >5% single-subject dominance):")
+        print("\nTop subjects by window share (watch for >5% single-subject dominance):")
         for subj, cnt in top:
             print(f"  s{subj}: {cnt} ({100 * cnt / session_count:.1f}%)")
 
@@ -324,7 +324,7 @@ def create_manifest():
     manifest_path = OUTPUT_DIR / "manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-    print(f"✓ Created manifest.json")
+    print("✓ Created manifest.json")
 
 
 def main():

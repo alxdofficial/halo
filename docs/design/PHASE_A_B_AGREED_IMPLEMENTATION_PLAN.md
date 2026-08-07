@@ -90,7 +90,8 @@ JEPA masked contextual prediction
 - Use only an EMA teacher with no gradients. The clean teacher emits contextual token targets; the masked
   student predicts them at valid masked positions through a dedicated predictor.
 - Update the teacher only after an optimizer step and save/restore it in checkpoints.
-- Use one cross-resolution physical mask and skip a resolution when it would have no visible context.
+- Draw one randomly located contiguous block independently in each resolution. Let resolutions
+  contextualize each other and keep at least one real token globally visible.
 - Reduce each resolution independently and duration-weight partial tail patches.
 
 ### Frontends, sampling, and health
@@ -172,8 +173,8 @@ from decoder training for model selection so candidate-text reasoning is tested 
 - Bind every Phase-B artifact to the exact Phase-A checkpoint, corpus, bank fingerprint, patch schema,
   and candidate-text vocabulary.
 - Keep controls for pooled versus patch evidence, implicit versus explicit acquisition metadata,
-  no-subspace versus subspace retrieval, fixed versus learnable frontend, every Phase-A objective arm,
-  and the identity evidence decoder.
+  no-subspace versus subspace retrieval, fixed versus learnable frontend, JEPA+VICReg versus
+  VICReg-only, and the identity evidence decoder.
 - Required tests cover VICReg collapse prevention, EMA stop-gradient/update/restore, event-pair
   integrity, patch-bank provenance, leakage exclusions, candidate/evidence permutations, metadata
   masking, subspace diversity, episodic support budgets, confidence behavior, and checkpoint guards.

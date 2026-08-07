@@ -8,7 +8,7 @@ Design decisions carried in from the gates:
     not HALO's. Source-balanced sampling (no per-stream cap) spreads each activity across configs.
   * Subject-disjoint train/val split per dataset.
   * Label-free hierarchical temperature sampling is the sole Phase-A sampler.
-  * The FULL augmentation stack (data/scripts/augmentations.py default_v2), with
+  * The Phase-A augmentation stack (data/scripts/augmentations.py phase_a), with
     per-worker reseeding of BOTH np.random and stdlib random (the CrossHAR lesson —
     the augmenter draws from both RNGs).
   * Multi-scale patch duration: ONE patch_seconds draw per BATCH (the token-count
@@ -34,7 +34,6 @@ from torch.utils.data import Dataset, Sampler
 
 from data.scripts.augmentations import AugmentationConfig, IMUAugmenter, IMUSample
 from data.scripts.eda.grid_io import GridRef, discover_grids
-from model.tokenizer.preprocess import gravity_align
 
 # ----------------------------------------------------------------------------------------------
 # Corpus configuration
@@ -53,7 +52,7 @@ PHASE_A_ONLY_DATASETS = frozenset({"nhanes"})
 UNLABELED_LABEL = "__unlabeled__"
 WINDOW_SECONDS = 6.0
 VAL_SUBJECT_FRACTION = 0.10      # subject-disjoint val within the train datasets
-GRAVITY_AUG_P = 0.15             # DROP from default_v2's 0.5: the audit found gravity
+GRAVITY_AUG_P = 0.15             # audit: p=0.5 removed gravity from half the corpus
                                  # removed on 52% of windows, killing the M0 gravity-align /
                                  # DC-tilt features on half the corpus. 0.15 keeps the
                                  # iOS-userAcceleration robustness without dominating.
@@ -127,9 +126,8 @@ def stream_channel_descriptions(dataset: str, stream: str) -> list[str]:
     # Gravity state is a real acquisition-config axis: accelerometer from gravity-removed streams
     # (kuhar, xrf_v2/airpods_ear) has |DC|~0 vs ~1 g for gravity-present streams. Only the
     # accelerometer carries it (the gyroscope is unaffected). The clause mirrors the sibling
-    # deployment_policy.channel_description() and is read back as AUTHORITATIVE by the gravity
-    # augmentation's _gravity_present() / _mark_gravity_removed() (so it also gates rotation/
-    # gravity-removal correctly on native gravity-removed streams, not the misfiring heuristic).
+    # deployment_policy.channel_description() and lets the gravity-removal augmentation skip
+    # streams that already contain user acceleration rather than trusting a magnitude heuristic.
     grav = "; gravity removed" if gravity_removed else "; includes gravity"
     return ([f"accelerometer {a}-axis worn at {where}{grav}" for a in "xyz"]
             + [f"gyroscope {a}-axis worn at {where}" for a in "xyz"])
@@ -212,9 +210,7 @@ _GRAVITY_STATE_CACHE: dict[tuple[str, str], str | None] = {}
 
 
 def _stream_gravity_state(dataset: str, stream: str) -> str | None:
-    """Authoritative per-stream gravity state ('present'/'removed') from the deployment policy,
-    cached. Fed to the collate's gravity_align so gravity-removed streams (kuhar, xrf/airpods_ear)
-    skip alignment instead of trusting the magnitude heuristic (which misfires on ~3% of them)."""
+    """Cached authoritative gravity state used by physics-aware augmentations and text."""
     key = (dataset, stream)
     if key not in _GRAVITY_STATE_CACHE:
         try:
@@ -408,12 +404,9 @@ class PretrainDataset(Dataset):
         self.index = index
         self.keys = keys
         self.two_view = two_view
-        cfg = AugmentationConfig.default_v2() if augment else AugmentationConfig.none()
+        cfg = AugmentationConfig.phase_a() if augment else AugmentationConfig.none()
         if augment:
             cfg.gravity.p = GRAVITY_AUG_P     # audit: 0.5 killed gravity on half the corpus
-            cfg.label_text.enabled = False    # Phase A never conditions on activity-label text; this aug is
-                                              # computed-then-discarded in pretraining (label
-                                              # text is a Pipeline-B concern)
         self.augmenter = IMUAugmenter(cfg)
         self._data_cache: dict[int, np.ndarray] = {}
 
@@ -442,8 +435,6 @@ class PretrainDataset(Dataset):
             channel_names=list(CHANNELS),
             sampling_rate=ref.rate_hz,
             channel_descriptions=list(base_texts),
-            label=ref.labels[key.window_i],
-            dataset_name=ref.dataset,
             channel_mask=[bool(m) for m in ref.mask],   # real vs zero-padded channels (F10b)
             role_descriptions=role_texts,
             sensor_descriptions=sensor_texts,
@@ -677,12 +668,9 @@ class MultiScaleCollate:
     Trailing patches the (possibly rate-shortened / cropped) window cannot fill are flagged in
     ``patch_padding_mask`` and never treated as real.
 
-    **Gravity is NOT aligned by default (design decision, 2026-07-19).** The tokenizer's signed-DC
-    feature already exposes the gravity DIRECTION per channel, so posture (stand/sit/lie, which differ
-    only in that direction) stays readable by the model; and the `rotation_3d` augmentation teaches
-    pose/mount-rotation robustness. Canonicalizing pitch/roll to +z did the opposite of both — it
-    flattened every posture's DC to (0,0,1) and cancelled most of `rotation_3d`. `align_gravity=True`
-    is kept only for the align-vs-no-align ablation. NOTE: eval/inference must match this (no align).
+    Gravity is not aligned. The tokenizer's signed-DC feature preserves gravity direction, while
+    SO(3) augmentation teaches mounting robustness. Canonicalizing pitch/roll would erase posture
+    information and cancel that augmentation.
 
     Output: patches (B, P, S, 6) zero-padded · patch_len (B,) · rates (B,) ·
     positions (B, P) s · channel_mask (B, 6) · patch_padding_mask (B, P) True=real ·
@@ -692,11 +680,10 @@ class MultiScaleCollate:
     def __init__(self, dft_size: int = DFT_SIZE,
                  patch_choices: Sequence[float] = PATCH_SECONDS_CHOICES,
                  fixed_patch_seconds: float | None = None, seed: int = SEED,
-                 align_gravity: bool = False, two_view: bool = False):
+                 two_view: bool = False):
         self.dft_size = dft_size
         self.patch_choices = tuple(patch_choices)
         self.fixed = fixed_patch_seconds
-        self.align_gravity = align_gravity
         # Augmentation VICReg: patchify the independently augmented positive view into `*_b` keys.
         self.two_view = two_view
         self.seed = seed
@@ -738,12 +725,6 @@ class MultiScaleCollate:
             n = max(1, int(round(rate * ps)))
             if n > self.dft_size:
                 raise ValueError(f"patch length {n} exceeds dft_size {self.dft_size}")
-            # Gravity-align the whole window on its true length (one R per window). Pass the
-            # AUTHORITATIVE gravity_state so gravity-removed streams skip alignment (F9).
-            if self.align_gravity:
-                data, _, _ = gravity_align(data.unsqueeze(0), list(CHANNELS), rate,
-                                           gravity_state=item.get("gravity_state"))
-                data = data[0]
             per_patch = n
             usable = min(P, data.shape[0] // n)
             if usable == 0 and data.shape[0] > 0:
@@ -812,7 +793,6 @@ class MultiResolutionCollate:
         max_batch_tokens: int = MAX_BATCH_TOKENS,
         min_resolution_ratio: float = MIN_RESOLUTION_RATIO,
         seed: int = SEED,
-        align_gravity: bool = False,
         two_view: bool = False,
     ):
         self.dft_size = int(dft_size)
@@ -822,7 +802,6 @@ class MultiResolutionCollate:
         self.max_batch_tokens = int(max_batch_tokens)
         self.min_resolution_ratio = float(min_resolution_ratio)
         self.seed = int(seed)
-        self.align_gravity = bool(align_gravity)
         # Augmentation VICReg: patchify the independently augmented positive view into `*_b` keys.
         self.two_view = bool(two_view)
         self._valid_pairs = tuple(
@@ -885,10 +864,6 @@ class MultiResolutionCollate:
             data, rate = item["data"], float(item["rate"])
             rates[b] = rate
             source_rates[b] = float(item.get("source_rate", rate))
-            if self.align_gravity:
-                data, _, _ = gravity_align(data.unsqueeze(0), list(CHANNELS), rate,
-                                           gravity_state=item.get("gravity_state"))
-                data = data[0]
 
             entries = []
             for resolution_id, duration in enumerate(pair):
@@ -916,8 +891,8 @@ class MultiResolutionCollate:
                         0.5 * (start_s + end_s), resolution_id, start_s, end_s,
                         n / rate, n, data[start:end],
                     ))
-            # Physical-time order keeps causal/windowed attention meaningful. Short tokens
-            # precede long tokens only when their centers are exactly equal.
+            # Physical-time order keeps RoPE and contiguous per-resolution masking meaningful.
+            # Short tokens precede long tokens only when their centers are exactly equal.
             entries.sort(key=lambda x: (x[0], x[1]))
             all_entries.append(entries)
 

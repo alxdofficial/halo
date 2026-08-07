@@ -64,7 +64,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -721,7 +721,6 @@ def build_synthetic(tmp: Path, seed: int):
     this only proves every axis + the output path run end-to-end without real assets."""
     from model.tokenizer.encoder import SetTokenizerEncoder
     from training.tokenizer.pretrain_data import DFT_SIZE
-    rng = np.random.default_rng(seed)
     ds_root = tmp / "datasets"
     subjects = [f"s{i}" for i in range(8)]
     labels = ["walking", "sitting", "standing", "walking_upstairs", "jogging", "eating_soup"]

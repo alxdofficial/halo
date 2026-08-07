@@ -8,11 +8,9 @@ Output: data/datasets/pamap2/
   - sessions/session_XXX/data.parquet
 """
 
-import os
 import shutil
 import sys
 import json
-import numpy as np
 import pandas as pd
 from pathlib import Path
 
@@ -120,8 +118,6 @@ def convert_subject(subject_file: Path):
     subject_id = subject_file.stem.replace('subject', '')
     session_data = []
     labels_dict = {}
-    sample_rate = 100.0  # PAMAP2 is 100Hz
-
     total_windows = 0
 
     for idx, session in enumerate(sessions):
@@ -277,8 +273,8 @@ def main():
     print(f"{'=' * 80}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"  - {len(all_labels)} sessions")
-    print(f"  - ~40 channels (3 IMUs + heart rate)")
-    print(f"  - 100 Hz IMU, 9 Hz heart rate")
+    print("  - ~40 channels (3 IMUs + heart rate)")
+    print("  - 100 Hz IMU, 9 Hz heart rate")
 
     # Generate debug visualizations
     try:

@@ -89,6 +89,10 @@ def main() -> None:
         plan = make_per_resolution_mask_plan(
             rids, channels, GYRO, valid_patches=valid, channel_mask=channel_mask,
         )
+        temporal_plan = make_per_resolution_mask_plan(
+            rids, channels, GYRO, channel_event_p=0.0,
+            valid_patches=valid, channel_mask=channel_mask,
+        )
         real = valid.unsqueeze(2) & channel_mask.unsqueeze(1)
         supervised = plan.token_mask & real
         counts = supervised.flatten(1).sum(1)
@@ -99,7 +103,7 @@ def main() -> None:
 
         # Realised fraction PER GRID. 'per_resolution' counts the block in tokens, so this should
         # track mask_ratio_time directly instead of the shared-interval scheme's (L+p)/W inflation.
-        token_masked = supervised.any(dim=2)
+        token_masked = temporal_plan.token_mask.any(dim=2)
         for group in (0, 1):
             sel = valid & rids.eq(group)
             n = sel.sum(dim=1)

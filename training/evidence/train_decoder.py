@@ -443,7 +443,7 @@ def main() -> None:
     print(f"[dec] init val transfer bAcc (decoder≡untrained) = {init_val:.4f} "
           f"(chance≈{1/len(val_eps[0][0]):.3f})", flush=True)
     if init_metrics:
-        print(f"[dec] init calibration (edl): " + json.dumps(
+        print("[dec] init calibration (edl): " + json.dumps(
             {k_: round(v, 4) for k_, v in init_metrics.items()}), flush=True)
 
     best_val = init_val

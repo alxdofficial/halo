@@ -44,7 +44,6 @@ from model.tokenizer.encoder import SetTokenizerEncoder
 from training.tokenizer.losses_repr import (
     MASK_RATIO_TIME,
     make_mask_plan,
-    make_multiresolution_mask_plan,
     make_per_resolution_mask_plan,
     masked_ema_latent_loss,
     pair_contrast,
@@ -132,23 +131,6 @@ class PretrainConfig:
     # low ratios), data2vec 2.0 ~80%, I-JEPA context 0.7-1.0. Raising this also reduces the
     # cross-resolution leak, since fewer short tokens stay visible inside a masked long one.
     mask_ratio_time: float = MASK_RATIO_TIME
-    # How the two temporal grids are masked, and therefore whether the masked student may attend
-    # across them. The two settings are a package deal; mixing them either leaks or wastes.
-    #   'per_resolution'  (default) one contiguous block per grid, drawn INDEPENDENTLY, and
-    #                     cross-resolution attention ON. Predicting a hidden fine token from a
-    #                     visible coarse summary is treated as legitimate inference. Realises
-    #                     mask_ratio_time exactly per grid, lets a one-token grid be masked at
-    #                     all (so short-window sources stop falling back to a cross-channel
-    #                     task), and removes the train/eval mismatch where JEPA never trained
-    #                     the cross-resolution attention that evaluation uses.
-    #   'shared_interval' one physical interval masked in BOTH grids, cross-resolution attention
-    #                     OFF. The historical arm; every completed 30k run used it.
-    # NOTE: 'per_resolution' is the EASIER task at equal mask_ratio_time -- it masks 0.50 of each
-    # grid where the interval scheme realised 0.558/0.674, and it hands the student the other
-    # grid. JEPA is already the fast-converging half of the recipe (loss 1.03 -> 0.10 by step 800,
-    # gradient share 21% -> 11% -> ~4%), so ~0.6 is the ratio that holds difficulty roughly level
-    # and 0.75 is where MAE's ablation peaks. Left at 0.5 so the mode change is a single variable.
-    jepa_mask_mode: str = "per_resolution"
     vicreg_invariance_weight: float = 25.0
     vicreg_variance_weight: float = 25.0
     vicreg_covariance_weight: float = 1.0
@@ -509,19 +491,6 @@ def _git(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *args], cwd=_repo_root(), capture_output=True, check=check, timeout=30,
     )
-
-
-def git_commit() -> str:
-    """Short HEAD plus source-dirty state, excluding generated Phase-A output directories."""
-    try:
-        head = _git(["rev-parse", "--short", "HEAD"]).stdout.decode().strip()
-        dirty = _git([
-            "status", "--porcelain", "--untracked-files=all", "--", ".",
-            ":(exclude)training/tokenizer/outputs/**",
-        ]).stdout.strip()
-        return f"{head}-dirty" if dirty else (head or "unknown")
-    except Exception:
-        return "unknown"
 
 
 def capture_source_provenance(out: Path, *, write: bool = True) -> dict:
@@ -926,13 +895,6 @@ def main() -> None:
                              "MAE/data2vec use 0.75-0.8.")
     parser.add_argument("--jepa-ema-decay", type=float, default=None,
                         help="EMA teacher momentum (default 0.996).")
-    parser.add_argument("--jepa-mask-mode", choices=("per_resolution", "shared_interval"),
-                        default=None,
-                        help="'per_resolution' (default): one contiguous block per temporal grid, "
-                             "drawn independently, masked student attends ACROSS resolutions. "
-                             "'shared_interval': one physical interval masked in both grids with "
-                             "resolution-isolated attention — the historical arm every completed "
-                             "30k run used. Multiresolution only.")
     parser.add_argument("--vicreg-proj-dim", type=int, default=None,
                         help="VICReg expander OUTPUT width (default 128); also the width of the "
                              "DxD covariance matrices, so memory grows quadratically. "
@@ -1010,8 +972,6 @@ def main() -> None:
         cfg.jepa_ema_schedule = args.jepa_ema_schedule
     if args.mask_ratio_time is not None:
         cfg.mask_ratio_time = args.mask_ratio_time
-    if args.jepa_mask_mode is not None:
-        cfg.jepa_mask_mode = args.jepa_mask_mode
     if args.jepa_ema_decay is not None:
         cfg.jepa_ema_decay = args.jepa_ema_decay
     if args.vicreg_proj_dim is not None:
@@ -1078,12 +1038,6 @@ def main() -> None:
         parser.error(f"--num-heads must be positive and divide d_model={cfg.d_model}")
     if not 0 < cfg.mask_ratio_time < 1:
         parser.error("--mask-ratio-time must be in (0,1)")
-    if cfg.jepa_mask_mode not in ("per_resolution", "shared_interval"):
-        parser.error("--jepa-mask-mode must be per_resolution or shared_interval")
-    if cfg.jepa_mask_mode == "shared_interval" and not cfg.multiresolution:
-        # Single-resolution uses make_mask_plan; silently accepting the flag would record a
-        # checkpoint config claiming an arm the run never exercised.
-        parser.error("--jepa-mask-mode shared_interval requires multiresolution")
     if cfg.vicreg_proj_dim <= 0 or cfg.vicreg_proj_hidden <= 0:
         parser.error("expander widths must be positive")
     if cfg.vicreg_proj_dim > 2048:
@@ -1524,16 +1478,8 @@ def main() -> None:
         print("torch.compile: student + EMA transformer cores (dynamic, checkpoint-neutral) "
               "— step 1 pays the compile", flush=True)
 
-    # Masked-pass attention scope. Isolation exists ONLY to make 'shared_interval' non-leaking: it
-    # is what stops a masked short token being read off the long token containing it. Under
-    # 'per_resolution' the grids are masked independently and cross-scale inference is the point,
-    # so the student attends across them — which also means JEPA finally trains the same attention
-    # pattern evaluation uses. Single-resolution runs have nothing to isolate.
-    cross_resolution_attention = not (
-        cfg.multiresolution and cfg.jepa_mask_mode == "shared_interval"
-    )
-    print(f"jepa mask: mode={cfg.jepa_mask_mode} ratio={cfg.mask_ratio_time:g} "
-          f"cross_resolution_attention={cross_resolution_attention}", flush=True)
+    print(f"jepa mask: independent contiguous block per resolution, "
+          f"ratio={cfg.mask_ratio_time:g}", flush=True)
 
     model.train()
     for step, batch in enumerate(train_loader, start=start_step + 1):
@@ -1553,13 +1499,7 @@ def main() -> None:
         B, P, _, C = patches.shape
 
         if cfg.jepa_weight > 0:
-            if cfg.multiresolution and cfg.jepa_mask_mode == "shared_interval":
-                plan = make_multiresolution_mask_plan(
-                    batch["patch_starts"].to(device, non_blocking=True),
-                    batch["patch_ends"].to(device, non_blocking=True),
-                    resolution_ids, C, GYRO_IDX, channel_mask=channel_mask,
-                    valid_patches=patch_pad, time_ratio=cfg.mask_ratio_time)
-            elif cfg.multiresolution:
+            if cfg.multiresolution:
                 plan = make_per_resolution_mask_plan(
                     resolution_ids, C, GYRO_IDX, channel_mask=channel_mask,
                     valid_patches=patch_pad, time_ratio=cfg.mask_ratio_time)
@@ -1616,7 +1556,6 @@ def main() -> None:
                 masked = encode_fn(sensor_tokens, text_embs, text_masks, positions,
                                               patch_durations=patch_durations,
                                               resolution_ids=resolution_ids,
-                                              cross_resolution_attention=cross_resolution_attention,
                                               token_mask=plan.token_mask,
                                               channel_mask=enc_channel_mask,
                                               patch_padding_mask=patch_pad,
@@ -1819,9 +1758,9 @@ def main() -> None:
                 # the short-window mask-planning fix; keep it visible so future patch choices cannot
                 # silently remove JEPA supervision from a source.
                 with torch.no_grad():
-                    unmasked = (jepa_mask.flatten(1).sum(dim=1) == 0).float()
-                rec["jepa_unmasked_frac_by_source"] = per_source_mean(
-                    unmasked, batch["sources"])
+                    zero_target = (jepa_mask.flatten(1).sum(dim=1) == 0).float()
+                rec["jepa_zero_target_frac_by_source"] = per_source_mean(
+                    zero_target, batch["sources"])
             if len(lrs) > 1:
                 rec["lr_frontend"] = lrs[1]
             if model.encoder.filterbank.learnable:

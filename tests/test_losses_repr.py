@@ -8,7 +8,6 @@ import torch
 from training.tokenizer.losses_repr import (
     MIN_VISIBLE_TIME,
     make_mask_plan,
-    make_multiresolution_mask_plan,
     make_per_resolution_mask_plan,
     masked_ema_latent_loss,
     phase_a_loss,
@@ -29,40 +28,6 @@ def gen(seed: int = 0) -> torch.Generator:
     g = torch.Generator()
     g.manual_seed(seed)
     return g
-
-
-def test_multiresolution_mask_hides_every_overlapping_support():
-    # Four 0.5-second tokens and two 1-second tokens over the same two seconds.
-    starts = torch.tensor([[0.0, 0.0, 0.5, 1.0, 1.0, 1.5]])
-    ends = torch.tensor([[0.5, 1.0, 1.0, 1.5, 2.0, 2.0]])
-    groups = torch.tensor([[0, 1, 0, 0, 1, 0]])
-    plan = make_multiresolution_mask_plan(
-        starts, ends, groups, C=1, gyro_channels=None, generator=gen(4),
-        channel_event_p=0.0, causal_p=1.0,
-        valid_patches=torch.ones_like(groups, dtype=torch.bool),
-        channel_mask=torch.ones(1, 1, dtype=torch.bool),
-    )
-    masked = plan.token_mask[0, :, 0]
-    masked_start = starts[0, masked].min()
-    masked_end = ends[0, masked].max()
-    overlap = (starts[0] < masked_end) & (ends[0] > masked_start)
-    assert torch.equal(masked, overlap), "an overlapping scale token leaked the masked interval"
-
-
-def test_multiresolution_mask_drops_unlearnable_fully_masked_resolution():
-    """Temporal attention is isolated by resolution, so a one-token scale cannot be its own context."""
-    starts = torch.tensor([[0.0, 0.4, 0.8, 0.0]])
-    ends = torch.tensor([[0.4, 0.8, 1.0, 1.0]])
-    groups = torch.tensor([[0, 0, 0, 1]])
-    plan = make_multiresolution_mask_plan(
-        starts, ends, groups, C=1, gyro_channels=None, generator=gen(4),
-        channel_event_p=0.0, causal_p=1.0, time_ratio=0.5,
-        valid_patches=torch.ones_like(groups, dtype=torch.bool),
-        channel_mask=torch.ones(1, 1, dtype=torch.bool),
-    )
-    masked = plan.token_mask[0, :, 0]
-    assert bool(masked[:3].any()) and bool((~masked[:3]).any())
-    assert not bool(masked[3]), "one-token isolated resolution received an impossible JEPA target"
 
 
 # ------------------------------------------------------------------------- mask plan
@@ -94,19 +59,7 @@ def test_one_patch_window_gets_cross_channel_jepa_target():
     assert not bool(plan.token_mask[..., 3:].any())
 
 
-def test_one_token_per_resolution_gets_shared_channel_target():
-    plan = make_multiresolution_mask_plan(
-        torch.tensor([[0.0, 0.0]]), torch.tensor([[1.0, 1.0]]),
-        torch.tensor([[0, 1]]), C=3, gyro_channels=None, generator=gen(10),
-        channel_event_p=0.0, valid_patches=torch.ones(1, 2, dtype=torch.bool),
-        channel_mask=torch.ones(1, 3, dtype=torch.bool),
-    )
-    assert int(plan.token_mask.sum()) == 2
-    assert torch.equal(plan.token_mask[0, 0], plan.token_mask[0, 1])
-    assert int(plan.token_mask[0, 0].sum()) == 1
-
-
-# ------------------------------------------------- per-resolution (default) mask plan
+# -------------------------------------------------------------- per-resolution mask plan
 def _per_res_grid(n_short: int, n_long: int):
     """Interleaved (B=1) resolution ids: the collate sorts tokens by physical centre time, so a
     grid's tokens are NOT contiguous along the patch axis. Alternate them to prove the block is
@@ -134,8 +87,7 @@ def test_per_resolution_block_is_contiguous_within_each_grid():
 
 
 def test_per_resolution_realises_the_requested_ratio_in_each_grid():
-    """The shared-interval scheme masks by OVERLAP, so nominal 0.5 realised 0.558/0.674. Counting
-    the block in tokens is what makes the knob mean what it says."""
+    """Counting each block in tokens makes the ratio independent of patch duration."""
     rids = _per_res_grid(12, 4)
     T = rids.shape[1]
     for ratio, want_short, want_long in ((0.5, 6, 2), (0.75, 9, 3)):
@@ -150,19 +102,14 @@ def test_per_resolution_realises_the_requested_ratio_in_each_grid():
 
 
 def test_per_resolution_masks_a_one_token_grid_in_full():
-    """The sp_sw_har case: a 1.0 s window gives a single long token. Under the isolated
-    shared-interval scheme masking it was unlearnable and a guard removed the mask, so 100% of
-    that source silently trained on a cross-channel task instead. With cross-resolution attention
-    the visible short grid is the context, so the token can and must be masked."""
+    """The sp_sw_har case: the other temporal grid contextualizes a one-token resolution."""
     rids = torch.tensor([[0, 1, 0]])            # 2 short tokens, 1 long token
     plan = make_per_resolution_mask_plan(
         rids, C=3, gyro_channels=None, generator=gen(5), channel_event_p=0.0,
         valid_patches=torch.ones(1, 3, dtype=torch.bool),
         channel_mask=torch.ones(1, 3, dtype=torch.bool),
     )
-    # ALL channels, not merely any: the shared-interval guard also leaves a mark here, but only
-    # via the one-channel fallback. Requiring the whole token is what separates real temporal
-    # supervision from the cross-channel consolation prize.
+    # ALL channels, not merely any: this is temporal rather than channel-only supervision.
     assert bool(plan.token_mask[0, 1].all()), "the single long token got no temporal mask"
     assert not bool(plan.token_mask[0].all()), "nothing visible left to predict from"
 
@@ -221,18 +168,6 @@ def test_validity_aware_mask_guarantees_supervision():
     # every window with >=2 real patches has >=1 masked real token
     sup = (plan.token_mask & real).flatten(1).sum(1)
     assert (sup[usable >= 2] >= 1).all(), "zero JEPA supervision on a >=2-patch window"
-
-
-def test_causal_variant_masks_the_tail():
-    plan = make_mask_plan(B=256, T=10, C=4, gyro_channels=None,
-                          generator=gen(3), causal_p=1.0, channel_event_p=0.0)
-    mask = plan.token_mask.any(dim=2)                    # (B, T)
-    # causal: masked steps must be a suffix
-    first_masked = mask.float().argmax(dim=1)
-    for b in range(0, 256, 37):
-        row = mask[b]
-        if row.any():
-            assert bool(row[int(first_masked[b]):].all()), "causal mask must be a suffix"
 
 
 # --------------------------------------------------------------------------- VICReg / EMA targets

@@ -2,8 +2,7 @@
 
 Temporal attention (per channel, physical-time RoPE over SECONDS not indices) +
 cross-channel attention (per patch, channel-mask aware -> variable channel counts by
-construction). `build_temporal_mask` provides full / causal / windowed modes — the
-causal mode is the streaming / world-model (§5.1) path.
+construction).
 
 NOTE: this is FACTORIZED (dual-branch) attention, not the flat T×C attention sketched
 in EVIDENCE_ENGINE.md §5.2.1 — ported as the battle-tested design; flat attention is
@@ -28,37 +27,6 @@ def _rope_cos_sin(positions: torch.Tensor, inv_freq: torch.Tensor):
     ang = positions.to(inv_freq.dtype).unsqueeze(-1) * inv_freq        # (BC, P, hd/2)
     emb = torch.cat((ang, ang), dim=-1)                                # (BC, P, hd)
     return emb.cos().unsqueeze(1), emb.sin().unsqueeze(1)              # (BC, 1, P, hd)
-
-
-def build_temporal_mask(positions, mode='full', window_sec=None,
-                        lookahead_patches=0, attention_sink=False):
-    """Temporal attention mask from per-patch physical times.
-
-    positions: (B, P) seconds. Returns (B, P, P) bool (True = attend) or None for 'full'.
-      full   -> None (unmasked bidirectional; offline/session mode)
-      causal -> query i attends key j where j <= i + lookahead_patches (streaming, all past)
-      window -> causal AND past key within `window_sec` seconds (bounded-memory streaming)
-    attention_sink: also always attend to patch 0 (persistent anchor, StreamingLLM).
-    The diagonal (self) is always allowed.
-    """
-    if mode == 'full':
-        return None
-    B, P = positions.shape
-    dev = positions.device
-    i = torch.arange(P, device=dev).view(1, P, 1)      # query index
-    j = torch.arange(P, device=dev).view(1, 1, P)      # key index
-    allowed = (j <= i + lookahead_patches)             # causal + K lookahead
-    if mode == 'window' and window_sec is not None:
-        ti = positions.unsqueeze(2)                    # (B,P,1)
-        tj = positions.unsqueeze(1)                    # (B,1,P)
-        past_ok = (ti - tj) <= window_sec              # past key within W seconds
-        future = (j > i)                               # lookahead keys always allowed
-        allowed = allowed & (past_ok | future)
-    allowed = allowed.expand(B, P, P).clone()
-    if attention_sink:
-        allowed[:, :, 0] = True
-    allowed |= torch.eye(P, dtype=torch.bool, device=dev).view(1, P, P)
-    return allowed
 
 
 class TemporalSelfAttention(nn.Module):
@@ -160,8 +128,7 @@ class TemporalSelfAttention(nn.Module):
             Q = Q * cos + _rotate_half(Q) * sin
             K = K * cos + _rotate_half(K) * sin
 
-        # Build attention mask for SDPA (True = attend, False = masked). `mask` may be a
-        # shared (P,P) mask or a per-sample (batch_channels, P, P) causal/windowed mask.
+        # Build an optional attention mask for SDPA (True = attend, False = masked).
         attn_mask = None
         if mask is not None:
             attn_mask = mask.bool()

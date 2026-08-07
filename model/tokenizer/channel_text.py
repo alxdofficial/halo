@@ -124,10 +124,6 @@ class TokenTextEncoder(nn.Module):
         masks = pad_sequence(cached_masks, batch_first=True, padding_value=0).bool()
         return embs, masks
 
-    def clear_cache(self):
-        self._cache.clear()
-
-
 class _TextPooler(nn.Module):
     """Frozen-LM token embeddings (N, S, text_dim) + mask (N, S) -> one vector per item (N, d).
 

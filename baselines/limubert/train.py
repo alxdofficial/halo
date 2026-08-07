@@ -79,8 +79,7 @@ def main(argv=None):
     import models as lb_models
     import train as lb_train
     from config import PretrainModelConfig, TrainConfig, MaskConfig
-    from utils import (LIBERTDataset4Pretrain, Preprocess4Mask, Preprocess4Normalization,
-                       prepare_pretrain_dataset, get_device)
+    from utils import LIBERTDataset4Pretrain, Preprocess4Mask, prepare_pretrain_dataset
 
     device = torch.device("cuda" if (args.gpu and torch.cuda.is_available()) else "cpu")
     print(f"[limubert] device={device}")

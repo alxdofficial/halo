@@ -36,10 +36,11 @@ Save this next to the run.
 | filterbank norm | calibrated over 50 augmented batches (frozen) |
 | val | every 1k steps, kNN-BA, **40 windows/label stratified** (all classes scored), best.pt on val |
 
-**Active augmentations (`default_v2`):** window_crop, channel_dropout (drops the whole gyro triad →
+**Historical active augmentations (now exposed as `AugmentationConfig.phase_a()`):** window_crop,
+channel_dropout (drops the whole gyro triad →
 accel-only, the real deployment shift), rotation_3d, gravity-remove (p=0.15), rate (15–100 Hz), scale,
-jitter, channel_text_phrase, channel_text_dropout. `label_text` is in the config but **disabled by the
-loader** (A2 contrasts on label IDs). `time_shift`/`time_warp`/`magnitude_warp` off.
+jitter, channel_text_phrase, channel_text_dropout. The permanently disabled label-text and time-warp
+augmentation branches were subsequently deleted; Phase A does not consume activity-label text.
 
 **Gravity is NOT aligned (design decision, 2026-07-19).** The signed-DC feature exposes gravity
 direction (posture stays readable) and `rotation_3d` teaches pose-robustness; aligning had flattened
@@ -106,6 +107,6 @@ is refactored anyway.
 - Peak-memory headroom is comfortable (~10.6/24 GB at batch 512; ~18.8 GB at 1024, not worth it).
 - XRF contributes ~22–23 % of sampled class slots (it uniquely covers the most labels; 6 diverse
   configs, no single config dominates).
-- label-text synonym configs missing for the 4 new datasets — inert in Phase-A (label_text disabled).
+- Label-text synonym coverage is a Phase-B concern; Phase A does not consume activity-label text.
 - After the HALO checkpoint: re-fit the ConSE baseline heads (auto-refit on next baseline run; now
   temperature-calibrated) + re-run the baseline table in the baseline env.

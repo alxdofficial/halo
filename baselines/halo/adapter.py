@@ -187,7 +187,7 @@ class HALOAdapter(ConSEAdapter):
         # model reshuffled its own aggregate subject pool, so excluding a stream moved 16.5% of
         # shared subjects into different folds than other models, and 3 datasets got ZERO val
         # subjects. Folds are now identical across models regardless of stream coverage.
-        from eval.splits import split_indices, manifest_fingerprint   # lazy
+        from eval.splits import split_indices   # lazy
         ti, vi, tei = split_indices(S)
         Xt = torch.from_numpy(X[ti]).float()
         Yt = torch.from_numpy(Y[ti]).long()

@@ -1,8 +1,7 @@
 # Augmentation policy — what each model gets, and why
 
 > **Updated for the consolidated SSL recipe.** The augmentation objective uses label-free VICReg;
-> SO(3) rotation includes
-> gravity-removed streams (`require_gravity=False`); a bounded **sensor-text dropout** was added.
+> SO(3) rotation includes gravity-removed streams; a bounded **sensor-text dropout** was added.
 > The authoritative Phase-A recipe table is in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md).
 
@@ -16,7 +15,7 @@ consume must be applied to the baselines *too* — otherwise a reviewer correctl
 HALO more diverse training data," and the conditioning result means nothing. Only augmentations a fixed
 model **structurally cannot ingest**, or that **train HALO's language interface**, are HALO-exclusive.
 
-## Active configuration (`AugmentationConfig.default_v2`, used by Phase-1 pretraining)
+## Active configuration (`AugmentationConfig.phase_a`, used by Phase-A pretraining)
 
 Source of truth: `data/scripts/augmentations.py`. Applied per-sample in the loader (`pretrain_data.py`).
 
@@ -30,8 +29,6 @@ Source of truth: `data/scripts/augmentations.py`. Applied per-sample in the load
 | `channel_dropout` | ✅ | 0.3 | drops the `gyro` group (acc never dropped) |
 | `window_crop` (P5) | ✅ | 0.5 | keep a random contiguous ≥50 % sub-window (session-length invariance); floor 32 samples |
 | `channel_text_phrase` / `channel_text_dropout` | ✅ | 0.5 / 0.15 | text-side augs (channel-text paraphrase, channel-desc dropout) |
-| `label_text` | ❌ **off in Phase-A** | (0.8) | Phase A has no activity-label input or loss; label text belongs to Phase B |
-| `time_shift` / `time_warp` / `magnitude_warp` | ❌ off | — | available but disabled by default |
 
 **Rate/length diversity is now REAL, not synthetic (changed 2026-07-18).** HALO trains on the
 `native` grids (`build_grids._ALIGNMENTS`): the corpus's **native sampling rates** (20/50/100 Hz) and
@@ -54,9 +51,6 @@ retrained baselines equally.
 |---|---|---|
 | `jitter` | additive Gaussian noise | shape/layout/rate intact |
 | `scale` | random amplitude factor | amplitude robustness; layout intact |
-| `magnitude_warp` | smooth per-timestep magnitude | shape robustness; layout intact |
-| `time_warp` | smooth local time distortion (same length) | speed robustness; layout intact |
-| `time_shift` | shift within the window | phase robustness; layout intact |
 | `gravity` (P1) | remove/add the gravity DC (iOS userAccel ↔ Android total) | still 6-ch/60 Hz — a fixed model **can** train on it |
 | `rotation_3d` (P2) | uniform SO(3) rotation of each co-located triad (gravity rotates with accel) | still 6-ch/60 Hz — a fixed model **can** train on it |
 
@@ -84,7 +78,6 @@ legitimately exclusive.
 |---|---|
 | `channel_text_phrase` | paraphrases the per-channel placement/sensor text |
 | `channel_text_dropout` | drops channel metadata for robustness |
-| `label_text` | paraphrases the label string (language-aligned label tower) |
 
 ## Two experiments, two policies
 

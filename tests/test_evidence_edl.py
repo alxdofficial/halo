@@ -135,6 +135,4 @@ def test_invalid_evidence_and_coverage_fail_loudly():
 
 if __name__ == "__main__":
     import sys
-
-    import pytest
     sys.exit(pytest.main([__file__, "-v"]))

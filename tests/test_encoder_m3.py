@@ -1,6 +1,6 @@
 """M3 gate tests (build plan M3): the set encoder must be permutation- and
 count-invariant over channels (identity = TEXT, not position), physical-time aware
-(RoPE over seconds), and support the JEPA mask + causal (world-model) paths.
+(RoPE over seconds), and support JEPA masking across temporal resolutions.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 
 from model.tokenizer.encoder import SetTokenizerEncoder
-from model.tokenizer.transformer import build_temporal_mask
 
 RATE = 60.0
 N = 60          # 1 s patches at 60 Hz
@@ -84,7 +83,7 @@ def test_multiresolution_pooling_weights_scales_not_tokens():
     assert torch.allclose(out["pooled"], torch.full((1, 4), 5.0))
 
 
-def test_masked_path_can_isolate_resolution_attention():
+def test_resolutions_contextualize_each_other():
     torch.manual_seed(7)
     model = SetTokenizerEncoder(
         d_model=16, num_layers=1, num_heads=4, dim_feedforward=32, dropout=0.0,
@@ -98,11 +97,9 @@ def test_masked_path_can_isolate_resolution_attention():
     text_mask = torch.ones(1, 1, 1, dtype=torch.bool)
     positions = torch.tensor([[0.25, 0.75, 0.5, 1.5]])
     groups = torch.tensor([[0, 0, 1, 1]])
-    a = model.encode(sensor, text, text_mask, positions, resolution_ids=groups,
-                     cross_resolution_attention=False)
-    b = model.encode(changed, text, text_mask, positions, resolution_ids=groups,
-                     cross_resolution_attention=False)
-    assert torch.allclose(a["tokens"][:, :2], b["tokens"][:, :2], atol=1e-5)
+    a = model.encode(sensor, text, text_mask, positions, resolution_ids=groups)
+    b = model.encode(changed, text, text_mask, positions, resolution_ids=groups)
+    assert not torch.allclose(a["tokens"][:, :2], b["tokens"][:, :2], atol=1e-5)
 
 
 # ------------------------------------------------------------- variable channel counts
@@ -216,31 +213,6 @@ def test_channel_mask_blocks_contribution(enc):
                    [t[:3] for t in texts], positions)
     assert torch.allclose(out6["pooled"], out3["pooled"], atol=1e-4), \
         "masked channels leaked into the pooled representation"
-
-
-def test_causal_mode_blocks_future(enc):
-    """In causal mode, corrupting the LAST patch must not change earlier per-patch
-    outputs (the world-model/streaming path)."""
-    causal = SetTokenizerEncoder(d_model=64, num_layers=2, num_heads=4,
-                                 dropout=0.0, dft_size=S, temporal_mode="causal")
-    causal.eval()
-    patches, texts, positions = make_batch()
-    corrupted = patches.clone()
-    corrupted[:, -1, :N] = torch.randn_like(corrupted[:, -1, :N]) * 5.0
-    with torch.no_grad():
-        a = causal(patches, RATE, torch.tensor([N, N]), texts, positions)
-        b = causal(corrupted, RATE, torch.tensor([N, N]), texts, positions)
-    assert torch.allclose(a["per_patch"][:, :-1], b["per_patch"][:, :-1], atol=1e-4), \
-        "future leaked into the past under the causal mask"
-    assert not torch.allclose(a["per_patch"][:, -1], b["per_patch"][:, -1], atol=1e-3)
-
-
-def test_temporal_mask_builder_modes():
-    positions = torch.arange(5).float().unsqueeze(0)
-    assert build_temporal_mask(positions, "full") is None
-    causal = build_temporal_mask(positions, "causal")
-    assert causal.shape == (1, 5, 5)
-    assert bool(causal[0].tril().sum() == causal[0].sum())        # strictly causal
 
 
 # ---------------------------------------------------------------------- training

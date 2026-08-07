@@ -13,7 +13,7 @@ The manifest exists to guarantee two properties that the old per-model
 import numpy as np
 import pytest
 
-from eval.splits import _split_one_dataset, build_manifest, load_manifest, split_indices
+from eval.splits import _split_one_dataset, load_manifest, split_indices
 
 
 def test_folds_are_identical_when_a_model_drops_a_dataset():

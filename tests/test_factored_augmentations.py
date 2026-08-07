@@ -22,8 +22,6 @@ def _sample() -> IMUSample:
             f"{name}; includes gravity" if name.startswith("acc") else name
             for name in CHANNELS
         ],
-        label="walking",
-        dataset_name="hhar",
         channel_mask=[True] * 6,
         role_descriptions=roles,
         sensor_descriptions=sensors,

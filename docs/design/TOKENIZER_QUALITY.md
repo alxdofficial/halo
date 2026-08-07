@@ -80,6 +80,6 @@ phone→watch **0.413**, watch→phone **0.272**.
 - The two weakest axes — **cross-placement** and **rate** — are exactly what **more config-diverse
   data** fixes (new placements/devices/rates). This directly motivates the dataset-expansion work:
   we are placement/device-poor, and it shows.
-- Next-run levers suggested by this: enable `time_warp` (cadence/rate diversity), add more
-  placement/device diversity (data), and consider a light sensor↔text alignment term if Pipeline B's
-  open-set transfer is weak.
+- Next-run levers suggested by this: add more placement/device/rate diversity in the corpus and
+  consider a light sensor↔text alignment term if Pipeline B's open-set transfer is weak. The earlier
+  time-warp proposal was not adopted and its dormant implementation has been removed.

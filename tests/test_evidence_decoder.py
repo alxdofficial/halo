@@ -7,7 +7,6 @@ sequence — positional encoding must not impose order), key-padding-mask correc
 flow to every learned component, and the same-window bias staying permutation-safe.
 """
 
-import math
 
 import pytest
 import torch

@@ -1,6 +1,5 @@
 """Tests for the harmonised canonical-label vocabulary."""
 
-import glob
 import json
 
 from data.scripts.labels.canonical_labels import SYNONYMS, canonicalize

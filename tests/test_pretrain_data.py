@@ -236,26 +236,25 @@ def test_window_crop_varies_observation_length():
     lens = []
     for _ in range(128):
         s = IMUSample(data=torch.zeros(360, 6), channel_names=list(CHANNELS),
-                      sampling_rate=60.0, channel_descriptions=["x"] * 6,
-                      label="walking", dataset_name="hhar")
+                      sampling_rate=60.0, channel_descriptions=["x"] * 6)
         lens.append(aug(s).data.shape[0])
     lens = np.asarray(lens)
     assert lens.max() <= 360 and lens.min() >= int(0.5 * 360)     # in [min_frac*T, T], never longer
     assert len(set(lens.tolist())) > 10                          # genuinely variable
     # floor: a window already near the min_samples floor is not cropped below it
     short = IMUSample(data=torch.zeros(40, 6), channel_names=list(CHANNELS), sampling_rate=50.0,
-                      channel_descriptions=["x"] * 6, label="walking", dataset_name="hhar")
+                      channel_descriptions=["x"] * 6)
     assert aug(short).data.shape[0] >= 32
 
 
-def test_window_crop_in_default_v2_is_enabled():
+def test_window_crop_in_phase_a_is_enabled():
     from data.scripts.augmentations import AugmentationConfig
-    assert AugmentationConfig.default_v2().window_crop.enabled
+    assert AugmentationConfig.phase_a().window_crop.enabled
     assert not AugmentationConfig.none().window_crop.enabled
 
 
-def test_gravity_state_removed_skips_collate_alignment():
-    """F9: gravity-removed streams skip alignment via the authoritative state, not the heuristic."""
+def test_gravity_align_primitive_respects_removed_state():
+    """The EDA alignment primitive respects authoritative gravity-removed metadata."""
     from model.tokenizer.preprocess import gravity_align
     w = torch.zeros(1, 120, 6)
     w[:, :, 0] = 1.0                                   # 1 g DC on x — the heuristic WOULD rotate it
@@ -301,35 +300,14 @@ def test_knn_scores_unsupported_query_labels_as_failures():
 
 
 def test_collate_default_does_not_rotate_gravity():
-    """Design decision (2026-07-19): the DEFAULT collate does NOT gravity-align — a window with
-    gravity on +x keeps its DC on +x (posture direction preserved for the tokenizer's DC feature),
-    whereas align_gravity=True rotates it to +z."""
+    """Collation preserves gravity direction for the tokenizer's signed-DC feature."""
     w = torch.zeros(120, 6)
     w[:, 0] = 1.0                                            # 1 g DC on x (gravity present)
     item = {"data": w, "rate": 50.0, "texts": ["x"] * 6, "label_id": 0,
             "channel_mask": torch.ones(6, dtype=torch.bool), "gravity_state": "present"}
-    d = MultiScaleCollate(fixed_patch_seconds=1.0)([item])                       # default: no align
+    d = MultiScaleCollate(fixed_patch_seconds=1.0)([item])
     dc_d = d["patches"][0, 0, :int(d["patch_len"][0]), :3].mean(0)
-    assert dc_d[0].abs() > 0.9 and dc_d[2].abs() < 0.1, dc_d                     # DC stays on x
-    a = MultiScaleCollate(fixed_patch_seconds=1.0, align_gravity=True)([item])   # ablation: align
-    dc_a = a["patches"][0, 0, :int(a["patch_len"][0]), :3].mean(0)
-    assert dc_a[2].abs() > 0.9 and dc_a[0].abs() < 0.1, dc_a                     # DC rotated to z
-
-
-def test_gravity_aligned_in_collate(index):
-    """Ablation path (align_gravity=True) still canonicalizes: for gravity-present accel-only
-    windows the DC of the filled region points ~+z after alignment."""
-    ds = PretrainDataset(index, index.train[:64], augment=False)   # no aug -> gravity present
-    out = MultiScaleCollate(fixed_patch_seconds=1.0, align_gravity=True)(
-        [ds[i] for i in range(64)])
-    n = int(out["patch_len"][0])
-    # first patch, accel triad, real samples -> mean should be dominated by +z
-    acc0 = out["patches"][:, 0, :n, :3].mean(dim=1)     # (64, 3) DC per window
-    mag = acc0.norm(dim=1)
-    present = mag > 0.5
-    if present.any():
-        z_frac = acc0[present, 2].abs() / mag[present].clamp(min=1e-6)
-        assert z_frac.median() > 0.9, "gravity not aligned to +z in collate"
+    assert dc_d[0].abs() > 0.9 and dc_d[2].abs() < 0.1, dc_d
 
 
 def test_source_rate_is_bounded_by_the_hardware_clock_after_rate_augmentation():

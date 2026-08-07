@@ -31,8 +31,8 @@ import torch.nn.functional as F
 from data.scripts.curate import deployment_policy as policy
 from eval.data import load_eval_stream
 from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_encoder
-# F1 fix: use the train_only-gated implementation, NOT train_head's, which merges the
-# eval datasets' hand-authored synonym tables (motionsense/realworld/shoaib).
+# Keep the train-only gate: eval datasets' hand-authored synonym tables
+# (motionsense/realworld/shoaib) must not leak into the retrieval sweep.
 from training.evidence.labeltext import global_label_paraphrases
 from training.tokenizer.eval_transfer import build_encoder, encode_dataset
 from training.tokenizer.pretrain_data import _stream_gravity_state, stream_channel_descriptions
@@ -169,8 +169,6 @@ def main() -> None:
     print("  (top_k, tau, csls, text_ens) -> meanF1", flush=True)
     for cfg, m in ranked[:12]:
         print(f"  {cfg} -> {m}", flush=True)
-    baseline = means.get((0, 0.03, False, False))  # closest to the both=identity baseline knobs
-
     # ---- confirm the best config on FULL queries ----
     best_cfg = ranked[0][0]
     top_k, tau, csls, tens = best_cfg

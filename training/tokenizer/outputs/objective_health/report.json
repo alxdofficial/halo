@@ -10,7 +10,7 @@
       "median": 27.0,
       "p90": 54.0,
       "max": 93.0,
-      "mean": 31.1549
+      "mean": 31.1584
     },
     "masked_fraction_of_real_tokens": {
       "n": 5120,
@@ -19,7 +19,7 @@
       "median": 0.5,
       "p90": 0.7308,
       "max": 0.875,
-      "mean": 0.5544
+      "mean": 0.5541
     },
     "zero_supervision_windows": 0,
     "zero_supervision_fraction": 0.0,
@@ -28,33 +28,33 @@
       "min": 0.4,
       "p10": 0.4444,
       "median": 0.5,
-      "p90": 1.0,
+      "p90": 0.5714,
       "max": 1.0,
-      "mean": 0.6289
+      "mean": 0.5043
     },
     "realised_masked_fraction_long": {
       "n": 5120,
       "min": 0.0,
       "p10": 0.4,
       "median": 0.5,
-      "p90": 1.0,
+      "p90": 0.6667,
       "max": 1.0,
-      "mean": 0.643
+      "mean": 0.527
     },
-    "masked_long_tokens_with_all_short_visible": 0.1604,
+    "masked_long_tokens_with_all_short_visible": 0.3684,
     "mean_temporally_masked_tokens_by_source": {
-      "capture24": 8.99,
-      "harmes": 8.68,
-      "hhar": 8.79,
-      "kuhar": 9.06,
-      "mhealth": 9.31,
-      "nfi_fared": 8.91,
-      "pamap2": 8.9,
-      "sp_sw_har": 2.07,
-      "uci_har": 4.18,
-      "unimib_shar": 4.69,
-      "wisdm": 9.1,
-      "xrf_v2": 8.64
+      "capture24": 7.13,
+      "harmes": 7.16,
+      "hhar": 7.03,
+      "kuhar": 7.18,
+      "mhealth": 7.34,
+      "nfi_fared": 7.11,
+      "pamap2": 7.13,
+      "sp_sw_har": 1.87,
+      "uci_har": 3.34,
+      "unimib_shar": 3.79,
+      "wisdm": 7.2,
+      "xrf_v2": 6.95
     }
   },
   "vicreg": {

@@ -61,7 +61,7 @@ calibrated** filterbank; the calibration excludes absent channels + phantom patc
 | `patch_seconds` (multi-scale) | `{0.5, 0.75, 1.0, 1.5}` → T∈{12,8,6,4} | per-batch draw; 2.0/T=3 dropped (too coarse to mask, collapses short windows) |
 | A1 mask ratio (time) | 0.5 | MAE/JEPA-style; latent-space target |
 | A1 channel-event p / gyro-bias | 0.25 / 0.7 | whole-channel drops biased to the gyro triad (the real deployment shift) |
-| A1 causal fraction | 0.3 | the world-model / streaming variant |
+| A1 temporal placement | random contiguous block | future-tail masking was retired |
 | A2 SupCon temperature | 0.1 | Khosla et al. |
 | A2 batch | 32 classes × 8 = 256 | guarantees 7 positives/anchor |
 | A3 weight | 0.1 | grounding **rail**, not a driver |
@@ -140,7 +140,7 @@ sweep caught 3 HIGH bugs that (a) missed — this is why we gate on it.
 
 ## 5b. Phase-1 run RESULT (2026-07-18, first real run — GREEN)
 
-Config as above (d256/6L, 7.28M params, balanced corpus, fixed 1:1:0.1, `label_text` off,
+Config as above (d256/6L, 7.28M params, balanced corpus, fixed 1:1:0.1, no activity-label text,
 A1 signal-only target). 20k steps, **86 ms/step**, ~35 min, 5.6 GB VRAM. Checkpoint
 `training/tokenizer/outputs/pretrain/best.pt` (git 806665d, step 11k; kept local, gitignored).
 

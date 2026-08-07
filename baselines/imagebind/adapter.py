@@ -44,7 +44,6 @@ Checkpoint ``imagebind_huge.pth`` (~4.5 GB) is cached under ``repo/.checkpoints/
 
 from __future__ import annotations
 
-import os
 import sys
 import types
 from pathlib import Path

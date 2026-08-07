@@ -119,20 +119,16 @@ period becomes 0.4 seconds when multiresolution is enabled; the fixed arm retain
 
 ## Objective Semantics
 
-- **JEPA:** choose a physical time interval and mask every token from every resolution whose support
-  overlaps it. Whole-channel masks also apply across all resolutions. During the masked forward,
-  temporal attention is isolated within each resolution; otherwise the edge of a masked long token
-  could still read an overlapping short token outside the initially selected interval. Clean VICReg
-  forwards retain cross-resolution attention. A resolution whose temporal mask leaves no visible
-  token is excluded because the isolated branch has no signal context. Average
-  masked-prediction loss within each resolution with represented-duration weighting, then average
-  active resolutions so the short scale and partial tails do not dominate through token count.
+- **JEPA:** draw one randomly located contiguous block independently in each resolution. The masked
+  student retains cross-resolution attention, and every window keeps at least one visible real
+  token globally. Average masked-prediction loss within each resolution with represented-duration
+  weighting, then average active resolutions so the short scale and partial tails do not dominate
+  through token count.
 - **VICReg:** pool patches within each resolution, average active resolution summaries equally,
   and apply universal augmentation VICReg.
 
-Short recordings may have one partial token per resolution. They remain valid for VICReg;
-JEPA skips a
-sample when no non-leaking visible/masked split exists.
+Short recordings may have one partial token per resolution. They remain valid for both objectives;
+JEPA reveals one real token if masking would otherwise hide the complete window.
 
 ## Configuration And Reproducibility
 

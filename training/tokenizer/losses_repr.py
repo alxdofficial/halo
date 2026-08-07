@@ -19,7 +19,6 @@ import torch.nn.functional as F
 MASK_RATIO_TIME = 0.5        # fraction of time steps masked for JEPA prediction
 MASK_RATIO_CHANNEL = 0.25    # fraction of batches that get a whole-channel mask event
 GYRO_DROP_BIAS = 0.7         # within channel-mask events, P(drop the whole gyro triad)
-CAUSAL_FRACTION = 0.3        # fraction of batches using the causal/future (world-model) mask
 MIN_VISIBLE_TIME = 2         # never mask below this many visible time steps (floor on T)
 
 
@@ -59,7 +58,6 @@ def make_mask_plan(
     time_ratio: float = MASK_RATIO_TIME,
     channel_event_p: float = MASK_RATIO_CHANNEL,
     gyro_bias: float = GYRO_DROP_BIAS,
-    causal_p: float = CAUSAL_FRACTION,
     device: torch.device = torch.device("cpu"),
     valid_patches: Optional[torch.Tensor] = None,   # (B, T) True = real patch
     channel_mask: Optional[torch.Tensor] = None,    # (B, C) True = real channel
@@ -69,8 +67,7 @@ def make_mask_plan(
     - masking is a RATIO over the variable (T, C) grid, with a floor of MIN_VISIBLE_TIME
       visible steps (robust to the multi-scale patch_seconds axis: T varies per batch);
     - channel stream: whole-channel mask events, biased toward dropping the gyro triad;
-    - temporal stream: contiguous random block, or the causal variant (mask the tail =
-      predict the future = the world-model objective).
+    - temporal stream: one contiguous block drawn at a random temporal location.
 
     VALIDITY-AWARE (pass valid_patches + channel_mask): the temporal block lands only on
     REAL patches (per-sample `usable` count) and channel drops hit only REAL channels. If a short
@@ -86,7 +83,6 @@ def make_mask_plan(
               else torch.full((B,), T, device=device)).long()           # (B,)
 
     # --- temporal stream: contiguous block within [0, usable) per sample ---
-    causal = rnd(B) < causal_p
     keep_vis = torch.clamp(usable - 1, min=1)                            # leave >=1 visible
     keep_vis = torch.minimum(keep_vis, torch.full_like(keep_vis, MIN_VISIBLE_TIME))
     max_block = torch.clamp(usable - keep_vis, min=0)                    # (B,) 0 if usable<=1
@@ -97,10 +93,7 @@ def make_mask_plan(
     lo = start.unsqueeze(1)
     hi = (start + block).unsqueeze(1)
     random_block = (t_idx >= lo) & (t_idx < hi) & (block.unsqueeze(1) > 0)
-    causal_block = (t_idx >= (usable - block).unsqueeze(1)) & (t_idx < usable.unsqueeze(1)) \
-        & (block.unsqueeze(1) > 0)
-    time_mask = torch.where(causal.unsqueeze(1), causal_block, random_block)  # (B, T)
-    mask |= time_mask.unsqueeze(2)
+    mask |= random_block.unsqueeze(2)
 
     # --- channel stream (per sample event): whole channels across all time ---
     event = rnd(B) < channel_event_p
@@ -134,100 +127,6 @@ def make_mask_plan(
     return MaskPlan(token_mask=mask)
 
 
-def make_multiresolution_mask_plan(
-    patch_starts: torch.Tensor,
-    patch_ends: torch.Tensor,
-    resolution_ids: torch.Tensor,
-    C: int,
-    gyro_channels: Optional[list[int]],
-    generator: Optional[torch.Generator] = None,
-    time_ratio: float = MASK_RATIO_TIME,
-    channel_event_p: float = MASK_RATIO_CHANNEL,
-    gyro_bias: float = GYRO_DROP_BIAS,
-    causal_p: float = CAUSAL_FRACTION,
-    channel_mask: Optional[torch.Tensor] = None,
-    valid_patches: Optional[torch.Tensor] = None,
-) -> MaskPlan:
-    """Mask one physical interval and every scale token whose support overlaps it.
-
-    CONTROL ARM (``--jepa-mask-mode shared_interval``). The default is now
-    ``make_per_resolution_mask_plan``; this remains selectable so the two schemes can be compared
-    on one corpus. It is the counterpart of ``make_mask_plan`` for a student whose attention is
-    ISOLATED per resolution: coupling the two grids' masked spans is what makes a masked short
-    patch unreadable from an overlapping long patch. Do not pair it with cross-resolution
-    attention -- the guarantee is one-directional (see below) and the pairing leaks.
-
-    INTERVAL LENGTH vs MASKED FRACTION. Masking is by OVERLAP, so a token of support ``p`` is
-    caught whenever the interval comes within ``p`` of it: the realised fraction is
-    ``(L + p) / W``, not ``L / W``. Setting ``L = time_ratio * W`` therefore does NOT mask
-    ``time_ratio`` of the tokens. Measured at the live patch sizes (0.5 s / 1.4 s in a 6 s
-    window) it masked 0.558 of short tokens and 0.674 of long ones against a nominal 0.5.
-
-    WHAT IS AND IS NOT GUARANTEED. A masked SHORT token cannot be read off a long one: any long
-    token containing it also overlaps the interval, so it is masked too. The REVERSE does not
-    hold and never did -- a masked LONG token can have a visible short token inside its support,
-    because the short tokens near the far end of the long token's span may miss the interval.
-    Measured at (0.5 s, 1.4 s) in a 6 s window: 25.7% of masked long tokens have a visible short
-    token inside them. That is a pre-existing property of overlap masking, not a regression.
-
-    The mask intentionally uses the uncompensated interval. A retired compensation arm reduced
-    the number of masked long tokens but increased cross-resolution leakage from 25.7% to 40.1%.
-    """
-    device = patch_starts.device
-    B, T = patch_starts.shape
-    rnd = lambda *s: torch.rand(*s, generator=generator, device=device)  # noqa: E731
-    valid = resolution_ids.ge(0)
-    if valid_patches is not None:
-        valid &= valid_patches
-    observed_end = patch_ends.masked_fill(~valid, 0.0).amax(dim=1)
-    interval_len = observed_end * float(time_ratio)
-    causal = rnd(B) < causal_p
-    random_start = rnd(B) * (observed_end - interval_len).clamp(min=0.0)
-    interval_start = torch.where(causal, observed_end - interval_len, random_start)
-    interval_end = interval_start + interval_len
-    temporal = valid & (patch_starts < interval_end.unsqueeze(1)) \
-        & (patch_ends > interval_start.unsqueeze(1))
-
-    # The masked encoder isolates temporal attention within each resolution. Therefore every
-    # A resolution supervised by temporal JEPA needs at least one visible token in that resolution;
-    # a one-token long grid cannot infer its signal from the visible short grid. Remove only the
-    # unlearnable resolution's temporal masks, preserving valid supervision in the other scale.
-    for group in (0, 1):
-        group_valid = valid & resolution_ids.eq(group)
-        all_group_masked = group_valid.any(dim=1) \
-            & ((temporal & group_valid).sum(dim=1) == group_valid.sum(dim=1))
-        temporal &= ~(all_group_masked.unsqueeze(1) & group_valid)
-
-    mask = temporal.unsqueeze(2).expand(B, T, C).clone()
-
-    # Whole-channel events mirror the single-resolution objective, but naturally span
-    # every token from both grids.
-    event = rnd(B) < channel_event_p
-    coin = rnd(B)
-    if gyro_channels:
-        gyro_real = (channel_mask[:, gyro_channels].all(dim=1) if channel_mask is not None
-                     else torch.ones(B, dtype=torch.bool, device=device))
-        drop_gyro = event & (coin < gyro_bias) & gyro_real
-        for c in gyro_channels:
-            mask[drop_gyro, :, c] = True
-        single = event & ~((coin < gyro_bias) & gyro_real)
-    else:
-        single = event
-    scores = rnd(B, C)
-    if channel_mask is not None:
-        scores = scores.masked_fill(~channel_mask, -1.0)
-    chan = scores.argmax(dim=1)
-    rows = torch.nonzero(single).squeeze(1)
-    if rows.numel():
-        mask[rows, :, chan[rows]] = True
-
-    mask &= valid.unsqueeze(2)
-    if channel_mask is not None:
-        mask &= channel_mask.unsqueeze(1)
-    mask = _ensure_learnable_target(mask, valid, channel_mask, rnd)
-    return MaskPlan(token_mask=mask)
-
-
 def make_per_resolution_mask_plan(
     resolution_ids: torch.Tensor,
     C: int,
@@ -236,29 +135,19 @@ def make_per_resolution_mask_plan(
     time_ratio: float = MASK_RATIO_TIME,
     channel_event_p: float = MASK_RATIO_CHANNEL,
     gyro_bias: float = GYRO_DROP_BIAS,
-    causal_p: float = CAUSAL_FRACTION,
     channel_mask: Optional[torch.Tensor] = None,
     valid_patches: Optional[torch.Tensor] = None,
 ) -> MaskPlan:
     """Mask ONE contiguous block per temporal resolution, drawn independently per grid.
 
-    This is the counterpart of ``make_multiresolution_mask_plan`` for a student that is ALLOWED
-    to attend across resolutions. Inferring a hidden fine-grained token from a visible coarse
-    summary of the same seconds (or the reverse) is treated as legitimate inference, not
-    leakage, so nothing here couples the two grids' masked spans.
+    The student attends across resolutions. Inferring a hidden fine-grained token from a visible
+    coarse summary of the same seconds (or the reverse) is treated as legitimate inference, so
+    nothing here couples the two grids' masked spans.
 
     Three consequences, all deliberate:
 
-    * ``time_ratio`` is REALISED EXACTLY (up to token rounding) in each grid. The shared-interval
-      scheme masks by overlap, so a token of support ``p`` is caught whenever the interval comes
-      within ``p`` -- realised ``(L + p)/W``, measured 0.558 short / 0.674 long against a nominal
-      0.5. Here the block is counted in tokens, so 0.5 means 0.5 in both grids. To hold the
-      realised difficulty of the old scheme roughly constant, raise ``time_ratio`` to ~0.6.
-    * A resolution may be masked in FULL. Under isolation that was unlearnable and had to be
-      undone by a guard, which is precisely why a one-token long grid (sp_sw_har's 1.0 s windows,
-      100% of them) could never receive temporal supervision and silently fell back to a
-      cross-channel task. With cross-resolution attention the other grid supplies the context,
-      so every source trains on the same objective.
+    * ``time_ratio`` is realised directly in token counts, up to rounding in small grids.
+    * A resolution may be masked in full because the other resolution supplies context.
     * Blocks stay CONTIGUOUS within each grid's own physical-time ordering. Scattered i.i.d.
       masking degenerates for quasi-stationary motion: an adjacent 0.5 s token is nearly a copy,
       so the task collapses to interpolate-from-neighbours.
@@ -273,9 +162,6 @@ def make_per_resolution_mask_plan(
     if valid_patches is not None:
         valid = valid & valid_patches
 
-    # Causal ("predict the future") is drawn PER SAMPLE, not per grid, so the world-model variant
-    # hides the same physical tail at both scales instead of two unrelated spans.
-    causal = rnd(B) < causal_p
     temporal = torch.zeros(B, T, dtype=torch.bool, device=device)
     for group in (0, 1):
         group_valid = valid & resolution_ids.eq(group)
@@ -287,7 +173,6 @@ def make_per_resolution_mask_plan(
         block = torch.minimum(block, n_group)                             # 0 where the grid is absent
         max_start = (n_group - block).clamp(min=0)
         start = (rnd(B) * (max_start + 1).float()).long().clamp(max=max_start)
-        start = torch.where(causal, max_start, start)                     # causal -> anchor at the end
         in_block = group_valid & (rank >= start.unsqueeze(1)) \
             & (rank < (start + block).unsqueeze(1)) & (block > 0).unsqueeze(1)
         temporal |= in_block

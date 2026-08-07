@@ -132,7 +132,7 @@ def parse_mobifall_txt(filepath: Path) -> Optional[pd.DataFrame]:
 
         return df
 
-    except Exception as e:
+    except Exception:
         return None
 
 
@@ -287,7 +287,7 @@ def load_mobiact_csv(filepath: Path) -> Optional[pd.DataFrame]:
 
         return result
 
-    except Exception as e:
+    except Exception:
         return None
 
 

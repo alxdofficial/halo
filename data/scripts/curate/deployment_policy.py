@@ -9,8 +9,6 @@ Every curated frame therefore has exactly three or six sensor channels.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
-import json
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -264,26 +262,6 @@ for _dataset in {spec.dataset for spec in STREAM_SPECS}:
     _BY_DATASET[_dataset] = tuple(spec for spec in STREAM_SPECS if spec.dataset == _dataset)
 
 
-def policy_fingerprint() -> str:
-    """Stable fingerprint used to invalidate cached HALO session indexes."""
-    payload = [
-        {
-            "dataset": s.dataset,
-            "stream_id": s.stream_id,
-            "device_profile": s.device_profile,
-            "placement": s.placement,
-            "required": dict(s.required),
-            "optional": dict(s.optional),
-            "gravity_state": s.gravity_state,
-            "role": s.role,
-            "session_contains": s.session_contains,
-            "session_excludes": s.session_excludes,
-        }
-        for s in STREAM_SPECS
-    ]
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
-
-
 def stream_specs(dataset: str, role: Optional[str] = "primary") -> Tuple[StreamSpec, ...]:
     specs = _BY_DATASET.get(dataset, ())
     return specs if role is None else tuple(spec for spec in specs if spec.role == role)
@@ -389,15 +367,6 @@ def curate_frame(frame: pd.DataFrame, spec: StreamSpec) -> Tuple[pd.DataFrame, C
         note=spec.note,
     )
     return out.reset_index(drop=True), metadata
-
-
-def source_channel_is_allowed(dataset: str, channel_name: str, role: str = "primary") -> bool:
-    """Whether a raw channel participates in any selected deployment stream."""
-    return any(
-        channel_name in sources
-        for spec in stream_specs(dataset, role)
-        for sources in (*spec.required.values(), *spec.optional.values())
-    )
 
 
 def channel_description(metadata: CuratedMetadata, channel_name: str) -> str:

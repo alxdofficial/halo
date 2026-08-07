@@ -139,7 +139,7 @@ def main() -> None:
     print(f"\n  honestly-selected : {best} -> {means[best]}", flush=True)
     print(f"  eval-selected     : {eval_selected} -> {means.get(eval_selected)}  "
           f"(rank {[c for c, _ in ranked].index(eval_selected) + 1}/{len(ranked)})", flush=True)
-    print(f"  AGREE" if best == eval_selected else "  DIFFER -> apply the honest one to eval ONCE",
+    print("  AGREE" if best == eval_selected else "  DIFFER -> apply the honest one to eval ONCE",
           flush=True)
 
     out = _DIR / "select_retrieval_config.json"

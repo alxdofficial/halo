@@ -14,7 +14,6 @@ subject, with an activity-id column marking each activity block). The shared
 this converter must NOT pre-window (that would double-window).
 """
 
-import os
 import sys
 import json
 import shutil
@@ -322,8 +321,8 @@ def main():
     print(f"{'=' * 80}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"  - {len(all_labels)} sessions")
-    print(f"  - 23 channels (3 IMUs + ECG)")
-    print(f"  - 50 Hz sampling rate")
+    print("  - 23 channels (3 IMUs + ECG)")
+    print("  - 50 Hz sampling rate")
 
     # Generate debug visualizations
     try:

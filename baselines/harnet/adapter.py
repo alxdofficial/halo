@@ -46,7 +46,7 @@ import json
 import os
 from fractions import Fraction
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 import numpy as np
 import torch
@@ -319,10 +319,10 @@ class HarnetAdapter(ConSEAdapter):
         print(f"[harnet] corpus mode={CORPUS_MODE} ({len(datasets)} datasets): {datasets}")
         if CORPUS_MODE == "legacy":
             print("[harnet] NOTE: legacy mode applies NO per-stream cap, while halo/crosshar/"
-                  f"limubert all cap at 20000. This row therefore sees strictly more data per "
-                  f"stream than every other ConSE baseline. Deliberate (it preserves the published "
-                  f"number) but it means 'identical probe on frozen features' is true of the PROBE, "
-                  f"not of the corpus -- state the corpus caveat alongside it.", flush=True)
+                  "limubert all cap at 20000. This row therefore sees strictly more data per "
+                  "stream than every other ConSE baseline. Deliberate (it preserves the published "
+                  "number) but it means 'identical probe on frozen features' is true of the PROBE, "
+                  "not of the corpus -- state the corpus caveat alongside it.", flush=True)
 
         feats, labs, subjs, used, skipped = [], [], [], [], []
         for ds in datasets:
@@ -360,7 +360,7 @@ class HarnetAdapter(ConSEAdapter):
         # model reshuffled its own aggregate subject pool, so excluding a stream moved 16.5% of
         # shared subjects into different folds than other models, and 3 datasets got ZERO val
         # subjects. Folds are now identical across models regardless of stream coverage.
-        from eval.splits import split_indices, manifest_fingerprint   # lazy
+        from eval.splits import split_indices   # lazy
         ti, vi, tei = split_indices(S)
         Xt = torch.from_numpy(X[ti]).float()
         Yt = torch.from_numpy(Y[ti]).long()

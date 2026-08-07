@@ -18,7 +18,6 @@ Data format:
 - gravity is a normalized unit vector
 """
 
-import os
 import sys
 import json
 import pandas as pd

@@ -272,24 +272,6 @@ class PhysicalFilterbankTokenizer(nn.Module):
             "frontend/filter_shape": float(self._filter_shape(adaptive=True)),
         }
 
-    def get_output_dim(self) -> int:
-        return self.d_model
-
-    def get_config(self) -> dict:
-        """Hyperparameters needed to reconstruct this tokenizer (for save/load, M4)."""
-        return {
-            "n_bands": self.n_bands, "f_min": self.f_min, "f_max": self.f_max,
-            "Q": self.Q, "dft_size": self.S, "nyquist_margin": self.nyquist_margin,
-            "learnable": self.learnable, "use_amplitude": self.use_amplitude,
-            "use_dc": self.use_dc,
-            "use_resolution_mask": self.use_resolution_mask, "norm": self.norm,
-            "center_shift_fraction": self.center_shift_fraction,
-            "bandwidth_factor_max": self.bandwidth_factor_max,
-            "compression_gain_max": self.compression_gain_max,
-            "filter_shape_min": self.filter_shape_min, "filter_shape_max": self.filter_shape_max,
-            "adaptive_gate_init": self.adaptive_gate_init,
-        }
-
     def _prep_rate_len(self, sampling_rate_hz, patch_len_samples, B, device, dtype, P=None
                        ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Normalize rate to (B,) and length to (B,) or, when P is given, (B,P)."""

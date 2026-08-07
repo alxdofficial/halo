@@ -18,7 +18,7 @@ HAPT format:
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -129,7 +129,7 @@ def convert_hapt():
             break
 
     if not labels_path.exists():
-        print(f"ERROR: labels.txt not found")
+        print("ERROR: labels.txt not found")
         return False
 
     print(f"Found labels: {labels_path}")
@@ -274,7 +274,7 @@ def create_manifest():
     manifest_path = OUTPUT_DIR / "manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2)
-    print(f"✓ Created manifest.json")
+    print("✓ Created manifest.json")
 
 
 def main():

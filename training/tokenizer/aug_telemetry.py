@@ -1,6 +1,6 @@
 """Augmentation magnitude telemetry — how hard does each aug hit the signal?
 
-For each augmentation (forced on alone, at its default_v2 params), measure its NUMERIC effect vs the
+For each augmentation (forced on alone, at its Phase-A defaults), measure its NUMERIC effect vs the
 raw window over a sample of real native windows, so we can see whether any aug is over-powering the
 data. Reports, per aug (medians unless noted):
 
@@ -28,7 +28,7 @@ from model.tokenizer.primitives import cadence
 from training.tokenizer.pretrain_data import CHANNELS, CorpusIndex
 
 SEED = 20260718
-# The physics/text augs to profile, each forced on ALONE at its default_v2 params.
+# The physics/text augs to profile, each forced on ALONE at its Phase-A defaults.
 PROFILE = ("window_crop", "rate", "rotation_3d", "gravity", "channel_dropout",
            "scale", "jitter", "channel_text_phrase", "channel_text_dropout")
 
@@ -68,15 +68,17 @@ def main() -> None:
         return w, float(ref.rate_hz), [bool(m) for m in ref.mask]
 
     rows = []
-    for name in PROFILE:
+    for aug_i, name in enumerate(PROFILE):
         aug = IMUAugmenter(_one_aug_cfg(name))
         rel_l2, rms_x, dcad, struct = [], [], [], []
-        for k in keys:
+        for sample_i, k in enumerate(keys):
             w, rate, cmask = raw_sample(k)
-            stdlib_random.seed(hash((name, k.window_i)) & 0xFFFF)
-            np.random.seed(hash((name, k.window_i)) & 0xFFFF)
+            draw_seed = SEED + 10_007 * aug_i + sample_i
+            stdlib_random.seed(draw_seed)
+            np.random.seed(draw_seed)
+            torch.manual_seed(draw_seed)
             s = IMUSample(data=w.clone(), channel_names=list(CHANNELS), sampling_rate=rate,
-                          channel_descriptions=["c"] * 6, label="a", dataset_name=ref_ds(idx, k),
+                          channel_descriptions=["c"] * 6,
                           channel_mask=cmask)
             a = aug(s)
             # structural
@@ -116,11 +118,5 @@ def main() -> None:
         else:
             st = "shape-preserving"
         print(f"{name:22s} {med(rel_l2):>8.3f} {med(rms_x):>7.3f} {med(dcad):>9.3f}  {st}")
-
-
-def ref_ds(idx, k):
-    return idx.refs[k.stream_i].dataset
-
-
 if __name__ == "__main__":
     main()

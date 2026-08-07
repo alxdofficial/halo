@@ -32,7 +32,7 @@ import torch.nn.functional as F
 
 from .channel_text import ChannelTextFusion, FactoredChannelTextFusion, TokenTextEncoder
 from .filterbank import PhysicalFilterbankTokenizer
-from .transformer import DualBranchTransformer, build_temporal_mask
+from .transformer import DualBranchTransformer
 
 # RoPE periods in SECONDS: fastest = finest patch spacing we draw (0.5 s multi-scale
 # floor, §5.2.1); slowest comfortably above any session span we train on.
@@ -59,7 +59,6 @@ class SetTokenizerEncoder(nn.Module):
         frontend: str = "fixed",                  # tokenizer front end: 'fixed'|'learnable'
         text_conditioning: str = "per_channel",  # 'per_channel' (legacy) | 'factored' (role+sensor)
         gate_bias_init: float = -2.0,             # factored: negative => identity lightly injected @ init
-        temporal_mode: str = "full",           # 'full' | 'causal' (streaming/world-model)
         use_duration_embedding: bool = False,
         duration_min_seconds: float = 0.4,
         duration_max_seconds: float = 1.5,
@@ -69,7 +68,6 @@ class SetTokenizerEncoder(nn.Module):
     ):
         super().__init__()
         self.d_model = d_model
-        self.temporal_mode = temporal_mode
         self.use_duration_embedding = bool(use_duration_embedding)
         self.duration_min_seconds = float(duration_min_seconds)
         self.duration_max_seconds = float(duration_max_seconds)
@@ -230,7 +228,6 @@ class SetTokenizerEncoder(nn.Module):
         positions: torch.Tensor,                     # (B, P) patch-center times in SECONDS
         patch_durations: Optional[torch.Tensor] = None,  # (B, P) true temporal support in seconds
         resolution_ids: Optional[torch.Tensor] = None,   # (B, P) 0=short, 1=long, -1=padding
-        cross_resolution_attention: bool = True,
         token_mask: Optional[torch.Tensor] = None,   # (B, P, C) True = hide for JEPA
         channel_mask: Optional[torch.Tensor] = None, # (B, C) True = channel exists
         patch_padding_mask: Optional[torch.Tensor] = None,  # (B, P) True = real patch
@@ -289,18 +286,9 @@ class SetTokenizerEncoder(nn.Module):
         else:
             tokens = self.fusion(tokens, text_embs, text_masks)
 
-        temporal_mask = build_temporal_mask(positions, mode=self.temporal_mode)
-        if not cross_resolution_attention:
-            if resolution_ids is None:
-                raise ValueError("resolution_ids are required to isolate resolution attention")
-            same_resolution = resolution_ids.unsqueeze(2).eq(resolution_ids.unsqueeze(1))
-            same_resolution &= resolution_ids.unsqueeze(2).ge(0)
-            temporal_mask = (same_resolution if temporal_mask is None
-                             else temporal_mask & same_resolution)
         transformer_forward = self._compiled_transformer_forward or self.transformer
         h = transformer_forward(
             tokens,
-            temporal_mask=temporal_mask,
             channel_mask=channel_mask,
             patch_padding_mask=patch_padding_mask,
             positions=positions,
@@ -350,7 +338,6 @@ class SetTokenizerEncoder(nn.Module):
         positions: torch.Tensor,                     # (B, P) patch-center times in SECONDS
         patch_durations: Optional[torch.Tensor] = None,
         resolution_ids: Optional[torch.Tensor] = None,
-        cross_resolution_attention: bool = True,
         token_mask: Optional[torch.Tensor] = None,   # (B, P, C) True = hide for JEPA
         channel_mask: Optional[torch.Tensor] = None, # (B, C) True = channel exists
         patch_padding_mask: Optional[torch.Tensor] = None,  # (B, P) True = real patch
@@ -375,7 +362,6 @@ class SetTokenizerEncoder(nn.Module):
             text_embs, text_masks = self.encode_texts(channel_texts, device)
         return self.encode(sensor_tokens, text_embs, text_masks, positions,
                            patch_durations=patch_durations, resolution_ids=resolution_ids,
-                           cross_resolution_attention=cross_resolution_attention,
                            token_mask=token_mask, channel_mask=channel_mask,
                            patch_padding_mask=patch_padding_mask,
                            sensor_text_embs=s_embs, sensor_text_masks=s_masks, sensor_id=sensor_id,

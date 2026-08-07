@@ -22,7 +22,6 @@ than a fixed-width vector.
 | Module | Role |
 |---|---|
 | `patch_retrieval.py` | per-query-patch retrieval over the memory bank, with learned EMA subspaces |
-| `head.py` | non-negative evidence accumulation per candidate label |
 | `decoder.py` | candidate-aware decoder (`QUERY` / `EVIDENCE` / `CANDIDATE` structural roles) |
 | `multisubspace.py` | multiple projection subspaces with diversity regularization |
 | `confidence.py`, `edl.py` | rejection confidence and evidential (Dirichlet) prediction |

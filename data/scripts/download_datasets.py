@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import sys
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.request import urlopen, Request

@@ -191,7 +191,7 @@ def main() -> None:
     # "beat the floor" when its like-for-like control was 46.7. Run --untrained to get the control.
     parity = "baseline-parity (bare eval labels)" if args.raw_labels else "NON-PARITY (ensembled candidates)"
     print(f"  MEAN = {mean}   [{parity}, top_k={blob['topk']}, tau={blob['tau_retr']}]", flush=True)
-    print(f"  compare ONLY against `--untrained` at these same settings.", flush=True)
+    print("  compare ONLY against `--untrained` at these same settings.", flush=True)
     if calibration:
         mean_aurc = float(np.nanmean([c["aurc"] for c in calibration.values()]))
         mean_cov_acc = float(np.nanmean([c["acc@0.8cov"] for c in calibration.values()]))

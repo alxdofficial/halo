@@ -31,7 +31,7 @@ DESCRIPTIONS = [
     "gyroscope z-axis at the front trouser pocket",
 ]
 # the axes we inspect, each forced on alone (p=1) with the training-default ranges
-AXES = ("rotation_3d", "rate", "time_warp", "channel_dropout", "scale", "jitter")
+AXES = ("rotation_3d", "rate", "gravity", "channel_dropout", "scale", "jitter")
 PATCH_SECONDS_GRID = (0.5, 0.75, 1.0, 1.5, 2.0)
 OUT = Path(__file__).resolve().parent / "outputs" / "m2_aug_inspect"
 
@@ -75,7 +75,7 @@ def main() -> None:
             torch.manual_seed(SEED + row)
             sample = IMUSample(data=data.clone(), channel_names=list(CHANNELS),
                                sampling_rate=rate,
-                               channel_descriptions=list(DESCRIPTIONS), label=name)
+                               channel_descriptions=list(DESCRIPTIONS))
             aug = augmenter(sample)
             t0 = np.arange(data.shape[0]) / rate
             t1 = np.arange(aug.data.shape[0]) / aug.sampling_rate

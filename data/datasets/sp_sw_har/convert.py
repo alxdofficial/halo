@@ -68,8 +68,6 @@ PAIR_MIN_OVERLAP = 0.75   # fraction of the 1.0 s window that must overlap in ab
 
 
 def create_manifest() -> dict:
-    place = {"phone_pocket": "smartphone in the left front trouser pocket (orientation-variable)",
-             "watch_wrist": "smartwatch on the left wrist"}
     return {
         "dataset_name": "SP-SW-HAR",
         "description": ("Paired smartphone (front pocket) + smartwatch (wrist) IMU during "

@@ -4,7 +4,7 @@ import numpy as np
 
 from eval.tokenizer_metrics import (
     alignment, cross_config_retrieval, decodability, effective_rank, knn_purity,
-    linear_probe_ba, uniformity,
+    linear_probe_ba,
 )
 
 

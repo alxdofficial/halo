@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from data.scripts.assembly.assemble import assemble
 from data.scripts.curate.accel_units import GRAVITY_MS2

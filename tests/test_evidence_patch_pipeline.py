@@ -306,7 +306,6 @@ def test_same_sensor_relation_bias_is_trainable_and_permutation_safe():
     )).train()
     inputs = _decoder_inputs()
     B, Q = inputs["zq"].shape[:2]
-    K = inputs["zev"].shape[1]
     q_sensor = torch.tensor([[0, 0, 1]] * B)
     ev_sensor = torch.tensor([[0, 1, 1, 2, 2]] * B)
     with torch.no_grad():

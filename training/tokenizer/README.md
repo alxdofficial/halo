@@ -84,44 +84,16 @@ continue the same trajectory.
 
 ## JEPA masking
 
-Default `--jepa-mask-mode per_resolution`: **one contiguous block per temporal grid, drawn
-independently**, and the masked student attends **across** resolutions. Inferring a hidden
-fine-grained token from a visible coarse summary of the same seconds (or the reverse) is treated as
-legitimate inference, not leakage. Blocks stay contiguous in each grid's own physical-time order —
-scattered i.i.d. masking degenerates for quasi-stationary motion, where an adjacent 0.5 s token is
-nearly a copy.
+JEPA has one masking strategy: draw **one randomly located contiguous block independently within
+each temporal grid**. The masked student attends across resolutions, so a visible coarse summary
+may contextualize a hidden fine token and vice versa. Blocks are counted in each grid's tokens, so
+the ratio is independent of native sampling rate and patch duration except for unavoidable rounding
+on small grids.
 
-Three properties follow, all measured on 24 live batches:
-
-| | `shared_interval` (control) | `per_resolution` (default) |
-|---|---:|---:|
-| realised mask fraction (nominal 0.5) | 0.558 short / 0.674 long | **0.50 / 0.50** (median) |
-| windows with temporal masking in BOTH grids — long-window sources | 94–98% | **100%** |
-| … `unimib_shar` (3.0 s) | 44.1% | **100%** |
-| … `uci_har` (2.56 s) | 24.8% | **100%** |
-| … `sp_sw_har` (1.0 s) | **0.0%** | **86.5%** |
-| masked long tokens with every contained short token visible | 25.7% (inert — attention isolated) | **16.0%** (live, by design) |
-
-The third row is the reason for the change. Under isolation a grid holding a single token could
-never be masked — hiding it left that grid no visible context — so a guard removed the mask and the
-window silently fell back to a cross-channel task. That made short-window sources (~19% of draws)
-train on a *different objective* than the rest of the corpus while `zero_supervision_fraction`
-still read 0.0. With cross-resolution attention the other grid supplies the context, so every
-source trains on the same objective. `sp_sw_har` stops at 86.5% rather than 100% because a window
-that reduces to one token per grid cannot mask both and keep anything visible.
-
-Dropping isolation also removes a train/inference mismatch: JEPA previously never trained the
-cross-resolution attention that evaluation uses.
-
-The cost, accepted deliberately: at equal `mask_ratio_time` this is the **easier** task — it masks
-0.50 of each grid where the interval scheme realised 0.558/0.674, and it hands the student the
-other grid. JEPA is already the fast-converging half of the recipe. **~0.6 holds realised
-difficulty roughly level; 0.75 is where MAE's ablation peaks.** The default stays 0.5 so the mode
-change is a single variable.
-
-`--jepa-mask-mode shared_interval` restores the historical arm (one physical interval masked in
-both grids, resolution-isolated attention) that every completed 30k run used. It requires
-multiresolution.
+A one-token resolution may be fully masked because the other grid supplies context. The only floor
+is global: every window retains at least one visible real token. Padded patches and absent channels
+are never selected as targets. There is no future-tail/causal variant, shared-interval mode, or
+resolution-isolated attention path.
 
 Short and long resolution losses are reduced independently and averaged. Partial tail patches are
 weighted by represented duration, preventing the more numerous short tokens from dominating.
@@ -155,7 +127,7 @@ upsampled 25 Hz signal from being treated as though it contains genuine 25 Hz sp
 |---|---:|
 | encoder | d=256, 6 layers, 8 heads (head dim 32) |
 | VICReg expander | 256 -> 256 -> 128 |
-| JEPA temporal mask ratio | 0.5 nominal (~0.6 realised) |
+| JEPA temporal mask ratio | 0.5 per grid, up to token rounding |
 | frontend | fixed physical filterbank |
 | temporal grids | simultaneous short + long |
 | conditioning | factored channel-role + sensor identity |

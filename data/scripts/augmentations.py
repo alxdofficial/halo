@@ -1,19 +1,13 @@
 """
 Augmentation strategies for IMU time series data.
 
-Implements physically plausible augmentations for IMU sensor data following
-research best practices from TS-TCC, PPDA, and recent literature (2023-2024).
-
-Augmentations are divided into:
-- Weak: jitter, scale, time_shift (preserve semantic meaning)
-- Strong: time_warp, magnitude_warp, resample (more aggressive)
+Implements the physically plausible transforms used by HALO Phase-A pretraining.
 """
 
 import re
 import torch
 import numpy as np
-from scipy import interpolate
-from typing import Tuple, Optional, List
+from typing import Optional, List
 
 # Sensor-type token detector for triad location inference. Longest alternative first so
 # 'accelerometer'/'accel' win over 'acc' (else 'acc' truncates 'accel' and mis-locates); the
@@ -44,7 +38,7 @@ from scipy import signal as _sps
 @dataclass
 class JitterCfg:
     """Additive Gaussian sensor noise, scaled by each channel's local signal std."""
-    enabled: bool = True
+    enabled: bool = False
     p: float = 0.5
     sigma: float = 0.05
 
@@ -52,36 +46,10 @@ class JitterCfg:
 @dataclass
 class ScaleCfg:
     """Per-channel amplitude scaling (gain/calibration variance)."""
-    enabled: bool = True
+    enabled: bool = False
     p: float = 0.5
     low: float = 0.9
     high: float = 1.1
-
-
-@dataclass
-class TimeShiftCfg:
-    """Whole-window temporal (phase) shift."""
-    enabled: bool = False
-    p: float = 0.5
-    max_ratio: float = 0.05
-
-
-@dataclass
-class TimeWarpCfg:
-    """Non-linear time warp (cadence variation)."""
-    enabled: bool = False
-    p: float = 0.3
-    n_knots: int = 4
-    strength: float = 0.2
-
-
-@dataclass
-class MagnitudeWarpCfg:
-    """Smooth per-channel amplitude modulation over time."""
-    enabled: bool = False
-    p: float = 0.3
-    n_knots: int = 4
-    strength: float = 0.3
 
 
 @dataclass
@@ -110,8 +78,6 @@ class Rotation3dCfg:
     time (recgym was dropped), not here."""
     enabled: bool = False
     p: float = 0.5
-    require_gravity: bool = False  # False (default): rotate any real triad — a gravity-removed accel
-                                   # is a valid vector. True: legacy gate that also skipped it (F12).
 
 
 @dataclass
@@ -152,17 +118,6 @@ class WindowCropCfg:
     p: float = 0.5
     min_frac: float = 0.5    # keep at least this fraction of the window's timesteps
     min_samples: int = 32    # never crop below this many samples (one resolvable patch)
-
-
-@dataclass
-class LabelTextCfg:
-    """Label paraphrase: dataset-specific synonym swap + template wrapping (augment_label).
-    Effective augmentation rate == `p` (the augmenter's outer gate; augment_label is called
-    with rate=1.0 once selected)."""
-    enabled: bool = False
-    p: float = 0.8
-    use_synonyms: bool = True
-    use_templates: bool = True
 
 
 @dataclass
@@ -254,17 +209,11 @@ def _paraphrase_sensor(desc: str) -> str:
 class AugmentationConfig:
     """Single source of truth for which augmentations run and how strong they are.
 
-    Defaults reproduce the legacy behaviour (jitter + scale only). Presets:
-      - AugmentationConfig()            -> legacy (jitter + scale)
-      - AugmentationConfig.default_v2() -> P1-P4 curriculum ON (+ jitter + scale)
-      - AugmentationConfig.none()       -> everything off
+    ``phase_a()`` is the training recipe and ``none()`` disables every transform.
     Print `cfg.summary()` to see the ON/OFF table.
     """
     jitter: JitterCfg = field(default_factory=JitterCfg)
     scale: ScaleCfg = field(default_factory=ScaleCfg)
-    time_shift: TimeShiftCfg = field(default_factory=TimeShiftCfg)
-    time_warp: TimeWarpCfg = field(default_factory=TimeWarpCfg)
-    magnitude_warp: MagnitudeWarpCfg = field(default_factory=MagnitudeWarpCfg)
     gravity: GravityCfg = field(default_factory=GravityCfg)
     rotation_3d: Rotation3dCfg = field(default_factory=Rotation3dCfg)
     rate: RateCfg = field(default_factory=RateCfg)
@@ -274,7 +223,6 @@ class AugmentationConfig:
     channel_text_phrase: ChannelTextPhraseCfg = field(default_factory=ChannelTextPhraseCfg)
     channel_text_dropout: ChannelTextDropoutCfg = field(default_factory=ChannelTextDropoutCfg)
     sensor_text_dropout: SensorTextDropoutCfg = field(default_factory=SensorTextDropoutCfg)
-    label_text: LabelTextCfg = field(default_factory=LabelTextCfg)
 
     # Application order: metadata/physics-changing first, then value-space, then TEXT last
     # (so channel-text augs see the final, physics-mutated channel set/descriptions).
@@ -282,12 +230,14 @@ class AugmentationConfig:
     # intact (teaching gravity-direction augmentation) before gravity may be removed; rate runs
     # after gravity/rotation.
     ORDER = ("window_crop", "channel_dropout", "rotation_3d", "gravity", "rate",
-             "time_warp", "time_shift", "magnitude_warp", "scale", "jitter",
-             "channel_text_phrase", "channel_text_dropout", "sensor_text_dropout", "label_text")
+             "scale", "jitter", "channel_text_phrase", "channel_text_dropout",
+             "sensor_text_dropout")
 
     @classmethod
-    def default_v2(cls) -> "AugmentationConfig":
+    def phase_a(cls) -> "AugmentationConfig":
         cfg = cls()
+        cfg.jitter.enabled = True
+        cfg.scale.enabled = True
         cfg.gravity.enabled = True
         # Full SO(3) rotation is the placement-invariance lever; principled now that
         # the filterbank carries a signed DC/gravity feature.
@@ -298,13 +248,7 @@ class AugmentationConfig:
         cfg.channel_text_phrase.enabled = True
         cfg.channel_text_dropout.enabled = True
         cfg.sensor_text_dropout.enabled = True     # F7: teach graceful fallback on missing config text
-        cfg.label_text.enabled = True
         return cfg
-
-    @classmethod
-    def legacy(cls) -> "AugmentationConfig":
-        """Only jitter + scale (pre-V2 effective behaviour)."""
-        return cls()
 
     @classmethod
     def none(cls) -> "AugmentationConfig":
@@ -335,20 +279,12 @@ class IMUSample:
     channel_names: List[str]
     sampling_rate: float
     channel_descriptions: List[str]   # base per-channel text (no Hz/window suffix)
-    label: str = ""                   # raw activity label (input to label-text augmentation)
-    dataset_name: str = ""            # for dataset-specific label synonyms
-    label_text: str = ""              # augmented label text (output; defaults to raw label)
     channel_mask: Optional[List[bool]] = None   # True = REAL channel (False = zero-padded absent);
                                                 # lets text dropout skip padded channels (F10b)
     role_descriptions: Optional[List[str]] = None
     sensor_descriptions: Optional[List[str]] = None
     sensor_id: Optional[List[int]] = None
     gravity_state: Optional[str] = None
-
-    def __post_init__(self):
-        if not self.label_text:
-            self.label_text = self.label
-
 
 def _gravity_present(triad: "np.ndarray", descs=None) -> bool:
     """True if an accelerometer triad still contains the gravity DC component.
@@ -485,56 +421,6 @@ class IMUAugmenter:
         s.data = s.data * factors
         return s
 
-    def _time_shift(self, s, spec):
-        T = s.data.shape[0]
-        max_shift = max(1, int(T * spec.max_ratio))
-        shift = int(np.random.randint(-max_shift, max_shift + 1))
-        if shift > 0:
-            fill = s.data[:shift].mean(0, keepdim=True).repeat(shift, 1)
-            s.data = torch.cat([fill, s.data[:-shift]], 0)
-        elif shift < 0:
-            fill = s.data[shift:].mean(0, keepdim=True).repeat(-shift, 1)
-            s.data = torch.cat([s.data[-shift:], fill], 0)
-        return s
-
-    def _time_warp(self, s, spec):
-        T, C = s.data.shape
-        if T < 10:
-            return s
-        orig = np.linspace(0, 1, T)
-        knots = np.linspace(0, 1, spec.n_knots)
-        vals = np.clip(knots + np.random.randn(spec.n_knots) * spec.strength, 0, 1)
-        vals[0], vals[-1] = 0, 1
-        vals = np.sort(vals)
-        # PCHIP (monotone cubic), NOT interp1d cubic: an unconstrained cubic through the
-        # knots overshoots past [0,1]; the clip then SATURATES warped_t, which edge-holds
-        # the signal into a flat tail (dead ~25% of the window on strong draws) and can
-        # even locally reverse time between knots. PCHIP is monotone + bounded by
-        # construction -> a true time reparametrization. (Caught by M2 visual inspection.)
-        warped_t = np.clip(interpolate.PchipInterpolator(knots, vals)(orig), 0, 1)
-        x = s.data.detach().cpu().numpy()
-        out = np.stack(
-            [interpolate.interp1d(orig, x[:, c], kind="linear", fill_value="extrapolate")(warped_t)
-             for c in range(C)],
-            axis=-1,
-        )
-        s.data = torch.from_numpy(np.ascontiguousarray(out)).float().to(s.data.device)
-        return s
-
-    def _magnitude_warp(self, s, spec):
-        T, C = s.data.shape
-        if T < 10:
-            return s
-        grid = np.linspace(0, 1, T)
-        knots = np.linspace(0, 1, spec.n_knots)
-        x = s.data.detach().cpu().numpy().copy()
-        for c in range(C):
-            facs = np.clip(1.0 + np.random.randn(spec.n_knots) * spec.strength, 0.5, 1.5)
-            curve = interpolate.interp1d(knots, facs, kind="cubic", fill_value="extrapolate")(grid)
-            x[:, c] = x[:, c] * curve
-        s.data = torch.from_numpy(x).float().to(s.data.device)
-        return s
-
     # ---------- P1: gravity add/remove ----------
     def _gravity(self, s, spec):
         sr = float(s.sampling_rate)
@@ -588,23 +474,7 @@ class IMUAugmenter:
             return s
         x = s.data
 
-        def loc_has_gravity(triads):
-            for idxs, gname in triads:
-                if "acc" in gname:
-                    if s.channel_mask is not None and not all(s.channel_mask[j] for j in idxs):
-                        continue
-                    tri = x[:, idxs]
-                    if _gravity_present(tri.detach().cpu().numpy(),
-                                        [s.channel_descriptions[k] for k in idxs]):
-                        return True
-            return False
-
         for _loc, triads in triloc.items():
-            # require_gravity is a legacy ablation gate (default OFF, F12): a gravity-removed accel
-            # is still a valid 3-vector, so rotating it is a correct orientation augmentation. When
-            # ON, skip locations whose accel no longer carries gravity.
-            if spec.require_gravity and not loc_has_gravity(triads):
-                continue
             R = _random_so3().to(x.dtype).to(x.device)
             for idxs, _gname in triads:
                 x[:, idxs] = torch.einsum("ij,tj->ti", R, x[:, idxs])
@@ -740,14 +610,3 @@ class IMUAugmenter:
             desc[i] = spec.neutral
         s.sensor_descriptions = desc
         return s
-
-    # ---------- text: label paraphrase (dataset-specific synonyms + templates) ----------
-    def _label_text(self, s, spec):
-        from data.scripts.labels.label_augmentation import augment_label
-        # Outer `p` already decided we augment; call augment_label unconditionally (rate=1.0).
-        s.label_text = augment_label(
-            s.label, s.dataset_name, augmentation_rate=1.0,
-            use_synonyms=spec.use_synonyms, use_templates=spec.use_templates,
-        )
-        return s
-

@@ -16,7 +16,8 @@
 >
 > **Phase-A objective warning (2026-08-05):** the numbered A1/A2/A3 recipe later in this document is
 > historical design rationale, not runnable configuration. The live trainer has exactly JEPA and
-> augmentation VICReg; see `training/tokenizer/README.md`.
+> augmentation VICReg; see `training/tokenizer/README.md`. The causal/future-tail world-model arm
+> discussed below was subsequently rejected and deleted.
 
 ## 0. The shift
 From an **activity classifier** (emit one label) to a **human-activity foundation model**
@@ -243,10 +244,9 @@ Supervisor suggestion — a "HAR world model." Scope it honestly as a **latent f
 next-latent-state predictor** (predict future patch latents from the past, JEPA-style, in embedding
 space), **NOT** an action-conditioned RL world model (HAR has no agent-actions to condition on; skip
 rollouts / long-horizon generation / planning — not needed).
-- **Cheap:** it's the research-recommended JEPA latent-masked objective (CHARM) extended along the
-  TEMPORAL axis — same masked-prediction SSL machinery with a causal/temporal mask instead of a channel
-  mask, reusing the causal physical-time (RoPE) encoder we already plan/port. Just a predictor head + a
-  mask schedule added to Pipeline A's Phase-1 pretraining.
+- **Historical proposal:** extend JEPA latent masking along time with a causal future-tail mask and
+  causal physical-time encoder. This branch was tested, rejected, and deleted; the live Phase-A JEPA
+  objective uses random contiguous temporal blocks and bidirectional context.
 - **Earns its place (not a bolt-on):** the **prediction error = surprise = novelty signal.** A model
   that predicts motion dynamics is *surprised* when reality deviates (an activity it has no dynamics for)
   → that surprise feeds Pipeline B's abstention/density gate directly (stacks with the density-aware
@@ -272,9 +272,10 @@ sparse code = evidence; feature-space because invariance kills raw reconstructio
 as a *separate* loss (overlaps the contrastive). **Augmentations:** the one non-redundant geometric aug is
 the **physically-correct time-warp** (`accel×1/α², gyro×1/α`) — rotation/translation/uniform-scale commute
 with `d²/dt²`, so the integrate→transform→differentiate detour reduces them to the SO(3)/gain augs we have.
-The implemented stack (`data/scripts/augmentations.py`) already provides the nuisance/heterogeneity axes:
-`RateCfg` (P3, anti-aliased resample → rate-invariance, co-varies the Hz channel-text), `TimeWarpCfg`
-(cadence), `ChannelDropoutCfg` (P4, whole-group drop → masked-channel objective), rotation/gravity/gain.
+The implemented stack (`data/scripts/augmentations.py`) provides the nuisance/heterogeneity axes:
+`RateCfg` (P3, anti-aliased resample → rate-invariance, co-varies the Hz channel-text),
+`ChannelDropoutCfg` (P4, whole-group drop → masked-channel objective), rotation/gravity/gain. The
+experimental time-warp branch was not adopted and has been deleted.
 
 #### 5.2.1 A1 — masked spatio-temporal latent prediction (concrete spec)
 Data shapes (harmonised corpus): **6 s window · 60 Hz · 360 samples · 6 canonical channels** `[acc xyz, gyro
@@ -293,9 +294,9 @@ xyz]` (pad+mask for accel-only sources). Tokenizer patch is defined in **seconds
   `T`** so a long-patch draw can't make the temporal mask degenerate. Two structured streams:
   (a) **channel/modality mask** — whole channels, **biased toward dropping the gyro triplet** at ~the
   corpus accel-only fraction (matches the real deployment shift) + occasional single-channel drops;
-  (b) **temporal mask** — MAE/JEPA block mask (**random-block** variant → representation; **causal/future**
-  variant → the §5.1 world-model / surprise objective). Prediction is in **latent space**, so high ratios
-  are fine — start ~50 % masked, ablate up.
+  (b) **temporal mask** — MAE/JEPA random contiguous block mask. The causal/future variant proposed for
+  the §5.1 world-model was rejected and deleted. Prediction is in **latent space**, so high ratios are
+  fine — start ~50 % masked, ablate up.
 - **Attention:** `T·C ≈ 60` tokens → **full self-attention over the flattened grid** (no need for axial).
 - **Positional encoding:** **time = RoPE keyed to physical Δt (seconds), never patch index** — this is what
   absorbs both variable rate *and* variable patch duration with zero special-casing. **Channels = a

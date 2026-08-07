@@ -15,12 +15,11 @@ HHAR Dataset Info:
 - ~43.9 million samples total
 """
 
-import os
 import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 
 # Activity mapping (original names to standardized)
@@ -282,7 +281,7 @@ def main():
     print(f"{'=' * 80}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"  - {len(labels_dict)} raw sessions (whole recordings; not pre-windowed)")
-    print(f"  - 6 channels (acc + gyro)")
+    print("  - 6 channels (acc + gyro)")
     print(f"  - {TARGET_SAMPLE_RATE} Hz sampling rate")
 
     # Activity distribution

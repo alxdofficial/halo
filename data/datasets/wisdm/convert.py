@@ -8,7 +8,6 @@ Output: data/datasets/wisdm/
   - sessions/session_XXX/data.parquet
 """
 
-import os
 import sys
 import json
 import numpy as np
@@ -297,10 +296,10 @@ def main():
     print(f"{'=' * 80}")
     print(f"Output: {OUTPUT_DIR}")
     print(f"  - {len(labels_dict)} sessions")
-    print(f"  - 12 channels (phone + watch, accel + gyro)")
-    print(f"  - 20 Hz sampling rate")
-    print(f"\nNOTE: Each session contains data from ONE device-sensor combination.")
-    print(f"      To use multi-modal data, merge sessions by subject and activity.")
+    print("  - 12 channels (phone + watch, accel + gyro)")
+    print("  - 20 Hz sampling rate")
+    print("\nNOTE: Each session contains data from ONE device-sensor combination.")
+    print("      To use multi-modal data, merge sessions by subject and activity.")
 
     # Generate debug visualizations
     try:

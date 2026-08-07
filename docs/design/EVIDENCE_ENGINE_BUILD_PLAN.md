@@ -7,11 +7,13 @@
 > been FAILED on re-measurement.** `model/evidence/` and `training/evidence/` implement M0–M4a and
 > Tier-2. Milestone status here is stale; the authoritative current position is
 > `EVIDENCE_ENGINE_FINDINGS.md` (STATUS block). In particular the M4a head path
-> (`model/evidence/head.py`, `train_head.py`, `eval_gate.py`, `diagnose.py`) is **superseded** by the
-> Tier-2 decoder (`model/evidence/decoder.py`) and is retained only for the diagnostics that
-> produced the tier-1 sweep.
+> (`model/evidence/head.py`, `train_head.py`, `eval_gate.py`, `diagnose.py`) was **superseded** by the
+> Tier-2 decoder (`model/evidence/decoder.py`) and has been deleted. Its historical results remain
+> in the findings document.
 > **The M0-M3 Phase-A objective sections are also historical.** The live trainer was consolidated
 > to JEPA + unified VICReg relation learning; see `training/tokenizer/README.md`.
+> The proposed causal/future-tail masking and causal transformer modes were rejected and deleted;
+> live JEPA uses only randomly located contiguous blocks.
 > Paths named below such as `scattering.py` and `m2_gate.py` were retired and intentionally deleted;
 > they describe experiments that no longer form part of the executable repository.
 
@@ -164,7 +166,8 @@ losses.
   **not** a fixed HP — and note **rate resample ≠ patch count** (rate stresses filterbank Hz-invariance;
   `patch_seconds` is the token-count knob). Mask = **ratio** over the variable grid (floor `T`), two
   structured streams: whole-**channel** mask biased to dropping the **gyro triplet** + **temporal** block
-  mask (random-block + causal/future = the world-model variant). Latent-space target → ~50 % start.
+  mask. The causal/future-tail variant proposed here was later rejected; the live objective uses
+  independent random contiguous blocks on each temporal resolution. Latent-space target → ~50 % start.
   **Batch-aware:** the tokenizer needs one patch-length/batch → **bucket batches by `(rate, patch_seconds)`**
   (or pad+mask to a common grid). **Before committing ranges: draw a batch of augmented samples and
   visually inspect** rate/patch-duration/channel-drop are sane.
@@ -203,9 +206,8 @@ HARNESS flaw, each a real lesson for Phase-1:
    untrained fallback token distorts held-out eval. Keep this in the real system.
 3. **Gravity-align is part of the front end, ALWAYS** (run 2→3: 0.238→0.366) — skipping the
    canonicalization asks the encoder to relearn M0's winning transform from scratch.
-Also from the M2 visual inspection: time_warp used an unconstrained cubic → clip SATURATION
-edge-held a dead flat tail (~25% of window) and could locally reverse time — fixed with monotone
-PCHIP in `data/scripts/augmentations.py`.
+Also from the M2 visual inspection: the experimental time-warp implementation produced invalid
+tails. That experiment was not adopted and the dormant implementation was subsequently deleted.
 M2 simplifications to resolve at M3/Phase-1: per-stream config token (→ real channel-text),
 fixed patch_seconds=1.0 (→ multi-scale bucketed sampler), SO(3)+gain only (→ full aug stack).
 
@@ -235,7 +237,8 @@ masked-channel modeling well-posed). Config conditioning IS the channel text; th
 config token + UNKNOWN fallback are gone. Structural gates all green: 3/6/9/12 channels unchanged,
 permutation equivariance + pooled invariance, text is load-bearing (wrist→ankle changes the rep),
 RoPE shift-invariant but spacing-sensitive (**assert on per_patch — mean-pooling cancels attention
-re-weighting**), causal mode provably blocks future→past, masked channels contribute nothing.
+re-weighting**), masked channels contribute nothing. The tested causal mode was subsequently rejected
+and deleted.
 **Transfer gate (all-4-holdout comparison, toy scale):** set encoder mean **0.556** > trivial 0.528 >
 handcrafted grav 0.507; set wins motionsense +0.058 and shoaib +0.121, ties realworld, loses only the
 noisy single-wrist pamap2 fold (−0.057). Single-fold snapshots are noise-bound (±0.05 @ 320 windows)
