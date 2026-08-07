@@ -63,7 +63,12 @@ def _line(axis, records, key, label=None, *, smooth=False, **kwargs):
     if not x:
         return
     if smooth and len(y) > 2:
-        axis.plot(x, y, alpha=0.2, lw=0.6, **{k: v for k, v in kwargs.items() if k != "color"})
+        # The faint raw underlay sets its OWN alpha/width, so drop any caller-supplied width or
+        # colour rather than passing them twice -- every `smooth=True` caller passes lw, which
+        # made --render a hard TypeError.
+        underlay = {k: v for k, v in kwargs.items()
+                    if k not in ("color", "lw", "linewidth", "alpha")}
+        axis.plot(x, y, alpha=0.2, lw=0.6, **underlay)
         y = ewma(y)
     axis.plot(x, y, label=label or key, **kwargs)
 
