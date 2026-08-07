@@ -183,6 +183,16 @@ class PatchTable:
         return torch.cat(selected)
 
 
+def _support_units(patch: dict, rows: torch.Tensor, device) -> torch.Tensor:
+    """Return one support identity per patch: verified event, otherwise source window."""
+    window = torch.as_tensor(patch["window"])[rows].long().to(device)
+    event = torch.as_tensor(patch["event"])[rows].long().to(device)
+    verified = torch.as_tensor(patch["event_verified"])[rows].bool().to(device)
+    # Offset verified events so their ids cannot collide with ordinary source-window ids.
+    offset = int(torch.as_tensor(patch["window"]).max()) + 1
+    return torch.where(verified, event + offset, window)
+
+
 def queries_from_encoded(
     encoded: dict[str, torch.Tensor],
     windows: torch.Tensor,
@@ -232,7 +242,7 @@ def build_allowed_mask(
     index_rows: torch.Tensor,
     query: QueryPatches,
     query_label: torch.Tensor,
-    candidates: torch.Tensor,
+    memory_labels: torch.Tensor,
     *,
     truth_present: bool,
     true_support: int | None,
@@ -240,13 +250,18 @@ def build_allowed_mask(
     config_mode: str,
     rng: np.random.Generator,
 ) -> torch.Tensor:
-    """Apply leakage, config, and independently controlled candidate-support constraints."""
+    """Apply leakage, configuration, memory-roster, and per-label support constraints.
+
+    Candidate labels and memory labels are intentionally independent. The candidate set defines
+    what the model may answer; ``memory_labels`` defines which labeled examples it may retrieve.
+    """
     device = query.Z.device
     rows = index_rows.detach().cpu()
     y = torch.as_tensor(patch["y"])[rows].long().to(device)
     subj = torch.as_tensor(patch["subj"])[rows].long().to(device)
     event = torch.as_tensor(patch["event"])[rows].long().to(device)
     window = torch.as_tensor(patch["window"])[rows].long().to(device)
+    support_unit = _support_units(patch, rows, device)
     cfg = torch.as_tensor(patch["cfg"])[rows].long().to(device)
     B, Q = query.mask.shape
     allowed = (
@@ -257,33 +272,60 @@ def build_allowed_mask(
     )
     if config_mode == "same":
         allowed &= cfg.view(1, 1, -1).eq(query.cfg.unsqueeze(-1))
-    elif config_mode in {"cross", "query_absent"}:
+    elif config_mode == "cross":
         allowed &= cfg.view(1, 1, -1).ne(query.cfg.unsqueeze(-1))
+    elif config_mode == "query_absent":
+        for batch_index in range(B):
+            query_configs = torch.unique(query.cfg[batch_index, query.mask[batch_index]])
+            allowed[batch_index] &= ~torch.isin(cfg, query_configs).view(1, -1)
     elif config_mode != "any":
         raise ValueError(f"unknown config_mode {config_mode!r}")
 
-    # Support is sampled once per query window and shared across its patches. This prevents a
-    # nominal budget of one from turning into Q examples merely because the query has Q patches.
-    candidate_set = set(candidates.detach().cpu().tolist())
+    memory_labels = memory_labels.to(device=device, dtype=torch.long)
+    allowed &= torch.isin(y, memory_labels).view(1, 1, -1)
+
+    # Support is sampled once per source example and shared across its patches. Verified
+    # synchronous placements share an event-level support identity; unpaired data uses a window.
     for b in range(B):
         row_allowed = allowed[b].any(0)
         if not truth_present:
             row_allowed &= y.ne(query_label[b])
-        for label in candidate_set:
+            allowed[b, :, y.eq(query_label[b])] = False
+        active_labels = torch.unique(y[row_allowed]).tolist()
+        for label in active_labels:
             cap = true_support if truth_present and label == int(query_label[b]) else other_support
             if cap is None:
                 continue
             label_rows = torch.nonzero(row_allowed & y.eq(label), as_tuple=True)[0]
-            label_windows = torch.unique(window[label_rows])
-            if len(label_windows) <= cap:
+            label_units = torch.unique(support_unit[label_rows])
+            if len(label_units) <= cap:
                 continue
-            keep_np = rng.choice(label_windows.detach().cpu().numpy(), size=cap, replace=False) \
+            keep_np = rng.choice(label_units.detach().cpu().numpy(), size=cap, replace=False) \
                 if cap > 0 else np.empty(0, dtype=np.int64)
-            keep_window = torch.from_numpy(np.asarray(keep_np)).to(device)
-            keep = torch.isin(window, keep_window) if len(keep_np) else torch.zeros_like(row_allowed)
+            keep_unit = torch.from_numpy(np.asarray(keep_np)).to(device)
+            keep = torch.isin(support_unit, keep_unit) \
+                if len(keep_np) else torch.zeros_like(row_allowed)
             remove = y.eq(label) & ~keep
             allowed[b, :, remove] = False
     return allowed
+
+
+def realized_support_examples(
+    patch: dict,
+    index_rows: torch.Tensor,
+    allowed: torch.Tensor,
+    query_label: torch.Tensor,
+) -> torch.Tensor:
+    """Count distinct eligible true-label events/windows for each query episode row."""
+    device = allowed.device
+    rows = index_rows.detach().cpu()
+    y = torch.as_tensor(patch["y"])[rows].long().to(device)
+    support_unit = _support_units(patch, rows, device)
+    counts = []
+    for b in range(allowed.shape[0]):
+        eligible = allowed[b].any(0) & y.eq(query_label[b])
+        counts.append(torch.unique(support_unit[eligible]).numel())
+    return torch.tensor(counts, dtype=torch.long, device=device)
 
 
 def assemble_evidence(

@@ -2,7 +2,9 @@
 
 > **Historical issue ledger.** File locations, open/closed markers, and proposed objective rails are
 > not the current implementation contract. Use `training/tokenizer/README.md` for the live Phase-A
-> recipe.
+> recipe and `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md` for the live Phase-B recipe. References to the
+> former pooled trainer/evaluator and EDL are retained only as audit history; that code was deleted
+> on 2026-08-07.
 
 Consolidates the fairness audit (F-series), the independent pre-run audit (B/H-series), and the
 findings from our own diagnostics. Each item gives **exact location**, **what to do**, **effort**, and

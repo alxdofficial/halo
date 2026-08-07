@@ -15,12 +15,13 @@ Entry points: `pretrain.py` (train), `pretrain_data.py` (corpus + temperature sa
 
 ## `evidence/` — Phase B (memory + evidence prediction)
 
-Builds a patch-level memory bank from a frozen Phase-A checkpoint, retrieves per query patch,
-accumulates non-negative evidence per candidate label, and predicts with an explicit rejection
-option. Deliberately kept separate from any conventional softmax/cosine-classifier path.
+Builds a patch-level memory bank from a frozen Phase-A checkpoint, retrieves per query patch, and
+trains one candidate-set predictor objective. Reject confidence is calibrated afterwards while the
+predictor remains frozen; no `UNKNOWN` candidate is introduced.
 
-Entry points: `build_memory.py` (bank), `train_patch_decoder.py` / `eval_patch_decoder.py` (patch
-arm), `train_decoder.py` / `eval_decoder.py` (the pooled control that is always run alongside).
+Entry points: `build_memory.py` (bank), `train_patch_decoder.py` (candidate-CE predictor),
+`train_patch_confidence.py` (separate calibration), and `eval_patch_decoder.py` (evaluation plus
+identity control).
 
 ## `diagnostics/` — cross-cutting analyses
 

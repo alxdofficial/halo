@@ -123,33 +123,3 @@ class PatchSubspaceRetriever(nn.Module):
             selected, -2, selector.expand(B, Q, H, K, 1, self.subspace_dim)
         ).squeeze(-2)
         return torch.einsum("bqhs,bqhks->bqhk", q, selected)
-
-    def projection_diversity_loss(self) -> torch.Tensor:
-        """Penalize identical projection operators across retrieval heads."""
-        flat = F.normalize(self.proj.flatten(1), dim=-1)
-        gram = flat @ flat.t()
-        eye = torch.eye(self.n_subspaces, device=gram.device, dtype=gram.dtype)
-        return ((gram - eye) ** 2).sum() / max(1, self.n_subspaces * (self.n_subspaces - 1))
-
-    def output_decorrelation_loss(self, z: torch.Tensor) -> torch.Tensor:
-        """Discourage different heads from emitting the same sample-similarity geometry."""
-        if z.shape[0] < 2 or self.n_subspaces < 2:
-            return self.proj.sum() * 0.0
-        p = self.project(z, ema=False)                                            # (N,H,S)
-        p = p - p.mean(dim=0, keepdim=True)
-        # Compare flattened per-head outputs across samples and dimensions.
-        head_summary = p.permute(1, 0, 2).flatten(1)
-        head_summary = F.normalize(head_summary, dim=-1)
-        gram = head_summary @ head_summary.t()
-        eye = torch.eye(self.n_subspaces, device=gram.device, dtype=gram.dtype)
-        return ((gram - eye) ** 2).sum() / max(1, self.n_subspaces * (self.n_subspaces - 1))
-
-
-def head_usage_loss(weights: torch.Tensor, head_id: torch.Tensor,
-                    valid: torch.Tensor, n_subspaces: int) -> torch.Tensor:
-    """KL-like squared imbalance penalty on total normalized contribution per head."""
-    usage = weights.new_zeros(n_subspaces)
-    usage.scatter_add_(0, head_id[valid].reshape(-1), weights[valid].reshape(-1))
-    usage = usage / usage.sum().clamp_min(1e-8)
-    target = torch.full_like(usage, 1.0 / n_subspaces)
-    return ((usage - target) ** 2).mean()

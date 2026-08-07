@@ -11,9 +11,9 @@ Training is two phases:
 
 - **Phase A** — label-free representation pretraining (JEPA + augmentation VICReg). Activity labels
   never enter the loss. See [`training/tokenizer/README.md`](training/tokenizer/README.md).
-- **Phase B** — the evidence engine: retrieval over a memory bank of Phase-A patches, non-negative
-  evidence accumulation per candidate label, prediction with an explicit rejection option. See
-  [`docs/design/EVIDENCE_ENGINE.md`](docs/design/EVIDENCE_ENGINE.md).
+- **Phase B** — the evidence engine: retrieval over a memory bank of Phase-A patches, candidate-set
+  prediction, then separate reject-confidence calibration. See
+  [`docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`](docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md).
 
 This repo is a **clean rebuild** of the v2 work. It carries only the current, verified design; the
 prior tree lives beside it as `legacy_code/` (not part of this repo) and is mined for reference only.
@@ -73,7 +73,7 @@ All five layers below are **built and running**; the open questions are empirica
    93-label canonical vocabulary. `docs/data/DATA_PIPELINE.md`.
 2. **Model** — physical-Hz filterbank tokenizer + config-conditional dual-branch encoder.
 3. **Phase A** — label-free JEPA + augmentation-VICReg pretraining.
-4. **Phase B** — memory bank + per-patch retrieval + evidence decoder with rejection.
+4. **Phase B** — memory bank + per-patch retrieval + candidate-CE predictor + confidence calibration.
 5. **Baselines + eval** — 8 models scored on 7 test sets under a stamped protocol;
    `python -m eval.assemble_table`.
 

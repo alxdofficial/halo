@@ -1,5 +1,9 @@
 # Evidence Engine — Build Plan
 
+> **Archived roadmap.** The live Phase-B implementation contract is
+> `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`. The pooled learned trainer, EDL, and auxiliary-loss
+> branches named below were removed on 2026-08-07.
+
 > Implementation roadmap for the design in [`EVIDENCE_ENGINE.md`](./EVIDENCE_ENGINE.md).
 > This doc is the **how + order + gates**, not the rationale.
 >

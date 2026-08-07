@@ -28,7 +28,7 @@ concern (the learned t-kernel), not a memory concern.
 
 Run:
     PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
-    HALO_CKPT=training/tokenizer/outputs/pretrain_fixed_mr/best.pt \
+    HALO_CKPT=training/tokenizer/outputs/phase_a_headline/best.pt \
       $PY -m training.evidence.build_memory --device cuda
 """
 
@@ -56,7 +56,7 @@ from training.tokenizer.pretrain_data import (TRAIN_DATASETS, _stream_gravity_st
                                               stream_channel_descriptions)
 
 _REPO = Path(__file__).resolve().parents[2]
-_DEFAULT_CKPT = _REPO / "training/tokenizer/outputs/pretrain_fixed_mr/best.pt"
+_DEFAULT_CKPT = _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt"
 _DEFAULT_OUT = Path(__file__).resolve().parent / "outputs" / "memory_bank.pt"
 _GLOBAL_LABELS = _REPO / "data/labels/global_labels.json"
 
@@ -161,7 +161,7 @@ def main() -> None:
     if not args.checkpoint.exists():
         raise FileNotFoundError(
             f"encoder checkpoint missing at {args.checkpoint}. Point --checkpoint / HALO_CKPT "
-            "at the frozen Phase-A run (default: the fixed+MR winner pretrain_fixed_mr/best.pt).")
+            "at the frozen Phase-A run (default: phase_a_headline/best.pt).")
     ckpt = torch.load(str(args.checkpoint), map_location="cpu", weights_only=False)
     enc = build_encoder(ckpt, device)
     for p in enc.parameters():

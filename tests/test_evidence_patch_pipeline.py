@@ -159,10 +159,28 @@ def test_allowed_mask_excludes_subject_event_window_and_caps_support_by_window()
     assert not allowed[..., bank["patch"]["subj"].eq(1)].any()
     assert not allowed[..., bank["patch"]["event"].eq(20)].any()
     assert not allowed[..., bank["patch"]["y"].eq(1)].any()
-    # Other candidate label 0 has two windows but support=1 retains all patches from one window.
+    # Label 0's two placements are one verified physical event, so support=1 retains both sensors.
     retained_label0 = rows[allowed[0, 0] & bank["patch"]["y"].eq(0)]
-    assert len(torch.unique(bank["patch"]["window"][retained_label0])) == 1
-    assert len(retained_label0) == 2
+    assert len(torch.unique(bank["patch"]["window"][retained_label0])) == 2
+    assert len(retained_label0) == 4
+
+
+def test_query_absent_excludes_every_config_in_a_multisensor_query():
+    bank = _bank()
+    query = PatchTable(bank).gather_queries(torch.tensor([0]), "cpu")
+    rows = torch.arange(8)
+    cross = build_allowed_mask(
+        bank["patch"], rows, query, torch.tensor([0]), torch.tensor([0, 1, 2]),
+        truth_present=True, true_support=None, other_support=None,
+        config_mode="cross", rng=np.random.default_rng(4),
+    )
+    assert cross.any()  # each sensor can use configurations belonging to the other query sensor
+    absent = build_allowed_mask(
+        bank["patch"], rows, query, torch.tensor([0]), torch.tensor([0, 1, 2]),
+        truth_present=True, true_support=None, other_support=None,
+        config_mode="query_absent", rng=np.random.default_rng(4),
+    )
+    assert not absent.any()  # this tiny bank has only the two configurations in the query session
 
 
 def test_subspace_retrieval_is_independent_masked_and_differentiable():
@@ -197,7 +215,7 @@ def test_subspace_retrieval_ignores_padded_query_slots_without_requiring_memory(
     assert not result.valid[:, 2].any()
 
 
-def test_subspace_ema_update_and_projection_diversity_penalty():
+def test_subspace_ema_update_tracks_the_online_projection():
     torch.manual_seed(4)
     retriever = PatchSubspaceRetriever(8, 3, 4, ema_decay=0.5)
     old = retriever.ema_proj.clone()
@@ -205,11 +223,6 @@ def test_subspace_ema_update_and_projection_diversity_penalty():
         retriever.proj.add_(1)
     retriever.update_ema()
     assert torch.allclose(retriever.ema_proj, old.lerp(retriever.proj, 0.5))
-    diverse = retriever.projection_diversity_loss()
-    with torch.no_grad():
-        retriever.proj[1:].copy_(retriever.proj[0])
-    collapsed = retriever.projection_diversity_loss()
-    assert collapsed > diverse
 
 
 def test_assemble_evidence_caps_windows_and_normalizes_head_resolution_groups():
@@ -351,24 +364,37 @@ def test_patch_episode_smoke_has_finite_gradients_and_attribution():
         d_model=8, text_dim=6, n_heads=2, n_layers=1,
         candidate_tokens=True, candidate_layers=1, structural_metadata=True,
     ))
-    confidence = EvidenceConfidenceHead()
     index_rows = torch.arange(len(bank["patch"]["Z"]))
     memory = F.normalize(bank["patch"]["Z"].float(), dim=-1)
     memory_index = retriever.build_index(memory)
     text = F.normalize(torch.randn(3, 6), dim=-1)
-    logits, conf, aux = run_patch_episode(
-        dec, retriever, confidence, table, bank, index_rows, memory_index,
-        torch.tensor([0]), torch.tensor([0, 1, 2]), text, text,
+    logits, aux = run_patch_episode(
+        dec, retriever, table, bank, index_rows, memory_index,
+        torch.tensor([0]), torch.tensor([0, 1, 2]), torch.tensor([0, 1, 2]), text, text,
         truth_present=True, true_support=0, other_support=None,
         config_mode="any", rng=np.random.default_rng(4), topk_per_head=2,
         max_evidence=4, max_per_window=2, max_per_label=4, tau=0.1,
         query_window_mask=torch.ones(4, dtype=torch.bool),
     )
-    loss = F.cross_entropy(logits, torch.tensor([0])) + conf.square().mean()
+    loss = F.cross_entropy(logits, torch.tensor([0]))
     loss.backward()
-    assert torch.isfinite(logits).all() and torch.isfinite(conf).all()
+    assert torch.isfinite(logits).all()
     assert retriever.proj.grad is not None
     assert {"evidence_index", "evidence_sensor", "evidence_head", "evidence_query_patch"} <= set(aux)
+
+
+def test_memory_support_caps_apply_to_non_candidate_labels():
+    bank = _bank()
+    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
+    rows = torch.arange(8)
+    # Candidate set could be [1, 2], but memory label 0 is independently visible and capped.
+    allowed = build_allowed_mask(
+        bank["patch"], rows, query, torch.tensor([1]), torch.tensor([0, 1]),
+        truth_present=True, true_support=0, other_support=1,
+        config_mode="any", rng=np.random.default_rng(3),
+    )
+    retained = rows[allowed[0, 0] & bank["patch"]["y"].eq(0)]
+    assert len(torch.unique(bank["patch"]["window"][retained])) == 2
 
 
 def test_activity_family_mapping_is_complete_and_drives_family_distractors():

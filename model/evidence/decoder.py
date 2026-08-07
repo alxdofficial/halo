@@ -34,8 +34,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from model.evidence.multisubspace import MultiSubspaceHead
-
 ROLE_QUERY = 0
 ROLE_EVIDENCE = 1
 ROLE_CANDIDATE = 2
@@ -53,8 +51,6 @@ class DecoderConfig:
     time_max_sec: float = 30.0  # longest window we scale frequencies for
     layerscale_init: float = 1e-4
     out_scale_init: float = 10.0
-    n_subspaces: int = 0        # D2: multi-subspace pooling re-weighting (0 = off, byte-identical)
-    subspace_dim: int = 64      # per-subspace projection dim for the multi-subspace head
     candidate_tokens: bool = False
     candidate_layers: int = 2
     structural_metadata: bool = False
@@ -193,15 +189,6 @@ class EvidenceDecoder(nn.Module):
             nn.init.zeros_(self.candidate_refiner.weight)
             nn.init.zeros_(self.candidate_refiner.bias)
 
-        # --- D2: multi-subspace pooling residual (opt-in; identity-at-init via gamma_ms=0) ---
-        # When n_subspaces == 0 (default) neither the head nor gamma_ms exist, so the state_dict
-        # and forward are byte-identical to the pre-D2 decoder. When > 0 the head is built and its
-        # contribution is gated by a zero-init scalar => still identity at init.
-        self.ms_head = None
-        if cfg.n_subspaces > 0:
-            self.ms_head = MultiSubspaceHead(cfg.d_model, cfg.n_subspaces, cfg.subspace_dim)
-            self.gamma_ms = nn.Parameter(torch.zeros(()))    # zero-init gate -> no effect @ init
-
     def _zero_init_heads(self):
         nn.init.zeros_(self.refiner[-1].weight); nn.init.zeros_(self.refiner[-1].bias)
         nn.init.zeros_(self.pool_phi.weight); nn.init.zeros_(self.pool_phi.bias)
@@ -332,15 +319,6 @@ class EvidenceDecoder(nn.Module):
         # ---- (b) pool as a residual on the retrieval prior ----
         phi = self.pool_phi(ev_state).squeeze(-1)                                # (B, k) — 0 @ init
         a_logit = torch.log(w_retr.clamp_min(1e-12)) + phi
-        # D2: multi-subspace re-weighting, gated by gamma_ms (0 @ init => a_logit UNCHANGED, so
-        # a/e/logits stay byte-identical to the untrained mechanism). psi is finite (bounded
-        # cosines) so 0*psi is exactly 0 — no NaN — and padded/dead rows are masked below as before.
-        if self.ms_head is not None:
-            q_weight = q_mask.to(zq.dtype)
-            pooled_zq = (zq * q_weight.unsqueeze(-1)).sum(1) \
-                / q_weight.sum(1, keepdim=True).clamp_min(1.0)
-            psi = self.ms_head(pooled_zq, zev)                                   # (B, k)
-            a_logit = a_logit + self.gamma_ms * psi
         a_logit = a_logit.masked_fill(~ev_mask, float("-inf"))
         # A row with NO valid evidence would be all -inf -> softmax = NaN -> one bad row silently
         # NaNs the whole batch's CE. Keep such rows finite and let them pool to zero evidence.
@@ -358,9 +336,6 @@ class EvidenceDecoder(nn.Module):
                 aux["candidate_delta_norm"] = float(
                     candidate_delta.detach().norm(dim=-1).mean()
                 )
-            if self.ms_head is not None:
-                # abs value so the trainer can reg-to-identity it (L1) like Δ/pool; keeps grad.
-                aux["gamma_ms"] = self.gamma_ms.abs()
             return logits, aux
         return logits
 
@@ -389,9 +364,6 @@ class EvidenceDecoder(nn.Module):
         return bias.repeat_interleave(self.cfg.n_heads, dim=0)                   # (B*nh, T, T)
 
     # -- convenience: split params for weight-decay grouping (exclude LN/bias/γ/embeddings) --
-    # This iterates ALL named_parameters, so the D2 multi-subspace params join automatically:
-    # ms_head.proj.weight (ndim 2) -> decay; ms_head.omega_logits (ndim 1) and the gamma_ms
-    # scalar (ndim 0) both fall under `p.ndim <= 1` -> no_decay, as required for the gate scalar.
     def param_groups(self, weight_decay: float = 0.01):
         decay, no_decay = [], []
         for name, p in self.named_parameters():

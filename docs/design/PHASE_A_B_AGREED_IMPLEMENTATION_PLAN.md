@@ -1,8 +1,10 @@
 # Agreed Phase-A and Phase-B Implementation Plan
 
-Status: Phase B implemented as recorded below. Phase A was consolidated on 2026-08-06 to the
-two-objective JEPA + augmentation-VICReg recipe documented in `training/tokenizer/README.md`; that recipe
-supersedes the earlier configurable objective menu in this plan.
+Status: Phase A completed on 2026-08-07. The selected checkpoint is
+`training/tokenizer/outputs/phase_a_headline/best.pt` at step 27,000 (`val_ba=0.288435`). Phase B was
+consolidated on 2026-08-07 to one candidate-CE predictor objective followed by a separate frozen-
+predictor confidence-calibration stage. Earlier pooled-window, EDL, auxiliary-loss, and duplicate
+multi-subspace implementations were removed.
 
 ## Implementation map and launch gates
 
@@ -20,12 +22,13 @@ Phase B:
   `training/tokenizer/eval_transfer.py`;
 - candidate-aware decoder, confidence, learned EMA subspaces:
   `model/evidence/{decoder,confidence,patch_retrieval}.py`;
-- episodic plumbing/trainer/evaluator:
-  `training/evidence/{patch_episodes,train_patch_decoder,eval_patch_decoder}.py`;
+- episodic plumbing/trainer/calibrator/evaluator:
+  `training/evidence/{patch_episodes,train_patch_decoder,train_patch_confidence,eval_patch_decoder}.py`;
 - canonical motion families: `data/labels/activity_families.json`;
 - tests: `tests/{test_eval_transfer_detailed,test_evidence_patch_pipeline}.py`;
-- CPU integration smoke passed:
-  `python -m training.evidence.train_patch_decoder --smoke`.
+- CPU integration smokes passed:
+  `python -m training.evidence.train_patch_decoder --smoke` and
+  `python -m training.evidence.train_patch_confidence --smoke`.
 
 Native-grid event migration completed on 2026-07-25:
 
@@ -42,14 +45,15 @@ Before a real Phase-B run, rebuild the bank with the selected frozen Phase-A che
 and evaluate the patch arm:
 
 ```bash
-HALO_CKPT=<phase-a-best.pt> python -m training.evidence.build_memory --device cuda
+python -m training.evidence.build_memory --device cuda
 python -m training.evidence.train_patch_decoder --device cuda
-HALO_CKPT=<phase-a-best.pt> python -m training.evidence.eval_patch_decoder --device cuda
+python -m training.evidence.train_patch_confidence --device cuda
+python -m training.evidence.eval_patch_decoder --device cuda \
+  --confidence training/evidence/outputs/patch_evidence_confidence.pt
 ```
 
-The historical `train_decoder.py`/`eval_decoder.py` pooled path remains the required control. A
-schema-v2 bank changes the bank fingerprint, so pooled learned artifacts must be retrained against
-that exact bank rather than reused.
+`eval_patch_decoder.py` reports the identity evidence-decoder control beside the trained predictor.
+There is no second pooled-window learned trainer.
 
 Patch retrieval uses a bounded EMA-projected coreset by default (`--index-per-label 256`) for
 tractable independent query-patch/subspace lookup. Each label draw is stratified across config and
@@ -124,10 +128,10 @@ from the live trainer rather than retained as dormant switches.
 
 - Use learned projections, never hard contiguous dimension slices.
 - Give each patch subspace its own retrieval and evidence contribution.
-- Prevent head collapse with output decorrelation, projection diversity, and contribution-usage
-  regularization.
 - Use an EMA copy of the subspace projectors for memory indexing and rebuild projected indexes
   periodically; online projectors score the retrieved items.
+- Do not add subspace-specific auxiliary losses. Head contribution and overlap are telemetry; the
+  candidate prediction objective decides whether specialized retrieval is useful.
 
 ### Decoder token set
 
@@ -147,24 +151,33 @@ from the live trainer rather than retained as dormant switches.
   attribution.
 - Do not introduce an `UNKNOWN` candidate.
 - Select among allowed labels from normalized candidate evidence.
-- Estimate reject confidence separately from absolute evidence, retrieval density, patch/sensor
+- After predictor training, freeze it and estimate reject confidence separately from absolute evidence, retrieval density, patch/sensor
   agreement, normalized vote entropy, and the leading-candidate margin.
-- Calibrate rejection on truth-absent validation episodes and evaluate risk/coverage. Truth-present
-  episodes must require support so the trivial always-reject solution is not optimal.
+- Train confidence to predict `correct AND answerable` on a mixture of truth-present and truth-absent
+  episodes, then evaluate ECE, AUROC, and risk/coverage. Confidence never changes candidate logits.
 
 ### Episodic training
 
 Vary these axes independently:
 
 - candidate budget: approximately 10%, 25%, 50%, and 100% of the vocabulary;
+- memory-label roster: approximately 25%, 50%, and 100% of eligible training labels, independent of
+  the candidate roster;
 - true-label memory support: 0, 1, 2, 4, 8, or all eligible examples;
 - independently subsampled support for other candidate labels;
 - same-config, cross-config-only, and query-config-absent memory;
 - random, language-near, motion-family-near, and physically confusable distractors;
-- truth-present classification episodes and truth-absent confidence episodes.
+- predictor stage: truth-present classification episodes only, optimized by candidate cross-entropy;
+- confidence stage: the predictor is frozen and truth-present/truth-absent episodes train only BCE.
 
 The query window/event and subject are always excluded from memory. Reserve complete label families
 from decoder training for model selection so candidate-text reasoning is tested on unseen concepts.
+One support example means one verified physical event, including all of its synchronous placements;
+unpaired data uses one source window.
+True support is sampled with probabilities 35%, 25%, 15%, 10%, 5%, and 10% for
+`0,1,2,4,8,all`; other-label support uses 5%, 10%, 15%, 20%, 20%, and 30%. Requested finite true
+support must be physically realizable after leakage/configuration exclusions or the episode is
+resampled, and requested versus realized support is logged.
 
 ## Compatibility, provenance, and gates
 
@@ -172,9 +185,9 @@ from decoder training for model selection so candidate-text reasoning is tested 
   structural-metadata policy in run artifacts.
 - Bind every Phase-B artifact to the exact Phase-A checkpoint, corpus, bank fingerprint, patch schema,
   and candidate-text vocabulary.
-- Keep controls for pooled versus patch evidence, implicit versus explicit acquisition metadata,
-  no-subspace versus subspace retrieval, fixed versus learnable frontend, JEPA+VICReg versus
-  VICReg-only, and the identity evidence decoder.
+- Keep controls for implicit versus explicit acquisition metadata, no-subspace versus subspace
+  retrieval, fixed versus learnable frontend, JEPA+VICReg versus VICReg-only, and the identity
+  evidence decoder.
 - Required tests cover VICReg collapse prevention, EMA stop-gradient/update/restore, event-pair
   integrity, patch-bank provenance, leakage exclusions, candidate/evidence permutations, metadata
-  masking, subspace diversity, episodic support budgets, confidence behavior, and checkpoint guards.
+  masking, episodic support budgets, confidence behavior, and checkpoint guards.

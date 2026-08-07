@@ -175,7 +175,7 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
 
     We cannot retro-validate a bank that never recorded its build parameters, so the minimum
     enforceable guarantee is that they ARE recorded; consumers that know the expected backbone
-    (eval_decoder, halo_evidence) additionally compare the checkpoint hash themselves.
+    (eval_patch_decoder, halo_evidence) additionally compare the checkpoint hash themselves.
     """
     missing = [
         k for k in ("vocab_fp", "backbone", "corpus", "embed_probe", "bank_fp")
@@ -200,7 +200,7 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
         f"  Its vocabulary matches, but without a backbone fingerprint there is no way to tell\n"
         f"  which encoder produced these vectors, so a retrieval number from it is unattributable.\n"
         f"  Rebuild with the current build_memory (which records them):\n\n"
-        f"      HALO_CKPT=training/tokenizer/outputs/pretrain_fixed_mr/best.pt \\\n"
+        f"      HALO_CKPT=training/tokenizer/outputs/phase_a_headline/best.pt \\\n"
         f"        python -m training.evidence.build_memory --device cuda\n")
 
 
@@ -229,7 +229,7 @@ def assert_bank_current(bank: dict, *, context: str = "") -> None:
         f"  in bank but NOT in global ({len(extra)}): {extra[:12]}{' ...' if len(extra) > 12 else ''}\n"
         f"\n  The bank was built under a different vocabulary, so its windows were filtered by a\n"
         f"  different label set than the ConSE heads now use. Rebuild it:\n\n"
-        f"      HALO_CKPT=training/tokenizer/outputs/pretrain_fixed_mr/best.pt \\\n"
+        f"      HALO_CKPT=training/tokenizer/outputs/phase_a_headline/best.pt \\\n"
         f"        python -m training.evidence.build_memory --device cuda\n\n"
         f"  See docs/design/REMEDIATION_PLAN.md Phase 0.2 / Phase 2.\n")
 

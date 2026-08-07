@@ -23,8 +23,7 @@ than a fixed-width vector.
 |---|---|
 | `patch_retrieval.py` | per-query-patch retrieval over the memory bank, with learned EMA subspaces |
 | `decoder.py` | candidate-aware decoder (`QUERY` / `EVIDENCE` / `CANDIDATE` structural roles) |
-| `multisubspace.py` | multiple projection subspaces with diversity regularization |
-| `confidence.py`, `edl.py` | rejection confidence and evidential (Dirichlet) prediction |
+| `confidence.py` | separate correct-and-answerable confidence calibration |
 
 Design of record: [`docs/design/EVIDENCE_ENGINE.md`](../docs/design/EVIDENCE_ENGINE.md); current
 empirical position, including retractions:

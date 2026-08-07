@@ -86,14 +86,58 @@ class EvidenceConfidenceHead(nn.Module):
 
     def __init__(self, hidden: int = 32):
         super().__init__()
-        self.norm = nn.LayerNorm(6)
         self.net = nn.Sequential(nn.Linear(6, hidden), nn.GELU(), nn.Linear(hidden, 1))
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         if features.shape[-1] != 6:
             raise ValueError(f"expected six confidence features, got {features.shape[-1]}")
-        return self.net(self.norm(features)).squeeze(-1)
+        return self.net(features).squeeze(-1)
 
     @staticmethod
-    def loss(logit: torch.Tensor, truth_present: torch.Tensor) -> torch.Tensor:
-        return F.binary_cross_entropy_with_logits(logit, truth_present.to(logit.dtype))
+    def loss(logit: torch.Tensor, correct_and_answerable: torch.Tensor) -> torch.Tensor:
+        """Binary calibration loss for whether the emitted prediction is usable."""
+        return F.binary_cross_entropy_with_logits(
+            logit, correct_and_answerable.to(logit.dtype)
+        )
+
+
+def binary_auroc(score, target) -> float:
+    """Dependency-free AUROC for binary confidence diagnostics."""
+    import numpy as np
+
+    score = np.asarray(score)
+    target = np.asarray(target, dtype=bool)
+    pos, neg = score[target], score[~target]
+    if not len(pos) or not len(neg):
+        return float("nan")
+    return float(
+        (pos[:, None] > neg[None, :]).mean()
+        + 0.5 * (pos[:, None] == neg[None, :]).mean()
+    )
+
+
+def aurc(uncertainty, correct) -> float:
+    """Area under the empirical risk-coverage curve; lower is better."""
+    import numpy as np
+
+    uncertainty = np.asarray(uncertainty)
+    correct = np.asarray(correct, dtype=bool)
+    if not len(correct):
+        return float("nan")
+    order = np.argsort(uncertainty, kind="stable")
+    risk = 1.0 - np.cumsum(correct[order]) / np.arange(1, len(order) + 1)
+    return float(risk.mean())
+
+
+def acc_at_coverage(uncertainty, correct, coverage: float) -> float:
+    """Accuracy among the least-uncertain examples at a requested coverage."""
+    import numpy as np
+
+    uncertainty = np.asarray(uncertainty)
+    correct = np.asarray(correct, dtype=bool)
+    if not 0.0 < coverage <= 1.0:
+        raise ValueError("coverage must be in (0, 1]")
+    if not len(correct):
+        return float("nan")
+    keep = max(1, int(np.ceil(coverage * len(correct))))
+    return float(correct[np.argsort(uncertainty, kind="stable")[:keep]].mean())

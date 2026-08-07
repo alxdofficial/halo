@@ -11,7 +11,7 @@ Each eval cell is encoded ONCE and reused across every bank size, so the sweep i
 
 Run:
     PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
-    HALO_CKPT=training/tokenizer/outputs/pretrain_fixed_mr/best.pt \
+    HALO_CKPT=training/tokenizer/outputs/phase_a_headline/best.pt \
       $PY -m training.evidence.bank_size_sweep --device cuda
 """
 
@@ -57,7 +57,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--checkpoint", type=Path,
                     default=Path(os.environ.get("HALO_CKPT",
-                                 _REPO / "training/tokenizer/outputs/pretrain_fixed_mr/best.pt")))
+                                 _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt")))
     ap.add_argument("--bank", type=Path, default=_DIR / "memory_bank.pt")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--datasets", nargs="*", default=list(policy.PRIMARY_EVAL_DATASETS))

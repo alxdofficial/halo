@@ -1,8 +1,8 @@
-"""Train the Phase-B patch evidence engine with candidate-aware episodic supervision.
+"""Train the Phase-B patch evidence predictor on answerable candidate episodes.
 
-The historical ``train_decoder`` remains the pooled-window control. This trainer consumes the
-schema-v2 patch table, performs independent retrieval per query patch and learned subspace, and
-varies candidate, support, and configuration budgets independently.
+The sole predictor objective is cross-entropy over the runtime candidate set. Memory composition,
+true-label support, acquisition configuration, and distractor difficulty vary as episode inputs.
+Reject confidence is calibrated later by ``train_patch_confidence`` with this predictor frozen.
 """
 
 from __future__ import annotations
@@ -18,10 +18,9 @@ import torch
 import torch.nn.functional as F
 
 from eval.scoring import get_sbert_encoder
-from model.evidence.confidence import EvidenceConfidenceHead, confidence_features
+from model.evidence.confidence import confidence_features
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
-from model.evidence.edl import DensityGate, aurc, edl_loss
-from model.evidence.patch_retrieval import PatchSubspaceRetriever, head_usage_loss
+from model.evidence.patch_retrieval import PatchSubspaceRetriever
 from training.evidence.bank_guard import (
     assert_bank_current,
     assert_patch_bank,
@@ -32,15 +31,66 @@ from training.evidence.patch_episodes import (
     PatchTable,
     assemble_evidence,
     build_allowed_mask,
+    realized_support_examples,
 )
-from training.evidence.train_decoder import balanced_accuracy, label_index, sample_text_tables
 from training.tokenizer.pretrain_data import stream_channel_descriptions
 
 _DIR = Path(__file__).resolve().parent / "outputs"
 _DEFAULT_BANK = _DIR / "memory_bank.pt"
-_DEFAULT_OUT = _DIR / "patch_evidence_decoder.pt"
+_DEFAULT_OUT = _DIR / "patch_evidence_predictor.pt"
 _FAMILY_PATH = Path(__file__).resolve().parents[2] / "data/labels/activity_families.json"
 SEED = 20260725
+SUPPORT_CHOICES = (0, 1, 2, 4, 8, None)
+TRUE_SUPPORT_PROBS = (0.35, 0.25, 0.15, 0.10, 0.05, 0.10)
+OTHER_SUPPORT_PROBS = (0.05, 0.10, 0.15, 0.20, 0.20, 0.30)
+
+
+def balanced_accuracy(pred: np.ndarray, true: np.ndarray) -> float:
+    per_class = [float((pred[true == label] == label).mean()) for label in np.unique(true)]
+    return float(np.mean(per_class)) if per_class else float("nan")
+
+
+def label_index(candidates: torch.Tensor, n_vocab: int, device) -> torch.Tensor:
+    position = torch.full((n_vocab,), -1, device=device, dtype=torch.long)
+    position[candidates] = torch.arange(len(candidates), device=device)
+    return position
+
+
+def sample_text_tables(variants: torch.Tensor, generator: torch.Generator):
+    """Independently sample evidence and candidate phrasings for every vocabulary label."""
+    n_labels, n_variants, _ = variants.shape
+    ev_pick = torch.randint(n_variants, (n_labels,), generator=generator, device=variants.device)
+    cand_pick = torch.randint(n_variants, (n_labels,), generator=generator, device=variants.device)
+    rows = torch.arange(n_labels, device=variants.device)
+    return variants[rows, ev_pick], variants[rows, cand_pick]
+
+
+def sample_support(
+    rng: np.random.Generator,
+    choices: tuple[int | None, ...],
+    probabilities: tuple[float, ...],
+) -> int | None:
+    if len(choices) != len(probabilities) or not np.isclose(sum(probabilities), 1.0):
+        raise ValueError("support choices and probabilities must align and sum to one")
+    return choices[int(rng.choice(len(choices), p=probabilities))]
+
+
+def choose_memory_labels(
+    allowed_vocab: torch.Tensor,
+    query_labels: torch.Tensor,
+    fraction: float,
+    rng: np.random.Generator,
+    *,
+    require_truth: bool,
+) -> torch.Tensor:
+    """Choose the labels represented in memory independently of the candidate roster."""
+    allowed = allowed_vocab.detach().cpu().numpy()
+    required = np.unique(query_labels.detach().cpu().numpy()) if require_truth else np.empty(0, int)
+    target = max(len(required), min(len(allowed), max(1, int(round(fraction * len(allowed))))))
+    pool = np.setdiff1d(allowed, required, assume_unique=False)
+    extra = rng.choice(pool, size=min(target - len(required), len(pool)), replace=False)
+    labels = np.unique(np.concatenate([required, np.asarray(extra, dtype=np.int64)]))
+    return torch.as_tensor(labels, device=allowed_vocab.device, dtype=torch.long)
 
 
 def synthetic_smoke_bank() -> dict:
@@ -98,16 +148,6 @@ def synthetic_smoke_bank() -> dict:
     }
     bank["bank_fp"] = bank_fingerprint(bank)
     return bank
-
-
-def parse_supports(value: str) -> tuple[int | None, ...]:
-    values = []
-    for part in value.split(","):
-        part = part.strip().lower()
-        values.append(None if part in {"all", "-1", "none"} else int(part))
-    if not values or any(item is not None and item < 0 for item in values):
-        raise argparse.ArgumentTypeError("support choices must be nonnegative integers or 'all'")
-    return tuple(values)
 
 
 def load_activity_families(vocab: list[str]) -> tuple[torch.Tensor, dict[str, list[str]], str]:
@@ -346,18 +386,9 @@ def family_holdout_labels(
     )[0]
 
 
-def binary_auroc(score: np.ndarray, target: np.ndarray) -> float:
-    pos, neg = score[target == 1], score[target == 0]
-    if not len(pos) or not len(neg):
-        return float("nan")
-    return float(((pos[:, None] > neg[None, :]).mean()
-                  + 0.5 * (pos[:, None] == neg[None, :]).mean()))
-
-
 def decode_patch_queries(
     dec: EvidenceDecoder,
     retriever: PatchSubspaceRetriever,
-    confidence: EvidenceConfidenceHead,
     bank: dict,
     index_rows: torch.Tensor,
     memory_index: torch.Tensor,
@@ -374,7 +405,7 @@ def decode_patch_queries(
     tau: float,
     memory_config_text: torch.Tensor | None = None,
     query_config_text: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, dict]:
+) -> tuple[torch.Tensor, dict]:
     """Retrieve and decode an already-packed query patch set."""
     device = next(dec.parameters()).device
     patch = bank["patch"]
@@ -437,7 +468,12 @@ def decode_patch_queries(
         aux["evidence"], evidence.scores, aux["votes"], aux["pool_weights"],
         ev_mask=evidence.mask, ev_sensor_id=ev_sensor,
     )
-    confidence_logit = confidence(features)
+    raw_candidate = F.normalize(t_cand[candidates], dim=-1)
+    raw_evidence = F.normalize(t_ev[ev_y], dim=-1)
+    identity_votes = torch.relu(torch.einsum("bkt,ct->bkc", raw_evidence, raw_candidate))
+    identity_logits = dec.cfg.out_scale_init * torch.einsum(
+        "bk,bkc->bc", evidence.weights, identity_votes
+    )
     aux.update({
         "retrieval_prior": evidence.weights,
         "retrieval_scores": evidence.scores,
@@ -451,20 +487,22 @@ def decode_patch_queries(
         "confidence_features": features,
         "candidate_ids": candidates,
         "query_repr": query.Z[query.mask],
+        "evidence_label": ev_y,
+        "identity_logits": identity_logits,
     })
-    return logits, confidence_logit, aux
+    return logits, aux
 
 
 def run_patch_episode(
     dec: EvidenceDecoder,
     retriever: PatchSubspaceRetriever,
-    confidence: EvidenceConfidenceHead,
     table: PatchTable,
     bank: dict,
     index_rows: torch.Tensor,
     memory_index: torch.Tensor,
     qi: torch.Tensor,
     candidates: torch.Tensor,
+    memory_labels: torch.Tensor,
     t_ev: torch.Tensor,
     t_cand: torch.Tensor,
     *,
@@ -480,7 +518,7 @@ def run_patch_episode(
     tau: float,
     query_window_mask: torch.Tensor | None = None,
     config_text: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, dict]:
+) -> tuple[torch.Tensor, dict]:
     """One patch-level training episode with all leakage exclusions."""
     device = next(dec.parameters()).device
     query = table.gather_queries(
@@ -489,18 +527,29 @@ def run_patch_episode(
     y_window = torch.as_tensor(bank["y"], device=device, dtype=torch.long)
     query_label = y_window[qi]
     allowed = build_allowed_mask(
-        bank["patch"], index_rows, query, query_label, candidates,
+        bank["patch"], index_rows, query, query_label, memory_labels,
         truth_present=truth_present, true_support=true_support,
         other_support=other_support, config_mode=config_mode, rng=rng,
     )
-    logits, confidence_logit, aux = decode_patch_queries(
-        dec, retriever, confidence, bank, index_rows, memory_index, query, allowed,
+    support = realized_support_examples(
+        bank["patch"], index_rows, allowed, query_label
+    )
+    if truth_present and true_support is not None and bool((support < true_support).any()):
+        raise ValueError(
+            f"requested true support {true_support} but only {int(support.min())} is eligible"
+        )
+    if truth_present and true_support is None and bool((support < 1).any()):
+        raise ValueError("requested true support all but at least one query has no eligible support")
+    logits, aux = decode_patch_queries(
+        dec, retriever, bank, index_rows, memory_index, query, allowed,
         candidates, t_ev, t_cand, topk_per_head=topk_per_head,
         max_evidence=max_evidence, max_per_window=max_per_window,
         max_per_label=max_per_label, tau=tau, memory_config_text=config_text,
     )
     aux["query_label"] = query_label
-    return logits, confidence_logit, aux
+    aux["realized_true_support"] = support
+    aux["memory_labels"] = memory_labels
+    return logits, aux
 
 
 def main() -> None:
@@ -511,6 +560,9 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=5e-4)
+    ap.add_argument("--weight-decay", type=float, default=0.01)
+    ap.add_argument("--warmup-steps", type=int, default=100)
+    ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--layers", type=int, default=3)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--subspaces", type=int, default=4)
@@ -526,14 +578,13 @@ def main() -> None:
     ap.add_argument("--tau-retr", type=float, default=0.07)
     ap.add_argument("--candidate-fractions", type=float, nargs="+",
                     default=(0.10, 0.25, 0.50, 1.0))
-    ap.add_argument("--true-support", type=parse_supports, default=parse_supports("0,1,2,4,8,all"))
-    ap.add_argument("--other-support", type=parse_supports, default=parse_supports("0,1,2,4,8,all"))
+    ap.add_argument("--memory-fractions", type=float, nargs="+", default=(0.25, 0.50, 1.0),
+                    help="fraction of training labels represented in an episode's memory")
     ap.add_argument("--config-modes", nargs="+", choices=("any", "same", "cross", "query_absent"),
                     default=("same", "cross", "query_absent"))
     ap.add_argument("--distractor-modes", nargs="+",
                     choices=("random", "language", "motion_family", "physical", "mixed"),
                     default=("random", "language", "motion_family", "physical", "mixed"))
-    ap.add_argument("--truth-absent-prob", type=float, default=0.25)
     ap.add_argument(
         "--query-balance",
         choices=("hierarchical", "legacy_sqrt"),
@@ -545,20 +596,12 @@ def main() -> None:
                     help="subject-size exponent inside each label/config query bucket")
     ap.add_argument("--explicit-config-text", action="store_true",
                     help="ablation: re-inject acquisition/config text already conditioned in Phase A")
-    ap.add_argument("--loss", choices=("ce", "edl"), default="edl")
-    ap.add_argument("--kl-max", type=float, default=0.1)
-    ap.add_argument("--confidence-weight", type=float, default=0.25)
-    ap.add_argument("--lambda-delta", type=float, default=0.1)
-    ap.add_argument("--lambda-pool", type=float, default=0.1)
-    ap.add_argument("--lambda-projection", type=float, default=0.01)
-    ap.add_argument("--lambda-output", type=float, default=0.01)
-    ap.add_argument("--lambda-usage", type=float, default=0.01)
     ap.add_argument("--val-families", type=int, default=1,
                     help="complete canonical activity families excluded from every training role")
     ap.add_argument("--val-frac-cfg", type=float, default=0.2)
     ap.add_argument("--val-every", type=int, default=200)
-    ap.add_argument("--val-episodes", type=int, default=8)
-    ap.add_argument("--val-queries", type=int, default=64)
+    ap.add_argument("--val-episodes", type=int, default=16)
+    ap.add_argument("--val-queries", type=int, default=32)
     ap.add_argument("--label-variants", type=int, default=16)
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--smoke", action="store_true",
@@ -578,17 +621,20 @@ def main() -> None:
         args.val_episodes = 2
         args.val_queries = 4
         args.val_frac_cfg = 0.5
-        args.out = Path("/tmp/halo_phase_b_patch_smoke.pt") if args.out == _DEFAULT_OUT else args.out
+        args.warmup_steps = 1
+        args.out = Path("/tmp/halo_phase_b_predictor_smoke.pt") if args.out == _DEFAULT_OUT else args.out
     if args.steps < 1 or args.batch < 1 or args.val_every < 1:
         ap.error("steps, batch, and val-every must be positive")
-    if not 0 <= args.truth_absent_prob < 1:
-        ap.error("--truth-absent-prob must be in [0,1)")
     if any(not 0 < value <= 1 for value in args.candidate_fractions):
         ap.error("candidate fractions must be in (0,1]")
+    if any(not 0 < value <= 1 for value in args.memory_fractions):
+        ap.error("memory fractions must be in (0,1]")
     if args.index_per_label == 0 or args.index_per_label < -1:
         ap.error("--index-per-label must be positive or -1 for the full bank")
     if not 0 <= args.query_subject_alpha <= 1:
         ap.error("--query-subject-alpha must be in [0,1]")
+    if args.warmup_steps < 0 or args.grad_clip <= 0:
+        ap.error("warmup-steps must be nonnegative and grad-clip must be positive")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
@@ -618,10 +664,9 @@ def main() -> None:
         if args.label_variants > 0 else None
     )
     text_gen = torch.Generator(device=device).manual_seed(args.seed)
-    physical = physical_label_centroids(Z, y, n_vocab)
 
-    # Subject-disjoint and config-disjoint split. Complete activity families are then excluded from
-    # every training role (query, candidate, memory) and used only for held-out-concept validation.
+    # Subject/config-disjoint validation. Held-out families never occur in a training query,
+    # candidate, or memory role. Their validation support comes only from the disjoint base fold.
     cfg_ids = np.arange(int(cfg.max()) + 1)
     rng.shuffle(cfg_ids)
     n_val_cfg = max(1, int(len(cfg_ids) * args.val_frac_cfg))
@@ -632,23 +677,34 @@ def main() -> None:
     val_subject = torch.tensor(subjects[:n_val_subject], device=device)
     is_val_cfg = torch.isin(cfg, val_cfg)
     is_val_subject = torch.isin(subj, val_subject)
-    val_pool = torch.nonzero(is_val_cfg & is_val_subject, as_tuple=True)[0]
-    train_pool = torch.nonzero(~is_val_cfg & ~is_val_subject, as_tuple=True)[0]
-    if not len(val_pool) or not len(train_pool):
+    raw_val_pool = torch.nonzero(is_val_cfg & is_val_subject, as_tuple=True)[0]
+    base_train_pool = torch.nonzero(~is_val_cfg & ~is_val_subject, as_tuple=True)[0]
+    if not len(raw_val_pool) or not len(base_train_pool):
         raise SystemExit("empty train/validation fold after config x subject split")
+    represented_for_validation = torch.unique(y[raw_val_pool])
+    represented_for_validation = represented_for_validation[
+        torch.isin(represented_for_validation, torch.unique(y[base_train_pool]))
+    ]
     heldout_labels = family_holdout_labels(
-        family_ids.cpu(), torch.unique(y[val_pool]).cpu(), args.val_families
+        family_ids.cpu(), represented_for_validation.cpu(), args.val_families
     )
     heldout_labels = heldout_labels.to(device)
-    train_pool = train_pool[~torch.isin(y[train_pool], heldout_labels)]
-    val_pool = val_pool[torch.isin(y[val_pool], heldout_labels)]
+    train_pool = base_train_pool[~torch.isin(y[base_train_pool], heldout_labels)]
+    val_pool = raw_val_pool[torch.isin(y[raw_val_pool], heldout_labels)]
     if len(torch.unique(y[val_pool])) < 2 or len(torch.unique(y[train_pool])) < 3:
         raise SystemExit("activity-family holdout left too few train or validation labels")
+    # Hard-distractor centroids may use only the non-validation fold. In particular, never compute
+    # a held-out-family centroid from the query windows later used to select a checkpoint.
+    physical = physical_label_centroids(
+        Z[base_train_pool], y[base_train_pool], n_vocab
+    )
     allowed_train_vocab = torch.arange(n_vocab, device=device)
     allowed_train_vocab = allowed_train_vocab[~torch.isin(allowed_train_vocab, heldout_labels)]
 
     memory_window_mask = torch.zeros(len(Z), dtype=torch.bool, device=device)
     memory_window_mask[train_pool] = True
+    val_memory_window_mask = torch.zeros(len(Z), dtype=torch.bool, device=device)
+    val_memory_window_mask[base_train_pool] = True
     val_window_mask = torch.zeros(len(Z), dtype=torch.bool, device=device)
     val_window_mask[val_pool] = True
     retriever = PatchSubspaceRetriever(
@@ -658,21 +714,23 @@ def main() -> None:
         d_model=d, n_layers=args.layers, n_heads=args.heads,
         candidate_tokens=True, structural_metadata=True,
     )).to(device)
-    confidence = EvidenceConfidenceHead().to(device)
-    gate = DensityGate().to(device) if args.loss == "edl" else None
-    params = dec.param_groups(0.01) + [
-        {"params": retriever.parameters(), "weight_decay": 0.01},
-        {"params": confidence.parameters(), "weight_decay": 0.01},
+    params = dec.param_groups(args.weight_decay) + [
+        {"params": retriever.parameters(), "weight_decay": args.weight_decay},
     ]
-    if gate is not None:
-        params.append({"params": gate.parameters(), "weight_decay": 0.0})
     opt = torch.optim.AdamW(params, lr=args.lr)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps)
+
+    def lr_factor(step_index: int) -> float:
+        if args.warmup_steps and step_index < args.warmup_steps:
+            return float(step_index + 1) / args.warmup_steps
+        progress = (step_index - args.warmup_steps) / max(1, args.steps - args.warmup_steps)
+        return 0.5 * (1.0 + np.cos(np.pi * min(1.0, max(0.0, progress))))
+
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_factor)
 
     index_rows = memory_index = None
     index_rng = np.random.default_rng(args.seed + 2)
     val_index_rows = table.sample_index_rows(
-        memory_window_mask, args.index_per_label, np.random.default_rng(args.seed + 3)
+        val_memory_window_mask, args.index_per_label, np.random.default_rng(args.seed + 3)
     )
 
     def rebuild_index(rows=None):
@@ -685,7 +743,10 @@ def main() -> None:
         )
         return rows, retriever.build_index(memory)
 
-    def make_episode(pool, *, truth_present, count, local_rng, validation=False):
+    def make_episode(
+        pool, *, count, local_rng, validation=False, candidate_fraction=None,
+        distractor_mode=None,
+    ):
         present = torch.unique(y[pool])
         n_seed = min(4, len(present))
         seed = local_rng.choice(present.cpu().numpy(), size=n_seed, replace=False)
@@ -698,95 +759,150 @@ def main() -> None:
             )
         else:
             qi = sample_queries(pool, seed_labels, y, count, local_rng)
-        size = candidate_size(n_vocab, tuple(args.candidate_fractions), local_rng)
-        mode = str(args.distractor_modes[int(local_rng.integers(len(args.distractor_modes)))])
+        fractions = tuple(args.candidate_fractions) if candidate_fraction is None \
+            else (float(candidate_fraction),)
+        size = candidate_size(n_vocab, fractions, local_rng)
+        mode = distractor_mode or str(
+            args.distractor_modes[int(local_rng.integers(len(args.distractor_modes)))]
+        )
         candidates = choose_candidates(
-            y[qi], size, n_vocab, text, physical, truth_present=truth_present,
+            y[qi], size, n_vocab, text, physical, truth_present=True,
             mode=mode, rng=local_rng,
             allowed_vocab=(None if validation else allowed_train_vocab),
             family_ids=family_ids,
         )
         return qi, candidates, mode
 
-    # Fixed paired validation: answerable and truth-absent episodes use the same held-out query pool.
+    # Fixed validation matrix over strict-zero-shot and low/full-support held-out-family episodes.
     val_specs = []
     val_rng = np.random.default_rng(args.seed + 1)
     for i in range(args.val_episodes):
-        val_specs.append((
-            i % 2 == 0,
-            *make_episode(val_pool, truth_present=i % 2 == 0, count=args.val_queries,
-                          local_rng=val_rng, validation=True),
-        ))
+        support_index, block = i % 4, i // 4
+        support = (0, 1, 4, None)[support_index]
+        candidate_fraction = args.candidate_fractions[
+            (support_index + block) % len(args.candidate_fractions)
+        ]
+        config_mode = ("cross", "query_absent")[(support_index + block) % 2]
+        distractor_mode = args.distractor_modes[
+            (support_index + 2 * block) % len(args.distractor_modes)
+        ]
+        memory_fraction = args.memory_fractions[
+            (support_index + 2 * block) % len(args.memory_fractions)
+        ]
+        episode_seed = args.seed + 1000 + i
+        for _attempt in range(50):
+            qi, candidates, _ = make_episode(
+                val_pool, count=args.val_queries, local_rng=val_rng, validation=True,
+                candidate_fraction=candidate_fraction, distractor_mode=distractor_mode,
+            )
+            memory_labels = choose_memory_labels(
+                torch.arange(n_vocab, device=device), y[qi], memory_fraction, val_rng,
+                require_truth=support != 0,
+            )
+            query = table.gather_queries(
+                qi, device, expand_verified_events=True,
+                allowed_window_mask=val_window_mask,
+            )
+            allowed = build_allowed_mask(
+                bank["patch"], val_index_rows, query, y[qi], memory_labels,
+                truth_present=True, true_support=support, other_support=None,
+                config_mode=config_mode, rng=np.random.default_rng(episode_seed),
+            )
+            realized = realized_support_examples(
+                bank["patch"], val_index_rows, allowed, y[qi]
+            )
+            support_ok = bool((realized > 0).all()) if support is None \
+                else bool((realized >= support).all())
+            memory_ok = bool((allowed.any(-1) | ~query.mask).all())
+            if support_ok and memory_ok:
+                break
+        else:
+            raise RuntimeError(
+                f"could not construct validation cell support={support}, "
+                f"config={config_mode}, candidate_fraction={candidate_fraction}"
+            )
+        val_specs.append({
+            "qi": qi, "candidates": candidates, "memory_labels": memory_labels,
+            "true_support": support, "other_support": None,
+            "candidate_fraction": float(candidate_fraction),
+            "memory_fraction": float(memory_fraction), "config_mode": config_mode,
+            "distractor_mode": str(distractor_mode), "seed": episode_seed,
+        })
 
     @torch.no_grad()
     def evaluate():
-        dec.eval(); retriever.eval(); confidence.eval()
-        if gate is not None:
-            gate.eval()
-        present_pred, present_true = [], []
-        confidence_score, confidence_target = [], []
-        present_confidence, present_correct = [], []
+        dec.eval(); retriever.eval()
+        all_pred, all_identity, all_true = [], [], []
+        per_cell, supports, true_mass = [], [], []
         _, val_memory_index = rebuild_index(val_index_rows)
-        for i, (truth_present, qi, candidates, _mode) in enumerate(val_specs):
-            t_ev, t_cand = text, text
-            logits, conf_logit, aux = run_patch_episode(
-                dec, retriever, confidence, table, bank, val_index_rows, val_memory_index,
-                qi, candidates, t_ev, t_cand, truth_present=truth_present,
-                true_support=(0 if not truth_present else None), other_support=None,
-                config_mode=("cross" if i % 3 else "query_absent"),
-                rng=np.random.default_rng(args.seed + 1000 + i),
+        for spec in val_specs:
+            qi, candidates = spec["qi"], spec["candidates"]
+            logits, aux = run_patch_episode(
+                dec, retriever, table, bank, val_index_rows, val_memory_index,
+                qi, candidates, spec["memory_labels"], text, text, truth_present=True,
+                true_support=spec["true_support"], other_support=spec["other_support"],
+                config_mode=spec["config_mode"], rng=np.random.default_rng(spec["seed"]),
                 topk_per_head=args.topk_per_head, max_evidence=args.max_evidence,
                 max_per_window=args.max_per_window, max_per_label=args.max_per_label,
                 tau=args.tau_retr,
                 query_window_mask=val_window_mask,
                 config_text=config_text,
             )
-            score = torch.sigmoid(conf_logit)
-            confidence_score.extend(score.cpu().tolist())
-            confidence_target.extend([int(truth_present)] * len(qi))
-            if truth_present:
-                pred = candidates[logits.argmax(1)]
-                present_pred.extend(pred.cpu().tolist())
-                present_true.extend(y[qi].cpu().tolist())
-                present_confidence.extend(score.cpu().tolist())
-                present_correct.extend(pred.eq(y[qi]).cpu().tolist())
-        ba = balanced_accuracy(np.asarray(present_pred), np.asarray(present_true))
-        auc = binary_auroc(np.asarray(confidence_score), np.asarray(confidence_target))
+            true = y[qi]
+            pred = candidates[logits.argmax(1)]
+            identity = candidates[aux["identity_logits"].argmax(1)]
+            cell_ba = balanced_accuracy(pred.cpu().numpy(), true.cpu().numpy())
+            per_cell.append((spec["true_support"], cell_ba))
+            all_pred.extend(pred.cpu().tolist()); all_identity.extend(identity.cpu().tolist())
+            all_true.extend(true.cpu().tolist())
+            supports.extend(aux["realized_true_support"].cpu().tolist())
+            mass = (
+                aux["pool_weights"]
+                * aux["evidence_label"].eq(true.unsqueeze(1)).to(aux["pool_weights"].dtype)
+            ).sum(1)
+            true_mass.extend(mass.cpu().tolist())
+        zero = [score for support, score in per_cell if support == 0]
+        low = [score for support, score in per_cell if support != 0]
         return {
-            "ba": ba,
-            "truth_present_auroc": auc,
-            "aurc": aurc(
-                1.0 - np.asarray(present_confidence),
-                np.asarray(present_correct, dtype=bool),
-            ),
+            "macro_cell_ba": float(np.mean([score for _, score in per_cell])),
+            "ba": balanced_accuracy(np.asarray(all_pred), np.asarray(all_true)),
+            "identity_ba": balanced_accuracy(np.asarray(all_identity), np.asarray(all_true)),
+            "zero_support_ba": float(np.mean(zero)) if zero else float("nan"),
+            "positive_support_ba": float(np.mean(low)) if low else float("nan"),
+            "mean_realized_true_support": float(np.mean(supports)),
+            "mean_retrieved_true_mass": float(np.mean(true_mass)),
         }
 
-    best = {"ba": -float("inf"), "truth_present_auroc": -float("inf")}
+    best = {"macro_cell_ba": -float("inf")}
     best_step = 0
     best_state = None
     t0 = time.time()
     for step in range(1, args.steps + 1):
         if index_rows is None or (step - 1) % args.index_refresh == 0:
             index_rows, memory_index = rebuild_index()
-        dec.train(); retriever.train(); confidence.train()
-        if gate is not None:
-            gate.train()
-        truth_present = bool(rng.random() >= args.truth_absent_prob)
+        dec.train(); retriever.train()
         episode_error = None
         for _attempt in range(10):
-            qi, candidates, distractor_mode = make_episode(
-                train_pool, truth_present=truth_present, count=args.batch, local_rng=rng
+            true_support = sample_support(rng, SUPPORT_CHOICES, TRUE_SUPPORT_PROBS)
+            other_support = sample_support(rng, SUPPORT_CHOICES, OTHER_SUPPORT_PROBS)
+            memory_fraction = float(
+                args.memory_fractions[int(rng.integers(len(args.memory_fractions)))]
             )
-            true_support = args.true_support[int(rng.integers(len(args.true_support)))]
-            other_support = args.other_support[int(rng.integers(len(args.other_support)))]
+            qi, candidates, distractor_mode = make_episode(
+                train_pool, count=args.batch, local_rng=rng
+            )
+            memory_labels = choose_memory_labels(
+                allowed_train_vocab, y[qi], memory_fraction, rng,
+                require_truth=true_support != 0,
+            )
             config_mode = str(args.config_modes[int(rng.integers(len(args.config_modes)))])
             t_ev, t_cand = (
                 (text, text) if variants is None else sample_text_tables(variants, text_gen)
             )
             try:
-                logits, conf_logit, aux = run_patch_episode(
-                    dec, retriever, confidence, table, bank, index_rows, memory_index,
-                    qi, candidates, t_ev, t_cand, truth_present=truth_present,
+                logits, aux = run_patch_episode(
+                    dec, retriever, table, bank, index_rows, memory_index,
+                    qi, candidates, memory_labels, t_ev, t_cand, truth_present=True,
                     true_support=true_support, other_support=other_support,
                     config_mode=config_mode, rng=rng, topk_per_head=args.topk_per_head,
                     max_evidence=args.max_evidence, max_per_window=args.max_per_window,
@@ -796,72 +912,39 @@ def main() -> None:
                 )
                 break
             except ValueError as exc:
-                if "no eligible" not in str(exc) and "no evidence" not in str(exc):
+                if not any(token in str(exc) for token in (
+                    "no eligible", "no evidence", "requested true support",
+                )):
                     raise
                 episode_error = exc
         else:
             raise RuntimeError(
                 "could not draw a feasible support/config episode in 10 attempts"
             ) from episode_error
-        if truth_present:
-            target = label_index(candidates, n_vocab, device)[y[qi]]
-            if bool((target < 0).any()):
-                raise RuntimeError("truth-present episode omitted a query label from candidates")
-            if gate is not None:
-                alpha, _ = gate.alpha(aux["evidence"], aux["retrieval_scores"])
-                task, _, _ = edl_loss(
-                    alpha, target, args.kl_max * min(1.0, step / max(1, args.steps // 2))
-                )
-            else:
-                task = F.cross_entropy(logits, target)
-        else:
-            task = logits.sum() * 0.0
-        confidence_target = torch.full_like(conf_logit, float(truth_present))
-        confidence_loss = confidence.loss(conf_logit, confidence_target)
-        pool = aux["pool_weights"]
-        prior = aux["retrieval_prior"]
-        mask = aux["evidence_mask"]
-        pool_kl = (
-            pool * (pool.clamp_min(1e-12).log() - prior.clamp_min(1e-12).log())
-        ).masked_fill(~mask, 0.0).sum(1).mean()
-        identity_reg = (
-            args.lambda_delta * (
-                aux["delta"].norm(dim=-1).mean()
-                + aux["candidate_delta"].norm(dim=-1).mean()
-            )
-            + args.lambda_pool * pool_kl
-        )
-        projection_reg = retriever.projection_diversity_loss()
-        output_reg = retriever.output_decorrelation_loss(
-            torch.cat([aux["query_repr"], Z[qi]], dim=0)
-        )
-        usage_reg = head_usage_loss(
-            pool, aux["evidence_head"], mask, args.subspaces
-        )
-        loss = (
-            task + args.confidence_weight * confidence_loss + identity_reg
-            + args.lambda_projection * projection_reg
-            + args.lambda_output * output_reg
-            + args.lambda_usage * usage_reg
-        )
+        target = label_index(candidates, n_vocab, device)[y[qi]]
+        if bool((target < 0).any()):
+            raise RuntimeError("answerable episode omitted a query label from candidates")
+        loss = F.cross_entropy(logits, target)
         if not bool(torch.isfinite(loss)):
             raise FloatingPointError(f"non-finite Phase-B loss at step {step}")
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            list(dec.parameters()) + list(retriever.parameters())
-            + list(confidence.parameters()) + ([] if gate is None else list(gate.parameters())),
-            1.0,
+        dec_grad = torch.sqrt(sum(
+            parameter.grad.float().square().sum()
+            for parameter in dec.parameters() if parameter.grad is not None
+        ))
+        retrieval_grad = torch.sqrt(sum(
+            parameter.grad.float().square().sum()
+            for parameter in retriever.parameters() if parameter.grad is not None
+        ))
+        preclip_grad = torch.nn.utils.clip_grad_norm_(
+            list(dec.parameters()) + list(retriever.parameters()), args.grad_clip,
         )
         opt.step(); sched.step(); retriever.update_ema()
 
         if step == 1 or step % args.val_every == 0:
             metrics = evaluate()
-            better = (
-                metrics["ba"] > best["ba"]
-                or (metrics["ba"] == best["ba"]
-                    and metrics["truth_present_auroc"] > best["truth_present_auroc"])
-            )
+            better = metrics["macro_cell_ba"] > best["macro_cell_ba"]
             if better:
                 best, best_step = dict(metrics), step
                 best_state = {
@@ -869,24 +952,38 @@ def main() -> None:
                     "retriever": {
                         k: v.detach().cpu().clone() for k, v in retriever.state_dict().items()
                     },
-                    "confidence": {
-                        k: v.detach().cpu().clone() for k, v in confidence.state_dict().items()
-                    },
-                    "gate": (
-                        {k: v.detach().cpu().clone() for k, v in gate.state_dict().items()}
-                        if gate is not None else None
-                    ),
                 }
+            mask = aux["evidence_mask"]
+            usage = torch.zeros(args.subspaces, device=device)
+            usage.scatter_add_(
+                0, aux["evidence_head"][mask], aux["pool_weights"][mask]
+            )
+            usage = usage / usage.sum().clamp_min(1e-8)
+            true_mass = (
+                aux["pool_weights"]
+                * aux["evidence_label"].eq(y[qi].unsqueeze(1)).to(aux["pool_weights"].dtype)
+            ).sum(1).mean()
             print(json.dumps({
                 "step": step, "loss": round(float(loss.detach()), 5),
-                "task": round(float(task.detach()), 5),
-                "confidence_loss": round(float(confidence_loss.detach()), 5),
-                "truth_present": truth_present, "candidate_count": len(candidates),
+                "candidate_count": len(candidates), "memory_label_count": len(memory_labels),
                 "true_support": "all" if true_support is None else true_support,
                 "other_support": "all" if other_support is None else other_support,
+                "realized_true_support_mean": round(
+                    float(aux["realized_true_support"].float().mean()), 3
+                ),
+                "retrieved_true_mass": round(float(true_mass.detach()), 4),
+                "head_usage": [round(float(value.detach()), 4) for value in usage],
+                "decoder_grad_norm": round(float(dec_grad), 4),
+                "retriever_grad_norm": round(float(retrieval_grad), 4),
+                "preclip_grad_norm": round(float(preclip_grad), 4),
+                "delta_norm": round(float(aux["delta_norm"]), 4),
+                "candidate_delta_norm": round(float(aux["candidate_delta_norm"]), 4),
+                "lr": opt.param_groups[0]["lr"],
+                "memory_fraction": memory_fraction,
                 "config_mode": config_mode, "distractor_mode": distractor_mode,
                 **{key: round(value, 4) for key, value in metrics.items()},
-                "best_ba": round(best["ba"], 4), "elapsed_s": round(time.time() - t0, 1),
+                "best_macro_cell_ba": round(best["macro_cell_ba"], 4),
+                "elapsed_s": round(time.time() - t0, 1),
             }), flush=True)
 
     if best_state is None:
@@ -902,10 +999,12 @@ def main() -> None:
         },
         "episode_cfg": {
             "candidate_fractions": list(args.candidate_fractions),
-            "true_support": list(args.true_support), "other_support": list(args.other_support),
+            "memory_fractions": list(args.memory_fractions),
+            "support_choices": list(SUPPORT_CHOICES),
+            "true_support_probabilities": list(TRUE_SUPPORT_PROBS),
+            "other_support_probabilities": list(OTHER_SUPPORT_PROBS),
             "config_modes": list(args.config_modes),
             "distractor_modes": list(args.distractor_modes),
-            "truth_absent_prob": args.truth_absent_prob,
             "query_balance": args.query_balance,
             "query_subject_alpha": args.query_subject_alpha,
         },
@@ -927,7 +1026,16 @@ def main() -> None:
             if set(labels) & {vocab[index] for index in heldout_labels.cpu().tolist()}
         }),
         "activity_family_fp": family_fp,
-        "best_step": best_step, "best_metrics": best, "loss": args.loss,
+        "fold": {
+            "validation_config_ids": val_cfg.cpu().tolist(),
+            "validation_subject_ids": val_subject.cpu().tolist(),
+        },
+        "optimizer_cfg": {
+            "lr": args.lr, "weight_decay": args.weight_decay,
+            "warmup_steps": args.warmup_steps, "grad_clip": args.grad_clip,
+        },
+        "objective": "candidate_cross_entropy",
+        "best_step": best_step, "best_metrics": best,
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, args.out)

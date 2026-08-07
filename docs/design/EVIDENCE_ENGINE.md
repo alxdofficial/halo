@@ -1,5 +1,10 @@
 # HALO as an Evidence Engine — working design
 
+> **Historical rationale, not the executable contract.** The live Phase-B recipe is the consolidated
+> candidate-CE predictor plus separate confidence calibration in
+> `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`. EDL and the pooled learned trainer described below were
+> rejected and deleted on 2026-08-07.
+
 > **Status:** working design, NOT finalized. This is a *separate line of work* from any
 > conventional (softmax/cosine-classifier) training path. It reuses the **tokenizer**; the
 > **model mechanism and training harness are different** and live in their own tree (see

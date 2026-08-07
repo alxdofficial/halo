@@ -12,7 +12,7 @@ single best config on the FULL queries. No training.
 
 Run:
     PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
-    HALO_CKPT=training/tokenizer/outputs/pretrain_fixed_mr/best.pt $PY -m training.evidence.tier1_sweep --device cuda
+    HALO_CKPT=training/tokenizer/outputs/phase_a_headline/best.pt $PY -m training.evidence.tier1_sweep --device cuda
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--checkpoint", type=Path,
                     default=Path(os.environ.get("HALO_CKPT",
-                                 _REPO / "training/tokenizer/outputs/pretrain_fixed_mr/best.pt")))
+                                 _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt")))
     ap.add_argument("--bank", type=Path, default=_DIR / "memory_bank.pt")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--sweep-queries", type=int, default=4000, help="query cap during the sweep")

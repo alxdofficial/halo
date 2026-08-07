@@ -11,8 +11,8 @@ structural analogue of ZS-XD:
                   exactly as a real eval dataset is absent from memory)
   * candidates  = the label set present in that held-out config (like a dataset's eval_labels)
   * score       = macro-F1, averaged over held-out configs
-The config split matches `train_decoder.py` (same seed / val_frac_cfg) so selection and training
-agree on what "held out" means.
+The split is frozen by the historical selection seed. This script is a standalone diagnostic for
+the untrained pooled retrieval baseline; it is not a Phase-B training objective.
 
 Everything runs on cached bank vectors — the encoder never runs, so the whole sweep is seconds.
 
@@ -87,7 +87,7 @@ def main() -> None:
     t_plain = ensemble_text(vocab, sbert, 1, use_descriptions=False).to(device)   # bare label string
     t_ens = ensemble_text(vocab, sbert, ENS_E).to(device)                          # train-only ensemble
 
-    # SAME config split as train_decoder.py
+    # Frozen historical selection split for reproducibility.
     rng = np.random.default_rng(SEED)
     cfg_ids = np.arange(int(cfg.max()) + 1)
     rng.shuffle(cfg_ids)
