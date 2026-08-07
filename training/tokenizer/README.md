@@ -132,6 +132,7 @@ upsampled 25 Hz signal from being treated as though it contains genuine 25 Hz sp
 | JEPA EMA decay | 0.996 |
 | validation | subject-disjoint, label/stream-covered kNN + ConSE probes |
 | objective calibration | 50 batches ending at step 2,000, apply once |
+| RTX 4090 loader | 12 workers (override with `--num-workers`) |
 
 `--lr`, `--warmup-steps`, `--weight-decay`, and `--grad-clip` expose the optimizer controls for
 attributable pilot sweeps; `--lr 4.2e-4` retains the former batch-512-scaled comparison arm.
@@ -174,16 +175,27 @@ python -m data.scripts.scan_duplicates
 python -m training.tokenizer.objective_health
 python -m training.tokenizer.grad_check
 python -m training.tokenizer.pretrain --device cuda \
+  --compile --num-workers 12 \
   --calibrate-objectives-at 2000 --objective-calibration-mode apply \
   --out training/tokenizer/outputs/<run>
 ```
+
+On the local RTX 4090, transformer-only dynamic compilation reduces the steady production loop from
+about 180 ms to 153 ms per update end-to-end. A cold process pays roughly 35–73 seconds once, plus a
+small one-time validation graph compile; the 30,000-step run amortizes this comfortably. The old
+whole-encoder compile path was slower because ragged unique-text shapes caused specialization churn;
+`--compile` now leaves text conditioning eager and compiles only the dual-branch transformer. Batch
+256 is throughput-optimal in the measured range: batch 320 gained only 2.7% windows/s and batch 384
+regressed, while changing optimization statistics. FP16 was marginally faster than BF16. Do not use
+the old advice to increase batch merely because the 24 GB card has free VRAM.
 
 Quality scans are fingerprinted to the current native grids and training fails closed when either
 cache is missing or stale. Grid construction must therefore precede both scans.
 
 The parser defaults to CPU, so `--device cuda` is required for a real run. Checkpoints contain the
 encoder, JEPA predictor and teacher, VICReg projector, optimizer/scheduler/scaler state, complete
-configuration, CPU/CUDA RNG state, corpus fingerprint, and provenance. Applied-calibration weights
+configuration, CPU/CUDA RNG state, corpus fingerprint, source provenance, and the Python/Torch/
+NumPy/SciPy/CUDA/cuDNN/GPU runtime identity. Applied-calibration weights
 are hydrated from the checkpoint on resume. Every run also writes `source.patch` plus
 `source_provenance.json`; checkpoints carry its SHA-256 so a resume under different source is
 rejected. Resume with the original launch settings and `--resume <checkpoint>`; calibration flags do

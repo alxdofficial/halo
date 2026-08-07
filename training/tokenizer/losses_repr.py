@@ -324,9 +324,8 @@ def pair_contrast(a: torch.Tensor, b: torch.Tensor, generator=None) -> dict[str,
     perm = (torch.arange(len(an), device=an.device) +
             1 + int(torch.randint(len(an) - 1, (1,), generator=generator))) % len(an)
     rnd = (an * bn[perm]).sum(-1).mean()
-    return {"positive_similarity": float(pos),
-            "random_similarity": float(rnd),
-            "margin": float(pos - rnd)}
+    values = torch.stack((pos, rnd, pos - rnd)).cpu().tolist()
+    return dict(zip(("positive_similarity", "random_similarity", "margin"), values))
 
 
 def masked_ema_latent_loss(
@@ -357,36 +356,40 @@ def masked_ema_latent_loss(
     per_token = 1.0 - (pred * tgt).sum(dim=-1)
     masked = mask & torch.isfinite(per_token)
 
-    def _reduce(selected: torch.Tensor) -> Optional[torch.Tensor]:
-        if not bool(selected.any()):
-            return None
-        if token_durations is None:
-            return per_token[selected].mean()
-        if token_durations.shape != prediction.shape[:2]:
-            raise ValueError(
-                f"EMA token durations must have shape {tuple(prediction.shape[:2])}, "
-                f"got {tuple(token_durations.shape)}"
-            )
-        weights = token_durations.to(per_token.dtype).unsqueeze(2).clamp(min=0.0)
-        weights = weights * selected.to(per_token.dtype)
+    if token_durations is not None and token_durations.shape != prediction.shape[:2]:
+        raise ValueError(
+            f"EMA token durations must have shape {tuple(prediction.shape[:2])}, "
+            f"got {tuple(token_durations.shape)}"
+        )
+
+    def _reduce(selected: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Keep this reduction entirely on-device. The former bool(selected.any()) synchronized the
+        # CUDA stream once per resolution in the middle of every training forward.
+        weights = selected.to(per_token.dtype)
+        if token_durations is not None:
+            weights = weights * token_durations.to(per_token.dtype).unsqueeze(2).clamp(min=0.0)
         values = torch.where(selected, per_token, torch.zeros_like(per_token))
-        return (values * weights).sum() / weights.sum().clamp(min=1e-6)
+        denominator = weights.sum()
+        reduced = (values * weights).sum() / denominator.clamp(min=1e-6)
+        return reduced, denominator.gt(0).to(per_token.dtype)
 
     if token_groups is None:
-        reduced = _reduce(masked)
-        return reduced if reduced is not None else prediction.new_zeros(())
+        reduced, active = _reduce(masked)
+        return reduced * active
     if token_groups.shape != prediction.shape[:2]:
         raise ValueError(
             f"EMA token groups must have shape {tuple(prediction.shape[:2])}, "
             f"got {tuple(token_groups.shape)}"
         )
     group_losses = []
+    group_active = []
     for group in (0, 1):
-        reduced = _reduce(masked & token_groups.eq(group).unsqueeze(2))
-        if reduced is not None:
-            group_losses.append(reduced)
-    return (torch.stack(group_losses).mean() if group_losses
-            else prediction.new_zeros(()))
+        reduced, active = _reduce(masked & token_groups.eq(group).unsqueeze(2))
+        group_losses.append(reduced)
+        group_active.append(active)
+    losses = torch.stack(group_losses)
+    active = torch.stack(group_active)
+    return (losses * active).sum() / active.sum().clamp(min=1.0)
 
 
 @dataclass

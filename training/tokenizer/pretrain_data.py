@@ -697,7 +697,7 @@ class MultiScaleCollate:
         self.patch_choices = tuple(patch_choices)
         self.fixed = fixed_patch_seconds
         self.align_gravity = align_gravity
-        # Relation objective: patchify the independently augmented positive view into `*_b` keys.
+        # Augmentation VICReg: patchify the independently augmented positive view into `*_b` keys.
         self.two_view = two_view
         self.seed = seed
 
@@ -823,7 +823,7 @@ class MultiResolutionCollate:
         self.min_resolution_ratio = float(min_resolution_ratio)
         self.seed = int(seed)
         self.align_gravity = bool(align_gravity)
-        # Relation objective: patchify the independently augmented positive view into `*_b` keys.
+        # Augmentation VICReg: patchify the independently augmented positive view into `*_b` keys.
         self.two_view = bool(two_view)
         self._valid_pairs = tuple(
             (short, long)

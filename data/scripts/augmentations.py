@@ -198,9 +198,9 @@ class SensorTextDropoutCfg:
     p: float = 0.1           # fraction of samples that get any sensor-text neutralized
     max_frac: float = 0.5    # never neutralize more than this fraction of a sample's sensors (>=2 case)
     neutral: str = "an inertial sensor"
-    # Share the decision (fire + which sensors) across a window's two SimCLR views. MUST stay True
+    # Share the decision (fire + which sensors) across a window's two VICReg views. MUST stay True
     # for the config-conditional thesis: with independent draws, ~2p(1-p) of positive pairs describe
-    # the config in one view and neutralise it in the other, and NT-Xent then trains
+    # the config in one view and neutralise it in the other, and the invariance term then trains
     # embed(config) == embed(no config) — pressure to IGNORE the config. Set False only to ablate
     # that effect deliberately.
     shared_across_views: bool = True
@@ -424,9 +424,9 @@ class IMUAugmenter:
         """Apply the configured augmentations in ORDER.
 
         ``shared_config_seed`` makes the CONFIG-BEARING sensor-text dropout deterministic for a given
-        window, so the two SimCLR views of that window make the SAME dropout decision. Without it,
+        window, so the two VICReg views of that window make the SAME dropout decision. Without it,
         the views draw independently and ~2p(1-p) of positive pairs end up with the config described
-        in one view and neutralised in the other; NT-Xent then trains ``embed(config) ==
+        in one view and neutralised in the other; the invariance term then trains ``embed(config) ==
         embed(no config)``, i.e. pressure to IGNORE the acquisition config — the opposite of the
         config-conditional ("salient, not invariant") thesis. Sharing the decision keeps the
         graceful-degradation lesson (both views config-less) without ever demanding that equality.
@@ -750,5 +750,4 @@ class IMUAugmenter:
             use_synonyms=spec.use_synonyms, use_templates=spec.use_templates,
         )
         return s
-
 

@@ -161,6 +161,55 @@ def test_identity_is_role_plus_sensor_sum():
     assert torch.allclose(got_identity, expected_identity, atol=1e-4)
 
 
+def test_unique_text_pooling_matches_dense_values_and_gradients():
+    """Deduplicating repeated text rows is an execution optimization, not a model change."""
+    torch.manual_seed(12)
+    dense_fusion = FactoredChannelTextFusion(
+        d_model=16, text_dim=8, dropout=0.0, gate_bias_init=0.0
+    ).eval()
+    unique_fusion = FactoredChannelTextFusion(
+        d_model=16, text_dim=8, dropout=0.0, gate_bias_init=0.0
+    ).eval()
+    unique_fusion.load_state_dict(dense_fusion.state_dict())
+
+    B, P, C, S = 3, 2, 6, 5
+    role_unique = torch.randn(4, S, 8)
+    role_unique_mask = torch.ones(4, S, dtype=torch.bool)
+    role_ids = torch.tensor([[0, 1, 2, 0, 1, 2],
+                             [0, 1, 2, 3, 3, 3],
+                             [2, 1, 0, 2, 1, 0]])
+    sensor_unique = torch.randn(3, S, 8)
+    sensor_unique_mask = torch.ones(3, S, dtype=torch.bool)
+    sensor_text_ids = torch.tensor([[0, -1], [1, 2], [2, -1]])
+    sensor_id = torch.tensor([[0] * C, [0, 0, 0, 1, 1, 1], [0] * C])
+
+    role_dense = role_unique[role_ids]
+    role_mask_dense = role_unique_mask[role_ids]
+    sensor_dense = sensor_unique[sensor_text_ids.clamp_min(0)]
+    sensor_mask_dense = sensor_unique_mask[sensor_text_ids.clamp_min(0)]
+    sensor_mask_dense[sensor_text_ids < 0] = False
+    sensor_dense = sensor_dense.masked_fill(~sensor_mask_dense.unsqueeze(-1), 0.0)
+    dense_tokens = torch.randn(B, P, C, 16, requires_grad=True)
+    unique_tokens = dense_tokens.detach().clone().requires_grad_(True)
+
+    dense = dense_fusion(dense_tokens, role_dense, role_mask_dense,
+                         sensor_dense, sensor_mask_dense, sensor_id)
+    unique = unique_fusion(unique_tokens, role_unique, role_unique_mask,
+                           sensor_unique, sensor_unique_mask, sensor_id,
+                           role_text_ids=role_ids, sensor_text_ids=sensor_text_ids)
+    assert torch.allclose(dense, unique, atol=1e-6, rtol=1e-5)
+
+    dense.square().mean().backward()
+    unique.square().mean().backward()
+    assert torch.allclose(dense_tokens.grad, unique_tokens.grad, atol=1e-6, rtol=1e-5)
+    for dense_parameter, unique_parameter in zip(
+        dense_fusion.parameters(), unique_fusion.parameters()
+    ):
+        assert torch.allclose(
+            dense_parameter.grad, unique_parameter.grad, atol=1e-6, rtol=1e-5
+        )
+
+
 # --------------------------------------------------------------------------- encoder integration
 def test_encoder_factored_forward_runs_and_legacy_is_unchanged():
     """Both paths run; and constructing 'per_channel' still builds the legacy fusion."""
@@ -187,6 +236,31 @@ def test_encoder_factored_forward_runs_and_legacy_is_unchanged():
               patch_padding_mask=torch.ones(B, P, dtype=torch.bool),
               sensor_texts=sensor_texts, sensor_id=sensor_id)
     assert out["pooled"].shape == (B, 32) and torch.isfinite(out["pooled"]).all()
+
+
+def test_transformer_runtime_hook_keeps_checkpoint_keys_and_values():
+    """The compile hook may replace execution, but it must not rewrite checkpoint structure."""
+    torch.manual_seed(21)
+    enc = SetTokenizerEncoder(
+        d_model=24, num_layers=1, num_heads=4, dim_feedforward=48, dropout=0.0,
+        text_conditioning="factored",
+    ).eval()
+    keys_before = tuple(enc.state_dict())
+    enc._compiled_transformer_forward = enc.transformer.forward
+    assert tuple(enc.state_dict()) == keys_before
+
+    B, P, C, S = 1, 2, 6, enc.filterbank.S
+    with torch.no_grad():
+        out = enc(
+            torch.randn(B, P, S, C), 50.0, S, [["x", "y", "z", "x", "y", "z"]],
+            torch.arange(P).float().unsqueeze(0),
+            channel_mask=torch.ones(B, C, dtype=torch.bool),
+            patch_padding_mask=torch.ones(B, P, dtype=torch.bool),
+            sensor_texts=[["a phone accelerometer in a pocket; includes gravity",
+                           "a phone gyroscope in a pocket"]],
+            sensor_id=torch.tensor([[0, 0, 0, 1, 1, 1]]),
+        )
+    assert torch.isfinite(out["pooled"]).all()
 
 
 def test_factored_conditioning_changes_embedding_when_sensor_text_changes():

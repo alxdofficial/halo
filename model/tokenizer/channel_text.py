@@ -198,21 +198,50 @@ class FactoredChannelTextFusion(nn.Module):
     def forward(
         self,
         sensor_tokens: torch.Tensor,      # (B, P, C, d)
-        role_tokens: torch.Tensor,        # (B, C, S, text_dim)
-        role_mask: torch.Tensor,          # (B, C, S) bool
-        sensor_text_tokens: torch.Tensor, # (B, N_sensors, S, text_dim)
-        sensor_text_mask: torch.Tensor,   # (B, N_sensors, S) bool
+        role_tokens: torch.Tensor,        # dense (B,C,S,text_dim) or unique (U_role,S,text_dim)
+        role_mask: torch.Tensor,          # dense (B,C,S) or unique (U_role,S) bool
+        sensor_text_tokens: torch.Tensor, # dense (B,N,S,text_dim) or unique (U_sensor,S,text_dim)
+        sensor_text_mask: torch.Tensor,   # dense (B,N,S) or unique (U_sensor,S) bool
         sensor_id: torch.Tensor,          # (B, C) long: which sensor each channel belongs to
+        role_text_ids: Optional[torch.Tensor] = None,    # (B,C) -> unique role row
+        sensor_text_ids: Optional[torch.Tensor] = None,  # (B,N_sensors) -> unique sensor row
     ) -> torch.Tensor:
         B, P, C, D = sensor_tokens.shape
-        Sr = role_tokens.shape[2]
-        Ns = sensor_text_tokens.shape[1]
-        Ss = sensor_text_tokens.shape[2]
+        if (role_text_ids is None) != (sensor_text_ids is None):
+            raise ValueError("role_text_ids and sensor_text_ids must be provided together")
 
-        role = self.pool(role_tokens.reshape(B * C, Sr, -1),
-                         role_mask.reshape(B * C, Sr)).reshape(B, C, D)          # (B, C, d)
-        sens = self.pool(sensor_text_tokens.reshape(B * Ns, Ss, -1),
-                         sensor_text_mask.reshape(B * Ns, Ss)).reshape(B, Ns, D)  # (B, N_sensors, d)
+        if role_text_ids is None:
+            Sr = role_tokens.shape[2]
+            Ns = sensor_text_tokens.shape[1]
+            Ss = sensor_text_tokens.shape[2]
+            role = self.pool(role_tokens.reshape(B * C, Sr, -1),
+                             role_mask.reshape(B * C, Sr)).reshape(B, C, D)
+            sens = self.pool(sensor_text_tokens.reshape(B * Ns, Ss, -1),
+                             sensor_text_mask.reshape(B * Ns, Ss)).reshape(B, Ns, D)
+        else:
+            # Factored descriptions repeat heavily: a live B=256 batch has 1,536 role rows but
+            # only x/y/z/(unknown), and roughly 380 sensor rows but about 70 unique strings. Pool
+            # each unique frozen-LM sequence once, then gather. index_select remains fully
+            # differentiable and sums gradients from every repeated use into the shared pooler. In
+            # training mode, repeats intentionally share that description's pooler-dropout draw for
+            # this pass; deterministic/eval outputs and gradients are exactly the dense computation.
+            if role_text_ids.shape != (B, C):
+                raise ValueError(
+                    f"role_text_ids must have shape {(B, C)}, got {tuple(role_text_ids.shape)}"
+                )
+            if sensor_text_ids.ndim != 2 or sensor_text_ids.shape[0] != B:
+                raise ValueError("sensor_text_ids must have shape (B, N_sensors)")
+            if role_tokens.ndim != 3 or role_mask.ndim != 2:
+                raise ValueError("unique role text tensors must have shapes (U,S,D) and (U,S)")
+            if sensor_text_tokens.ndim != 3 or sensor_text_mask.ndim != 2:
+                raise ValueError("unique sensor text tensors must have shapes (U,S,D) and (U,S)")
+            role_unique = self.pool(role_tokens, role_mask)
+            sensor_unique = self.pool(sensor_text_tokens, sensor_text_mask)
+            role = role_unique.index_select(0, role_text_ids.reshape(-1)).reshape(B, C, D)
+            safe_sensor_ids = sensor_text_ids.clamp_min(0)
+            sens = sensor_unique.index_select(0, safe_sensor_ids.reshape(-1)).reshape(
+                B, sensor_text_ids.shape[1], D
+            )
         # Broadcast each sensor's identity to its channels.
         sens_bc = torch.gather(sens, 1, sensor_id.unsqueeze(-1).expand(B, C, D))  # (B, C, d)
 

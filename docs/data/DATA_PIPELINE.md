@@ -29,7 +29,11 @@ python -m data.scripts.labels.build_global_label_mapping  # canonical ConSE voca
 `placement_strict` (phones only, "harmonised-strict") is not a separate build — it is the phone
 subset of the harmonised grids, selected at training time via `deployment_streams(placement_strict=True)`.
 
-## Status — run end-to-end and verified (2026-07-12)
+## Historical status snapshot (2026-07-12)
+
+This section records the earlier converter milestone and is not the current Phase-A roster. The
+authoritative live roster, stream semantics, and measured corpus properties are in
+`DATA_HETEROGENEITY.md` and `training/tokenizer/README.md`.
 
 **11 datasets converted + verified end-to-end** on real downloads (harmonised 60 Hz 6-ch `[acc,gyro]` /
 non-harmonised native): motionsense, hapt, uci_har, pamap2, wisdm, mhealth, realworld, hhar, kuhar,

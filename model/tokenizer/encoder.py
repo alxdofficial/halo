@@ -112,6 +112,9 @@ class SetTokenizerEncoder(nn.Module):
             rope_min_period=rope_min_period,
             rope_max_period=ROPE_MAX_PERIOD_S,
         )
+        # Runtime-only acceleration hook. The trainer may install a compiled bound ``forward`` here;
+        # keeping the actual module untouched preserves ordinary state_dict keys and eager eval loads.
+        self._compiled_transformer_forward = None
 
     # ------------------------------------------------------------------ shareable stages
     # The forward splits into (tokenize · encode_texts · encode) so a training step that
@@ -144,6 +147,23 @@ class SetTokenizerEncoder(nn.Module):
         a batch has at most (#streams × 6) distinct descriptions, not B×C, so the
         per-step assembly cost is bounded by variety, not batch size.
         """
+        embs_u, masks_u, gather = self.encode_texts_unique(channel_texts, device)
+        B, C = gather.shape
+        S = embs_u.shape[1]
+        embs = embs_u.index_select(0, gather.reshape(-1)).reshape(B, C, S, -1)
+        masks = masks_u.index_select(0, gather.reshape(-1)).reshape(B, C, S)
+        return embs, masks
+
+    def encode_texts_unique(
+        self, channel_texts: Sequence[Sequence[str]], device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encode unique strings and return ``(embeddings, masks, inverse_ids)``.
+
+        ``inverse_ids`` has shape (B,C). Keeping text unique through the learnable pooler avoids
+        repeating identical attention/MLP work for every batch row. With pooler dropout disabled (or
+        in eval), values and gradients are exactly the dense computation; training shares one dropout
+        realization among rows carrying the same description.
+        """
         B, C = len(channel_texts), len(channel_texts[0])
         for texts in channel_texts:
             assert len(texts) == C, "all samples in a batch must have the same channel count"
@@ -151,11 +171,8 @@ class SetTokenizerEncoder(nn.Module):
         unique = list(dict.fromkeys(flat))
         embs_u, masks_u = self.text_encoder.encode(unique, device=device)   # (U, S, 384)
         idx = {t: i for i, t in enumerate(unique)}
-        gather = torch.tensor([idx[t] for t in flat], device=device)
-        S = embs_u.shape[1]
-        embs = embs_u.index_select(0, gather).reshape(B, C, S, -1)
-        masks = masks_u.index_select(0, gather).reshape(B, C, S)
-        return embs, masks
+        gather = torch.tensor([idx[t] for t in flat], device=device, dtype=torch.long).reshape(B, C)
+        return embs_u, masks_u, gather
 
     def encode_texts_factored(self, role_texts, sensor_texts, device):
         """Encode the two factored text sources with the same frozen LM.
@@ -182,6 +199,29 @@ class SetTokenizerEncoder(nn.Module):
             sensor_masks[b, :len(texts)] = masks_u.index_select(0, gather)
         return role_embs, role_masks, sensor_embs, sensor_masks
 
+    def encode_texts_factored_unique(self, role_texts, sensor_texts, device):
+        """Unique-token equivalent of :meth:`encode_texts_factored` for the hot path.
+
+        Returns unique role token rows + (B,C) inverse IDs and unique sensor token rows + a padded
+        (B,N_max) inverse-ID table. ``-1`` marks a padded sensor slot that no channel may reference.
+        """
+        role_embs, role_masks, role_ids = self.encode_texts_unique(role_texts, device)
+        if not sensor_texts or any(len(texts) == 0 for texts in sensor_texts):
+            raise ValueError("factored text conditioning requires at least one sensor description "
+                             "per sample")
+        B, n_max = len(sensor_texts), max(map(len, sensor_texts))
+        flat = [text for texts in sensor_texts for text in texts]
+        unique = list(dict.fromkeys(flat))
+        sensor_embs, sensor_masks = self.text_encoder.encode(unique, device=device)
+        lookup = {text: i for i, text in enumerate(unique)}
+        sensor_text_ids = torch.full((B, n_max), -1, dtype=torch.long, device=device)
+        for b, texts in enumerate(sensor_texts):
+            sensor_text_ids[b, :len(texts)] = torch.tensor(
+                [lookup[text] for text in texts], dtype=torch.long, device=device
+            )
+        return (role_embs, role_masks, role_ids,
+                sensor_embs, sensor_masks, sensor_text_ids)
+
     def encode(
         self,
         sensor_tokens: torch.Tensor,                 # (B, P, C, d) from tokenize()
@@ -198,6 +238,8 @@ class SetTokenizerEncoder(nn.Module):
         sensor_text_embs: Optional[torch.Tensor] = None,   # (B, N_sensors, S, 384)
         sensor_text_masks: Optional[torch.Tensor] = None,  # (B, N_sensors, S)
         sensor_id: Optional[torch.Tensor] = None,          # (B, C) long
+        role_text_ids: Optional[torch.Tensor] = None,      # (B,C), when text rows stay unique
+        sensor_text_ids: Optional[torch.Tensor] = None,    # (B,N_sensors), -1 = padding
     ) -> dict[str, torch.Tensor]:
         B, P, C, _ = sensor_tokens.shape
 
@@ -226,12 +268,15 @@ class SetTokenizerEncoder(nn.Module):
             sensor_id = sensor_id.to(device=tokens.device, dtype=torch.long)
             if sensor_id.shape != (B, C):
                 raise ValueError(f"sensor_id must have shape {(B, C)}, got {tuple(sensor_id.shape)}")
+            sensor_count = (sensor_text_ids.shape[1] if sensor_text_ids is not None
+                            else sensor_text_embs.shape[1])
             if sensor_id.numel() and (
                 int(sensor_id.min().item()) < 0
-                or int(sensor_id.max().item()) >= sensor_text_embs.shape[1]
+                or int(sensor_id.max().item()) >= sensor_count
             ):
                 raise ValueError("sensor_id contains an index without a corresponding sensor description")
-            valid_sensor = sensor_text_masks.any(dim=2)
+            valid_sensor = (sensor_text_ids.ge(0) if sensor_text_ids is not None
+                            else sensor_text_masks.any(dim=2))
             selected_sensor_valid = torch.gather(valid_sensor, 1, sensor_id)
             if not bool(selected_sensor_valid.all()):
                 raise ValueError(
@@ -239,7 +284,8 @@ class SetTokenizerEncoder(nn.Module):
                 )
             # `text_embs`/`text_masks` carry the ROLE tokens in the factored path.
             tokens = self.fusion(tokens, text_embs, text_masks,
-                                 sensor_text_embs, sensor_text_masks, sensor_id)
+                                 sensor_text_embs, sensor_text_masks, sensor_id,
+                                 role_text_ids=role_text_ids, sensor_text_ids=sensor_text_ids)
         else:
             tokens = self.fusion(tokens, text_embs, text_masks)
 
@@ -251,7 +297,8 @@ class SetTokenizerEncoder(nn.Module):
             same_resolution &= resolution_ids.unsqueeze(2).ge(0)
             temporal_mask = (same_resolution if temporal_mask is None
                              else temporal_mask & same_resolution)
-        h = self.transformer(
+        transformer_forward = self._compiled_transformer_forward or self.transformer
+        h = transformer_forward(
             tokens,
             temporal_mask=temporal_mask,
             channel_mask=channel_mask,
@@ -322,8 +369,8 @@ class SetTokenizerEncoder(nn.Module):
         if self.text_conditioning == "factored":
             if sensor_texts is None or sensor_id is None:
                 raise ValueError("factored text_conditioning requires sensor_texts and sensor_id")
-            text_embs, text_masks, s_embs, s_masks = self.encode_texts_factored(
-                channel_texts, sensor_texts, device)
+            text_embs, text_masks, role_ids, s_embs, s_masks, sensor_text_ids = \
+                self.encode_texts_factored_unique(channel_texts, sensor_texts, device)
         else:
             text_embs, text_masks = self.encode_texts(channel_texts, device)
         return self.encode(sensor_tokens, text_embs, text_masks, positions,
@@ -331,4 +378,7 @@ class SetTokenizerEncoder(nn.Module):
                            cross_resolution_attention=cross_resolution_attention,
                            token_mask=token_mask, channel_mask=channel_mask,
                            patch_padding_mask=patch_padding_mask,
-                           sensor_text_embs=s_embs, sensor_text_masks=s_masks, sensor_id=sensor_id)
+                           sensor_text_embs=s_embs, sensor_text_masks=s_masks, sensor_id=sensor_id,
+                           role_text_ids=(role_ids if self.text_conditioning == "factored" else None),
+                           sensor_text_ids=(sensor_text_ids
+                                            if self.text_conditioning == "factored" else None))
