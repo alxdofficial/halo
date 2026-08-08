@@ -509,6 +509,91 @@ def sample_queries_covering_labels(
     return result[order]
 
 
+def prepare_support_feasible_query_pool(
+    pool: torch.Tensor,
+    index_rows: torch.Tensor,
+    bank: dict,
+    labels: torch.Tensor,
+    *,
+    support_count: int,
+    episode_type: str,
+    rng: np.random.Generator,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reserve support identities before drawing a shared episode query batch.
+
+    A Phase-B support overlay is shared by every query in an episode. Sampling many query
+    executions first can therefore exclude more than the single unit assumed by a ``k + 1``
+    capacity check. For ordinary/enrollment episodes, reserve ``k`` active support units and remove
+    those identities from the query pool. For cross-subject episodes, choose one query subject per
+    label only when at least ``k`` units remain on other subjects.
+    """
+    if support_count == 0:
+        return labels, pool
+    device = pool.device
+    rows = index_rows.detach().cpu().long()
+    patch = bank["patch"]
+    active_y = torch.as_tensor(patch["y"])[rows].long().to(device)
+    active_subj = torch.as_tensor(patch["subj"])[rows].long().to(device)
+    active_window = torch.as_tensor(patch["window"])[rows].long().to(device)
+    active_event = torch.as_tensor(patch["event"])[rows].long().to(device)
+    active_verified = torch.as_tensor(patch["event_verified"])[rows].bool().to(device)
+    unit_offset = int(torch.as_tensor(patch["window"]).max()) + 1
+    active_unit = torch.where(
+        active_verified, active_event + unit_offset, active_window
+    )
+
+    window_y = torch.as_tensor(bank["y"], device=device, dtype=torch.long)
+    window_subj = torch.as_tensor(bank["subj"], device=device, dtype=torch.long)
+    window_event = torch.as_tensor(bank["event"], device=device, dtype=torch.long)
+    window_verified = torch.as_tensor(
+        bank["event_verified"], device=device, dtype=torch.bool
+    )
+    pool_unit = torch.where(
+        window_verified[pool], window_event[pool] + unit_offset, pool
+    )
+
+    feasible_labels = []
+    query_parts = []
+    for label in labels.tolist():
+        label_pool_mask = window_y[pool].eq(label)
+        label_pool = pool[label_pool_mask]
+        if not len(label_pool):
+            continue
+        active_label = active_y.eq(label)
+        if episode_type == "cross_subject_few_support":
+            viable_subjects = []
+            for subject in torch.unique(window_subj[label_pool]).tolist():
+                available = active_label & active_subj.ne(subject)
+                if torch.unique(active_unit[available]).numel() >= support_count:
+                    viable_subjects.append(int(subject))
+            if not viable_subjects:
+                continue
+            query_subject = int(rng.choice(np.asarray(viable_subjects)))
+            query_part = label_pool[window_subj[label_pool].eq(query_subject)]
+        else:
+            units = torch.unique(active_unit[active_label])
+            if len(units) < support_count:
+                continue
+            reserved = torch.as_tensor(
+                rng.choice(
+                    units.detach().cpu().numpy(), size=support_count, replace=False
+                ),
+                device=device,
+                dtype=torch.long,
+            )
+            query_part = label_pool[~torch.isin(pool_unit[label_pool_mask], reserved)]
+        if len(query_part):
+            feasible_labels.append(label)
+            query_parts.append(query_part)
+
+    if not feasible_labels:
+        return labels[:0], pool[:0]
+    return (
+        torch.tensor(feasible_labels, device=device, dtype=torch.long),
+        torch.cat(query_parts),
+    )
+
+
 def physical_label_centroids(Z: torch.Tensor, y: torch.Tensor, n_vocab: int) -> torch.Tensor:
     centroids = Z.new_zeros(n_vocab, Z.shape[1])
     centroids.index_add_(0, y, Z)
@@ -1301,7 +1386,9 @@ def main() -> None:
         ]
         candidate_count = min(spec.candidate_count, len(allowed_vocab))
         if candidate_count < 2:
-            raise ValueError("adaptation episode needs at least two represented candidate labels")
+            raise ValueError(
+                "no eligible support-feasible labels for an adaptation episode"
+            )
         seed_count = min(2, candidate_count - 1)
         seed = local_rng.choice(
             allowed_vocab.detach().cpu().numpy(), size=seed_count, replace=False
@@ -1322,8 +1409,21 @@ def main() -> None:
         )
         # choose_candidates may have fewer rows when the represented pool is tiny.
         candidates = candidates[torch.isin(candidates, allowed_vocab)]
+        feasible_candidates, episode_query_pool = prepare_support_feasible_query_pool(
+            pool,
+            rows,
+            bank,
+            candidates,
+            support_count=spec.support_count,
+            episode_type=spec.episode_type,
+            rng=local_rng,
+        )
+        if len(feasible_candidates) != len(candidates):
+            raise ValueError(
+                "no eligible support-feasible labels for an adaptation episode"
+            )
         qi = sample_queries_covering_labels(
-            pool, candidates, y, count, local_rng,
+            episode_query_pool, candidates, y, count, local_rng,
             config_ids=cfg, subject_ids=subj,
         )
         query = table.gather_queries(

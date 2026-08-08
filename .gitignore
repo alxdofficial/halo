@@ -63,6 +63,7 @@ training/tokenizer/outputs/**/*.pt
 training/tokenizer/outputs/pretrain*/
 training/tokenizer/outputs/*/
 training/tokenizer/outputs/**/*.log
+training/evidence/outputs/telemetry/
 
 # agent worktrees / session scratch
 .claude/

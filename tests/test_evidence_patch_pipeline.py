@@ -41,6 +41,7 @@ from training.evidence.train_patch_decoder import (
     load_activity_families,
     parameter_gradient_norm,
     prepare_adaptation_views,
+    prepare_support_feasible_query_pool,
     run_patch_episode,
     sample_queries,
     soft_retrieval_temperature,
@@ -89,6 +90,47 @@ def _bank():
         "cfg_rate_hz": {0: 50.0, 1: 100.0},
         "patch": patch,
     }
+
+
+def _support_feasibility_bank(subjects):
+    n = len(subjects)
+    values = torch.arange(n)
+    return {
+        "y": torch.zeros(n, dtype=torch.long),
+        "subj": torch.as_tensor(subjects, dtype=torch.long),
+        "event": values,
+        "event_verified": torch.ones(n, dtype=torch.bool),
+        "patch": {
+            "y": torch.zeros(n, dtype=torch.long),
+            "subj": torch.as_tensor(subjects, dtype=torch.long),
+            "window": values,
+            "event": values,
+            "event_verified": torch.ones(n, dtype=torch.bool),
+        },
+    }
+
+
+def test_query_pool_reserves_all_requested_ordinary_support_units():
+    bank = _support_feasibility_bank([0] * 9)
+    labels, pool = prepare_support_feasible_query_pool(
+        torch.arange(9), torch.arange(9), bank, torch.tensor([0, 1]),
+        support_count=8, episode_type="ordinary_few_support",
+        rng=np.random.default_rng(4),
+    )
+    # Label 1 is absent and is removed; the one remaining query unit leaves eight for support.
+    assert labels.tolist() == [0]
+    assert len(pool) == 1
+
+
+def test_cross_subject_query_pool_leaves_requested_support_on_other_people():
+    bank = _support_feasibility_bank([0] * 8 + [1])
+    labels, pool = prepare_support_feasible_query_pool(
+        torch.arange(9), torch.arange(9), bank, torch.tensor([0]),
+        support_count=8, episode_type="cross_subject_few_support",
+        rng=np.random.default_rng(7),
+    )
+    assert labels.tolist() == [0]
+    assert pool.tolist() == [8]
 
 
 def test_patch_bank_foreign_keys_and_event_expansion():
