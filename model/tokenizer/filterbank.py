@@ -78,7 +78,7 @@ FB_RESOLUTION_MIN_CYCLES = 1.0
 class PhysicalFilterbankTokenizer(nn.Module):
     """
     Physical-Hz constant-Q filterbank tokenizer (PHz-FB). Design rationale:
-    docs/design/EVIDENCE_ENGINE.md §7 (tokenizer direction).
+    docs/archive/EVIDENCE_ENGINE.md §7 (tokenizer direction).
 
     Turns each native-rate, zero-padded patch of each channel into one d_model
     token, entirely in the *physical frequency* domain, so the representation is

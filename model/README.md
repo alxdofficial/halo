@@ -25,9 +25,9 @@ than a fixed-width vector.
 | `decoder.py` | candidate-aware decoder (`QUERY` / `EVIDENCE` / `CANDIDATE` structural roles) |
 | `confidence.py` | separate correct-and-answerable confidence calibration |
 
-Design of record: [`docs/design/EVIDENCE_ENGINE.md`](../docs/design/EVIDENCE_ENGINE.md); current
+Design of record: [`docs/archive/EVIDENCE_ENGINE.md`](docs/archive/EVIDENCE_ENGINE.md); current
 empirical position, including retractions:
-[`docs/design/EVIDENCE_ENGINE_FINDINGS.md`](../docs/design/EVIDENCE_ENGINE_FINDINGS.md).
+[`docs/archive/EVIDENCE_ENGINE_FINDINGS.md`](docs/archive/EVIDENCE_ENGINE_FINDINGS.md).
 
 There is no InfoNCE label-alignment head. Activity-label language enters at Phase B through candidate
 content (and through the ConSE comparison bridge). Phase A remains activity-label-free while using

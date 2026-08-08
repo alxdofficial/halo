@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by `../README.md` (results) and `../design/REMEDIATION_PLAN.md` (issue status).
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 # Evidence engine — critical findings (2026-07-20)
 
 > **Archived empirical record.** Paths to the former pooled trainer/evaluator document the code that

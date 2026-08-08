@@ -77,7 +77,7 @@ All five layers below are **built and running**; the open questions are empirica
 5. **Baselines + eval** — 8 models scored on 7 test sets under a stamped protocol;
    `python -m eval.assemble_table`.
 
-⚠️ **Before citing any number, read `docs/design/EVIDENCE_ENGINE_FINDINGS.md`.** Several headline
+⚠️ **Before citing any number, read `docs/archive/EVIDENCE_ENGINE_FINDINGS.md`.** Several headline
 claims have been retracted, and that doc — not this one — is the authoritative empirical position.
 
 ## Development

@@ -3,7 +3,7 @@
 > **Status: brainstorm, 2026-08-06. No decision taken.** Written to answer the supervisor's note
 > that the paper needs something that excites MobiCom reviewers beyond a technique contribution.
 > Nothing here is built or measured; the numbers cited are from
-> `EVIDENCE_ENGINE_FINDINGS.md` and `eval/assemble_table`.
+> `docs/archive/EVIDENCE_ENGINE_FINDINGS.md` and `eval/assemble_table`.
 
 ## 0. The constraint that should drive the choice
 

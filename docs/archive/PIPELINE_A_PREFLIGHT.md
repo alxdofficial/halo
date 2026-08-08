@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by `../design/DATA_SCALING_PLAN.md`.
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 > **HISTORICAL AUDIT.** Superseded for both corpus facts and Phase-A objective semantics. This
 > audit describes the OLD corpus:
 > **8 datasets / 57 labels / 60 Hz harmonised**. The corpus is now **12 datasets / 93 labels /

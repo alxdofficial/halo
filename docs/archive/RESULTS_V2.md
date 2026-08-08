@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by `../README.md`.
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 > ⚠️ **SUPERSEDED SNAPSHOT — pre-vocabulary-fix protocol.** Every number below was produced under the stale **59-label** global vocabulary, which silently discarded 11.48% of training windows. The vocabulary is now **93** labels and all ConSE heads + the memory bank are stale and awaiting refit. Do NOT mix these numbers with post-fix ones. See `docs/design/EVIDENCE_ENGINE_FINDINGS.md` (STATUS block) for the current position.
 
 # Zero-shot results — HALO vs baselines, full 7-dataset table (2026-07-20)

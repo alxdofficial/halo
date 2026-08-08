@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by nothing — a point-in-time audit, not a design record.
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 # Workstation storage audit (2026-07-26)
 
 Read-only audit of all storage visible without administrator authentication. No files were deleted.

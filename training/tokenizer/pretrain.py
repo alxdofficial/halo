@@ -873,7 +873,7 @@ def main() -> None:
     parser.add_argument("--frontend", choices=("fixed", "learnable"), default="fixed",
                         help="tokenizer arm. 'fixed' = physical-Hz constant-Q filterbank (default); "
                              "'learnable' = the constrained-adaptive filterbank arm "
-                             "(docs/design/LEARNABLE_TOKENIZER_ARM.md).")
+                             "(docs/archive/LEARNABLE_TOKENIZER_ARM.md).")
     parser.add_argument("--text-conditioning", choices=("per_channel", "factored"), default=None,
                         help="config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). "
                              "'per_channel' = one description per channel; 'factored' (the CLI "

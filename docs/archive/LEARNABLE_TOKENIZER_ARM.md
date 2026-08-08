@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by `../design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`.
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 # HALO Learnable Tokenizer Arm
 
 > ## ⚠️ RESULT (2026-07-20): the arm helps, but NOT for the reason this plan proposes.

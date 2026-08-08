@@ -105,10 +105,15 @@ and raw-source provenance.
 
 The standard capacity policy is deliberately small:
 
-- archive budget: 250,000 balanced source windows, CPU resident;
+- archive budget: at most 250,000 source windows, CPU resident; the global label/configuration
+  balancing policy applies when the source population exceeds that cap. **Measured 2026-08-08: the
+  current corpus yields 248,351 encoded windows, so the cap does not bind and no balancing is
+  applied.** The archive is therefore whatever the 50,000-per-stream scan ceiling produced, and is
+  strongly imbalanced (`sitting` 28,648 windows against a 30-window minimum). Balance is restored
+  downstream by the active view, which equalises to 16 windows per label;
 - active view: up to 16 source windows per label, refreshed every 100 steps;
 - evidence budget: 64 final patch rows per query;
-- candidate counts: four or eight;
+- candidate counts: four, eight, twelve, or sixteen;
 - support counts: one, two, four, or eight independent executions per candidate.
 
 Retrieval K and per-window/per-label contribution limits are derived from the evidence budget. They
@@ -122,10 +127,14 @@ what prevents the model from solving a random-alias episode through a hidden can
 ## 6. Candidate-Conditioned Evidence
 
 The decoder receives a permutation-equivariant set containing query patches and retrieved evidence.
-Evidence rows carry their memory label text and one of the structural roles `EVIDENCE` or
-`PROVIDED_SUPPORT`. Candidate tokens carry frozen base text embeddings plus the `CANDIDATE` role and
-attend to the physical query/evidence states. Patch center, duration, resolution, sensor/source
-membership, and validity are supplied as structural metadata.
+A query token combines its physical patch vector with the `QUERY` role and an explicit no-label
+embedding. Each evidence item is one bound token: its retrieved physical patch and attached label
+text are summed with either the `EVIDENCE` or `PROVIDED_SUPPORT` role. Keeping them in one token
+prevents attention from losing which label belongs to which physical exemplar. Evidence also carries
+the learned retrieval-subspace identity that selected it. Candidate labels are separate tokens with
+the `CANDIDATE` role; candidate self-attention and cross-attention read the physical query/evidence
+set. Patch center, duration, resolution, sensor/source membership, and validity are supplied as
+structural metadata.
 
 Candidate tokens are intentionally enabled. This resolves the older wording discrepancy: **there
 are no per-label classifier parameters, but the generic decoder is trained to reason over frozen
@@ -145,10 +154,35 @@ Training cycles equally through four regimes:
    memory.
 2. `ordinary_few_support`: balanced support for every candidate with independent mild acquisition
    variation.
-3. `cross_subject_few_support`: support and query come from different physical subjects and
-   configurations where possible, and receive different virtual-subject styles.
+3. `cross_subject_few_support`: support and query come from different physical subjects — a hard
+   constraint — and receive different virtual-subject styles. **Acquisition disjointness is allowed
+   but not required.** Support drawn from another stream happens wherever the label supports it and
+   is counted, never demanded; see §7.1.
 4. `same_subject_enrollment`: support and query share one virtual-subject style but receive
    independent acquisition variation, simulating enrollment and later recognition for one person.
+   Note that this regime places no constraint on *real* subject identity — the shared persona is
+   synthetic, and the underlying executions may come from different people.
+
+### 7.1 Why cross-configuration is an allower, not a prerequisite
+
+Measured on the 2026-08-08 bank: **0 of 93 labels have only one subject**, so person-disjointness is
+always satisfiable. But **35 of 93 labels exist in exactly one stream** — `applying_hand_cream`
+(harmes only), all seven `falling_*` labels, `ironing`, `floor_cleaning` and others. Requiring
+acquisition disjointness alongside subject disjointness made an eight-candidate episode feasible
+essentially never (measured 0.00%–1.5% depending on support count), because every candidate had to
+satisfy it simultaneously. Enforcing it would silently drop those 35 labels from the regime that most
+directly rehearses the deployment story.
+
+Each episode therefore records what it actually enrolled, in recorded executions: how many came from
+a different person, from the query's own stream, from a second stream worn simultaneously (a
+synchronised rig such as xrf_v2's placements or nfi_fared's back+wrist), and from an independently
+recorded stream (wisdm's phone and watch, or two different studies). Those counts appear per batch in
+the telemetry and in the periodic training line.
+
+**Scope limit for the paper.** Cross-configuration enrollment is only testable on the 58 labels that
+appear on more than one stream — 33 of them via synchronised multi-placement rigs, 25 via two
+different studies. No code change extends this; only a corpus with the same activity recorded on more
+than one device would.
 
 Supported episodes use one, two, four, or eight independent support executions for every candidate.
 They split evenly between coherent activity text and random aliases. Random aliases are forbidden
@@ -162,7 +196,8 @@ adaptation mechanism works.
 
 ## 8. Physical Episode Views
 
-Every raw execution follows this order:
+Training cycles exactly 50/50 between two physical-view modes. The **clean** mode re-encodes the
+unaltered source query and support executions. The **augmented** mode follows this order:
 
 ```text
 raw source window
@@ -185,6 +220,11 @@ Persistent style and independent acquisition noise serve different purposes. Reu
 label-specific noise transform would create an augmentation watermark, so acquisition randomness is
 sampled per execution rather than used as a candidate identity.
 
+The clean half closes the train/deployment gap: ordinary runtime queries and enrollment examples are
+not synthetically transformed. Held-out validation runs each identical episode through both modes and
+reports `clean_macro_cell_ba` and `augmented_macro_cell_ba` separately; checkpoint selection uses their
+equal-weight mean. A model may therefore earn robustness without hiding a regression on clean input.
+
 ## 9. Hard Retrieval and Gradient Flow
 
 Inference uses hard top-k retrieval. During training, the numerical forward remains exactly that
@@ -202,7 +242,8 @@ path a learning signal when useful support falls outside hard top-k.
 
 Required telemetry includes exact hard-forward equivalence, non-selected-row gradient, hard/soft
 gradient norms, retained soft mass, true-support recall, selected-row entropy, candidate entropy,
-candidate margin, row/subspace utilization, and support-removal effects.
+candidate margin, row/subspace utilization, cross-subspace top-k overlap, identity-control gain, and
+support-removal effects.
 
 ## 10. Tokenizer Modes
 
@@ -228,8 +269,10 @@ There is no corpus-classification auxiliary head, metric-learning loss, subject-
 EDL predictor loss, repeatability penalty, or explicit unknown target.
 
 After predictor training, the predictor is frozen. A separate confidence head is trained with BCE to
-predict `correct AND answerable` from evidence and retrieval diagnostics. Its episodes match the
-adaptation distribution and include coherent truth-absent cases. Confidence never changes candidate
+predict `correct AND answerable` from evidence and retrieval diagnostics. Truth-present and
+truth-absent samples use the same physical augmentation, support-overlay, retrieval, and decoder
+path; truth-absent samples differ only in that their true concept is excluded from candidates and
+memory. Confidence never changes candidate
 logits. Thresholds and operating points must be selected on validation data and reported with ECE,
 AUROC, and risk/coverage rather than treated as intrinsic uncertainty guarantees.
 
@@ -251,7 +294,9 @@ AUROC, and risk/coverage rather than treated as intrinsic uncertainty guarantees
 ## 13. Required Evidence Before Making the Claim
 
 1. Support curves at zero, one, two, four, and eight examples per candidate, reported separately for
-   same-subject and cross-subject/configuration enrollment.
+   same-subject and cross-subject/configuration enrollment. Enrollment is drawn from corrected native
+   grids in distinct source-execution units; every window from a chosen same-subject support
+   execution is excluded from that subject's query set.
 2. A random-alias support curve showing that examples, not familiar label semantics, drive the gain.
 3. Support-removal and alias-permutation canaries showing that the predictor reads provided support
    rather than candidate position or canonical-label leakage.

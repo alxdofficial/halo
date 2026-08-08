@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by `../design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`.
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 > ⚠️ **STALE ENCODER (2026-07-21).** This battery was run on an **11k-step** checkpoint from the
 > OLD 8-dataset / 57-label / 60 Hz corpus. Current encoders are `pretrain_native` and
 > `pretrain_fixed_mr` on the 12-dataset / 93-label native-rate corpus. The probe *methods* are still

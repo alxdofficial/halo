@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by `../../training/tokenizer/README.md`.
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 # Native Phase-A pretrain — pre-launch manifest (2026-07-19)
 
 > **HISTORICAL MANIFEST.** This predates the consolidated objective and describes the old SupCon /

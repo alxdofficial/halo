@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by `../design/PHASE_B_TRAINING_INTENT.md`.
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 # Evidence Engine — Tier-2 improvement plan
 
 Status: archived experiment record. The pooled trainer, EDL, decoder-level multi-subspace branch,

@@ -1,105 +1,103 @@
 # HALO docs
 
-Organized into subfolders by concern.
+> ## If you are writing the paper, read exactly these, in this order
+> 1. [**design/MOTIVATION.md**](design/MOTIVATION.md) — the thesis. *Why* HALO exists and why it is
+>    not trivial. If a framing cannot survive the rebuttals in its §2, it is not the contribution.
+> 2. [**design/POSITIONING.md**](design/POSITIONING.md) — what the result is *for*, and how to report
+>    it. ⚠️ its argument is live, its **numbers are pre-v4** — take numbers only from the block below.
+> 3. [**design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md**](design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md)
+>    — what Phase A actually is, as built, and the artifact handed to Phase B.
+> 4. [**design/PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — what Phase B is,
+>    why memory is an adaptation mechanism, and the evidence required before claiming it works.
+>
+> Then take every number from Results below, and nothing at all from
+> [`archive/`](archive/README.md).
 
-> ## Read these three first, in this order
-> 1. [**design/MOTIVATION.md**](design/MOTIVATION.md) — *why* HALO exists (the thesis).
-> 2. [**design/POSITIONING.md**](design/POSITIONING.md) — whether the thesis is worth pursuing, what
->    the result would actually be **for**, and how to report it. Written 2026-07-21 after a hard look
->    at the numbers.
-> 3. [**design/PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — why memory is an
->    adaptation mechanism, the live episodic contract, and the evidence required before making the
->    Phase-B claim.
->
-> ### State of results as of 2026-08-06
-> **`eval/results/` is populated and consistent** — 56 cells (8 models × 7 zero-shot test sets), all
-> stamped **protocol v4** (93 labels). Regenerate the table with `python -m eval.assemble_table`,
-> which refuses to assemble a mixed-protocol table. Current means:
->
-> | harnet | halo_evidence | crosshar | unimts | halo | limubert | imagebind | normwear |
-> |---:|---:|---:|---:|---:|---:|---:|---:|
-> | **45.7** | 42.9 | 42.8 | 34.7 | 34.4 | 32.2 | 11.4 | 5.1 |
->
-> **harnet (frozen UK-Biobank) is still ahead.** The evidence engine is second and beats the
-> Phase-A + ConSE path (34.4) by 8.5 points, but does not beat the strongest baseline.
->
-> **Retracted claims — do not cite:** the 49.5 "beats harnet" evidence-decoder headline (twice: first
-> for eval-label text contamination + eval-tuned hyperparameters, then again after the vocabulary
-> fix); the `r = −0.973` seen-vs-unseen correlation (re-measured at −0.328, p = 0.47); the learnable
-> filterbank as a contribution (measured **inert** — the gain was multiresolution).
->
-> **⚠️ Never pair a number from `pretrain_native` with one from `pretrain_fixed_mr`.** They are
-> different encoders. Any pre-v4 number in the docs below (40.4, 47.3, 42.7, 45.1, 46.1, 49.5) was
-> produced under the 59-label vocabulary and is **not** comparable to the table above.
+## Results — the only live table
 
-## `design/` — the contribution: what we're building and why
+Generated from `eval/results/` by `python -m eval.assemble_table`, which refuses to assemble a
+mixed-protocol table. **56 cells** (8 models × 7 zero-shot test sets), all **protocol v4 (93 labels)**,
+as of 2026-08-06.
 
-**Thesis and positioning**
+| harnet | halo_evidence | crosshar | unimts | halo | limubert | imagebind | normwear |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| **45.7** | 42.9 | 42.8 | 34.7 | 34.4 | 32.2 | 11.4 | 5.1 |
+
+**harnet (frozen UK-Biobank) is still ahead.** The evidence engine is second and beats the Phase-A +
+ConSE path (34.4) by 8.5 points, but does not beat the strongest baseline. Phase B has not yet had a
+full run under the current recipe, so it has established no claim of its own.
+
+### Retracted — do not cite
+- the **49.5 "beats harnet"** evidence-decoder headline — retracted twice: first for eval-label text
+  contamination plus eval-tuned hyperparameters, then again after the vocabulary fix;
+- the **r = −0.973** seen-vs-unseen correlation — re-measured at −0.328, p = 0.47;
+- the **learnable filterbank** as a contribution — measured inert; the gain was multiresolution.
+
+### The number trap
+Any figure produced before the vocabulary fix (**59 labels**) is not comparable to the table above:
+40.4, 42.7, 45.1, 46.1, 47.3, 49.5. **Never pair a number from `pretrain_native` with one from
+`pretrain_fixed_mr`** — they are different encoders.
+
+## `design/` — the contribution
+
+**Thesis and framing**
 - [**MOTIVATION.md**](design/MOTIVATION.md) — one language interface for unseen labels *and* unseen
-  acquisition configs; open-set-labels-alone is table stakes (ConSE); channel-count is not a claim.
-- [**POSITIONING.md**](design/POSITIONING.md) — is zero-shot HAR worth pursuing, what the deliverable
-  is *for* (operational properties, not accuracy), the k-curve, the controlled-shift protocol.
-- [APPLICATIONS.md](design/APPLICATIONS.md) — what a HAR foundation model makes *possible*
-  downstream, chosen so the comparison does not rest on accuracy we do not have. Brainstorm; no
-  decision taken.
-- [LANGUAGE_HIERARCHY.md](design/LANGUAGE_HIERARCHY.md) — second-act design: language at every level.
-- [**TEXT_CONDITIONING.md**](design/TEXT_CONDITIONING.md) — factoring channel text into a
-  per-sensor identity (device+placement+modality) + trivial intra-sensor role; current-code mapping
-  and the fold-in plan. ⚠️ prior-art lane is crowded — see MOTIVATION §2b.
+  acquisition configs; open-set labels alone is table stakes (ConSE); channel count is not a claim.
+- [**POSITIONING.md**](design/POSITIONING.md) — is this worth pursuing, what it is for, the k-curve
+  and controlled-shift protocols. ⚠️ numbers pre-v4.
+- [TEXT_CONDITIONING.md](design/TEXT_CONDITIONING.md) — the factored per-sensor identity
+  (device + placement + modality) plus intra-sensor axis role, as implemented.
 
-**Evidence engine**
-- [**PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — the sole current Phase-B
-  motivation and training contract.
-- [EVIDENCE_ENGINE_RESEARCH.md](design/EVIDENCE_ENGINE_RESEARCH.md) — literature synthesis; evidence
-  for design context rather than executable guidance.
-- [EVIDENCE_ENGINE.md](design/EVIDENCE_ENGINE.md),
-  [EVIDENCE_ENGINE_TIER2.md](design/EVIDENCE_ENGINE_TIER2.md), and
-  [EVIDENCE_ENGINE_FINDINGS.md](design/EVIDENCE_ENGINE_FINDINGS.md) — archived design and empirical
-  records. They preserve rejected branches and retractions; none defines the live trainer.
-
-**Pretraining / tokenizer**
+**The two phases, as built**
 - [**PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md**](design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md) —
-  the completed Phase-A implementation record and artifact handoff to Phase B. Phase-A commands
-  live in [`training/tokenizer/README.md`](../training/tokenizer/README.md); Phase-B details are not
-  duplicated there.
-- [AUGMENTATIONS.md](design/AUGMENTATIONS.md) — augmentation policy + the told-vs-not-told experiment.
-- [LEARNABLE_TOKENIZER_ARM.md](design/LEARNABLE_TOKENIZER_ARM.md) — ⚠️ hypothesis **falsified**: the
-  learnable filterbank is inert; multiresolution did the work.
-- [NATIVE_PRETRAIN_PREFLIGHT.md](design/NATIVE_PRETRAIN_PREFLIGHT.md) — provenance for the
-  `pretrain_native` run.
-- [PIPELINE_A_PREFLIGHT.md](design/PIPELINE_A_PREFLIGHT.md) — older 8-dataset / 57-label / 60 Hz
-  audit. **Superseded** by NATIVE_PRETRAIN_PREFLIGHT for corpus facts.
-- [TOKENIZER_QUALITY.md](design/TOKENIZER_QUALITY.md) — quality battery on an **11k-step** encoder;
-  predates the current checkpoints.
+  Phase-A record and the handoff contract. Commands live in
+  [`training/tokenizer/README.md`](../training/tokenizer/README.md).
+- [**PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — the sole Phase-B motivation
+  and training contract. Commands live in
+  [`training/evidence/README.md`](../training/evidence/README.md).
+- [AUGMENTATIONS.md](design/AUGMENTATIONS.md) — augmentation policy and the told-vs-not-told experiment.
 
-**Planning**
+**Planning and open issues**
 - [REMEDIATION_PLAN.md](design/REMEDIATION_PLAN.md) — every known correctness/fairness issue, with
-  status. Includes the 2026-07-21 debug-sweep table (fixed vs still open).
-- [DATA_SCALING_PLAN.md](design/DATA_SCALING_PLAN.md) — corpus is ~290–547 h reachable; the case for
+  status. The first place to look before trusting any result.
+- [DATA_SCALING_PLAN.md](design/DATA_SCALING_PLAN.md) — what corpus is reachable and the case for
   broadening.
 
-## `data/` — the corpus and how it's built
+**Literature**
+- [EVIDENCE_ENGINE_RESEARCH.md](design/EVIDENCE_ENGINE_RESEARCH.md) — prior-art synthesis with real
+  citations and a blunt novelty read. Useful for related work; not a design spec.
+
+**Proposed — not decided, not built.** Do not describe these as part of the system.
+- [APPLICATIONS.md](design/APPLICATIONS.md) — what a HAR foundation model could make possible
+  downstream, chosen so the pitch does not rest on accuracy we do not have.
+- [LANGUAGE_HIERARCHY.md](design/LANGUAGE_HIERARCHY.md) — language at every level; a second act.
+
+## `data/` — the corpus
 - [DATA_PIPELINE.md](data/DATA_PIPELINE.md) — source → curate → unit→g → resample → window → grids.
 - [DATA_HETEROGENEITY.md](data/DATA_HETEROGENEITY.md) — per-dataset normalization decisions and why.
-- [STORAGE_AUDIT_2026-07-26.md](data/STORAGE_AUDIT_2026-07-26.md) — on-disk footprint by dataset.
 
-## `baselines/` — who we compare against and how
+## `baselines/` — who we compare against
 - [BASELINES.md](baselines/BASELINES.md) — roster, verified input contracts, frozen-vs-self-train.
-- [BASELINE_FAIRNESS_POLICY.md](baselines/BASELINE_FAIRNESS_POLICY.md) — treatment contract. ⚠️ its
-  "identical 6-channel 60 Hz tensor" invariant describes the design, **not** the executed path
-  (scoring runs `non_harmonised`); see the correction in §2.
-- [RESULTS_V2.md](baselines/RESULTS_V2.md) — ⚠️ **superseded** pre-vocabulary-fix snapshot.
-- [RESULTS_PRELIMINARY.md](baselines/RESULTS_PRELIMINARY.md) — ⚠️ **superseded**, older still.
+- [BASELINE_FAIRNESS_POLICY.md](baselines/BASELINE_FAIRNESS_POLICY.md) — the treatment contract.
+  ⚠️ its "identical 6-channel 60 Hz tensor" invariant describes the design, **not** the executed
+  path (scoring runs `non_harmonised`); see the correction in its §2.
 
-## Parked directions (branch `pose-pretext-exploration`, not on main)
-- `POSE_PRETEXT_LITERATURE.md` — IMU→pose as a pretext task. **Killed by literature**: the
-  config-invariance premise is backwards, and IMUCoCo (UIST 2025) already published the mechanism.
-- `ENROLLMENT_BY_DEMONSTRATION.md` — repetition-mined few-shot enrollment. Alive but a larger pivot;
-  prior art unchecked.
+## [`archive/`](archive/README.md) — superseded records
+Ten documents that were authoritative when written and are not now: the pre-consolidation evidence
+engine design and findings, two superseded results snapshots, three superseded preflight/quality
+records, and the falsified learnable-tokenizer arm. **Nothing there describes the current system.**
+Each carries a banner naming its live replacement.
+
+## Parked on branch `pose-pretext-exploration` (not on main)
+- `POSE_PRETEXT_LITERATURE.md` — IMU→pose pretext. **Killed by literature**: the config-invariance
+  premise is backwards, and IMUCoCo (UIST 2025) already published the mechanism.
+- `ENROLLMENT_BY_DEMONSTRATION.md` — repetition-mined enrollment. Alive but a larger pivot.
 
 ## Conventions
 - One concern per folder; add new docs to the matching subfolder **and link them here**.
-- Facts verified against papers/code carry a date.
-- A doc whose central claim is later falsified gets a **banner at the top**, and is kept rather than
-  deleted — the record of what we believed and why is part of the work.
+- Facts verified against papers or code carry a date.
+- A doc whose central claim is falsified gets a banner and **moves to `archive/`** — kept, not
+  deleted, because the record of what we believed and why is part of the work. What changed in the
+  2026-08-08 consolidation is that stale docs no longer sit beside live ones.
+- Numbers live in exactly one place: the Results block above, generated from `eval/results/`.
 - Cross-session context lives in the memory files (`~/.claude/.../memory/halo-*.md`).

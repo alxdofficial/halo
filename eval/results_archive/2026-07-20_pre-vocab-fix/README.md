@@ -10,5 +10,5 @@ deterministic head seeding, the shared subject-split manifest, and the unified p
 Kept so the pre-fix numbers stay reproducible and we can report an honest before/after.
 **Do not mix these with post-fix numbers in one table.**
 
-See `docs/design/EVIDENCE_ENGINE_FINDINGS.md` (STATUS block) and
+See `docs/archive/EVIDENCE_ENGINE_FINDINGS.md` (STATUS block) and
 `docs/design/REMEDIATION_PLAN.md`.

@@ -1,5 +1,9 @@
 # The language-native hierarchy: conditioning → concepts → labels (with graceful degradation)
 
+> **Status: proposed, not decided, not built.** Nothing here exists in code and no result depends on
+> it. It is a direction we may take *after* Phase B is validated. Do not describe it as part of the
+> system; see [`MOTIVATION.md`](MOTIVATION.md) for what HALO actually claims.
+
 A design direction that extends the core thesis (`MOTIVATION.md`). It is a **second act** — to be
 implemented after base HALO + the conditioning experiment are validated — but recorded now so we don't
 lose it.

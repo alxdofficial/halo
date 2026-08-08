@@ -1,3 +1,10 @@
+> # ARCHIVED — not the current design. Do not cite.
+> Superseded by `../design/PHASE_B_TRAINING_INTENT.md`.
+> Kept as a record of what we believed and why; see [`README.md`](README.md) for the
+> full archive index and the pre-v4 number trap.
+
+---
+
 # HALO as an Evidence Engine — working design
 
 > **Historical rationale, not the executable contract.** The live Phase-B recipe is the consolidated
