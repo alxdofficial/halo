@@ -30,6 +30,20 @@ def _load(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _load_history(path: Path, run_id: str | None) -> list[dict]:
+    rows = []
+    if not path.is_file():
+        return rows
+    for line in path.read_text().splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and (run_id is None or value.get("run_id") == run_id):
+            rows.append(value)
+    return rows
+
+
 def _metric(snapshot: dict, name: str, field: str = "mean") -> float:
     try:
         return float(snapshot["metrics"][name][field])
@@ -53,6 +67,9 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
     planned = int(metadata.get("planned_steps", step or 0))
     final = snapshot.get("event") == "run_end" or (planned > 0 and step >= planned)
     stage = snapshot.get("stage", "unknown")
+    history = _load_history(
+        Path(snapshot.get("history_file", "")), snapshot.get("run_id")
+    ) if snapshot else []
 
     if not snapshot:
         alert("critical", "no_telemetry", "No Phase-B telemetry snapshot is available.")
@@ -89,11 +106,54 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
         if math.isfinite(hard_soft_cos) and hard_soft_cos < -0.25:
             alert("warning", "surrogate_gradient_conflict",
                   f"Hard and soft retriever gradients have cosine {hard_soft_cos:.2f}.")
+        output_scale = _metric(snapshot, "output_scale", "max")
+        if math.isfinite(output_scale) and output_scale > 100:
+            alert("warning", "output_scale_growth",
+                  f"Learned output scale reached {output_scale:.1f}; loss may improve without argmax gains.")
+        component_names = {
+            key for row in history[-6:] for key in row.get("metrics", {})
+            if key.startswith("component_grad_norm/")
+        }
+        dead_components = []
+        for key in sorted(component_names):
+            samples = [
+                float(row["metrics"][key].get("max", 0.0))
+                for row in history[-6:] if key in row.get("metrics", {})
+            ]
+            if len(samples) >= 3 and all(value == 0.0 for value in samples[-3:]):
+                dead_components.append(key.removeprefix("component_grad_norm/"))
+        if step > warmup and dead_components:
+            alert("warning", "dead_components",
+                  "Zero gradient in three consecutive probes: "
+                  + ", ".join(dead_components) + ".")
+        subspace_count = int(metadata.get("n_retrieval_heads", 4))
+        subspace_mass = [
+            _metric(snapshot, f"subspace_{index}_mass") for index in range(subspace_count)
+        ]
+        finite_mass = [value for value in subspace_mass if math.isfinite(value)]
+        if finite_mass and (max(finite_mass) > 0.8 or min(finite_mass) < 0.01):
+            alert("warning", "retrieval_subspace_collapse",
+                  f"Recent retrieval-subspace mass is {[round(value, 3) for value in finite_mass]}.")
         validation = snapshot.get("validation", {})
         gain = validation.get("adaptation_macro_cell_ba_gain")
-        if gain is not None and float(gain) < -0.05:
+        if gain is not None and step > warmup and float(gain) < -0.05:
             alert("warning", "worse_than_identity",
                   f"Held-out adaptation score is {float(gain):.3f} below identity control.")
+        gap = validation.get("train_validation_macro_cell_ba_gap")
+        if gap is not None and step > warmup and float(gap) > 0.25:
+            alert("warning", "large_train_validation_gap",
+                  f"Matched train BA exceeds held-out BA by {float(gap):.3f}.")
+        validation_points = []
+        previous_value = object()
+        for row in history:
+            value = row.get("validation", {}).get("macro_cell_ba")
+            if value is not None and value != previous_value:
+                validation_points.append(float(value)); previous_value = value
+        if len(validation_points) >= 3:
+            best = max(validation_points)
+            if all(value < best - 0.10 for value in validation_points[-2:]):
+                alert("warning", "validation_regression",
+                      "The latest two held-out scores are over 0.10 below the run best.")
 
     if stage == "confidence" and snapshot.get("metrics"):
         positive_rate = _metric(snapshot, "target_positive_rate")
@@ -106,6 +166,27 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
                 and score_std < 0.005 and (score_mean < 0.05 or score_mean > 0.95):
             alert("warning", "confidence_saturation",
                   f"Confidence outputs are nearly constant at {score_mean:.3f}.")
+        validation = snapshot.get("validation", {})
+        auroc = validation.get("auroc")
+        if auroc is not None and float(auroc) < 0.48:
+            alert("warning", "confidence_inverted",
+                  f"Validation AUROC is {float(auroc):.3f}, below random ranking.")
+        auprc = validation.get("auprc")
+        prevalence = validation.get("positive_rate")
+        if auprc is not None and prevalence is not None \
+                and float(auprc) < float(prevalence) - 0.02:
+            alert("warning", "confidence_below_base_rate",
+                  f"Validation AUPRC {float(auprc):.3f} is below the "
+                  f"{float(prevalence):.3f} positive-rate baseline.")
+        ece = validation.get("ece")
+        if ece is not None and float(ece) > 0.15:
+            alert("warning", "confidence_miscalibrated",
+                  f"Validation expected calibration error is {float(ece):.3f}.")
+        positive = validation.get("mean_confidence_positive")
+        negative = validation.get("mean_confidence_negative")
+        if positive is not None and negative is not None and float(positive) <= float(negative):
+            alert("warning", "confidence_no_separation",
+                  "Mean confidence for correct predictions does not exceed incorrect predictions.")
 
     status = "green"
     for item in alerts:
@@ -127,6 +208,7 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
         "steps_per_s": rate,
         "eta_minutes": eta,
         "alerts": alerts,
+        "history_points": len(history),
         "metrics": snapshot.get("metrics", {}),
         "mix": snapshot.get("mix", {}),
         "strata": snapshot.get("strata", {}),
@@ -156,11 +238,14 @@ def render_text(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_report(telemetry_dir: Path) -> dict:
-    report = assess(telemetry_dir)
+def write_report(telemetry_dir: Path, *, stale_seconds: float = 150.0, render: bool = False) -> dict:
+    report = assess(telemetry_dir, stale_seconds=stale_seconds)
     _atomic_text(Path(telemetry_dir) / "health.json", json.dumps(report, indent=2) + "\n")
     text = render_text(report)
     _atomic_text(Path(telemetry_dir) / "health.txt", text)
+    if render:
+        from training.evidence.plot_training import render as render_plot
+        render_plot(telemetry_dir)
     print(text, end="", flush=True)
     return report
 
@@ -170,13 +255,12 @@ def main() -> None:
     parser.add_argument("--telemetry-dir", type=Path, required=True)
     parser.add_argument("--watch", type=float, default=0.0)
     parser.add_argument("--stale-seconds", type=float, default=150.0)
+    parser.add_argument("--render", action="store_true")
     args = parser.parse_args()
     while True:
-        report = assess(args.telemetry_dir, stale_seconds=args.stale_seconds)
-        _atomic_text(args.telemetry_dir / "health.json", json.dumps(report, indent=2) + "\n")
-        text = render_text(report)
-        _atomic_text(args.telemetry_dir / "health.txt", text)
-        print(text, end="", flush=True)
+        write_report(
+            args.telemetry_dir, stale_seconds=args.stale_seconds, render=args.render
+        )
         if args.watch <= 0:
             break
         time.sleep(args.watch)

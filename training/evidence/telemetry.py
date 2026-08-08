@@ -60,10 +60,15 @@ class PhaseBTelemetry:
             lambda: defaultdict(lambda: defaultdict(list))
         )
         self.nonfinite: Counter = Counter()
+        self.total_nonfinite: Counter = Counter()
         self.last_validation: dict = {}
         self.metadata: dict = {}
         self.sequence = 0
         self.started = False
+        self.last_metrics: dict = {}
+        self.last_mix: dict = {}
+        self.last_strata: dict = {}
+        self.last_nonfinite: dict = {}
 
     def due(self) -> bool:
         return time.monotonic() - self.last_emit >= self.interval_seconds
@@ -106,6 +111,7 @@ class PhaseBTelemetry:
                 finite[key] = number
             else:
                 self.nonfinite[key] += 1
+                self.total_nonfinite[key] += 1
         for key, value in (categories or {}).items():
             values = value if isinstance(value, (list, tuple)) else (value,)
             self.categories[key].update(str(item) for item in values)
@@ -185,28 +191,38 @@ class PhaseBTelemetry:
         if not self.numeric and not self.categories and not self.nonfinite and not final:
             return None
         window_seconds = time.monotonic() - self.last_emit
+        metrics = {
+            key: _summary(values) for key, values in sorted(self.numeric.items()) if values
+        }
+        mix = {
+            key: dict(sorted(counter.items()))
+            for key, counter in sorted(self.categories.items())
+        }
+        strata = {
+            dimension: {
+                category: {
+                    key: _summary(values)
+                    for key, values in sorted(metric_values.items()) if values
+                }
+                for category, metric_values in sorted(categories.items())
+            }
+            for dimension, categories in sorted(self.strata.items())
+        }
+        nonfinite = dict(sorted(self.total_nonfinite.items()))
+        if final and not metrics and not mix and not self.nonfinite:
+            metrics, mix, strata = self.last_metrics, self.last_mix, self.last_strata
         payload = self._publish(
             step=step,
             elapsed_seconds=elapsed_seconds,
             event="run_end" if final else "heartbeat",
             window_seconds=window_seconds,
-            metrics={key: _summary(values) for key, values in sorted(self.numeric.items()) if values},
-            mix={
-                key: dict(sorted(counter.items()))
-                for key, counter in sorted(self.categories.items())
-            },
-            strata={
-                dimension: {
-                    category: {
-                        key: _summary(values)
-                        for key, values in sorted(metric_values.items()) if values
-                    }
-                    for category, metric_values in sorted(categories.items())
-                }
-                for dimension, categories in sorted(self.strata.items())
-            },
-            nonfinite=dict(sorted(self.nonfinite.items())),
+            metrics=metrics,
+            mix=mix,
+            strata=strata,
+            nonfinite=nonfinite,
         )
+        self.last_metrics, self.last_mix = metrics, mix
+        self.last_strata, self.last_nonfinite = strata, nonfinite
         self.numeric.clear()
         self.categories.clear()
         self.strata.clear()

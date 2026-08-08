@@ -33,11 +33,28 @@ python -m training.evidence.eval_patch_decoder --device cuda \
   --confidence training/evidence/outputs/patch_evidence_confidence.pt
 python -m training.evidence.eval_enrollment --device cuda
 python -m training.evidence.eval_enrollment --device cuda --random-aliases
+# Run the sealed roster only after development decisions are frozen.
+python -m training.evidence.eval_patch_decoder --device cuda --protocol-role test \
+  --confidence training/evidence/outputs/patch_evidence_confidence.pt
+python -m training.evidence.eval_enrollment --device cuda --protocol-role test
 ```
 
-`eval_patch_decoder` is the semantic zero-shot protocol. `eval_enrollment` reports same-subject and
-cross-subject support curves for `k=0,1,2,4,8`; its random-alias run starts at `k=1` and isolates example-based adaptation
-from any help supplied by known label semantics.
+`eval_patch_decoder` is the semantic zero-shot protocol. Both evaluators default to the development
+roster (`motionsense`, `realworld`, `shoaib`); `--protocol-role test` selects the sealed external
+roster (`inclusivehar`, `usc_had`, `tnda_har`, `ut_complex`). Explicit `--datasets` overrides either
+roster and is recorded in the result artifact.
+
+`eval_enrollment` reports same-subject and cross-subject support curves for `k=0,1,2,4,8`; its
+random-alias run starts at `k=1` and isolates example-based adaptation from help supplied by known
+label semantics. A curve freezes its subjects, candidate labels, and query windows at the highest
+execution-supported `k`; smaller `k` values use nested prefixes of the same support set. Unsupported
+points are marked rather than silently changing the evaluated population. Window-level pseudo-event
+ids are rejected for same-subject adaptation. Every result includes the learned decoder, identity
+decoder, support-removed, cyclically label-shuffled support, prototype, and fitted L2 ridge-head
+controls, plus seen/unseen-concept and per-subject results. Enrollment summaries treat subjects as
+the independent unit and include paired subject-bootstrap intervals for each control delta. The
+semantic evaluation reports subject-bootstrap intervals per deployment stream. Development,
+sealed-test, and explicit custom runs use separate output filenames.
 
 The standard predictor exposes one retrieval-capacity setting:
 
@@ -58,8 +75,29 @@ virtual-subject plus mild acquisition-augmentation simulation. Validation evalua
 episode both ways and reports clean and augmented balanced accuracy separately.
 
 Inference remains hard top-k. Training attaches a balanced soft all-memory vote only in backward so
-unselected rows teach retrieval without changing the forward result. Phase-B health telemetry is
-updated about once per minute in `training/evidence/outputs/telemetry/`.
+unselected rows teach retrieval without changing the forward result. Predictor and confidence health
+telemetry is updated about once per minute in separate run directories:
+
+```text
+training/evidence/outputs/telemetry/patch_evidence_predictor/
+training/evidence/outputs/telemetry/patch_evidence_confidence/
+```
+
+Each launch writes an immediate run-identified heartbeat, a run-specific JSONL history, and an atomic
+`phase_b_telemetry_latest.json`. Generate a machine-readable health verdict, concise text summary,
+and live plot without using the training GPU:
+
+```bash
+python -m training.evidence.monitor_training \
+  --telemetry-dir training/evidence/outputs/telemetry/patch_evidence_predictor \
+  --render --watch 60
+```
+
+Predictor telemetry includes candidate-count-normalized CE, training accuracy, per-curriculum-stratum
+metrics, component gradients, clipping, hard/soft retrieval-gradient agreement, evidence-pool
+concentration, support usage, fixed train/held-out canaries, throughput, and VRAM. Confidence telemetry
+includes target balance, score saturation, BCE, AUROC/AUPRC, ECE, Brier score, and risk/coverage. Both
+stages fail before the optimizer update on non-finite gradients.
 
 Both training stages write atomic resumable state beside their output as `*.last.pt`. Resume with
 the same command and `--resume <path-to-last-state>`; bank identity and trajectory-affecting options

@@ -383,6 +383,72 @@ def subject_bootstrap_ci(
     }
 
 
+def paired_subject_bootstrap_difference(
+    gt_names: Sequence[str],
+    pred_names: Sequence[str],
+    control_names: Sequence[str],
+    subjects: np.ndarray,
+    metric: str = "f1_macro",
+    B: int = BOOTSTRAP_B,
+    seed: int = BOOTSTRAP_SEED,
+) -> Dict[str, float]:
+    """Paired subject-bootstrap interval for a model-minus-control metric difference."""
+    gt = np.asarray(gt_names)
+    pred = np.asarray(pred_names)
+    control = np.asarray(control_names)
+    subjects = np.asarray(subjects)
+    if not (len(gt) == len(pred) == len(control) == len(subjects)):
+        raise ValueError("ground truth, predictions, control, and subjects must have equal length")
+    uniq = np.unique(subjects)
+    if metric == "f1_macro":
+        classes = sorted(set(gt.tolist()) | set(pred.tolist()) | set(control.tolist()))
+
+        def score(target, estimate):
+            return f1_score(
+                target, estimate, labels=classes, average="macro", zero_division=0
+            ) * 100
+    elif metric == "balanced_accuracy":
+        classes = sorted(set(gt.tolist()))
+
+        def score(target, estimate):
+            return recall_score(
+                target, estimate, labels=classes, average="macro", zero_division=0
+            ) * 100
+    elif metric == "accuracy":
+        def score(target, estimate):
+            return accuracy_score(target, estimate) * 100
+    else:
+        raise ValueError(f"unsupported bootstrap metric: {metric}")
+
+    point = float(score(gt, pred) - score(gt, control))
+    if len(uniq) < 2:
+        return {
+            f"{metric}_difference": point,
+            f"{metric}_difference_ci_lo": float("nan"),
+            f"{metric}_difference_ci_hi": float("nan"),
+            "bootstrap_B": 0,
+            "n_subjects": int(len(uniq)),
+            "ci_degenerate": True,
+        }
+    subject_rows = {subject: np.flatnonzero(subjects == subject) for subject in uniq}
+    rng = np.random.RandomState(seed)
+    statistics = []
+    for _ in range(B):
+        sampled = rng.choice(uniq, size=len(uniq), replace=True)
+        rows = np.concatenate([subject_rows[subject] for subject in sampled])
+        statistics.append(score(gt[rows], pred[rows]) - score(gt[rows], control[rows]))
+    lower, upper = np.percentile(statistics, [2.5, 97.5])
+    return {
+        f"{metric}_difference": point,
+        f"{metric}_difference_ci_lo": float(lower),
+        f"{metric}_difference_ci_hi": float(upper),
+        "bootstrap_B": B,
+        "n_subjects": int(len(uniq)),
+        "ci_method": "paired_subject_bootstrap",
+        "ci_degenerate": False,
+    }
+
+
 def subject_groupkfold_ci(
     gt_names: Sequence[str],
     pred_names: Sequence[str],

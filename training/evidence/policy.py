@@ -38,9 +38,14 @@ CANDIDATE_COUNTS = (4, 8, 12, 16)
 LABEL_TEXT_MODES = ("coherent", "random_alias")
 PHYSICAL_VIEW_MODES = ("clean", "augmented")
 
+# External evaluation is deliberately split so repeated development runs do not consume every
+# dataset that is supposed to support the final claim. The test roster is only selected explicitly.
+PHASE_B_DEV_DATASETS = ("motionsense", "realworld", "shoaib")
+PHASE_B_TEST_DATASETS = ("inclusivehar", "usc_had", "tnda_har", "ut_complex")
+
 # Artifact guard for the complete predictor recipe. Bump this whenever a behavioral training path
 # changes even if the decoder parameter schema stays compatible.
-PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_hard_forward_soft_backward_v3"
+PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_hard_forward_soft_backward_v4"
 
 # Fine-tuning constants. The online tokenizer uses a deliberately small LR, while an EMA copy
 # supplies stable retrieval keys and the inference representation.

@@ -116,6 +116,37 @@ def binary_auroc(score, target) -> float:
     )
 
 
+def binary_auprc(score, target) -> float:
+    """Average precision for a binary confidence target."""
+    import numpy as np
+
+    score = np.asarray(score, dtype=np.float64)
+    target = np.asarray(target, dtype=bool)
+    positives = int(target.sum())
+    if positives == 0:
+        return float("nan")
+    ranked = target[np.argsort(-score, kind="stable")]
+    precision = np.cumsum(ranked) / np.arange(1, len(ranked) + 1)
+    return float(precision[ranked].sum() / positives)
+
+
+def expected_calibration_error(score, target, bins: int = 10) -> float:
+    """Equal-width expected calibration error for binary confidence."""
+    import numpy as np
+
+    score = np.asarray(score, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if not len(score):
+        return float("nan")
+    total = 0.0
+    edges = np.linspace(0, 1, bins + 1)
+    for lower, upper in zip(edges[:-1], edges[1:]):
+        member = (score >= lower) & (score < upper if upper < 1 else score <= upper)
+        if member.any():
+            total += member.mean() * abs(score[member].mean() - target[member].mean())
+    return float(total)
+
+
 def aurc(uncertainty, correct) -> float:
     """Area under the empirical risk-coverage curve; lower is better."""
     import numpy as np

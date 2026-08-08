@@ -245,6 +245,13 @@ gradient norms, retained soft mass, true-support recall, selected-row entropy, c
 candidate margin, row/subspace utilization, cross-subspace top-k overlap, identity-control gain, and
 support-removal effects.
 
+Telemetry is interpreted per episode type, support count, candidate count, label mode, and physical
+view rather than only as a global average. Candidate CE is normalized by `log(candidate_count)`.
+Expected modules expose component gradient norms, non-finite gradients stop before an optimizer
+update, and the hard/soft retriever probes report both norm ratio and cosine. Every launch immediately
+replaces stale health output with a run-identified heartbeat. A CPU-only monitor turns the latest
+snapshot into green/warning/critical health, a text summary, and an optional plot.
+
 ## 10. Tokenizer Modes
 
 The default mode freezes Phase A. Raw query and support windows are still re-encoded after their
@@ -307,6 +314,16 @@ AUROC, and risk/coverage rather than treated as intrinsic uncertainty guarantees
 6. Identity-control comparisons and telemetry ruling out candidate-position, memory-row, retrieval-
    subspace, or low-entropy selection collapse.
 7. Confidence ECE, AUROC, and risk/coverage on held-out families and truth-absent episodes.
+8. External enrollment curves must use one fixed subject/candidate/query cohort and nested,
+   execution-independent support prefixes. Report unsupported cells instead of substituting windows
+   or changing the cohort. Compare against support removal, shuffled support labels, prototypes, and
+   a fitted few-shot head on exactly the same support/query split.
+9. Development uses the registered external development roster. The external test roster is selected
+   explicitly only after design and checkpoint choices are frozen; report seen and unseen activity
+   concepts separately.
+10. Treat the subject as the independent unit for uncertainty. Report paired subject-bootstrap
+    intervals for adaptation gains over identity, support-removed, shuffled-label, prototype, and
+    fitted-head controls. Keep development, sealed-test, and custom artifacts in distinct files.
 
 An improvement in ordinary in-corpus accuracy that degrades these adaptation tests is a regression
 against the purpose of Phase B.

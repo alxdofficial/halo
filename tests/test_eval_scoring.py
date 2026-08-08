@@ -149,6 +149,19 @@ def test_bootstrap_ci_degenerate_with_one_subject():
     assert np.isnan(ci["f1_macro_ci_lo"]) and np.isnan(ci["f1_macro_ci_hi"])
 
 
+def test_paired_subject_bootstrap_difference_uses_matched_subjects():
+    gt = ["a", "b", "a", "b", "a", "b", "a", "b"]
+    learned = ["a", "b", "a", "b", "a", "b", "a", "a"]
+    control = ["a", "a", "a", "a", "b", "b", "b", "b"]
+    subjects = np.asarray([0, 0, 1, 1, 2, 2, 3, 3])
+    result = scoring.paired_subject_bootstrap_difference(
+        gt, learned, control, subjects, B=200, seed=4
+    )
+    assert result["f1_macro_difference"] > 0
+    assert result["ci_method"] == "paired_subject_bootstrap"
+    assert result["n_subjects"] == 4
+
+
 def test_groupkfold_ci_brackets_point_deterministic_and_degenerate():
     """#7: leave-one-subject-out jackknife CI for small cohorts — brackets the point, is a valid
     deterministic interval, and stays flagged-degenerate for a single-subject cohort."""

@@ -18,7 +18,13 @@ import torch
 import torch.nn.functional as F
 
 from eval.scoring import get_sbert_encoder
-from model.evidence.confidence import EvidenceConfidenceHead, aurc, binary_auroc
+from model.evidence.confidence import (
+    EvidenceConfidenceHead,
+    aurc,
+    binary_auprc,
+    binary_auroc,
+    expected_calibration_error,
+)
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.patch_retrieval import PatchSubspaceRetriever
 from training.evidence.bank_guard import (
@@ -71,33 +77,6 @@ _DEFAULT_BANK = _DIR / "memory_bank.pt"
 _DEFAULT_PREDICTOR = _DIR / "patch_evidence_predictor.pt"
 _DEFAULT_OUT = _DIR / "patch_evidence_confidence.pt"
 SEED = 20260807
-
-
-def expected_calibration_error(score: np.ndarray, target: np.ndarray, bins: int = 10) -> float:
-    score = np.asarray(score, dtype=np.float64)
-    target = np.asarray(target, dtype=np.float64)
-    if not len(score):
-        return float("nan")
-    total = 0.0
-    for lower, upper in zip(np.linspace(0, 1, bins + 1)[:-1], np.linspace(0, 1, bins + 1)[1:]):
-        member = (score >= lower) & (score < upper if upper < 1 else score <= upper)
-        if member.any():
-            total += member.mean() * abs(score[member].mean() - target[member].mean())
-    return float(total)
-
-
-def binary_auprc(score: np.ndarray, target: np.ndarray) -> float:
-    """Average precision for the positive confidence target, without sklearn dependency."""
-    score = np.asarray(score, dtype=np.float64)
-    target = np.asarray(target, dtype=bool)
-    positives = int(target.sum())
-    if positives == 0:
-        return float("nan")
-    order = np.argsort(-score, kind="stable")
-    ranked = target[order]
-    true_positive = np.cumsum(ranked)
-    precision = true_positive / np.arange(1, len(ranked) + 1)
-    return float(precision[ranked].sum() / positives)
 
 
 def main() -> None:
@@ -554,10 +533,8 @@ def main() -> None:
             head.parameters(), 1.0, error_if_nonfinite=True
         )
         optimizer.step(); scheduler.step()
-        validation_metrics = None
         if step == 1 or step % args.val_every == 0:
             metrics = evaluate()
-            validation_metrics = metrics
             telemetry.set_validation(metrics)
             if metrics["bce"] < best["bce"]:
                 best = dict(metrics); best_step = step

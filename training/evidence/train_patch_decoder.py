@@ -1797,6 +1797,7 @@ def main() -> None:
             "planned_steps": args.steps,
             "warmup_steps": args.warmup_steps,
             "grad_clip": args.grad_clip,
+            "n_retrieval_heads": RETRIEVAL_SUBSPACES,
             "output": str(args.out),
             "bank_fp": current_bank_fp,
             "tokenizer_mode": args.tokenizer_mode,

@@ -8,7 +8,12 @@ import torch
 import torch.nn.functional as F
 
 from data.scripts.eda.grid_io import GridRef
-from model.evidence.confidence import EvidenceConfidenceHead, confidence_features
+from model.evidence.confidence import (
+    EvidenceConfidenceHead,
+    binary_auprc,
+    confidence_features,
+    expected_calibration_error,
+)
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.patch_retrieval import PatchSubspaceRetriever
 from training.evidence.build_memory import archive_budget_balanced_keep, label_config_balanced_keep
@@ -41,7 +46,11 @@ from training.evidence.train_patch_decoder import (
 )
 from training.evidence.subject_style import SubjectStyle, apply_subject_style
 from training.evidence.runtime_memory import build_enrollment_memory
-from training.evidence.eval_enrollment import _support_and_query_rows
+from training.evidence.eval_enrollment import (
+    _support_and_query_rows,
+    build_paired_enrollment_plans,
+    paired_subject_summary,
+)
 from training.evidence.device import resolve_device
 
 
@@ -375,6 +384,68 @@ def test_same_subject_enrollment_excludes_the_whole_support_execution():
     assert position.tolist() == [0, 1]
     assert not set(executions[support]).intersection(executions[query])
     assert set(labels[query]) == {"walk", "sit"}
+
+
+def test_paired_enrollment_plan_uses_nested_support_and_fixed_queries():
+    labels, subjects, executions = [], [], []
+    for subject in ("s1", "s2"):
+        for label in ("walk", "sit"):
+            for execution in range(3):
+                labels.extend([label, label])
+                subjects.extend([subject, subject])
+                executions.extend([f"{subject}:{label}:{execution}"] * 2)
+    plans, coverage = build_paired_enrollment_plans(
+        np.asarray(labels, dtype=object),
+        np.asarray(subjects, dtype=object),
+        np.asarray(executions, dtype=object),
+        ["walk", "sit"],
+        requested_support=[0, 1, 2, 4], mode="same_subject", seed=7,
+    )
+    assert coverage["support_ceiling"] == 2
+    assert coverage["subjects"] == 2
+    for plan in plans:
+        assert all(len(rows) == 2 for rows in plan.support_rows)
+        support_executions = {
+            executions[row] for rows in plan.support_rows for row in rows
+        }
+        query_executions = {executions[row] for row in plan.query_rows}
+        assert support_executions.isdisjoint(query_executions)
+        assert all(rows[:1] == (rows[0],) for rows in plan.support_rows)
+
+
+def test_paired_enrollment_rejects_window_level_execution_ids():
+    labels = np.asarray(["walk", "sit"] * 4, dtype=object)
+    subjects = np.asarray(["s1"] * len(labels), dtype=object)
+    executions = np.asarray([f"window_{index}" for index in range(len(labels))], dtype=object)
+    plans, coverage = build_paired_enrollment_plans(
+        labels, subjects, executions, ["walk", "sit"],
+        requested_support=[0, 1, 2], mode="same_subject", seed=1,
+    )
+    assert plans == []
+    assert coverage["status"] == "unverified_window_level_execution_ids"
+
+
+def test_enrollment_summary_uses_paired_subject_differences():
+    records = {
+        "s1": {
+            "f1_macro": 80.0, "identity_f1_macro": 60.0,
+            "support_removed_f1_macro": 50.0,
+            "support_label_shuffled_f1_macro": 40.0,
+            "prototype_f1_macro": 70.0, "ridge_head_f1_macro": 75.0,
+        },
+        "s2": {
+            "f1_macro": 40.0, "identity_f1_macro": 50.0,
+            "support_removed_f1_macro": 45.0,
+            "support_label_shuffled_f1_macro": 30.0,
+            "prototype_f1_macro": 35.0, "ridge_head_f1_macro": 45.0,
+        },
+    }
+    summary = paired_subject_summary(records, seed=3, samples=200)
+    assert summary["learned_f1_macro"] == 60.0
+    assert summary["adaptation_gain_over_identity"] == 5.0
+    assert summary["gain_over_support_removed"] == 12.5
+    assert summary["adaptation_gain_over_identity_ci95"] == [-10.0, 20.0]
+    assert summary["independent_unit"] == "subject"
 
 
 def test_gradient_telemetry_is_zero_before_tokenizer_finetuning_activates():
@@ -734,6 +805,15 @@ def test_confidence_features_are_finite_and_candidate_entropy_is_normalized():
     assert torch.allclose(f2[:, 2], f8[:, 2], atol=1e-6)  # normalized concentration
     head = EvidenceConfidenceHead()
     assert head(f2).shape == (1,)
+
+
+def test_confidence_quality_metrics_reward_correct_ranking_and_calibration():
+    target = np.asarray([0, 0, 1, 1], dtype=bool)
+    good = np.asarray([0.05, 0.2, 0.8, 0.95])
+    reversed_score = good[::-1]
+    assert binary_auprc(good, target) == pytest.approx(1.0)
+    assert binary_auprc(reversed_score, target) < 0.5
+    assert expected_calibration_error(good, target) < 0.2
 
 
 def test_patch_episode_smoke_has_finite_gradients_and_attribution():
