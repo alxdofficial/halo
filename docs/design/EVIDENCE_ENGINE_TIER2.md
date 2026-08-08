@@ -2,12 +2,12 @@
 
 Status: archived experiment record. The pooled trainer, EDL, decoder-level multi-subspace branch,
 and auxiliary losses described here were removed on 2026-08-07. The live contract is
-`PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`.
+`PHASE_B_TRAINING_INTENT.md`.
 Previously: historical plan with T2.4/T2.5 implemented but not empirically gated, updated 2026-07-25.
-Supersedes nothing; extends `EVIDENCE_ENGINE.md` (§4.2 head, §5 objectives) and
-`EVIDENCE_ENGINE_BUILD_PLAN.md` (M4–M6) with the concrete Tier-2 architecture + loss, informed by the
+Supersedes nothing; historically extended `EVIDENCE_ENGINE.md` (§4.2 head, §5 objectives) with the
+concrete Tier-2 architecture + loss, informed by the
 M4a diagnostic ([[halo-phaseB-m4a-results]]) and a literature pass. The authoritative implementation
-contract is `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`.
+contract is `PHASE_B_TRAINING_INTENT.md`.
 
 ## 0. Where we are (the facts this plan is built on)
 

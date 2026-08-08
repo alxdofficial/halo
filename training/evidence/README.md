@@ -6,12 +6,12 @@ Phase A frozen; `--tokenizer-mode ema_finetune` uses detached EMA retrieval keys
 the selected raw query/evidence windows with gradients. A second, frozen-predictor stage calibrates
 reject confidence from correctness and truth-absent episodes.
 
-- **Historical rationale:** see [`docs/design/EVIDENCE_ENGINE.md`](../../docs/design/EVIDENCE_ENGINE.md).
-- **Live contract:** see
-  [`docs/design/PHASE_B_TRAINING_INTENT.md`](../../docs/design/PHASE_B_TRAINING_INTENT.md) and
+- **Canonical motivation and live contract:** see
+  [`docs/design/PHASE_B_TRAINING_INTENT.md`](../../docs/design/PHASE_B_TRAINING_INTENT.md).
+- **Phase-A artifact handoff:** see
   [`docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`](../../docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md).
-- **Archived build plan:** see
-  [`docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md`](../../docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md).
+- **Historical research:** `docs/design/EVIDENCE_ENGINE*.md` records earlier experiments and rejected
+  branches; it is not configuration guidance.
 - **Shared with the rest of HALO:** the tokenizer (`model/tokenizer/`, physical filterbank +
   extensions). Everything else here — the archetypal memory, the evidence decoder, the training
   loop — is bespoke to this approach.

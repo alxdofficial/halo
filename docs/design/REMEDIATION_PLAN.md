@@ -2,7 +2,7 @@
 
 > **Historical issue ledger.** File locations, open/closed markers, and proposed objective rails are
 > not the current implementation contract. Use `training/tokenizer/README.md` for the live Phase-A
-> recipe and `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md` for the live Phase-B recipe. References to the
+> recipe and `PHASE_B_TRAINING_INTENT.md` for the live Phase-B recipe. References to the
 > former pooled trainer/evaluator and EDL are retained only as audit history; that code was deleted
 > on 2026-08-07.
 

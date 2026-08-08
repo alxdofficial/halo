@@ -13,7 +13,7 @@ Training is two phases:
   never enter the loss. See [`training/tokenizer/README.md`](training/tokenizer/README.md).
 - **Phase B** — the evidence engine: retrieval over a memory bank of Phase-A patches, candidate-set
   prediction, then separate reject-confidence calibration. See
-  [`docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`](docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md).
+  [`docs/design/PHASE_B_TRAINING_INTENT.md`](docs/design/PHASE_B_TRAINING_INTENT.md).
 
 This repo is a **clean rebuild** of the v2 work. It carries only the current, verified design; the
 prior tree lives beside it as `legacy_code/` (not part of this repo) and is mined for reference only.

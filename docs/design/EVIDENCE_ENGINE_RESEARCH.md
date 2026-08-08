@@ -1,7 +1,7 @@
 # HALO Evidence-Engine — Research Synthesis & Decision Report
 
 > Produced by a 7-facet research workflow (Consensus + Perplexity/web), 2026-07-14. Companion to
-> `EVIDENCE_ENGINE.md` (design) + `EVIDENCE_ENGINE_BUILD_PLAN.md` (plan). Verdicts are the workflow's;
+> `EVIDENCE_ENGINE.md` (historical design) and `PHASE_B_TRAINING_INTENT.md` (current contract). Verdicts are the workflow's;
 > treat as decision input, not gospel — but the citations are real and the novelty read is blunt.
 
 ## 1. TL;DR

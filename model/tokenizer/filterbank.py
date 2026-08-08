@@ -2,8 +2,8 @@
 
 Ported verbatim from `legacy_code/model/feature_extractor.py` (the battle-tested V2
 tokenizer, with its unit-test suite at `tests/test_filterbank.py`) into the
-evidence-engine Pipeline A front end — see docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md
-(M1). Key hyperparameters and the physics that pins each value are collected below
+evidence-engine Phase-A front end; see docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md.
+Key hyperparameters and the physics that pins each value are collected below
 so they are easy to find and hard to second-guess.
 
 `learnable=True` is the constrained-learnable arm: mildly adaptive ordered centers,

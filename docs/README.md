@@ -7,9 +7,9 @@ Organized into subfolders by concern.
 > 2. [**design/POSITIONING.md**](design/POSITIONING.md) — whether the thesis is worth pursuing, what
 >    the result would actually be **for**, and how to report it. Written 2026-07-21 after a hard look
 >    at the numbers.
-> 3. [**design/EVIDENCE_ENGINE_FINDINGS.md**](design/EVIDENCE_ENGINE_FINDINGS.md) (STATUS block) —
->    the authoritative current empirical position. **Any number in any other doc is subordinate to
->    this one.**
+> 3. [**design/PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — why memory is an
+>    adaptation mechanism, the live episodic contract, and the evidence required before making the
+>    Phase-B claim.
 >
 > ### State of results as of 2026-08-06
 > **`eval/results/` is populated and consistent** — 56 cells (8 models × 7 zero-shot test sets), all
@@ -47,22 +47,21 @@ Organized into subfolders by concern.
   per-sensor identity (device+placement+modality) + trivial intra-sensor role; current-code mapping
   and the fold-in plan. ⚠️ prior-art lane is crowded — see MOTIVATION §2b.
 
-**Evidence engine** (read FINDINGS before the others)
-- [**EVIDENCE_ENGINE_FINDINGS.md**](design/EVIDENCE_ENGINE_FINDINGS.md) — ⭐ current empirical truth,
-  including the retractions and what replaced them.
-- [EVIDENCE_ENGINE.md](design/EVIDENCE_ENGINE.md) — original design rationale (2026-07-13/14).
-  Preserved as written; the empirical picture has since moved.
-- [EVIDENCE_ENGINE_BUILD_PLAN.md](design/EVIDENCE_ENGINE_BUILD_PLAN.md) — milestone plan. Status
-  lines are **stale**: much is built and several gates were later failed.
-- [EVIDENCE_ENGINE_TIER2.md](design/EVIDENCE_ENGINE_TIER2.md) — Tier-2 architecture. Its T2.2/T2.3
-  "GATE PASSED" claims are **retracted**; retained with strike-through as a record.
-- [EVIDENCE_ENGINE_RESEARCH.md](design/EVIDENCE_ENGINE_RESEARCH.md) — 2026-07-14 literature synthesis.
+**Evidence engine**
+- [**PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — the sole current Phase-B
+  motivation and training contract.
+- [EVIDENCE_ENGINE_RESEARCH.md](design/EVIDENCE_ENGINE_RESEARCH.md) — literature synthesis; evidence
+  for design context rather than executable guidance.
+- [EVIDENCE_ENGINE.md](design/EVIDENCE_ENGINE.md),
+  [EVIDENCE_ENGINE_TIER2.md](design/EVIDENCE_ENGINE_TIER2.md), and
+  [EVIDENCE_ENGINE_FINDINGS.md](design/EVIDENCE_ENGINE_FINDINGS.md) — archived design and empirical
+  records. They preserve rejected branches and retractions; none defines the live trainer.
 
 **Pretraining / tokenizer**
 - [**PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md**](design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md) —
-  the agreed contract for both phases: objectives, sampling, memory/decoder rules,
-  and required controls. Phase A consolidated to JEPA + augmentation VICReg on 2026-08-06.
-  The executable recipe lives in [`training/tokenizer/README.md`](../training/tokenizer/README.md).
+  the completed Phase-A implementation record and artifact handoff to Phase B. Phase-A commands
+  live in [`training/tokenizer/README.md`](../training/tokenizer/README.md); Phase-B details are not
+  duplicated there.
 - [AUGMENTATIONS.md](design/AUGMENTATIONS.md) — augmentation policy + the told-vs-not-told experiment.
 - [LEARNABLE_TOKENIZER_ARM.md](design/LEARNABLE_TOKENIZER_ARM.md) — ⚠️ hypothesis **falsified**: the
   learnable filterbank is inert; multiresolution did the work.

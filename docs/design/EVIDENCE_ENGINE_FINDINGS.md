@@ -2,7 +2,8 @@
 
 > **Archived empirical record.** Paths to the former pooled trainer/evaluator document the code that
 > produced these historical results; those modules were removed in the 2026-08-07 Phase-B
-> consolidation. Use `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md` for runnable commands.
+> consolidation. Use `PHASE_B_TRAINING_INTENT.md` for the current contract and
+> `training/evidence/README.md` for runnable commands.
 
 > ## STATUS — READ FIRST (rewritten 2026-07-21, end of day)
 >

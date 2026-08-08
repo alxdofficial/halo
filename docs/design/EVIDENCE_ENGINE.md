@@ -2,7 +2,7 @@
 
 > **Historical rationale, not the executable contract.** The live Phase-B recipe is the consolidated
 > candidate-CE predictor plus separate confidence calibration in
-> `PHASE_B_TRAINING_INTENT.md` and `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`. EDL, a full-soft
+> `PHASE_B_TRAINING_INTENT.md`. EDL, a full-soft
 > numerical forward, and the pooled learned trainer
 > described below were rejected and deleted. The live patch engine also supports optional
 > warm-started EMA-tokenizer fine-tuning; statements below that Phase A must stay permanently frozen
@@ -421,8 +421,8 @@ model/tokenizer/     SHARED — port the legacy PhysicalFilterbankTokenizer + th
 model/evidence/      NEW — primitive encoder, archetypal memory, evidence decoder.
 training/evidence/    NEW — the retrieval/evidence training harness (its own loop, NOT a
                      conventional classifier trainer). See training/evidence/README.md.
-docs/design/EVIDENCE_ENGINE.md   this file (design/rationale).
-docs/design/EVIDENCE_ENGINE_BUILD_PLAN.md   the milestoned build plan (how + order + gates).
+docs/design/EVIDENCE_ENGINE.md   this file (archived design rationale).
+docs/design/PHASE_B_TRAINING_INTENT.md   the current motivation and executable contract.
 ```
 The tokenizer is the only shared component; the mechanism + harness are self-contained so this
 line never conflates with a standard softmax/cosine training path.
