@@ -1,13 +1,16 @@
-"""Does a SMALLER, BALANCED memory bank help? (Tier-2 diagnostic.)
+"""Archived pooled-window bank-size diagnostic; not part of the live Phase-B recipe.
 
-The MVP bank is "big and roughly balanced" (164,516 windows, per-label cap 8,000). Two competing
+The historical MVP bank had 164,516 windows and a per-label cap of 8,000. Two competing
 intuitions: (a) more exemplars = better coverage of acquisition configs; (b) a huge head-class-heavy
 bank causes hubness and diffuse retrieval (measured effective-k ~2200, hubness Gini 0.81), so a small
 balanced bank might force sharper discrimination.
 
-This settles it empirically on the UNTRAINED mechanism (no learning, so no confound): sweep the
-per-label cap, holding the tier-1 winning config fixed (full-soft, tau=0.03, text-ensemble E=8).
+This historical experiment tested the UNTRAINED pooled mechanism: sweep the per-label cap while
+holding the tier-1 winning config fixed (full-soft, tau=0.03, text-ensemble E=8).
 Each eval cell is encoded ONCE and reused across every bank size, so the sweep is cheap.
+
+The current source-aware patch engine instead uses one global label/configuration-balanced archive
+budget and a fixed balanced active index. This script is retained only to reproduce the old control.
 
 Run:
     PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
@@ -36,7 +39,7 @@ from training.tokenizer.pretrain_data import _stream_gravity_state, stream_chann
 _REPO = Path(__file__).resolve().parents[2]
 _DIR = Path(__file__).resolve().parent / "outputs"
 
-CAPS = [8000, 2000, 500, 200, 50, 20, 5]   # per-label cap (8000 = current bank, effectively uncapped)
+CAPS = [8000, 2000, 500, 200, 50, 20, 5]   # historical pooled-control caps
 TAU = 0.03
 ENS = 8
 

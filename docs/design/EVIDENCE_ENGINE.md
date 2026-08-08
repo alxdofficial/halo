@@ -2,8 +2,11 @@
 
 > **Historical rationale, not the executable contract.** The live Phase-B recipe is the consolidated
 > candidate-CE predictor plus separate confidence calibration in
-> `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`. EDL and the pooled learned trainer described below were
-> rejected and deleted on 2026-08-07.
+> `PHASE_B_TRAINING_INTENT.md` and `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`. EDL, a full-soft
+> numerical forward, and the pooled learned trainer
+> described below were rejected and deleted. The live patch engine also supports optional
+> warm-started EMA-tokenizer fine-tuning; statements below that Phase A must stay permanently frozen
+> are historical rather than implementation requirements.
 
 > **Status:** working design, NOT finalized. This is a *separate line of work* from any
 > conventional (softmax/cosine-classifier) training path. It reuses the **tokenizer**; the

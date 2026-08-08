@@ -1,11 +1,10 @@
 """Build the frozen archetypal memory bank for Phase-B (the evidence engine).
 
-This is the ONE expensive pass in Phase B. We encode the training corpus a single
-time with the frozen Pipeline-A encoder (the fixed+multiresolution default) and cache
-the pooled window vectors + metadata to disk. Every downstream Phase-B training step
-then operates purely on these cached vectors — the encoder never runs in the loop, so
-episodic training is a batched matmul over a compact in-VRAM bank (see
-docs/design/EVIDENCE_ENGINE.md §4.2).
+This is the initial expensive pass in Phase B. We encode the training corpus with the frozen
+Pipeline-A encoder and cache pooled/patch vectors, metadata, and exact source pointers. Frozen
+Phase-B training operates on the cache. Optional ``ema_finetune`` training keeps the global cache
+detached and re-encodes only bounded selected source windows (see
+``docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md``).
 
 Cached bank (``memory_bank.pt``):
     Z          (N, d)  float16   pooled frozen-encoder embeddings (L2-normalizable downstream)
@@ -16,11 +15,13 @@ Cached bank (``memory_bank.pt``):
     label_text (L, 384) float32  frozen-SBERT embedding of each vocab label (the ConSE text space)
     subj_names / cfg_names        int->string decoders for subj / cfg
     backbone   dict              provenance (ckpt path, step, val_ba, git, content fingerprint)
-    patch      dict              schema-v2 valid patch vectors + parent window/event/config,
+    patch      dict              schema-v3 valid patch vectors + parent window/event/config,
                                 center time, duration, resolution, and verification metadata
+    source_row (N,) int64        original native-grid row for exact live re-encoding
 
-The pooled keys are intentionally unchanged: they are the T2.0 control. ``schema_version=2`` adds
-the patch table and a separate behavioral patch-path probe without reinterpreting pooled vectors.
+The pooled keys are intentionally unchanged: they are the T2.0 control. ``schema_version=3`` adds
+the patch table, exact source provenance, and a behavioral patch-path probe without reinterpreting
+pooled vectors.
 
 Memory is built from CLEAN (un-augmented) encodings — a retrieval bank of jittered
 vectors would be matching against noise. Label/query augmentation is a *training-loop*
@@ -43,7 +44,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from data.scripts.eda.grid_io import discover_grids
+from data.scripts.eda.grid_io import discover_grids, grid_corpus_fingerprint
 from data.scripts.labels.canonical_labels import canonicalize
 from eval.scoring import get_sbert_encoder
 from training.tokenizer.eval_transfer import (
@@ -54,6 +55,7 @@ from training.tokenizer.eval_transfer import (
 )
 from training.tokenizer.pretrain_data import (TRAIN_DATASETS, _stream_gravity_state,
                                               stream_channel_descriptions)
+from training.evidence.policy import ARCHIVE_BUDGET_WINDOWS
 
 _REPO = Path(__file__).resolve().parents[2]
 _DEFAULT_CKPT = _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt"
@@ -136,27 +138,97 @@ def label_config_balanced_keep(
     return keep
 
 
+def archive_budget_balanced_keep(
+    labels: torch.Tensor,
+    configs: torch.Tensor,
+    budget: int,
+    *,
+    seed: int = 20260720,
+) -> torch.Tensor:
+    """Spend one global archive budget across labels, then configurations.
+
+    Scarce labels are retained in full. Their unused quota is redistributed to common labels, so
+    the result uses the requested budget whenever enough windows exist. Each label's allocation is
+    then divided across its available acquisition configurations.
+    """
+    n = len(labels)
+    if budget < 1:
+        raise ValueError("archive budget must be positive")
+    if n <= budget:
+        return torch.ones(n, dtype=torch.bool)
+    counts = {int(label): int(labels.eq(label).sum()) for label in labels.unique().tolist()}
+    quotas = {label: 0 for label in counts}
+    remaining = int(budget)
+    active = set(counts)
+    while active and remaining:
+        share = max(1, remaining // len(active))
+        progressed = False
+        for label in sorted(tuple(active)):
+            available = counts[label] - quotas[label]
+            take = min(share, available, remaining)
+            quotas[label] += take
+            remaining -= take
+            progressed |= take > 0
+            if quotas[label] == counts[label]:
+                active.remove(label)
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+
+    keep = torch.zeros(n, dtype=torch.bool)
+    for label, quota in quotas.items():
+        label_rows = torch.nonzero(labels.eq(label), as_tuple=True)[0]
+        label_cfg = configs[label_rows]
+        cfg_values = sorted(map(int, label_cfg.unique().tolist()))
+        cfg_quota = max(1, quota // len(cfg_values))
+        chosen_parts = []
+        for config in cfg_values:
+            rows = label_rows[label_cfg.eq(config)]
+            take = min(cfg_quota, len(rows))
+            generator = torch.Generator().manual_seed(
+                int(seed + 1_000_003 * label + 9_973 * config)
+            )
+            chosen_parts.append(rows[torch.randperm(len(rows), generator=generator)[:take]])
+        chosen = torch.cat(chosen_parts) if chosen_parts else label_rows[:0]
+        if len(chosen) < quota:
+            unchosen = label_rows[~torch.isin(label_rows, chosen)]
+            generator = torch.Generator().manual_seed(int(seed + 31_337 * label))
+            fill = unchosen[torch.randperm(len(unchosen), generator=generator)[:quota - len(chosen)]]
+            chosen = torch.cat([chosen, fill])
+        elif len(chosen) > quota:
+            generator = torch.Generator().manual_seed(int(seed + 65_537 * label))
+            chosen = chosen[torch.randperm(len(chosen), generator=generator)[:quota]]
+        keep[chosen] = True
+    return keep
+
+
+def _patch_ordinals(local_patch_window: torch.Tensor) -> torch.Tensor:
+    """Zero-based patch row within each source window, preserving deterministic export order."""
+    if len(local_patch_window) == 0:
+        return torch.empty(0, dtype=torch.long)
+    if bool((local_patch_window[1:] < local_patch_window[:-1]).any()):
+        raise RuntimeError("detailed patch export is not grouped by source window")
+    _, counts = torch.unique_consecutive(local_patch_window, return_counts=True)
+    starts = counts.cumsum(0) - counts
+    return torch.arange(len(local_patch_window)) - torch.repeat_interleave(starts, counts)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--checkpoint", type=Path,
                     default=Path(os.environ.get("HALO_CKPT", _DEFAULT_CKPT)))
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--max-per-stream", type=int, default=50000,
-                    help="cap windows per stream at ENCODE time (tractable; -1 = all)")
-    ap.add_argument("--max-per-label", type=int, default=8000,
-                    help="configuration-balanced cap per global label AFTER encoding (tames "
-                         "head-class/config flooding; rare labels/configs kept; -1 = no cap)")
-    ap.add_argument(
-        "--label-cap-policy",
-        choices=("configuration_balanced", "random"),
-        default="configuration_balanced",
-        help="how --max-per-label selects common-label windows; random is the historical control",
-    )
+    ap.add_argument("--archive-budget-windows", type=int, default=ARCHIVE_BUDGET_WINDOWS,
+                    help="one balanced archive-size budget; rare labels are retained first")
     ap.add_argument("--out", type=Path, default=_DEFAULT_OUT)
     args = ap.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    cap = None if args.max_per_stream is not None and args.max_per_stream < 0 else args.max_per_stream
-    label_cap = None if args.max_per_label is not None and args.max_per_label < 0 else args.max_per_label
+    if args.archive_budget_windows < 1:
+        ap.error("--archive-budget-windows must be positive")
+    # Fixed engineering guard: the global archive policy below, rather than this scan ceiling,
+    # determines the represented memory distribution.
+    scan_cap_per_stream = 50_000
 
     if not args.checkpoint.exists():
         raise FileNotFoundError(
@@ -182,10 +254,11 @@ def main() -> None:
     refs = sorted((r for r in discover_grids("native") if r.dataset in roster),
                   key=lambda r: r.key)
     Z_parts, y_parts, subj_parts, cfg_parts, event_parts, event_verified_parts = [], [], [], [], [], []
+    source_row_parts = []
     patch_Z_parts, patch_y_parts, patch_subj_parts = [], [], []
     patch_cfg_parts, patch_sensor_parts = [], []
     patch_window_parts, patch_event_parts, patch_event_verified_parts = [], [], []
-    patch_time_parts, patch_duration_parts, patch_resolution_parts = [], [], []
+    patch_time_parts, patch_duration_parts, patch_resolution_parts, patch_ordinal_parts = [], [], [], []
     subj_names: dict[str, int] = {}
     cfg_names: dict[str, int] = {}
     cfg_rates: dict[int, float] = {}
@@ -223,8 +296,8 @@ def main() -> None:
         if keep.size == 0:
             print(f"[memory]   {ref.key}: 0 in-vocab windows, skipped", flush=True)
             continue
-        if cap is not None and keep.size > cap:
-            keep = np.sort(rng.choice(keep, cap, replace=False))
+        if keep.size > scan_cap_per_stream:
+            keep = np.sort(rng.choice(keep, scan_cap_per_stream, replace=False))
         data = np.asarray(ref.load_data()[keep])
         texts = stream_channel_descriptions(ref.dataset, ref.stream)
         gs = _stream_gravity_state(ref.dataset, ref.stream)
@@ -262,12 +335,14 @@ def main() -> None:
         patch_time_parts.append(encoded["patch_time"].float())
         patch_duration_parts.append(encoded["patch_duration"].float())
         patch_resolution_parts.append(encoded["patch_resolution"].long())
+        patch_ordinal_parts.append(_patch_ordinals(local_patch_window))
         Z_parts.append(z.to(torch.float16))
         y_parts.append(torch.from_numpy(gl[keep].astype(np.int64)))
         subj_parts.append(torch.from_numpy(s_ids))
         cfg_parts.append(torch.full((keep.size,), cfg_id, dtype=torch.int64))
         event_parts.append(torch.from_numpy(e_ids))
         event_verified_parts.append(event_verified)
+        source_row_parts.append(torch.from_numpy(keep.astype(np.int64)))
         next_window += int(keep.size)
         bank_streams[ref.key] = int(keep.size)
         bank_datasets.add(ref.dataset)
@@ -279,6 +354,7 @@ def main() -> None:
     cfg = torch.cat(cfg_parts)
     event = torch.cat(event_parts)
     event_verified = torch.cat(event_verified_parts)
+    source_row = torch.cat(source_row_parts)
     patch = {
         "Z": torch.cat(patch_Z_parts),
         "y": torch.cat(patch_y_parts),
@@ -293,33 +369,25 @@ def main() -> None:
         "time": torch.cat(patch_time_parts),
         "duration": torch.cat(patch_duration_parts),
         "resolution": torch.cat(patch_resolution_parts),
+        "ordinal": torch.cat(patch_ordinal_parts),
     }
 
-    # Per-label/config balance: cap each global label while dividing its budget across acquisition
-    # configurations. A random label-only cap leaves common Capture-24 labels almost entirely
-    # acc-only wrist; the evidence engine instead needs each available way of observing an activity.
-    if label_cap is not None:
-        if args.label_cap_policy == "configuration_balanced":
-            keep_mask = label_config_balanced_keep(y, cfg, label_cap)
-        else:
-            keep_mask = torch.zeros(len(y), dtype=torch.bool)
-            for label in y.unique().tolist():
-                rows = torch.nonzero(y.eq(label), as_tuple=True)[0]
-                if len(rows) > label_cap:
-                    generator = torch.Generator().manual_seed(int(label))
-                    rows = rows[torch.randperm(len(rows), generator=generator)[:label_cap]]
-                keep_mask[rows] = True
+    # One global budget, distributed label -> configuration. This replaces independently tunable
+    # stream/label caps whose interactions made the effective memory population hard to explain.
+    if len(y) > args.archive_budget_windows:
+        keep_mask = archive_budget_balanced_keep(y, cfg, args.archive_budget_windows)
         before = len(y)
         remap = torch.full((before,), -1, dtype=torch.long)
         remap[keep_mask] = torch.arange(int(keep_mask.sum()), dtype=torch.long)
         keep_patch = keep_mask[patch["window"]]
         patch = {name: values[keep_patch] for name, values in patch.items()}
         patch["window"] = remap[patch["window"]]
-        Z, y, subj, cfg, event, event_verified = (
+        Z, y, subj, cfg, event, event_verified, source_row = (
             Z[keep_mask], y[keep_mask], subj[keep_mask], cfg[keep_mask], event[keep_mask],
-            event_verified[keep_mask],
+            event_verified[keep_mask], source_row[keep_mask],
         )
-        print(f"[memory] per-label cap {label_cap}: {before} -> {len(y)} windows", flush=True)
+        print(f"[memory] balanced archive budget {args.archive_budget_windows}: "
+              f"{before} -> {len(y)} windows", flush=True)
 
     sbert = get_sbert_encoder()
     label_text = torch.from_numpy(sbert(vocab).astype(np.float32))   # (L, 384) L2-normalized
@@ -335,9 +403,9 @@ def main() -> None:
     from training.evidence.bank_guard import bank_fingerprint, vocab_fingerprint
     args.out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "Z": Z, "y": y, "subj": subj, "cfg": cfg, "event": event,
-        "event_verified": event_verified,
+        "event_verified": event_verified, "source_row": source_row,
         # Versioned patch evidence. The legacy pooled keys above intentionally remain unchanged so
         # official pooled controls and old adapters keep their exact data contract.
         "patch": patch,
@@ -352,10 +420,11 @@ def main() -> None:
                      "fingerprint": _backbone_fp(args.checkpoint),
                      "frontend": ckpt["config"].get("frontend"),
                      "multiresolution": ckpt["config"].get("multiresolution")},
-        "max_per_stream": cap,
-        "max_per_label": label_cap,
+        "archive_budget_windows": int(args.archive_budget_windows),
+        "source_scan_cap_per_stream": scan_cap_per_stream,
+        "source_alignment": "native",
         "balance_policy": {
-            "label_cap": f"{args.label_cap_policy}_v1",
+            "archive": "global_label_config_balanced_v1",
         },
         # Bind the bank to the corpus it was built from AND to the Phase-A corpus the encoder was
         # trained on (F3): a matching vocabulary + backbone is not enough — a bank encoded over a
@@ -367,6 +436,7 @@ def main() -> None:
             "n_encoded_windows": int(sum(bank_streams.values())),
             "phase_a_corpus_fp": ckpt.get("corpus_fingerprint"),   # None for pre-fingerprint ckpts
             "phase_a_corpus": ckpt.get("corpus"),
+            "source_grid_fp": grid_corpus_fingerprint("native", refs),
         },
         # BEHAVIOURAL fingerprint of the embedding path that produced Z. Corpus/weight/roster
         # fingerprints all stay identical when the encode CODE changes (e.g. the F1 pooling fix),

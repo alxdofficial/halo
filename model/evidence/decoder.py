@@ -36,7 +36,8 @@ import torch.nn.functional as F
 
 ROLE_QUERY = 0
 ROLE_EVIDENCE = 1
-ROLE_CANDIDATE = 2
+ROLE_SUPPORT = 2
+ROLE_CANDIDATE = 3
 
 
 @dataclass
@@ -54,6 +55,7 @@ class DecoderConfig:
     candidate_tokens: bool = False
     candidate_layers: int = 2
     structural_metadata: bool = False
+    support_role: bool = False
 
 
 def _fourier_time(t: torch.Tensor, n_freqs: int, time_max: float) -> torch.Tensor:
@@ -154,8 +156,12 @@ class EvidenceDecoder(nn.Module):
         self.proj_cfg = nn.Linear(cfg.text_dim, d)       # text-keyed config/placement (frozen SBERT)
         self.proj_lab = nn.Linear(cfg.text_dim, d)       # evidence known-label text (frozen SBERT)
         self.proj_time = nn.Linear(2 * cfg.n_time_freqs, d)
-        n_roles = 3 if cfg.candidate_tokens else 2
+        n_roles = 2 + int(cfg.support_role) + int(cfg.candidate_tokens)
         self.role_emb = nn.Embedding(n_roles, d)         # QUERY | EVIDENCE | optional CANDIDATE
+        self.support_role_id = ROLE_SUPPORT if cfg.support_role else ROLE_EVIDENCE
+        self.candidate_role_id = (
+            ROLE_CANDIDATE if cfg.support_role else ROLE_SUPPORT
+        )
         self.q_nolabel = nn.Parameter(torch.zeros(d))    # query stands in for "no label text"
         self.in_ln = nn.LayerNorm(d)
 
@@ -225,6 +231,7 @@ class EvidenceDecoder(nn.Module):
         w_retr,             # (B, k)         retrieval weights (normalized over valid evidence)
         cand_text,          # (B, C, text) or (C, text)  frozen SBERT target label text
         ev_mask=None,       # (B, k) bool    True = valid evidence (else padding)
+        ev_support_mask=None,  # (B, k) bool True = episode-provided labeled support
         q_mask=None,        # (B, q) bool    True = valid query patch
         q_config_text=None, ev_config_text=None,    # (B,text) / (B,k,text)  frozen SBERT config
         q_time=None, ev_time=None,                  # (B,q) / (B,k) window-relative seconds
@@ -269,6 +276,12 @@ class EvidenceDecoder(nn.Module):
         )
         q_tok = q_tok + self.q_nolabel
         ev_role = torch.full((B, k), ROLE_EVIDENCE, device=dev, dtype=torch.long)
+        if ev_support_mask is not None:
+            if not self.cfg.support_role:
+                raise ValueError("ev_support_mask requires support_role=True")
+            if ev_support_mask.shape != (B, k):
+                raise ValueError(f"ev_support_mask must have shape {(B, k)}")
+            ev_role = ev_role.masked_fill(ev_support_mask, self.support_role_id)
         ev_tok = self._embed(
             zev, ev_role, ev_label_text, ev_config_text, ev_time,
             ev_duration, ev_resolution,
@@ -303,7 +316,7 @@ class EvidenceDecoder(nn.Module):
         candidate_delta = None
         if self.candidate_blocks is not None:
             cand_role = torch.full(
-                cand_text.shape[:2], ROLE_CANDIDATE, device=dev, dtype=torch.long
+                cand_text.shape[:2], self.candidate_role_id, device=dev, dtype=torch.long
             )
             candidate_state = self.candidate_in_ln(
                 self.proj_lab(cand_text) + self.role_emb(cand_role)

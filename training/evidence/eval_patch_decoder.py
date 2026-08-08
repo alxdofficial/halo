@@ -1,4 +1,4 @@
-"""Evaluate the trained schema-v2 patch evidence engine on the ZS-XD protocol."""
+"""Evaluate the trained source-aware patch evidence engine on the ZS-XD protocol."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data.scripts.curate import deployment_policy as policy
+from data.scripts.curate import deployment_policy
 from eval.data import load_eval_stream
 from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_encoder
 from model.evidence.confidence import EvidenceConfidenceHead, acc_at_coverage, aurc
@@ -28,6 +28,8 @@ from training.evidence.bank_guard import (
     vocab_fingerprint,
 )
 from training.evidence.labeltext import ensemble_text
+from training.evidence.live_encoder import SourcePatchEncoder
+from training.evidence.policy import ACTIVE_WINDOWS_PER_LABEL, PhaseBPolicy
 from training.evidence.patch_episodes import PatchTable, queries_from_encoded
 from training.evidence.train_patch_decoder import (
     decode_patch_queries,
@@ -53,13 +55,14 @@ def score_cell(
     memory_index,
     t_memory,
     sbert,
-    retrieval_cfg,
+    phaseb_policy,
     device,
     *,
     memory_config_text=None,
     raw_labels=True,
     candidate_ensemble=8,
     batch=16,
+    live_source=None,
 ):
     encoded = encode_dataset_detailed(
         enc, np.asarray(es.windows),
@@ -100,13 +103,13 @@ def score_cell(
         logits, aux = decode_patch_queries(
             dec, retriever, bank, index_rows, memory_index,
             query, allowed, candidate_ids, t_memory, candidate_text,
-            topk_per_head=retrieval_cfg["topk_per_head"],
-            max_evidence=retrieval_cfg["max_evidence"],
-            max_per_window=retrieval_cfg["max_per_window"],
-            max_per_label=retrieval_cfg["max_per_label"],
-            tau=retrieval_cfg["tau_retr"],
+            policy=phaseb_policy,
             memory_config_text=memory_config_text,
             query_config_text=query_config_text,
+            live_source=live_source,
+            live_encoder=enc if live_source is not None else None,
+            live_requires_grad=False,
+            query_already_live=live_source is not None,
         )
         prediction[start:stop] = [
             es.eval_labels[index] for index in logits.argmax(1).cpu().tolist()
@@ -154,7 +157,7 @@ def main() -> None:
     ap.add_argument("--confidence", type=Path, default=None,
                     help="optional separately calibrated confidence artifact")
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--datasets", nargs="*", default=list(policy.PRIMARY_EVAL_DATASETS))
+    ap.add_argument("--datasets", nargs="*", default=list(deployment_policy.PRIMARY_EVAL_DATASETS))
     ap.add_argument("--ensemble-candidates", dest="raw_labels", action="store_false", default=True,
                     help="NON-PARITY diagnostic; default uses bare eval label strings")
     ap.add_argument("--batch", type=int, default=16)
@@ -170,6 +173,9 @@ def main() -> None:
     )
     if blob.get("objective") != "candidate_cross_entropy":
         raise SystemExit("evaluation requires the consolidated candidate-CE predictor")
+    if blob.get("training_regime") != \
+            "episodic_memory_adaptation_hard_forward_soft_backward_v1":
+        raise SystemExit("evaluation requires a predictor trained with the current adaptation regime")
     if int(blob.get("memory_schema", 0)) != int(bank["schema_version"]):
         raise SystemExit("patch decoder / memory schema mismatch")
     _, _, current_family_fp = load_activity_families(list(bank["vocab"]))
@@ -192,12 +198,24 @@ def main() -> None:
         d_model=cfg["d_model"], n_layers=cfg["n_layers"], n_heads=cfg["n_heads"],
         candidate_tokens=cfg["candidate_tokens"],
         structural_metadata=cfg["structural_metadata"],
+        support_role=cfg.get("support_role", False),
     )).to(device)
     dec.load_state_dict(blob["decoder"])
     retriever = PatchSubspaceRetriever(
         cfg["d_model"], cfg["n_subspaces"], cfg["subspace_dim"], cfg["subspace_ema"]
     ).to(device)
     retriever.load_state_dict(blob["retriever"])
+    retrieval_cfg = blob["retrieval_cfg"]
+    phaseb_policy = PhaseBPolicy(
+        int(retrieval_cfg["evidence_budget"]), cfg.get("tokenizer_mode", "frozen")
+    )
+    live_source = None
+    if phaseb_policy.tokenizer_mode == "ema_finetune":
+        if "tokenizer_ema" not in blob:
+            raise SystemExit("fine-tuned predictor is missing its EMA tokenizer state")
+        enc.load_state_dict(blob["tokenizer_ema"])
+        enc.eval()
+        live_source = SourcePatchEncoder(bank, device)
     confidence = EvidenceConfidenceHead().to(device)
     if args.confidence is not None:
         confidence_blob = torch.load(args.confidence, map_location="cpu", weights_only=True)
@@ -212,14 +230,18 @@ def main() -> None:
         confidence = None
     dec.eval(); retriever.eval()
 
-    retrieval_cfg = blob["retrieval_cfg"]
     table = PatchTable(bank)
     all_windows = torch.ones(len(bank["Z"]), dtype=torch.bool)
     index_rows = table.sample_index_rows(
-        all_windows, retrieval_cfg["index_per_label"],
+        all_windows, ACTIVE_WINDOWS_PER_LABEL,
         np.random.default_rng(retrieval_cfg["index_seed"]),
     )
-    memory = F.normalize(bank["patch"]["Z"][index_rows].float().to(device), dim=-1)
+    memory = (
+        bank["patch"]["Z"][index_rows].float().to(device)
+        if live_source is None else
+        live_source.encode_patch_rows(index_rows, enc, requires_grad=False).to(device)
+    )
+    memory = F.normalize(memory, dim=-1)
     memory_index = retriever.build_index(memory)
     sbert = get_sbert_encoder()
     t_memory = ensemble_text(list(bank["vocab"]), sbert, 8, train_only=True).to(device)
@@ -230,15 +252,16 @@ def main() -> None:
 
     per_cell, identity_control, calibration = {}, {}, {}
     for dataset in args.datasets:
-        for spec in policy.stream_specs(dataset, "primary"):
+        for spec in deployment_policy.stream_specs(dataset, "primary"):
             try:
                 stream = load_eval_stream(dataset, spec.stream_id, alignment="non_harmonised")
             except FileNotFoundError:
                 continue
             result = score_cell(
                 dec, retriever, confidence, enc, stream, bank, index_rows, memory_index,
-                t_memory, sbert, retrieval_cfg, device, raw_labels=args.raw_labels,
+                t_memory, sbert, phaseb_policy, device, raw_labels=args.raw_labels,
                 batch=args.batch, memory_config_text=memory_config_text,
+                live_source=live_source,
             )
             if result is None:
                 continue

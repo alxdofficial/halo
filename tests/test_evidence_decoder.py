@@ -252,6 +252,26 @@ def test_fully_masked_evidence_row_does_not_produce_nan():
         "a row with no evidence should contribute no evidence"
 
 
+def test_provided_support_role_is_operational_and_keeps_identity_initialization():
+    torch.manual_seed(13)
+    cfg = DecoderConfig(support_role=True)
+    dec = EvidenceDecoder(cfg).eval()
+    x = _inputs(seed=13)
+    support = torch.zeros(4, 6, dtype=torch.bool)
+    support[:, :2] = True
+    with torch.no_grad():
+        output = dec(**x, ev_support_mask=support)
+    assert torch.allclose(
+        output,
+        _untrained_reference(x["ev_label_text"], x["w_retr"], x["cand_text"]),
+        atol=1e-4,
+    )
+    dec.refiner[-1].weight.data.normal_(0, 0.02)
+    dec(**x, ev_support_mask=support).sum().backward()
+    assert dec.role_emb.weight.grad is not None
+    assert float(dec.role_emb.weight.grad[dec.support_role_id].abs().sum()) > 0
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))

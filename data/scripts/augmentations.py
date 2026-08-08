@@ -251,6 +251,25 @@ class AugmentationConfig:
         return cfg
 
     @classmethod
+    def phase_b_generic(cls) -> "AugmentationConfig":
+        """Independent acquisition variation for Phase-B query/support executions.
+
+        Phase B keeps duration, channel layout, gravity state, and text fixed so source patch
+        ordinals remain valid. Subject character is applied separately before this transform.
+        """
+        cfg = cls()
+        cfg.jitter.enabled = True
+        cfg.jitter.p = 0.7
+        cfg.jitter.sigma = 0.025
+        cfg.scale.enabled = True
+        cfg.scale.p = 0.7
+        cfg.scale.low = 0.95
+        cfg.scale.high = 1.05
+        cfg.rotation_3d.enabled = True
+        cfg.rotation_3d.p = 0.8
+        return cfg
+
+    @classmethod
     def none(cls) -> "AugmentationConfig":
         cfg = cls()
         for name in cls.ORDER:

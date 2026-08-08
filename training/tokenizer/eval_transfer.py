@@ -45,12 +45,14 @@ KNN_K = 5
 SEED = 20260718
 
 
-def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
+def build_encoder(ckpt: dict, device, *, training: bool = False) -> SetTokenizerEncoder:
     c = ckpt["config"]
     frontend = c.get("frontend", "fixed")
     kw = dict(
         d_model=c["d_model"], num_layers=c["num_layers"], num_heads=c["num_heads"],
-        dim_feedforward=c["dim_feedforward"], dropout=0.0, dft_size=DFT_SIZE,
+        dim_feedforward=c["dim_feedforward"],
+        dropout=float(c.get("dropout", 0.1)) if training else 0.0,
+        dft_size=DFT_SIZE,
         frontend=frontend,                                  # reconstruct the ACTUAL arm (was: always filterbank)
         use_duration_embedding=c.get("multiresolution", False),
         duration_min_seconds=min(c.get("short_patch_choices", (0.4,))),
@@ -72,7 +74,8 @@ def build_encoder(ckpt: dict, device) -> SetTokenizerEncoder:
     enc.load_state_dict(ckpt["encoder"])
     enc.eval_resolution_pair = tuple(c.get("val_resolution_pair", VAL_RESOLUTION_PAIR))
     enc.min_resolution_ratio = float(c.get("min_resolution_ratio", 1.75))
-    return enc.to(device).eval()
+    enc = enc.to(device)
+    return enc.train() if training else enc.eval()
 
 
 #: Fixed probe spec. A window length that does NOT divide evenly into the patch grid, so the probe
@@ -120,11 +123,12 @@ def patch_embedding_fingerprint(enc, device) -> torch.Tensor:
     return torch.cat(pieces).cpu()
 
 
-@torch.no_grad()
 def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state=None,
                             channel_mask=None, dataset=None, stream=None,
                             source_rate: float | None = None,
-                            _require_patches: bool = True) -> dict[str, torch.Tensor]:
+                            _require_patches: bool = True,
+                            requires_grad: bool = False,
+                            batch_size: int = 256) -> dict[str, torch.Tensor]:
     """Encode windows and retain both pooled and valid per-patch representations.
 
     Returns:
@@ -175,63 +179,67 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
     patch_time_parts = []
     patch_duration_parts = []
     patch_resolution_parts = []
-    for start in range(0, len(data), 256):
-        block = torch.tensor(np.asarray(data[start:start + 256]), dtype=torch.float32)
-        items = []
-        for window in block:
-            item = {"data": window, "rate": rate, "source_rate": source_rate,
-                    "texts": enc_texts, "label_id": 0,
-                    "channel_mask": cmask, "gravity_state": gravity_state, "source": "eval"}
-            if factored:
-                item["role_texts"] = role_texts
-                item["sensor_texts"] = sensor_texts
-                item["sensor_id"] = sensor_id_t
-            items.append(item)
-        batch = collate(items)
-        plen = batch["patch_len"]
-        out = enc(
-            batch["patches"].to(device), batch["rates"].to(device),
-            plen.to(device),
-            batch["role_texts"] if factored else batch["texts"],   # channel_texts = ROLE when factored
-            batch["positions"].to(device),
-            patch_durations=(batch["patch_durations"].to(device)
-                             if "patch_durations" in batch else None),
-            resolution_ids=(batch["resolution_ids"].to(device)
-                            if "resolution_ids" in batch else None),
-            channel_mask=batch["channel_mask"].to(device),
-            patch_padding_mask=batch["patch_padding_mask"].to(device),
-            sensor_texts=(batch["sensor_texts"] if factored else None),
-            sensor_id=(batch["sensor_id"].to(device) if factored else None),
-            source_rate_hz=batch["source_rates"].to(device),
-        )
-        embs.append(out["pooled"].cpu())
-        if "per_patch" not in out:
-            if _require_patches:
-                raise KeyError("encoder detailed export requires an out['per_patch'] tensor")
-            continue
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    grad_context = torch.enable_grad if requires_grad else torch.no_grad
+    for start in range(0, len(data), batch_size):
+        with grad_context():
+            block = torch.tensor(np.asarray(data[start:start + batch_size]), dtype=torch.float32)
+            items = []
+            for window in block:
+                item = {"data": window, "rate": rate, "source_rate": source_rate,
+                        "texts": enc_texts, "label_id": 0,
+                        "channel_mask": cmask, "gravity_state": gravity_state, "source": "eval"}
+                if factored:
+                    item["role_texts"] = role_texts
+                    item["sensor_texts"] = sensor_texts
+                    item["sensor_id"] = sensor_id_t
+                items.append(item)
+            batch = collate(items)
+            plen = batch["patch_len"]
+            out = enc(
+                batch["patches"].to(device), batch["rates"].to(device),
+                plen.to(device),
+                batch["role_texts"] if factored else batch["texts"],
+                batch["positions"].to(device),
+                patch_durations=(batch["patch_durations"].to(device)
+                                 if "patch_durations" in batch else None),
+                resolution_ids=(batch["resolution_ids"].to(device)
+                                if "resolution_ids" in batch else None),
+                channel_mask=batch["channel_mask"].to(device),
+                patch_padding_mask=batch["patch_padding_mask"].to(device),
+                sensor_texts=(batch["sensor_texts"] if factored else None),
+                sensor_id=(batch["sensor_id"].to(device) if factored else None),
+                source_rate_hz=batch["source_rates"].to(device),
+            )
+            embs.append(out["pooled"] if requires_grad else out["pooled"].cpu())
+            if "per_patch" not in out:
+                if _require_patches:
+                    raise KeyError("encoder detailed export requires an out['per_patch'] tensor")
+                continue
 
-        valid = batch["patch_padding_mask"].bool()
-        per_patch = out["per_patch"].cpu()
-        local_rows = (
-            torch.arange(len(block), dtype=torch.long).unsqueeze(1)
-            .expand_as(valid) + int(start)
-        )
-        if "patch_durations" in batch:
-            durations = batch["patch_durations"].float()
-            resolutions = batch["resolution_ids"].long()
-        else:
-            # Single-resolution collate uses one honest true patch length per sample. Every valid
-            # full patch has that support; the short-window fallback records its shorter true len.
-            durations = (
-                batch["patch_len"].float() / batch["rates"].clamp_min(1e-8)
-            ).unsqueeze(1).expand_as(batch["positions"])
-            resolutions = torch.zeros_like(batch["positions"], dtype=torch.long)
+            valid = batch["patch_padding_mask"].bool()
+            per_patch = out["per_patch"]
+            valid_on_output = valid.to(per_patch.device)
+            local_rows = (
+                torch.arange(len(block), dtype=torch.long).unsqueeze(1)
+                .expand_as(valid) + int(start)
+            )
+            if "patch_durations" in batch:
+                durations = batch["patch_durations"].float()
+                resolutions = batch["resolution_ids"].long()
+            else:
+                durations = (
+                    batch["patch_len"].float() / batch["rates"].clamp_min(1e-8)
+                ).unsqueeze(1).expand_as(batch["positions"])
+                resolutions = torch.zeros_like(batch["positions"], dtype=torch.long)
 
-        patch_z_parts.append(per_patch[valid])
-        patch_window_parts.append(local_rows[valid])
-        patch_time_parts.append(batch["positions"].float()[valid])
-        patch_duration_parts.append(durations[valid])
-        patch_resolution_parts.append(resolutions[valid])
+            patch_z_parts.append(per_patch[valid_on_output])
+            metadata_device = per_patch.device if requires_grad else torch.device("cpu")
+            patch_window_parts.append(local_rows[valid].to(metadata_device))
+            patch_time_parts.append(batch["positions"].float()[valid].to(metadata_device))
+            patch_duration_parts.append(durations[valid].to(metadata_device))
+            patch_resolution_parts.append(resolutions[valid].to(metadata_device))
 
     pooled = torch.cat(embs)
     d_model = int(pooled.shape[-1])

@@ -49,8 +49,11 @@ def bank_fingerprint(bank: dict) -> str:
         "datasets": sorted(corpus.get("datasets") or []),
         "streams": sorted((corpus.get("streams") or {}).items()),
         "n_encoded_windows": corpus.get("n_encoded_windows"),
-        "max_per_stream": bank.get("max_per_stream"),
-        "max_per_label": bank.get("max_per_label"),
+        "max_per_stream": bank.get("max_per_stream"),       # schema <= 2
+        "max_per_label": bank.get("max_per_label"),         # schema <= 2
+        "archive_budget_windows": bank.get("archive_budget_windows"),
+        "source_scan_cap_per_stream": bank.get("source_scan_cap_per_stream"),
+        "source_alignment": bank.get("source_alignment"),
         "d_model": bank.get("d_model"),
         "embed_probe_fp": probe_fp,
     }
@@ -76,11 +79,16 @@ def bank_fingerprint(bank: dict) -> str:
             "patch_embed_probe_fp": patch_probe_fp,
             "cfg_rate_hz": sorted((bank.get("cfg_rate_hz") or {}).items()),
         })
+        if int(bank.get("schema_version", 1)) >= 3:
+            payload.update({
+                "source_grid_fp": corpus.get("source_grid_fp"),
+                "n_source_rows": len(bank.get("source_row", [])),
+            })
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def assert_patch_bank(bank: dict, *, context: str = "") -> None:
-    """Validate the schema-v2 patch evidence table and its foreign-key invariants."""
+    """Validate the patch evidence table and its foreign-key/source invariants."""
     import torch
 
     where = f" ({context})" if context else ""
@@ -103,6 +111,8 @@ def assert_patch_bank(bank: dict, *, context: str = "") -> None:
         "Z", "y", "subj", "cfg", "sensor", "window", "event", "event_verified",
         "time", "duration", "resolution",
     }
+    if int(bank.get("schema_version", 1)) >= 3:
+        required.add("ordinal")
     missing = sorted(required - set(patch))
     if missing:
         raise SystemExit(f"\n[bank_guard] MALFORMED PATCH BANK{where}: missing {missing}.\n")
@@ -122,6 +132,31 @@ def assert_patch_bank(bank: dict, *, context: str = "") -> None:
             f"\n[bank_guard] MALFORMED PATCH BANK{where}: patch.window contains an invalid "
             "pooled-window foreign key.\n"
         )
+    if int(bank.get("schema_version", 1)) >= 3:
+        source_row = torch.as_tensor(bank.get("source_row", []))
+        if len(source_row) != len(bank["Z"]) or source_row.dtype not in (
+            torch.int32, torch.int64
+        ) or not len(source_row) or int(source_row.min()) < 0:
+            raise SystemExit(
+                f"\n[bank_guard] MALFORMED SOURCE PROVENANCE{where}: schema-v3 requires one "
+                "nonnegative source_row per pooled window.\n"
+            )
+        ordinal = torch.as_tensor(patch["ordinal"])
+        if ordinal.dtype not in (torch.int32, torch.int64) or int(ordinal.min()) < 0:
+            raise SystemExit(
+                f"\n[bank_guard] MALFORMED SOURCE PROVENANCE{where}: patch.ordinal must be "
+                "a nonnegative integer.\n"
+            )
+        order = torch.argsort(window, stable=True)
+        sorted_window, sorted_ordinal = window[order], ordinal[order]
+        counts = torch.bincount(sorted_window, minlength=len(bank["Z"]))
+        starts = counts.cumsum(0) - counts
+        expected = torch.arange(n) - torch.repeat_interleave(starts, counts)
+        if not torch.equal(sorted_ordinal.cpu(), expected.cpu()):
+            raise SystemExit(
+                f"\n[bank_guard] MALFORMED SOURCE PROVENANCE{where}: patch ordinals are not "
+                "contiguous from zero within every source window.\n"
+            )
     for key in ("y", "subj", "cfg", "event", "event_verified"):
         expected = torch.as_tensor(bank[key])[window]
         actual = torch.as_tensor(patch[key])
@@ -170,8 +205,8 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
 
     The guard originally compared vocabularies only, while its own name and docstring promised
     protection against "mixed protocols". Two banks can share a vocabulary and still be
-    incomparable — different backbone checkpoint, different ``--max-per-label`` cap, different
-    frontend. Those change every retrieval number the bank produces.
+    incomparable — different backbone checkpoint, archive policy, or frontend. Those change every
+    retrieval number the bank produces.
 
     We cannot retro-validate a bank that never recorded its build parameters, so the minimum
     enforceable guarantee is that they ARE recorded; consumers that know the expected backbone
@@ -185,6 +220,11 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
         missing.append("backbone.fingerprint")
     if "corpus" in bank and not bank["corpus"].get("streams"):
         missing.append("corpus.streams")               # which streams the bank was encoded over (F3)
+    if int(bank.get("schema_version", 1)) >= 3:
+        if bank.get("source_alignment") != "native":
+            missing.append("source_alignment=native")
+        if not (bank.get("corpus") or {}).get("source_grid_fp"):
+            missing.append("corpus.source_grid_fp")
     if not missing:
         calculated = bank_fingerprint(bank)
         if bank["bank_fp"] != calculated:
@@ -277,7 +317,7 @@ def assert_embedding_path_current(bank: dict, enc, device, *, context: str = "")
 
 
 def assert_patch_embedding_path_current(bank: dict, enc, device, *, context: str = "") -> None:
-    """Raise if live per-patch export no longer reproduces the schema-v2 bank."""
+    """Raise if live per-patch export no longer reproduces the patch bank."""
     import torch
     from training.tokenizer.eval_transfer import patch_embedding_fingerprint
 

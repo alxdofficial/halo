@@ -22,6 +22,7 @@ class QueryPatches:
     subj: torch.Tensor
     cfg: torch.Tensor
     sensor: torch.Tensor
+    row: torch.Tensor
 
 
 @dataclass
@@ -32,6 +33,25 @@ class EvidenceBatch:
     mask: torch.Tensor
     head: torch.Tensor
     query_patch: torch.Tensor
+    local_index: torch.Tensor | None = None
+
+
+@dataclass
+class EpisodeMemoryView:
+    """One batch-level overlay on the immutable active memory index."""
+
+    allowed: torch.Tensor
+    support_mask: torch.Tensor
+    support_candidate: torch.Tensor
+    candidate_ids: torch.Tensor
+    query_label: torch.Tensor
+    support_units_per_candidate: torch.Tensor
+    episode_type: str
+    label_mode: str
+
+    @property
+    def support_rows(self) -> torch.Tensor:
+        return torch.nonzero(self.support_mask, as_tuple=True)[0]
 
 
 class PatchTable:
@@ -45,6 +65,8 @@ class PatchTable:
         self.window_event_verified = torch.as_tensor(
             bank["event_verified"], dtype=torch.bool
         ).cpu()
+        self.window_cfg = torch.as_tensor(bank["cfg"], dtype=torch.long).cpu()
+        self.window_subj = torch.as_tensor(bank["subj"], dtype=torch.long).cpu()
         window = torch.as_tensor(self.patch["window"], dtype=torch.long).cpu()
         order = torch.argsort(window, stable=True)
         self.order = order
@@ -116,6 +138,7 @@ class PatchTable:
         subj = allocate(torch.long)
         cfg = allocate(torch.long)
         sensor = allocate(torch.long)
+        row_id = torch.full((B, Q), -1, dtype=torch.long, device=device)
         for b, row in enumerate(rows):
             n = len(row)
             mask[b, :n] = True
@@ -128,56 +151,63 @@ class PatchTable:
             subj[b, :n] = torch.as_tensor(self.patch["subj"])[row].long().to(device)
             cfg[b, :n] = torch.as_tensor(self.patch["cfg"])[row].long().to(device)
             sensor[b, :n] = torch.as_tensor(self.patch["sensor"])[row].long().to(device)
+            row_id[b, :n] = row.to(device)
         return QueryPatches(
             Z=Z, mask=mask, time=time, duration=duration, resolution=resolution,
-            window=window, event=event, subj=subj, cfg=cfg, sensor=sensor,
+            window=window, event=event, subj=subj, cfg=cfg, sensor=sensor, row=row_id,
         )
 
     def sample_index_rows(
         self,
         memory_window_mask: torch.Tensor,
-        per_label: int,
+        windows_per_label: int,
         rng: np.random.Generator,
     ) -> torch.Tensor:
-        """Label-balanced, config/resolution-stratified patch roster for an EMA index rebuild."""
+        """Label/config/subject-balanced source windows, retaining all of their patch grids."""
         memory_window_mask = memory_window_mask.detach().cpu().bool()
-        selected = []
-        patch_window = torch.as_tensor(self.patch["window"], dtype=torch.long).cpu()
-        patch_cfg = torch.as_tensor(self.patch["cfg"], dtype=torch.long).cpu()
-        patch_resolution = torch.as_tensor(self.patch["resolution"], dtype=torch.long).cpu()
+        if windows_per_label < 1:
+            raise ValueError("windows_per_label must be positive")
+        selected_windows = []
         for label in sorted(self.label_rows):
-            rows = self.label_rows[label]
-            rows = rows[memory_window_mask[patch_window[rows]]]
-            if per_label > 0 and len(rows) > per_label:
-                groups: dict[tuple[int, int], torch.Tensor] = {}
-                for config, resolution in zip(
-                    patch_cfg[rows].tolist(), patch_resolution[rows].tolist()
-                ):
-                    groups.setdefault((config, resolution), [])
-                for group in groups:
-                    match = patch_cfg[rows].eq(group[0]) & patch_resolution[rows].eq(group[1])
-                    groups[group] = rows[match]
-                quota = max(1, per_label // len(groups))
-                picks = []
-                for group in sorted(groups):
-                    candidates = groups[group]
-                    take = min(quota, len(candidates))
-                    chosen = rng.choice(len(candidates), size=take, replace=False)
-                    picks.append(candidates[torch.from_numpy(np.sort(chosen))])
-                picked = torch.cat(picks)
-                if len(picked) > per_label:
-                    keep = rng.choice(len(picked), size=per_label, replace=False)
-                    picked = picked[torch.from_numpy(np.sort(keep))]
-                elif len(picked) < per_label:
-                    remaining = rows[~torch.isin(rows, picked)]
-                    take = min(per_label - len(picked), len(remaining))
-                    if take:
-                        fill = rng.choice(len(remaining), size=take, replace=False)
-                        picked = torch.cat([
-                            picked, remaining[torch.from_numpy(np.sort(fill))]
-                        ])
-                rows = picked.sort().values
-            selected.append(rows)
+            candidates = torch.nonzero(
+                memory_window_mask & self.window_label.eq(label), as_tuple=True
+            )[0]
+            if len(candidates) <= windows_per_label:
+                selected_windows.append(candidates)
+                continue
+            configs = sorted(self.window_cfg[candidates].unique().tolist())
+            # When a label occurs in more configurations than the active-window budget, assigning
+            # the remainder to sorted config ids would permanently exclude later datasets/streams.
+            # Randomize only the quota order; the supplied generator keeps the roster reproducible.
+            configs = [int(value) for value in rng.permutation(configs)]
+            base, extra = divmod(windows_per_label, len(configs))
+            picked = []
+            for position, config in enumerate(configs):
+                quota = base + int(position < extra)
+                if quota == 0:
+                    continue
+                cfg_windows = candidates[self.window_cfg[candidates].eq(config)]
+                # Temper large subjects by drawing subject round-robin within a configuration.
+                subject_buckets = {}
+                for subject in self.window_subj[cfg_windows].unique().tolist():
+                    values = cfg_windows[self.window_subj[cfg_windows].eq(subject)].numpy()
+                    subject_buckets[int(subject)] = list(rng.permutation(values))
+                cfg_pick = []
+                while len(cfg_pick) < quota and any(subject_buckets.values()):
+                    for subject in sorted(subject_buckets):
+                        if subject_buckets[subject] and len(cfg_pick) < quota:
+                            cfg_pick.append(subject_buckets[subject].pop())
+                picked.extend(cfg_pick)
+            if len(picked) < windows_per_label:
+                remaining = candidates[~torch.isin(candidates, torch.tensor(picked))]
+                take = min(windows_per_label - len(picked), len(remaining))
+                picked.extend(rng.choice(remaining.numpy(), size=take, replace=False).tolist())
+            selected_windows.append(torch.tensor(sorted(picked), dtype=torch.long))
+        selected = [
+            row
+            for windows in selected_windows
+            for row in self.rows_for_windows(windows)
+        ]
         if not selected or not any(len(rows) for rows in selected):
             raise ValueError("no patch rows are eligible for the training memory index")
         return torch.cat(selected)
@@ -191,6 +221,146 @@ def _support_units(patch: dict, rows: torch.Tensor, device) -> torch.Tensor:
     # Offset verified events so their ids cannot collide with ordinary source-window ids.
     offset = int(torch.as_tensor(patch["window"]).max()) + 1
     return torch.where(verified, event + offset, window)
+
+
+def build_episode_memory_view(
+    patch: dict,
+    index_rows: torch.Tensor,
+    query: QueryPatches,
+    query_label: torch.Tensor,
+    candidates: torch.Tensor,
+    *,
+    support_count: int,
+    episode_type: str,
+    label_mode: str,
+    rng: np.random.Generator,
+) -> EpisodeMemoryView:
+    """Construct support/background roles without mutating labels stored in the archive.
+
+    Candidate concepts are removed from ordinary background memory. Exactly ``support_count``
+    event/window identities per candidate are then restored as provided support. All patches from
+    one selected identity are retained, including verified synchronous placements.
+    """
+    if episode_type not in {
+        "semantic_zero_support", "ordinary_few_support",
+        "cross_subject_few_support", "same_subject_enrollment",
+    }:
+        raise ValueError(f"unknown episode type {episode_type!r}")
+    if support_count < 0:
+        raise ValueError("support_count must be nonnegative")
+    if episode_type == "semantic_zero_support" and support_count != 0:
+        raise ValueError("semantic_zero_support requires support_count=0")
+    if label_mode == "random_alias" and support_count == 0:
+        raise ValueError("random aliases are unanswerable without provided support")
+
+    device = query.Z.device
+    rows_cpu = index_rows.detach().cpu().long()
+    y = torch.as_tensor(patch["y"])[rows_cpu].long().to(device)
+    subj = torch.as_tensor(patch["subj"])[rows_cpu].long().to(device)
+    event = torch.as_tensor(patch["event"])[rows_cpu].long().to(device)
+    window = torch.as_tensor(patch["window"])[rows_cpu].long().to(device)
+    cfg = torch.as_tensor(patch["cfg"])[rows_cpu].long().to(device)
+    support_unit = _support_units(patch, rows_cpu, device)
+    candidates = candidates.long().to(device)
+    query_label = query_label.long().to(device)
+    if bool((~torch.isin(query_label, candidates)).any()):
+        raise ValueError("every query label must be in the episode candidate set")
+
+    # A support identity can never be the query execution itself. For verified events this also
+    # excludes every synchronous placement, rather than leaking a sibling sensor as enrollment.
+    query_windows = torch.unique(query.window[query.mask])
+    query_events = torch.unique(query.event[query.mask])
+    eligible_support = ~torch.isin(window, query_windows) & ~torch.isin(event, query_events)
+    support_mask = torch.zeros(len(rows_cpu), dtype=torch.bool, device=device)
+    support_candidate = torch.full(
+        (len(rows_cpu),), -1, dtype=torch.long, device=device
+    )
+    realized = []
+    for candidate_position, label in enumerate(candidates.tolist()):
+        label_rows = y.eq(label) & eligible_support
+        if episode_type == "cross_subject_few_support":
+            query_rows = query_label.eq(label)
+            query_subjects = torch.unique(query.subj[query_rows.unsqueeze(1) & query.mask])
+            label_rows &= ~torch.isin(subj, query_subjects)
+            query_configs = torch.unique(query.cfg[query_rows.unsqueeze(1) & query.mask])
+            label_rows &= ~torch.isin(cfg, query_configs)
+        units = torch.unique(support_unit[label_rows])
+        if len(units) < support_count:
+            raise ValueError(
+                f"candidate label {label} has {len(units)} eligible support units, "
+                f"needs {support_count}"
+            )
+        if support_count:
+            chosen = rng.choice(
+                units.detach().cpu().numpy(), size=support_count, replace=False
+            )
+            chosen_t = torch.as_tensor(chosen, dtype=torch.long, device=device)
+            selected = y.eq(label) & torch.isin(support_unit, chosen_t)
+            support_mask |= selected
+            support_candidate[selected] = candidate_position
+        realized.append(support_count)
+
+    B, Q = query.mask.shape
+    allowed = query.mask.unsqueeze(-1).expand(B, Q, len(rows_cpu)).clone()
+    allowed &= window.view(1, 1, -1).ne(query.window.unsqueeze(-1))
+    allowed &= event.view(1, 1, -1).ne(query.event.unsqueeze(-1))
+    # Candidate classes enter memory only through explicitly provided support. Background labels
+    # remain available as distractors and as semantic bridges in coherent-label episodes.
+    candidate_rows = torch.isin(y, candidates)
+    allowed &= (~candidate_rows | support_mask).view(1, 1, -1)
+    if not bool((allowed.any(-1) | ~query.mask).all()):
+        raise ValueError("at least one query patch has no eligible episodic memory rows")
+    return EpisodeMemoryView(
+        allowed=allowed,
+        support_mask=support_mask,
+        support_candidate=support_candidate,
+        candidate_ids=candidates,
+        query_label=query_label,
+        support_units_per_candidate=torch.tensor(realized, device=device),
+        episode_type=episode_type,
+        label_mode=label_mode,
+    )
+
+
+def balanced_memory_log_prior(patch: dict, index_rows: torch.Tensor, device) -> torch.Tensor:
+    """A count-neutral prior over label -> window -> resolution -> represented duration."""
+    rows = index_rows.detach().cpu().long()
+    y = torch.as_tensor(patch["y"])[rows].long().cpu()
+    window = torch.as_tensor(patch["window"])[rows].long().cpu()
+    resolution = torch.as_tensor(patch["resolution"])[rows].long().cpu()
+    duration = torch.as_tensor(patch["duration"])[rows].float().cpu().clamp_min(1e-6)
+    weight = torch.zeros_like(duration)
+    labels = torch.unique(y)
+    for label in labels.tolist():
+        label_rows = torch.nonzero(y.eq(label), as_tuple=True)[0]
+        windows = torch.unique(window[label_rows])
+        for source_window in windows.tolist():
+            window_rows = label_rows[window[label_rows].eq(source_window)]
+            resolutions = torch.unique(resolution[window_rows])
+            for grid in resolutions.tolist():
+                group = window_rows[resolution[window_rows].eq(grid)]
+                weight[group] = (
+                    duration[group] / duration[group].sum().clamp_min(1e-8)
+                    / len(resolutions) / len(windows) / len(labels)
+                )
+    if not bool((weight > 0).all()):
+        raise ValueError("failed to assign a positive prior to every active memory row")
+    return weight.log().to(device)
+
+
+def support_capacity_by_label(
+    patch: dict,
+    index_rows: torch.Tensor,
+    n_labels: int,
+) -> torch.Tensor:
+    """Count independent verified-event/window support identities per canonical label."""
+    rows = index_rows.detach().cpu().long()
+    labels = torch.as_tensor(patch["y"])[rows].long()
+    units = _support_units(patch, rows, torch.device("cpu"))
+    capacity = torch.zeros(n_labels, dtype=torch.long)
+    for label in torch.unique(labels).tolist():
+        capacity[int(label)] = torch.unique(units[labels.eq(label)]).numel()
+    return capacity
 
 
 def queries_from_encoded(
@@ -234,6 +404,7 @@ def queries_from_encoded(
     return QueryPatches(
         Z=Z, mask=mask, time=time, duration=duration, resolution=resolution,
         window=window_id, event=event, subj=subj, cfg=cfg, sensor=cfg.clone(),
+        row=torch.full((B, Q), -1, dtype=torch.long, device=device),
     )
 
 
@@ -242,18 +413,16 @@ def build_allowed_mask(
     index_rows: torch.Tensor,
     query: QueryPatches,
     query_label: torch.Tensor,
-    memory_labels: torch.Tensor,
     *,
     truth_present: bool,
     true_support: int | None,
-    other_support: int | None,
     config_mode: str,
     rng: np.random.Generator,
 ) -> torch.Tensor:
     """Apply leakage, configuration, memory-roster, and per-label support constraints.
 
-    Candidate labels and memory labels are intentionally independent. The candidate set defines
-    what the model may answer; ``memory_labels`` defines which labeled examples it may retrieve.
+    Candidate labels are intentionally absent from this function: they define what the model may
+    answer, while the active index defines what memory actually contains.
     """
     device = query.Z.device
     rows = index_rows.detach().cpu()
@@ -281,9 +450,6 @@ def build_allowed_mask(
     elif config_mode != "any":
         raise ValueError(f"unknown config_mode {config_mode!r}")
 
-    memory_labels = memory_labels.to(device=device, dtype=torch.long)
-    allowed &= torch.isin(y, memory_labels).view(1, 1, -1)
-
     # Support is sampled once per source example and shared across its patches. Verified
     # synchronous placements share an event-level support identity; unpaired data uses a window.
     for b in range(B):
@@ -293,7 +459,9 @@ def build_allowed_mask(
             allowed[b, :, y.eq(query_label[b])] = False
         active_labels = torch.unique(y[row_allowed]).tolist()
         for label in active_labels:
-            cap = true_support if truth_present and label == int(query_label[b]) else other_support
+            # Only familiarity with the truth is an episode condition. Non-truth labels follow the
+            # same balanced active-index policy and are not governed by a second support knob.
+            cap = true_support if truth_present and label == int(query_label[b]) else None
             if cap is None:
                 continue
             label_rows = torch.nonzero(row_allowed & y.eq(label), as_tuple=True)[0]
@@ -345,9 +513,6 @@ def assemble_evidence(
     selected_global = index_rows.to(device)[retrieval.index]
     patch_window = torch.as_tensor(patch["window"], device=device, dtype=torch.long)
     patch_y = torch.as_tensor(patch["y"], device=device, dtype=torch.long)
-    patch_resolution = torch.as_tensor(patch["resolution"], device=device, dtype=torch.long)
-    patch_duration = torch.as_tensor(patch["duration"], device=device, dtype=torch.float32)
-
     chosen: list[list[tuple[int, float, int, int]]] = []
     for b in range(B):
         candidates = []
@@ -401,20 +566,47 @@ def assemble_evidence(
         query_patch[b, :n] = torch.tensor([v[3] for v in accepted], device=device)
         mask[b, :n] = True
 
-    # Equal total prior mass per active (subspace,resolution) group. Duration weighting within each
-    # group prevents a denser short grid from winning simply by producing more retrievable patches.
+    evidence = EvidenceBatch(
+        index=index, weights=torch.zeros_like(scores), scores=scores, mask=mask,
+        head=head, query_patch=query_patch,
+        local_index=torch.zeros(B, E, dtype=torch.long, device=device),
+    )
+    for b, accepted in enumerate(chosen):
+        n = len(accepted)
+        evidence.local_index[b, :n] = torch.tensor(
+            [int(retrieval.index[b, value[3], value[2], value[4]]) for value in accepted],
+            device=device,
+        )
+    return reweight_evidence(evidence, scores, patch, tau=tau)
+
+
+def reweight_evidence(
+    evidence: EvidenceBatch,
+    scores: torch.Tensor,
+    patch: dict,
+    *,
+    tau: float,
+) -> EvidenceBatch:
+    """Normalize live pair scores without changing the detached selected evidence roster."""
+    if scores.shape != evidence.index.shape:
+        raise ValueError("evidence scores must align with assembled evidence")
+    device = scores.device
+    patch_resolution = torch.as_tensor(patch["resolution"], device=device, dtype=torch.long)
+    patch_duration = torch.as_tensor(patch["duration"], device=device, dtype=torch.float32)
     weights = torch.zeros_like(scores)
-    resolution = patch_resolution[index]
-    duration = patch_duration[index]
+    resolution = patch_resolution[evidence.index]
+    duration = patch_duration[evidence.index]
+    B = scores.shape[0]
     for b in range(B):
-        group_ids = head[b] * 3 + (resolution[b].clamp(-1, 1) + 1)
-        active_groups = torch.unique(group_ids[mask[b]])
+        group_ids = evidence.head[b] * 3 + (resolution[b].clamp(-1, 1) + 1)
+        active_groups = torch.unique(group_ids[evidence.mask[b]])
         for group in active_groups:
-            select = mask[b] & group_ids.eq(group)
+            select = evidence.mask[b] & group_ids.eq(group)
             raw = torch.softmax(scores[b, select] / tau, dim=0) * duration[b, select]
             raw = raw / raw.sum().clamp_min(1e-8)
             weights[b, select] = raw / len(active_groups)
     return EvidenceBatch(
-        index=index, weights=weights, scores=scores, mask=mask,
-        head=head, query_patch=query_patch,
+        index=evidence.index, weights=weights, scores=scores, mask=evidence.mask,
+        head=evidence.head, query_patch=evidence.query_patch,
+        local_index=evidence.local_index,
     )

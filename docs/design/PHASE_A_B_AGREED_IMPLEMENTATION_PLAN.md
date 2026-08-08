@@ -6,6 +6,9 @@ consolidated on 2026-08-07 to one candidate-CE predictor objective followed by a
 predictor confidence-calibration stage. Earlier pooled-window, EDL, auxiliary-loss, and duplicate
 multi-subspace implementations were removed.
 
+The adaptation-focused episode redesign was implemented on 2026-08-08. Its motivation and exact
+live recipe are in `PHASE_B_TRAINING_INTENT.md`.
+
 ## Implementation map and launch gates
 
 Phase A:
@@ -18,7 +21,7 @@ Phase A:
 
 Phase B:
 
-- schema-v2 pooled + patch bank: `training/evidence/{build_memory,bank_guard}.py` and
+- schema-v3 pooled + source-aware patch bank: `training/evidence/{build_memory,bank_guard}.py` and
   `training/tokenizer/eval_transfer.py`;
 - candidate-aware decoder, confidence, learned EMA subspaces:
   `model/evidence/{decoder,confidence,patch_retrieval}.py`;
@@ -50,25 +53,24 @@ python -m training.evidence.train_patch_decoder --device cuda
 python -m training.evidence.train_patch_confidence --device cuda
 python -m training.evidence.eval_patch_decoder --device cuda \
   --confidence training/evidence/outputs/patch_evidence_confidence.pt
+python -m training.evidence.eval_enrollment --device cuda
 ```
 
 `eval_patch_decoder.py` reports the identity evidence-decoder control beside the trained predictor.
 There is no second pooled-window learned trainer.
 
-Patch retrieval uses a bounded EMA-projected coreset by default (`--index-per-label 256`) for
-tractable independent query-patch/subspace lookup. Each label draw is stratified across config and
-resolution, and the coreset is resampled at index refreshes; `--index-per-label -1` is the exact
-full-bank control when hardware permits. Consequently, an episodic support value of `all` means all
-eligible source windows in the active index, while repeated refreshes expose the full bank over
-training.
+Patch retrieval uses a fixed-size, EMA-projected active index for tractable independent
+query-patch/subspace lookup. The index samples 16 source windows per label hierarchically across
+configuration and subject and retains every valid patch grid from those windows. This is an
+implementation policy, not a user-facing hyperparameter. In fine-tuning mode its EMA-tokenizer keys
+are refreshed in deterministic shards.
 
 Corpus scale is controlled without deleting windows. Phase A assigns dataset mass proportional to
 `n^0.25`, caps any dataset share at 25%, and splits each dataset's mass across subjects
-proportional to `n_subject^0.5`. There is no source-specific pair quota. Phase B's 8,000-window label cap is
-water-filled across configurations, and patch-episode queries are uniform over selected labels and
-configurations with square-root subject tempering. Historical controls remain available through
-`--sampler-alpha 0.5 --sampler-max-dataset-share 1 --sampler-subject-alpha 1`,
-`build_memory --label-cap-policy random`, and `train_patch_decoder --query-balance legacy_sqrt`.
+proportional to `n_subject^0.5`. There is no source-specific pair quota. Phase B uses one global,
+label/configuration-balanced archive budget instead of independently tunable stream and label caps;
+its patch-episode queries are uniform over selected labels and configurations with square-root
+subject tempering.
 
 Phase A remains activity-label-free. Phase B may use labels attached to retrieved memory examples and
 the runtime candidate vocabulary.
@@ -135,7 +137,7 @@ from the live trainer rather than retained as dormant switches.
 
 ### Decoder token set
 
-- Use learned structural roles `QUERY`, `EVIDENCE`, and `CANDIDATE`.
+- Use learned structural roles `QUERY`, `EVIDENCE`, `PROVIDED_SUPPORT`, and `CANDIDATE`.
 - Candidate tokens contain frozen label-text content plus the candidate role.
 - First contextualize query/evidence patches. Candidate tokens then use permutation-equivariant
   self-attention and cross-attention over the fixed physical evidence states.
@@ -158,26 +160,31 @@ from the live trainer rather than retained as dormant switches.
 
 ### Episodic training
 
-Vary these axes independently:
+Use the following fixed recipe:
 
-- candidate budget: approximately 10%, 25%, 50%, and 100% of the vocabulary;
-- memory-label roster: approximately 25%, 50%, and 100% of eligible training labels, independent of
-  the candidate roster;
-- true-label memory support: 0, 1, 2, 4, 8, or all eligible examples;
-- independently subsampled support for other candidate labels;
-- same-config, cross-config-only, and query-config-absent memory;
+- exactly balanced cycle over semantic zero-support, ordinary few-support, cross-subject/cross-config
+  few-support, and same-subject enrollment regimes;
+- four or eight candidate labels;
+- exactly 1, 2, 4, or 8 support event/window units per candidate in supported episodes;
+- coherent labels or episode-local random aliases, with aliases forbidden at zero support;
+- remove ordinary memory rows of every candidate concept and restore only selected support;
+- apply persistent virtual-subject style before independent acquisition augmentation;
 - random, language-near, motion-family-near, and physically confusable distractors;
 - predictor stage: truth-present classification episodes only, optimized by candidate cross-entropy;
-- confidence stage: the predictor is frozen and truth-present/truth-absent episodes train only BCE.
+- confidence stage: the predictor is frozen; adaptation-distributed truth-present and coherent
+  truth-absent episodes train only BCE.
 
-The query window/event and subject are always excluded from memory. Reserve complete label families
+The query window and verified event are always excluded from support. Cross-subject episodes also
+exclude query subjects and configurations when selecting support. Reserve complete label families
 from decoder training for model selection so candidate-text reasoning is tested on unseen concepts.
 One support example means one verified physical event, including all of its synchronous placements;
 unpaired data uses one source window.
-True support is sampled with probabilities 35%, 25%, 15%, 10%, 5%, and 10% for
-`0,1,2,4,8,all`; other-label support uses 5%, 10%, 15%, 20%, 20%, and 30%. Requested finite true
-support must be physically realizable after leakage/configuration exclusions or the episode is
-resampled, and requested versus realized support is logged.
+Labels without enough independent executions remain in lower-support episodes but are excluded from
+infeasible high-support strata.
+
+The numerical predictor uses hard top-k retrieval. A label/window/resolution/duration-balanced soft
+all-memory route is attached only in backward with a straight-through estimator, so non-selected
+rows teach the retrieval projection without changing inference behavior.
 
 ## Compatibility, provenance, and gates
 
@@ -185,9 +192,34 @@ resampled, and requested versus realized support is logged.
   structural-metadata policy in run artifacts.
 - Bind every Phase-B artifact to the exact Phase-A checkpoint, corpus, bank fingerprint, patch schema,
   and candidate-text vocabulary.
-- Keep controls for implicit versus explicit acquisition metadata, no-subspace versus subspace
-  retrieval, fixed versus learnable frontend, JEPA+VICReg versus VICReg-only, and the identity
-  evidence decoder.
+- Keep controls for implicit versus explicit acquisition metadata, frozen versus EMA-fine-tuned
+  tokenizer, fixed versus learnable Phase-A frontend, JEPA+VICReg versus VICReg-only, and the
+  identity evidence decoder. Retrieval subspaces are part of the fixed Phase-B recipe rather than a
+  dormant no-subspace branch.
 - Required tests cover VICReg collapse prevention, EMA stop-gradient/update/restore, event-pair
   integrity, patch-bank provenance, leakage exclusions, candidate/evidence permutations, metadata
   masking, episodic support budgets, confidence behavior, and checkpoint guards.
+## Phase B configuration and end-to-end tokenizer fine-tuning
+
+Phase B exposes only orthogonal concepts:
+
+1. **Candidate labels** are task input, not a memory hyperparameter.
+2. **Support** (`zero`, `1`, `2`, `4`, `8` per candidate) is an episode condition. The standard
+   training recipe samples a fixed mixture and validation reports every condition separately.
+3. **Evidence budget** is the sole retrieval-capacity knob. Retrieval K and per-window/per-label
+   contribution limits are derived from it.
+4. **Tokenizer mode** is either `frozen` or `ema_finetune`.
+
+The archive budget, rotating active-index construction, retrieval subspaces, heterogeneity mixture, and
+non-truth memory population are fixed recipe policies. They are persisted in artifacts and logged,
+but are not independently tunable CLI flags. This makes contradictory states (for example asking
+for eight supports after excluding the truth label, or setting a per-label cap above the total
+evidence budget) unrepresentable.
+
+In `ema_finetune` mode the complete memory bank remains detached. Every bank window stores its
+deployment stream and original native-grid row. A detached EMA tokenizer supplies global
+selection keys. After hard top-K selection and bounded evidence assembly, the raw query and selected
+source windows are reloaded and passed through the online tokenizer. Query/evidence similarities
+are recomputed differentiably inside this selected set, so candidate cross-entropy updates the
+online tokenizer, retriever, and evidence decoder without retaining a graph for the full bank.
+EMA keys are refreshed in deterministic shards, and inference uses the EMA tokenizer.
