@@ -10,7 +10,9 @@ Each dataset stores windowed grids under::
 
 and a pre-registered candidate label vocabulary at
 ``data/datasets/<ds>/eval_labels.json`` (the ZS-XD target strings for that
-dataset). The global ConSE training vocabulary lives at
+dataset). Harmonized grid construction may store a genuine synonym under its training-corpus
+canonical name; :func:`eval.scoring.align_ground_truth_labels` maps that internal representation
+back to the unique frozen target string before scoring. The global ConSE training vocabulary lives at
 ``data/labels/global_labels.json``.
 
 Unlike the legacy loader (which majority-voted raw per-timestep activity codes
@@ -48,7 +50,7 @@ class EvalStream:
                      or resampled ``"harmonised"``.
         windows:     (N, T, C) float32 sensor windows (accel + optional gyro), in g.
         gt:          per-window ground-truth label strings, length N (verbatim from
-                     the grid meta — NOT yet filtered to `eval_labels`).
+                     the grid meta — NOT yet aligned or filtered to `eval_labels`).
         subjects:    (N,) subject ids, one per window.
         channels:    the C channel names of `windows`, in grid order.
         rate_hz:     sampling rate of `windows`.
@@ -128,7 +130,7 @@ def load_eval_stream(
                    source, since adapters resample per baseline) or ``"harmonised"``.
 
     The returned `gt` / `subjects` are 1:1 with `windows` (length N) and verbatim
-    from the grid — restrict `gt` to `eval_labels` at scoring time via
+    from the grid — align and restrict `gt` to `eval_labels` at scoring time via
     :func:`eval.scoring.filter_ground_truth`.
     """
     gdir = _grid_dir(dataset, stream, alignment)

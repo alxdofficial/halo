@@ -26,6 +26,21 @@ def test_filter_ground_truth_drops_out_of_vocab():
     assert list(kept_subj) == ["a", "b"]
 
 
+def test_filter_ground_truth_aligns_canonical_grid_labels_to_native_candidates():
+    gt = ["walking_upstairs", "walking_downstairs", "walking"]
+    candidates = ["climbingup", "climbingdown", "walking"]
+    kept_gt, _, keep_idx = scoring.filter_ground_truth(gt, ["a", "a", "a"], candidates)
+    assert kept_gt == candidates
+    assert list(keep_idx) == [0, 1, 2]
+
+
+def test_ground_truth_alignment_rejects_ambiguous_candidate_synonyms():
+    with pytest.raises(ValueError, match="collapse"):
+        scoring.align_ground_truth_labels(
+            ["walking_upstairs"], ["ascending_stairs", "climbingup"]
+        )
+
+
 # =============================================================================
 # Subject-disjoint split
 # =============================================================================

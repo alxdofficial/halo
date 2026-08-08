@@ -16,7 +16,11 @@ import torch.nn.functional as F
 from data.scripts.curate import deployment_policy
 from data.scripts.labels.canonical_labels import canonicalize
 from eval.data import load_eval_stream
-from eval.scoring import classification_metrics, get_sbert_encoder
+from eval.scoring import (
+    align_ground_truth_labels,
+    classification_metrics,
+    get_sbert_encoder,
+)
 from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.patch_retrieval import PatchSubspaceRetriever
 from training.evidence.bank_guard import (
@@ -612,7 +616,9 @@ def main() -> None:
                 _stream_gravity_state(stream.dataset, stream.stream),
                 channel_mask=stream.mask, dataset=stream.dataset, stream=stream.stream,
             )
-            labels = np.asarray(stream.gt, dtype=object)
+            labels = np.asarray(
+                align_ground_truth_labels(stream.gt, stream.eval_labels), dtype=object
+            )
             subjects = np.asarray(stream.subjects, dtype=object)
             if stream.execution_ids is None:
                 raise RuntimeError(f"{dataset}/{stream.stream}: native grid has no execution ids")

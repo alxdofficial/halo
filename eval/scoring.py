@@ -7,7 +7,8 @@ scored by the SAME code path.
 
 Protocol summary (see docs):
   * **ZS-XD**: zero-shot vs the TARGET dataset's own pre-registered label
-    strings (exact string match, no synonym groups anywhere).
+    strings. Canonical grid labels are translated back to the unique native target string before
+    exact-match scoring; target classes are never merged during scoring.
   * **Primary metric: macro-F1** over classes present in ground truth UNION
     predictions (not accuracy) — the imbalance-aware ZSL canon.
   * **Subject-disjoint** splits for anything that trains on target data; a
@@ -25,9 +26,9 @@ Fixes preserved from the legacy audit (do not regress):
     labels and only projects onto the target vocabulary; the bootstrap FREEZES
     the scored class set on the full sample so every replicate scores one
     estimand.
-  * Ground truth is offset-free: the new grid format stores per-window label
-    strings directly (:mod:`eval.data`), so there is no code arithmetic here at
-    all — only a drop of windows whose label is outside the candidate vocab.
+  * Ground truth is offset-free: the new grid format stores per-window label strings directly
+    (:mod:`eval.data`), so there is no code arithmetic. Genuine converter-time synonyms are aligned
+    to the dataset's frozen native candidate wording; other out-of-vocabulary windows are dropped.
 """
 
 from __future__ import annotations
@@ -36,6 +37,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, recall_score
+
+from data.scripts.labels.canonical_labels import canonicalize
 
 # Pre-registered protocol constants (do not tune post-hoc).
 CONSE_TOP_T = 10
@@ -50,6 +53,35 @@ SOFT_POOL_TAU = 0.07  # matches the training temperature
 # Ground truth (offset-free, new grid format)
 # =============================================================================
 
+def align_ground_truth_labels(
+    gt_names: Sequence[str],
+    candidates: Sequence[str],
+) -> List[Optional[str]]:
+    """Align canonical grid labels to a dataset's frozen native candidate strings.
+
+    Grid construction canonicalizes genuine synonyms even for held-out datasets, while the ZS-XD
+    candidate vocabulary intentionally preserves each dataset's published label wording. Translate a
+    grid label to the unique candidate with the same canonical meaning, retaining ``None`` for concepts
+    outside the candidate set. Two candidates that collapse to one canonical concept are not a valid
+    classification target and therefore fail loudly.
+    """
+    candidate_names = list(candidates)
+    canonical_candidates: dict[str, str] = {}
+    for candidate in candidate_names:
+        concept = canonicalize(candidate)
+        previous = canonical_candidates.get(concept)
+        if previous is not None and previous != candidate:
+            raise ValueError(
+                f"candidate labels {previous!r} and {candidate!r} collapse to {concept!r}"
+            )
+        canonical_candidates[concept] = candidate
+    exact = set(candidate_names)
+    return [
+        label if label in exact else canonical_candidates.get(canonicalize(label))
+        for label in gt_names
+    ]
+
+
 def filter_ground_truth(
     gt_names: Sequence[str],
     subjects: Sequence,
@@ -60,10 +92,9 @@ def filter_ground_truth(
     The new grid format already stores a per-window label string and subject id
     (:mod:`eval.data`), so there is no majority vote over raw codes and NO offset
     arithmetic — the class of legacy bug (HARTH min-subtraction) is structurally
-    impossible here. The only ground-truth decision left is which windows are
-    in-vocabulary: a window whose label is not one of the target dataset's
-    pre-registered candidate strings can never be predicted correctly (candidates
-    are exactly `candidates`) and is dropped, mirroring the legacy `keep_idx`.
+    impossible here. Canonicalized synonyms are first translated to the unique
+    dataset-native candidate string. Remaining out-of-vocabulary windows are dropped,
+    mirroring the legacy `keep_idx`.
 
     Args:
         gt_names:   per-window ground-truth label strings, length N.
@@ -78,9 +109,11 @@ def filter_ground_truth(
     """
     gt_names = list(gt_names)
     subjects = np.asarray(subjects)
-    vocab = set(candidates)
-    keep_idx = np.array([i for i, g in enumerate(gt_names) if g in vocab], dtype=np.int64)
-    kept_gt = [gt_names[i] for i in keep_idx]
+    aligned = align_ground_truth_labels(gt_names, candidates)
+    keep_idx = np.array(
+        [i for i, label in enumerate(aligned) if label is not None], dtype=np.int64
+    )
+    kept_gt = [aligned[i] for i in keep_idx]
     return kept_gt, subjects[keep_idx], keep_idx
 
 

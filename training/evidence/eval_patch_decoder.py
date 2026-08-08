@@ -16,6 +16,7 @@ from data.scripts.curate import deployment_policy
 from data.scripts.labels.canonical_labels import canonicalize
 from eval.data import load_eval_stream
 from eval.scoring import (
+    align_ground_truth_labels,
     classification_metrics,
     filter_ground_truth,
     get_sbert_encoder,
@@ -150,6 +151,7 @@ def score_cell(
                 confidence(aux["confidence_features"])
             ).cpu().numpy()
 
+    aligned_gt = align_ground_truth_labels(es.gt, es.eval_labels)
     kept_gt, _, keep = filter_ground_truth(es.gt, es.subjects, es.eval_labels)
     if not len(keep):
         return None
@@ -199,7 +201,7 @@ def score_cell(
     absent_scores = []
     vocab_position = {label: index for index, label in enumerate(bank["vocab"])}
     memory_y = torch.as_tensor(bank["patch"]["y"])[index_rows.cpu()].to(device)
-    gt_array = np.asarray(es.gt, dtype=object)
+    gt_array = np.asarray(aligned_gt, dtype=object)
     for omitted_position, omitted_label in enumerate(es.eval_labels):
         omitted_rows = np.flatnonzero(gt_array == omitted_label)
         if not len(omitted_rows) or len(es.eval_labels) < 2:
