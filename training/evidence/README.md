@@ -3,8 +3,8 @@
 **Pipeline B** is a retrieval/evidence mechanism initialized from Phase-A representations. Its
 predictor has one objective: candidate-set cross-entropy on answerable episodes. The default keeps
 Phase A frozen; `--tokenizer-mode ema_finetune` uses detached EMA retrieval keys and re-encodes only
-the selected raw query/evidence windows with gradients. A second, frozen-predictor stage calibrates
-reject confidence from correctness and truth-absent episodes.
+the selected raw query/evidence windows with gradients. The separate reject-confidence calibration
+experiment is implemented but parked; it is not part of the current Phase-B launch sequence.
 
 - **Canonical motivation and live contract:** see
   [`docs/design/PHASE_B_TRAINING_INTENT.md`](../../docs/design/PHASE_B_TRAINING_INTENT.md).
@@ -28,14 +28,11 @@ Run the real sequence after Phase A finishes:
 python -m training.evidence.build_memory --device cuda
 python -m training.evidence.train_patch_decoder --device cuda --real-smoke
 python -m training.evidence.train_patch_decoder --device cuda
-python -m training.evidence.train_patch_confidence --device cuda
-python -m training.evidence.eval_patch_decoder --device cuda \
-  --confidence training/evidence/outputs/patch_evidence_confidence.pt
+python -m training.evidence.eval_patch_decoder --device cuda
 python -m training.evidence.eval_enrollment --device cuda
 python -m training.evidence.eval_enrollment --device cuda --random-aliases
 # Run the sealed roster only after development decisions are frozen.
-python -m training.evidence.eval_patch_decoder --device cuda --protocol-role test \
-  --confidence training/evidence/outputs/patch_evidence_confidence.pt
+python -m training.evidence.eval_patch_decoder --device cuda --protocol-role test
 python -m training.evidence.eval_enrollment --device cuda --protocol-role test
 ```
 
@@ -46,15 +43,17 @@ roster and is recorded in the result artifact.
 
 `eval_enrollment` reports same-subject and cross-subject support curves for `k=0,1,2,4,8`; its
 random-alias run starts at `k=1` and isolates example-based adaptation from help supplied by known
-label semantics. A curve freezes its subjects, candidate labels, and query windows at the highest
-execution-supported `k`; smaller `k` values use nested prefixes of the same support set. Unsupported
-points are marked rather than silently changing the evaluated population. Window-level pseudo-event
-ids are rejected for same-subject adaptation. Every result includes the learned decoder, identity
-decoder, support-removed, cyclically label-shuffled support, prototype, and fitted L2 ridge-head
-controls, plus seen/unseen-concept and per-subject results. Enrollment summaries treat subjects as
-the independent unit and include paired subject-bootstrap intervals for each control delta. The
-semantic evaluation reports subject-bootstrap intervals per deployment stream. Development,
-sealed-test, and explicit custom runs use separate output filenames.
+label semantics. Before support is appended, every base-archive row whose canonical concept is one
+of the episode's candidate labels is removed; candidate concepts can enter the runtime memory only
+through explicit enrollment. A curve freezes its subjects, candidate labels, and query windows at
+the highest execution-supported `k`; smaller `k` values use nested prefixes of the same support set.
+Unsupported points are marked rather than silently changing the evaluated population. Window-level
+pseudo-event ids are rejected for same-subject adaptation. Every result includes the learned
+decoder, identity decoder, support-removed, cyclically label-shuffled support, prototype, and fitted
+L2 ridge-head controls, plus seen/unseen-concept and per-subject results. Enrollment summaries treat
+subjects as the independent unit and include paired subject-bootstrap intervals for each control
+delta. The semantic evaluation reports subject-bootstrap intervals per deployment stream.
+Development, sealed-test, and explicit custom runs use separate output filenames.
 
 The standard predictor exposes one retrieval-capacity setting:
 

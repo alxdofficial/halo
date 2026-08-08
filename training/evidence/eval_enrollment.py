@@ -323,6 +323,12 @@ def score_enrollment_cell(
     subject_results = {}
     for subject_index, plan in enumerate(plans):
         candidate_names = list(plan.candidate_names)
+        vocab_position = {label: index for index, label in enumerate(base_bank["vocab"])}
+        excluded_base_labels = torch.tensor(sorted({
+            vocab_position[canonicalize(label)]
+            for label in candidate_names
+            if canonicalize(label) in vocab_position
+        }), dtype=torch.long)
         query_rows = plan.query_rows
         support = np.asarray([
             row for rows in plan.support_rows for row in rows[:support_count]
@@ -347,6 +353,7 @@ def score_enrollment_cell(
                 base_bank, base_rows, base_selector_z, encoded,
                 torch.from_numpy(support), torch.from_numpy(position),
                 canonical_text, label_set.embeddings,
+                excluded_base_labels=excluded_base_labels,
             )
             return memory, retriever.build_index(memory.selector_z), balanced_memory_log_prior(
                 memory.bank["patch"], memory.index_rows, device
@@ -357,6 +364,7 @@ def score_enrollment_cell(
             base_bank, base_rows, base_selector_z, encoded,
             torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long),
             canonical_text, label_set.embeddings,
+            excluded_base_labels=excluded_base_labels,
         ), None, None
         removed_index = retriever.build_index(removed.selector_z)
         removed_prior = balanced_memory_log_prior(

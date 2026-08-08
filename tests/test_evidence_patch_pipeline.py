@@ -413,6 +413,28 @@ def test_runtime_enrollment_appends_equal_support_without_mutating_base_bank():
     assert zero.support_units_per_candidate.tolist() == [0, 0]
 
 
+def test_runtime_enrollment_can_exclude_candidate_concepts_from_base_archive():
+    bank = _bank()
+    encoded = {
+        "patch_Z": torch.randn(8, 8),
+        "patch_window": torch.arange(4).repeat_interleave(2),
+        "patch_time": torch.tensor([0.5, 1.5] * 4),
+        "patch_duration": torch.ones(8),
+        "patch_resolution": torch.tensor([0, 1] * 4),
+    }
+    canonical = F.normalize(torch.randn(3, 6), dim=-1)
+    candidates = F.normalize(torch.randn(2, 6), dim=-1)
+    memory = build_enrollment_memory(
+        bank, torch.arange(8), F.normalize(bank["patch"]["Z"].float(), dim=-1),
+        encoded, torch.tensor([0, 1]), torch.tensor([0, 1]), canonical, candidates,
+        excluded_base_labels=torch.tensor([0, 1]),
+    )
+    base_count = int((~memory.support_mask).sum())
+    assert base_count == 2
+    assert set(memory.bank["patch"]["y"][:base_count].tolist()) == {2}
+    assert set(memory.bank["patch"]["y"][base_count:].tolist()) == {3, 4}
+
+
 def test_same_subject_enrollment_excludes_the_whole_support_execution():
     labels = np.asarray(["walk"] * 6 + ["sit"] * 6, dtype=object)
     subjects = np.asarray(["s1"] * 12, dtype=object)

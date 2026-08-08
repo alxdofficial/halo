@@ -56,6 +56,8 @@ def build_enrollment_memory(
     support_candidate_position: torch.Tensor,
     canonical_text: torch.Tensor,
     candidate_text: torch.Tensor,
+    *,
+    excluded_base_labels: torch.Tensor | None = None,
 ) -> EnrollmentMemory:
     """Append labeled external support patches to a detached active corpus view."""
     device = base_selector_z.device
@@ -90,7 +92,17 @@ def build_enrollment_memory(
     ], dtype=torch.long)
 
     base_rows = base_index_rows.detach().cpu().long()
+    if len(base_selector_z) != len(base_rows):
+        raise ValueError("base selector embeddings and index rows must align")
     base_patch = base_bank["patch"]
+    if excluded_base_labels is not None:
+        excluded = excluded_base_labels.detach().cpu().long()
+        base_y = torch.as_tensor(base_patch["y"])[base_rows].long()
+        keep = ~torch.isin(base_y, excluded)
+        base_rows = base_rows[keep]
+        base_selector_z = base_selector_z[keep.to(base_selector_z.device)]
+    if not len(base_rows):
+        raise ValueError("candidate-label exclusion removed every base memory row")
     n_base = len(base_rows)
     n_support = len(selected_rows)
     vocab_size = canonical_text.shape[0]
