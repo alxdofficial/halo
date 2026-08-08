@@ -34,6 +34,7 @@ from eval.scoring import classification_metrics, filter_ground_truth, get_sbert_
 # Keep the train-only gate: eval datasets' hand-authored synonym tables
 # (motionsense/realworld/shoaib) must not leak into the retrieval sweep.
 from training.evidence.labeltext import global_label_paraphrases
+from training.evidence.device import resolve_device
 from training.tokenizer.eval_transfer import build_encoder, encode_dataset
 from training.tokenizer.pretrain_data import _stream_gravity_state, stream_channel_descriptions
 
@@ -90,7 +91,7 @@ def main() -> None:
     ap.add_argument("--sweep-queries", type=int, default=4000, help="query cap during the sweep")
     ap.add_argument("--datasets", nargs="*", default=list(policy.PRIMARY_EVAL_DATASETS))
     args = ap.parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
     from training.evidence.bank_guard import assert_bank_current

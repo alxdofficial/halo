@@ -34,8 +34,13 @@ EPISODE_TYPES = (
     "same_subject_enrollment",
 )
 SUPPORT_COUNTS = (1, 2, 4, 8)
-CANDIDATE_COUNTS = (4, 8)
+CANDIDATE_COUNTS = (4, 8, 12, 16)
 LABEL_TEXT_MODES = ("coherent", "random_alias")
+PHYSICAL_VIEW_MODES = ("clean", "augmented")
+
+# Artifact guard for the complete predictor recipe. Bump this whenever a behavioral training path
+# changes even if the decoder parameter schema stays compatible.
+PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_hard_forward_soft_backward_v3"
 
 # Fine-tuning constants. The online tokenizer uses a deliberately small LR, while an EMA copy
 # supplies stable retrieval keys and the inference representation.

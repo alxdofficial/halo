@@ -56,6 +56,7 @@ from training.tokenizer.eval_transfer import (
 from training.tokenizer.pretrain_data import (TRAIN_DATASETS, _stream_gravity_state,
                                               stream_channel_descriptions)
 from training.evidence.policy import ARCHIVE_BUDGET_WINDOWS
+from training.evidence.device import resolve_device
 
 _REPO = Path(__file__).resolve().parents[2]
 _DEFAULT_CKPT = _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt"
@@ -69,6 +70,18 @@ def _load_vocab() -> list[str]:
 
 def _backbone_fp(ckpt_path: Path) -> str:
     return hashlib.sha256(ckpt_path.read_bytes()).hexdigest() if ckpt_path.exists() else ""
+
+
+def _population_fingerprint(fields: dict[str, torch.Tensor]) -> str:
+    """Hash selected source identities and patch layout without re-hashing learned vectors."""
+    digest = hashlib.sha256()
+    for name in sorted(fields):
+        value = torch.as_tensor(fields[name]).detach().cpu().contiguous()
+        digest.update(name.encode())
+        digest.update(str(value.dtype).encode())
+        digest.update(str(tuple(value.shape)).encode())
+        digest.update(value.numpy().tobytes())
+    return digest.hexdigest()[:16]
 
 
 def label_config_balanced_keep(
@@ -223,7 +236,7 @@ def main() -> None:
                     help="one balanced archive-size budget; rare labels are retained first")
     ap.add_argument("--out", type=Path, default=_DEFAULT_OUT)
     args = ap.parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
     if args.archive_budget_windows < 1:
         ap.error("--archive-budget-windows must be positive")
     # Fixed engineering guard: the global archive policy below, rather than this scan ceiling,
@@ -321,7 +334,12 @@ def main() -> None:
         )
         local_patch_window = encoded["patch_window"].long()
         patch_window_parts.append(local_patch_window + next_window)
-        patch_Z_parts.append(encoded["patch_Z"].to(torch.float16))
+        # ``encode_dataset_detailed`` returns pooled vectors and every metadata field on the CPU but
+        # leaves patch vectors on the encoder device (the live fine-tuning path needs them there).
+        # Narrow to fp16 first, then land on the CPU: otherwise the whole archive accumulates in
+        # VRAM stream by stream (~1.9 GB at the current corpus size) and torch.save writes CUDA
+        # tensors into the bank, which every consumer then has to map back.
+        patch_Z_parts.append(encoded["patch_Z"].to(torch.float16).cpu())
         patch_y_parts.append(torch.from_numpy(gl[keep].astype(np.int64))[local_patch_window])
         patch_subj_parts.append(torch.from_numpy(s_ids)[local_patch_window])
         patch_cfg_parts.append(
@@ -374,7 +392,8 @@ def main() -> None:
 
     # One global budget, distributed label -> configuration. This replaces independently tunable
     # stream/label caps whose interactions made the effective memory population hard to explain.
-    if len(y) > args.archive_budget_windows:
+    archive_was_applied = len(y) > args.archive_budget_windows
+    if archive_was_applied:
         keep_mask = archive_budget_balanced_keep(y, cfg, args.archive_budget_windows)
         before = len(y)
         remap = torch.full((before,), -1, dtype=torch.long)
@@ -402,6 +421,12 @@ def main() -> None:
 
     from training.evidence.bank_guard import bank_fingerprint, vocab_fingerprint
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    population_fp = _population_fingerprint({
+        "y": y, "subj": subj, "cfg": cfg, "event": event,
+        "event_verified": event_verified, "source_row": source_row,
+        **{f"patch_{name}": value for name, value in patch.items() if name != "Z"},
+    })
+    represented_refs = [ref for ref in refs if ref.key in bank_streams]
     payload = {
         "schema_version": 3,
         "Z": Z, "y": y, "subj": subj, "cfg": cfg, "event": event,
@@ -423,8 +448,10 @@ def main() -> None:
         "archive_budget_windows": int(args.archive_budget_windows),
         "source_scan_cap_per_stream": scan_cap_per_stream,
         "source_alignment": "native",
+        "population_fp": population_fp,
         "balance_policy": {
             "archive": "global_label_config_balanced_v1",
+            "archive_applied": archive_was_applied,
         },
         # Bind the bank to the corpus it was built from AND to the Phase-A corpus the encoder was
         # trained on (F3): a matching vocabulary + backbone is not enough — a bank encoded over a
@@ -436,7 +463,7 @@ def main() -> None:
             "n_encoded_windows": int(sum(bank_streams.values())),
             "phase_a_corpus_fp": ckpt.get("corpus_fingerprint"),   # None for pre-fingerprint ckpts
             "phase_a_corpus": ckpt.get("corpus"),
-            "source_grid_fp": grid_corpus_fingerprint("native", refs),
+            "source_grid_fp": grid_corpus_fingerprint("native", represented_refs),
         },
         # BEHAVIOURAL fingerprint of the embedding path that produced Z. Corpus/weight/roster
         # fingerprints all stay identical when the encode CODE changes (e.g. the F1 pooling fix),

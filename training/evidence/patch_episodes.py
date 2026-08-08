@@ -78,11 +78,17 @@ class PatchTable:
         for label in torch.unique(labels).tolist():
             self.label_rows[int(label)] = torch.nonzero(labels == label, as_tuple=True)[0]
         self.event_windows: dict[int, torch.Tensor] = {}
-        for event in torch.unique(self.window_event[self.window_event_verified]).tolist():
-            rows = torch.nonzero(
-                self.window_event_verified & self.window_event.eq(event), as_tuple=True
-            )[0]
-            self.event_windows[int(event)] = rows
+        verified_rows = torch.nonzero(self.window_event_verified, as_tuple=True)[0]
+        if len(verified_rows):
+            event_order = torch.argsort(self.window_event[verified_rows], stable=True)
+            sorted_rows = verified_rows[event_order]
+            sorted_events = self.window_event[sorted_rows]
+            events, counts = torch.unique_consecutive(sorted_events, return_counts=True)
+            offsets = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(0)])
+            for position, event in enumerate(events.tolist()):
+                self.event_windows[int(event)] = sorted_rows[
+                    int(offsets[position]):int(offsets[position + 1])
+                ]
 
     def rows_for_windows(self, windows: torch.Tensor) -> list[torch.Tensor]:
         rows = []
@@ -234,6 +240,7 @@ def build_episode_memory_view(
     episode_type: str,
     label_mode: str,
     rng: np.random.Generator,
+    truth_present: bool = True,
 ) -> EpisodeMemoryView:
     """Construct support/background roles without mutating labels stored in the archive.
 
@@ -259,12 +266,14 @@ def build_episode_memory_view(
     subj = torch.as_tensor(patch["subj"])[rows_cpu].long().to(device)
     event = torch.as_tensor(patch["event"])[rows_cpu].long().to(device)
     window = torch.as_tensor(patch["window"])[rows_cpu].long().to(device)
-    cfg = torch.as_tensor(patch["cfg"])[rows_cpu].long().to(device)
     support_unit = _support_units(patch, rows_cpu, device)
     candidates = candidates.long().to(device)
     query_label = query_label.long().to(device)
-    if bool((~torch.isin(query_label, candidates)).any()):
-        raise ValueError("every query label must be in the episode candidate set")
+    query_truth_is_candidate = torch.isin(query_label, candidates)
+    if truth_present and bool((~query_truth_is_candidate).any()):
+        raise ValueError("every query label must be in an answerable episode candidate set")
+    if not truth_present and bool(query_truth_is_candidate.any()):
+        raise ValueError("truth-absent episodes cannot include a query label as a candidate")
 
     # A support identity can never be the query execution itself. For verified events this also
     # excludes every synchronous placement, rather than leaking a sibling sensor as enrollment.
@@ -279,11 +288,17 @@ def build_episode_memory_view(
     for candidate_position, label in enumerate(candidates.tolist()):
         label_rows = y.eq(label) & eligible_support
         if episode_type == "cross_subject_few_support":
+            # Person-disjointness only. Acquisition disjointness is deliberately NOT required: 35 of
+            # the 93 corpus labels exist in exactly one stream, so demanding it would silently drop
+            # them from this regime entirely. Support recorded on another stream is allowed and
+            # happens naturally wherever the label supports it; how often it happened is measured by
+            # describe_episode_composition rather than enforced here.
             query_rows = query_label.eq(label)
-            query_subjects = torch.unique(query.subj[query_rows.unsqueeze(1) & query.mask])
+            related_query_mask = (
+                query_rows.unsqueeze(1) & query.mask if truth_present else query.mask
+            )
+            query_subjects = torch.unique(query.subj[related_query_mask])
             label_rows &= ~torch.isin(subj, query_subjects)
-            query_configs = torch.unique(query.cfg[query_rows.unsqueeze(1) & query.mask])
-            label_rows &= ~torch.isin(cfg, query_configs)
         units = torch.unique(support_unit[label_rows])
         if len(units) < support_count:
             raise ValueError(
@@ -308,6 +323,9 @@ def build_episode_memory_view(
     # remain available as distractors and as semantic bridges in coherent-label episodes.
     candidate_rows = torch.isin(y, candidates)
     allowed &= (~candidate_rows | support_mask).view(1, 1, -1)
+    if not truth_present:
+        # An unanswerable example must not leak its true concept through ordinary background rows.
+        allowed &= y.view(1, 1, -1).ne(query_label.view(B, 1, 1))
     if not bool((allowed.any(-1) | ~query.mask).all()):
         raise ValueError("at least one query patch has no eligible episodic memory rows")
     return EpisodeMemoryView(
@@ -346,6 +364,103 @@ def balanced_memory_log_prior(patch: dict, index_rows: torch.Tensor, device) -> 
     if not bool((weight > 0).all()):
         raise ValueError("failed to assign a positive prior to every active memory row")
     return weight.log().to(device)
+
+
+def simultaneous_stream_pairs(
+    window_cfg: torch.Tensor,
+    window_event: torch.Tensor,
+) -> set[frozenset]:
+    """Stream pairs captured at the same instant, i.e. sharing verified event ids.
+
+    xrf_v2's six placements and nfi_fared's back/wrist are recorded synchronously and therefore
+    share an event; wisdm's phone and watch cover the same activities in separate sessions and
+    share none. The distinction is invisible to the config id alone, so precompute it once and let
+    :func:`describe_episode_composition` report which kind an episode actually drew.
+    """
+    cfg = window_cfg.detach().cpu().long()
+    event = window_event.detach().cpu().long()
+    order = torch.argsort(event, stable=True)
+    events, counts = torch.unique_consecutive(event[order], return_counts=True)
+    offsets = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(0)])
+    pairs: set[frozenset] = set()
+    for position in torch.nonzero(counts > 1, as_tuple=True)[0].tolist():
+        members = sorted({
+            int(value) for value in
+            cfg[order[int(offsets[position]):int(offsets[position + 1])]].tolist()
+        })
+        for i, a in enumerate(members):
+            for b in members[i + 1:]:
+                pairs.add(frozenset((a, b)))
+    return pairs
+
+
+def describe_episode_composition(
+    patch: dict,
+    index_rows: torch.Tensor,
+    query: QueryPatches,
+    view: EpisodeMemoryView,
+    simultaneous_pairs: set[frozenset] | None = None,
+) -> dict:
+    """Plain-language account of what an episode's enrolled support actually consists of.
+
+    Reports counts in whole recorded executions (and the patch rows they contribute) rather than
+    enforcing anything, so an episode whose label only exists on one stream is described honestly
+    instead of being excluded.
+    """
+    rows = index_rows.detach().cpu().long()
+    support_local = view.support_rows.detach().cpu()
+    subj = torch.as_tensor(patch["subj"])[rows].long()
+    cfg = torch.as_tensor(patch["cfg"])[rows].long()
+    unit = _support_units(patch, rows, torch.device("cpu"))
+    candidate_of = view.support_candidate.detach().cpu()
+    candidates = view.candidate_ids.detach().cpu().tolist()
+    query_label = view.query_label.detach().cpu()
+    q_mask = query.mask.detach().cpu()
+    q_subj = query.subj.detach().cpu()
+    q_cfg = query.cfg.detach().cpu()
+    pairs = simultaneous_pairs or set()
+
+    # NOTE on the stream categories: provided support can never be the query's own execution, so
+    # these describe the RELATIONSHIP between the two streams, not whether these two particular
+    # recordings happened at once. "worn simultaneously" means the corpus captures those streams
+    # together as one rig (xrf_v2's placements, nfi_fared back+wrist); "independently recorded"
+    # means the same activity was covered by both streams in unrelated sessions (wisdm's phone and
+    # watch, or two different studies).
+    counts = {
+        "enrolled_examples": 0, "enrolled_patches": int(len(support_local)),
+        "performed_by_a_different_person": 0, "performed_by_the_same_person": 0,
+        "from_the_query_s_own_stream": 0,
+        "from_a_second_stream_worn_simultaneously": 0,
+        "from_an_independently_recorded_stream": 0,
+    }
+    for position, label in enumerate(candidates):
+        picked = support_local[candidate_of[support_local].eq(position)]
+        if not len(picked):
+            continue
+        rows_for_label = q_mask & query_label.eq(int(label)).unsqueeze(1)
+        if not bool(rows_for_label.any()):
+            rows_for_label = q_mask
+        query_subjects = set(q_subj[rows_for_label].tolist())
+        query_configs = set(q_cfg[rows_for_label].tolist())
+        for execution in torch.unique(unit[picked]).tolist():
+            member = picked[unit[picked].eq(execution)]
+            counts["enrolled_examples"] += 1
+            key = ("performed_by_the_same_person"
+                   if set(subj[member].tolist()) & query_subjects
+                   else "performed_by_a_different_person")
+            counts[key] += 1
+            streams = set(cfg[member].tolist())
+            if streams & query_configs:
+                counts["from_the_query_s_own_stream"] += 1
+            elif any(frozenset((s, q)) in pairs for s in streams for q in query_configs):
+                counts["from_a_second_stream_worn_simultaneously"] += 1
+            else:
+                counts["from_an_independently_recorded_stream"] += 1
+    counts["synthetic_persona"] = {
+        "same_subject_enrollment": "one persona shared by the query and its support",
+        "cross_subject_few_support": "a different persona for the query and its support",
+    }.get(view.episode_type, "none applied")
+    return counts
 
 
 def support_capacity_by_label(
@@ -510,19 +625,24 @@ def assemble_evidence(
     """Deduplicate/cap retrieved rows and normalize contribution by subspace × resolution."""
     B, Q, H, K = retrieval.index.shape
     device = online_scores.device
-    selected_global = index_rows.to(device)[retrieval.index]
-    patch_window = torch.as_tensor(patch["window"], device=device, dtype=torch.long)
-    patch_y = torch.as_tensor(patch["y"], device=device, dtype=torch.long)
+    # Roster selection is deliberately non-differentiable. Copy its bounded top-k state once;
+    # scalar reads from CUDA inside this loop would otherwise synchronize once per candidate.
+    retrieval_index_cpu = retrieval.index.detach().cpu()
+    retrieval_valid_cpu = retrieval.valid.detach().cpu()
+    selected_global_cpu = index_rows.detach().cpu()[retrieval_index_cpu]
+    detached_scores_cpu = online_scores.detach().float().cpu()
+    patch_window = torch.as_tensor(patch["window"], dtype=torch.long).cpu()
+    patch_y = torch.as_tensor(patch["y"], dtype=torch.long).cpu()
     chosen: list[list[tuple[int, float, int, int]]] = []
     for b in range(B):
         candidates = []
         for q in range(Q):
             for h in range(H):
                 for j in range(K):
-                    if bool(retrieval.valid[b, q, h, j]):
+                    if bool(retrieval_valid_cpu[b, q, h, j]):
                         candidates.append((
-                            int(selected_global[b, q, h, j]),
-                            float(online_scores[b, q, h, j].detach()),
+                            int(selected_global_cpu[b, q, h, j]),
+                            float(detached_scores_cpu[b, q, h, j]),
                             h, q, j,
                         ))
         candidates.sort(key=lambda value: value[1], reverse=True)
@@ -574,7 +694,7 @@ def assemble_evidence(
     for b, accepted in enumerate(chosen):
         n = len(accepted)
         evidence.local_index[b, :n] = torch.tensor(
-            [int(retrieval.index[b, value[3], value[2], value[4]]) for value in accepted],
+            [int(retrieval_index_cpu[b, value[3], value[2], value[4]]) for value in accepted],
             device=device,
         )
     return reweight_evidence(evidence, scores, patch, tau=tau)

@@ -26,6 +26,7 @@ Run the real sequence after Phase A finishes:
 
 ```bash
 python -m training.evidence.build_memory --device cuda
+python -m training.evidence.train_patch_decoder --device cuda --real-smoke
 python -m training.evidence.train_patch_decoder --device cuda
 python -m training.evidence.train_patch_confidence --device cuda
 python -m training.evidence.eval_patch_decoder --device cuda \
@@ -35,7 +36,7 @@ python -m training.evidence.eval_enrollment --device cuda --random-aliases
 ```
 
 `eval_patch_decoder` is the semantic zero-shot protocol. `eval_enrollment` reports same-subject and
-cross-subject support curves for `k=1,2,4,8`; its random-alias run isolates example-based adaptation
+cross-subject support curves for `k=0,1,2,4,8`; its random-alias run starts at `k=1` and isolates example-based adaptation
 from any help supplied by known label semantics.
 
 The standard predictor exposes one retrieval-capacity setting:
@@ -48,12 +49,21 @@ Retrieval K and per-window/per-label contribution limits are derived from that b
 labels are task input. Training cycles evenly over semantic zero-support, ordinary few-support,
 cross-subject/cross-config few-support, and same-subject enrollment. Supported episodes use exactly
 `1`, `2`, `4`, or `8` independent event/window examples for every candidate and mix coherent labels
-with episode-local neutral aliases. The archive uses one global balanced window budget; its active
-label/config/subject-balanced view rotates every 100 steps.
+with episode-local neutral aliases. Candidate sets contain `4`, `8`, `12`, or `16` labels. The
+archive has one global upper budget; when the source corpus is smaller no rows are discarded. Its
+active label/config/subject-balanced view rotates every 100 steps.
+
+Physical views are a fixed 50/50 recipe: exact clean source query/support executions, or the full
+virtual-subject plus mild acquisition-augmentation simulation. Validation evaluates every held-out
+episode both ways and reports clean and augmented balanced accuracy separately.
 
 Inference remains hard top-k. Training attaches a balanced soft all-memory vote only in backward so
 unselected rows teach retrieval without changing the forward result. Phase-B health telemetry is
 updated about once per minute in `training/evidence/outputs/telemetry/`.
+
+Both training stages write atomic resumable state beside their output as `*.last.pt`. Resume with
+the same command and `--resume <path-to-last-state>`; bank identity and trajectory-affecting options
+are checked before state is restored.
 
 The optional end-to-end experiment is:
 

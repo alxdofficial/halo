@@ -10,12 +10,12 @@ Per window: encode -> cosine to the frozen memory bank -> softmax(sim/tau) retri
 each neighbour's (ensembled) label text votes for the candidate labels by cosine -> argmax.
 
 This is the do-no-harm FLOOR that every Tier-2 learned component must beat
-(docs/design/EVIDENCE_ENGINE_TIER2.md §3). It reuses the SAME encoder and the SAME cached
+(docs/archive/EVIDENCE_ENGINE_TIER2.md §3). It reuses the SAME encoder and the SAME cached
 memory bank as the decoder trainer, so the harness number is apples-to-apples with the
 learned decoder that will (must) replace it. Provenance-guarded: the encoder checkpoint's
 content hash must match the bank's backbone fingerprint or setup fails loud.
 
-Backbone: ``training/tokenizer/outputs/pretrain_fixed_mr/best.pt`` (gitignored).
+Backbone: ``training/tokenizer/outputs/phase_a_headline/best.pt`` (gitignored).
 Bank:     ``training/evidence/outputs/memory_bank.pt`` (gitignored; built by build_memory).
 """
 
@@ -40,7 +40,7 @@ from eval import scoring
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKBONE_CKPT = Path(os.environ.get(
-    "HALO_CKPT", _REPO / "training/tokenizer/outputs/pretrain_fixed_mr/best.pt"))
+    "HALO_CKPT", _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt"))
 _BANK = Path(os.environ.get(
     "HALO_BANK", _REPO / "training/evidence/outputs/memory_bank.pt"))
 
@@ -64,7 +64,7 @@ class HALOEvidenceAdapter(BaselineAdapter):
         if not _BACKBONE_CKPT.exists():
             raise FileNotFoundError(
                 f"HALO checkpoint missing at {_BACKBONE_CKPT}. Point HALO_CKPT at the frozen "
-                "fixed+MR Phase-A run (pretrain_fixed_mr/best.pt).")
+                "current Phase-A run (phase_a_headline/best.pt).")
         if not _BANK.exists():
             raise FileNotFoundError(
                 f"memory bank missing at {_BANK}. Build it: "

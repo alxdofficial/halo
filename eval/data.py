@@ -34,7 +34,7 @@ REPO = Path(__file__).resolve().parents[1]
 DATASETS_DIR = REPO / "data" / "datasets"
 GLOBAL_LABELS_PATH = REPO / "data" / "labels" / "global_labels.json"
 
-ALIGNMENTS = ("non_harmonised", "harmonised")
+ALIGNMENTS = ("native", "non_harmonised", "harmonised")
 
 
 @dataclass
@@ -44,7 +44,8 @@ class EvalStream:
     Attributes:
         dataset:     dataset name (e.g. ``"motionsense"``).
         stream:      stream / placement id (e.g. ``"phone_front_pocket"``).
-        alignment:   ``"non_harmonised"`` (native channels/rate) or ``"harmonised"``.
+        alignment:   ``"native"`` (current converter output), legacy ``"non_harmonised"``,
+                     or resampled ``"harmonised"``.
         windows:     (N, T, C) float32 sensor windows (accel + optional gyro), in g.
         gt:          per-window ground-truth label strings, length N (verbatim from
                      the grid meta — NOT yet filtered to `eval_labels`).
@@ -53,6 +54,8 @@ class EvalStream:
         rate_hz:     sampling rate of `windows`.
         mask:        (C,) bool per-channel validity (False = zero-padded absence).
         eval_labels: the dataset's pre-registered ZS-XD candidate label vocabulary.
+        event_ids:   converter-provided window event ids when available.
+        execution_ids: source-execution ids derived by removing the final window ordinal.
     """
     dataset: str
     stream: str
@@ -64,6 +67,8 @@ class EvalStream:
     rate_hz: float
     mask: np.ndarray
     eval_labels: List[str]
+    event_ids: Optional[np.ndarray] = None
+    execution_ids: Optional[np.ndarray] = None
     # Synthetic diagnostic overrides. Production grid loads leave these as None and adapters derive
     # the authoritative values from deployment_policy exactly as before.
     gravity_state: Optional[str] = None
@@ -140,11 +145,21 @@ def load_eval_stream(
 
     gt = list(meta["labels"])
     subjects = np.asarray(meta["subjects"])
+    event_ids = np.asarray(
+        meta.get("event_ids", [f"{dataset}:{stream}:window_{i}" for i in range(len(gt))]),
+        dtype=object,
+    )
+    execution_ids = np.asarray([
+        value.rsplit(":", 1)[0]
+        if ":" in str(value) and str(value).rsplit(":", 1)[1].isdigit()
+        else str(value)
+        for value in event_ids
+    ], dtype=object)
     channels = list(meta["channels"])
 
     # Structural invariants — fail loud rather than silently misalign scoring.
     n = windows.shape[0]
-    if not (len(gt) == len(subjects) == n):
+    if not (len(gt) == len(subjects) == len(event_ids) == n):
         raise ValueError(
             f"{dataset}/{stream}: meta labels ({len(gt)}) / subjects "
             f"({len(subjects)}) do not match window count ({n})."
@@ -170,4 +185,6 @@ def load_eval_stream(
         rate_hz=float(meta["rate_hz"]),
         mask=mask.astype(bool),
         eval_labels=load_eval_labels(dataset),
+        event_ids=event_ids,
+        execution_ids=execution_ids,
     )

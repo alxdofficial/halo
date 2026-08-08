@@ -36,6 +36,7 @@ import torch.nn.functional as F
 
 from eval.scoring import classification_metrics, get_sbert_encoder
 from training.evidence.labeltext import ensemble_text
+from training.evidence.device import resolve_device
 
 _DIR = Path(__file__).resolve().parent / "outputs"
 SEED = 20260720
@@ -73,7 +74,7 @@ def main() -> None:
     ap.add_argument("--val-frac-cfg", type=float, default=0.2)
     ap.add_argument("--max-queries", type=int, default=4000, help="cap per held-out config")
     args = ap.parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
 
     bank = torch.load(str(args.bank), map_location="cpu", weights_only=True)
     from training.evidence.bank_guard import assert_bank_current

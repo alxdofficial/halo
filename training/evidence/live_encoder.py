@@ -39,7 +39,9 @@ def _seeded_augmentation(seed: int):
     torch_state = torch.random.get_rng_state()
     random.seed(seed)
     np.random.seed(seed % (2**32 - 1))
-    torch.manual_seed(seed)
+    # The augmenter draws from the CPU default generator. Seeding it directly avoids mutating
+    # every CUDA generator, which would otherwise perturb trainer dropout and sampling streams.
+    torch.default_generator.manual_seed(seed)
     try:
         yield
     finally:
@@ -59,10 +61,10 @@ class SourcePatchEncoder:
         alignment = str(bank.get("source_alignment", "native"))
         if alignment != "native":
             raise ValueError(f"unsupported Phase-B source alignment {alignment!r}")
-        roster = set((bank.get("corpus") or {}).get("datasets") or [])
-        refs = [ref for ref in discover_grids(alignment) if ref.dataset in roster]
-        self.refs = {ref.key: ref for ref in refs}
         self.cfg_names = {int(key): str(value) for key, value in bank["cfg_names"].items()}
+        represented = set(self.cfg_names.values())
+        refs = [ref for ref in discover_grids(alignment) if ref.key in represented]
+        self.refs = {ref.key: ref for ref in refs}
         missing = sorted(set(self.cfg_names.values()) - set(self.refs))
         if missing:
             raise RuntimeError(f"source grids needed by the memory bank are missing: {missing}")

@@ -21,6 +21,7 @@ class EnrollmentMemory:
     canonical_text: torch.Tensor
     candidate_text: torch.Tensor
     support_units_per_candidate: torch.Tensor
+    runtime_sensor_id: int
 
     def episode_view(
         self,
@@ -65,16 +66,16 @@ def build_enrollment_memory(
     if torch.unique(support_windows).numel() != len(support_windows):
         raise ValueError("an enrollment source window may be assigned only once")
     n_candidates = candidate_text.shape[0]
-    if not len(support_windows) or bool((support_candidate_position < 0).any()) \
+    if bool((support_candidate_position < 0).any()) \
             or bool((support_candidate_position >= n_candidates).any()):
-        raise ValueError("runtime enrollment needs valid support for at least one candidate")
+        raise ValueError("runtime enrollment candidate positions are out of range")
     counts = torch.bincount(support_candidate_position, minlength=n_candidates)
     if bool((counts != counts[0]).any()):
         raise ValueError("every runtime candidate must receive the same support count")
 
     patch_window = encoded["patch_window"].detach().cpu().long()
     selected = torch.isin(patch_window, support_windows)
-    if not bool(selected.any()):
+    if len(support_windows) and not bool(selected.any()):
         raise ValueError("selected enrollment windows exported no valid patches")
     selected_rows = torch.nonzero(selected, as_tuple=True)[0]
     selected_parent = patch_window[selected_rows]
@@ -170,4 +171,5 @@ def build_enrollment_memory(
         canonical_text=torch.cat([canonical_text, candidate_text], dim=0),
         candidate_text=candidate_text,
         support_units_per_candidate=counts.to(device),
+        runtime_sensor_id=support_cfg_id,
     )

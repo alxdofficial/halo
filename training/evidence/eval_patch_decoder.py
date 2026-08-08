@@ -28,8 +28,13 @@ from training.evidence.bank_guard import (
     vocab_fingerprint,
 )
 from training.evidence.labeltext import ensemble_text
+from training.evidence.device import resolve_device
 from training.evidence.live_encoder import SourcePatchEncoder
-from training.evidence.policy import ACTIVE_WINDOWS_PER_LABEL, PhaseBPolicy
+from training.evidence.policy import (
+    ACTIVE_WINDOWS_PER_LABEL,
+    PHASE_B_TRAINING_REGIME,
+    PhaseBPolicy,
+)
 from training.evidence.patch_episodes import PatchTable, queries_from_encoded
 from training.evidence.train_patch_decoder import (
     decode_patch_queries,
@@ -162,7 +167,7 @@ def main() -> None:
                     help="NON-PARITY diagnostic; default uses bare eval label strings")
     ap.add_argument("--batch", type=int, default=16)
     args = ap.parse_args()
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
 
     bank = torch.load(args.bank, map_location="cpu", weights_only=True)
     assert_bank_current(bank, context="eval_patch_decoder")
@@ -173,8 +178,7 @@ def main() -> None:
     )
     if blob.get("objective") != "candidate_cross_entropy":
         raise SystemExit("evaluation requires the consolidated candidate-CE predictor")
-    if blob.get("training_regime") != \
-            "episodic_memory_adaptation_hard_forward_soft_backward_v1":
+    if blob.get("training_regime") != PHASE_B_TRAINING_REGIME:
         raise SystemExit("evaluation requires a predictor trained with the current adaptation regime")
     if int(blob.get("memory_schema", 0)) != int(bank["schema_version"]):
         raise SystemExit("patch decoder / memory schema mismatch")
@@ -199,6 +203,7 @@ def main() -> None:
         candidate_tokens=cfg["candidate_tokens"],
         structural_metadata=cfg["structural_metadata"],
         support_role=cfg.get("support_role", False),
+        n_retrieval_heads=cfg.get("n_retrieval_heads", cfg["n_subspaces"]),
     )).to(device)
     dec.load_state_dict(blob["decoder"])
     retriever = PatchSubspaceRetriever(
@@ -254,7 +259,7 @@ def main() -> None:
     for dataset in args.datasets:
         for spec in deployment_policy.stream_specs(dataset, "primary"):
             try:
-                stream = load_eval_stream(dataset, spec.stream_id, alignment="non_harmonised")
+                stream = load_eval_stream(dataset, spec.stream_id, alignment="native")
             except FileNotFoundError:
                 continue
             result = score_cell(

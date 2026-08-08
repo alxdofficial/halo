@@ -83,6 +83,7 @@ def bank_fingerprint(bank: dict) -> str:
             payload.update({
                 "source_grid_fp": corpus.get("source_grid_fp"),
                 "n_source_rows": len(bank.get("source_row", [])),
+                "population_fp": bank.get("population_fp"),
             })
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
@@ -133,6 +134,11 @@ def assert_patch_bank(bank: dict, *, context: str = "") -> None:
             "pooled-window foreign key.\n"
         )
     if int(bank.get("schema_version", 1)) >= 3:
+        if not bank.get("population_fp"):
+            raise SystemExit(
+                f"\n[bank_guard] PATCH BANK LACKS POPULATION PROVENANCE{where}. "
+                "Rebuild it with the current build_memory.\n"
+            )
         source_row = torch.as_tensor(bank.get("source_row", []))
         if len(source_row) != len(bank["Z"]) or source_row.dtype not in (
             torch.int32, torch.int64

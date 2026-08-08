@@ -1,5 +1,5 @@
 """Evidence decoder (Tier-2, T2.3) — the set-transformer that refines retrieved evidence
-before it votes. Implements docs/design/EVIDENCE_ENGINE_TIER2.md §2 + §2.2 (transformer hygiene).
+before it votes. Implements docs/archive/EVIDENCE_ENGINE_TIER2.md §2 + §2.2 (transformer hygiene).
 
 Per query we have already retrieved a set of top-k EVIDENCE tokens (labeled memory neighbours)
 plus the QUERY token(s). This module mixes them with self-attention, then:
@@ -56,6 +56,7 @@ class DecoderConfig:
     candidate_layers: int = 2
     structural_metadata: bool = False
     support_role: bool = False
+    n_retrieval_heads: int = 4
 
 
 def _fourier_time(t: torch.Tensor, n_freqs: int, time_max: float) -> torch.Tensor:
@@ -171,6 +172,9 @@ class EvidenceDecoder(nn.Module):
         if cfg.structural_metadata:
             self.proj_duration = nn.Linear(1, d)
             self.resolution_emb = nn.Embedding(3, d)     # 0=unknown/pad, 1=short/single, 2=long
+            # 0 is unknown/padding; selected retrieval subspaces use ids 1..H. This tells set
+            # attention which learned physical aspect supplied an otherwise identical patch.
+            self.retrieval_head_emb = nn.Embedding(cfg.n_retrieval_heads + 1, d)
 
         self.blocks = nn.ModuleList(_Block(cfg) for _ in range(cfg.n_layers))
         self.final_ln = nn.LayerNorm(d)
@@ -238,6 +242,7 @@ class EvidenceDecoder(nn.Module):
         q_duration=None, ev_duration=None,          # (B,q) / (B,k) represented seconds
         q_resolution=None, ev_resolution=None,      # (B,q) / (B,k), -1/0/1
         q_sensor_id=None, ev_sensor_id=None,        # (B,q) / (B,k) structural sensor group
+        ev_retrieval_head=None,                     # (B,k) learned retrieval-subspace id
         window_id=None,     # (B, q+k) long  co-membership groups for the same-window bias
         return_aux=False,
     ):
@@ -268,6 +273,10 @@ class EvidenceDecoder(nn.Module):
             q_mask = torch.ones(B, q, dtype=torch.bool, device=dev)
         elif q_mask.shape != (B, q):
             raise ValueError(f"q_mask must have shape {(B, q)}, got {tuple(q_mask.shape)}")
+        if ev_mask is None:
+            ev_mask = torch.ones(B, k, dtype=torch.bool, device=dev)
+        elif ev_mask.shape != (B, k):
+            raise ValueError(f"ev_mask must have shape {(B, k)}, got {tuple(ev_mask.shape)}")
 
         # ---- build the token set: [q query patches] + [k evidence patches] ----
         q_tok = self._embed(
@@ -286,13 +295,28 @@ class EvidenceDecoder(nn.Module):
             zev, ev_role, ev_label_text, ev_config_text, ev_time,
             ev_duration, ev_resolution,
         )
+        if ev_retrieval_head is not None:
+            if not self.cfg.structural_metadata:
+                raise ValueError("ev_retrieval_head requires structural_metadata=True")
+            if ev_retrieval_head.shape != (B, k):
+                raise ValueError(
+                    f"ev_retrieval_head must have shape {(B, k)}, "
+                    f"got {tuple(ev_retrieval_head.shape)}"
+                )
+            if bool((ev_retrieval_head[ev_mask] < 0).any()) \
+                    or bool((ev_retrieval_head[ev_mask] >= self.cfg.n_retrieval_heads).any()):
+                raise ValueError("valid evidence has an out-of-range retrieval-subspace id")
+            head_index = torch.where(
+                ev_mask,
+                ev_retrieval_head.clamp(0, self.cfg.n_retrieval_heads - 1) + 1,
+                torch.zeros_like(ev_retrieval_head),
+            )
+            ev_tok = ev_tok + self.retrieval_head_emb(head_index)
         x = torch.cat([q_tok, ev_tok], dim=1)                                   # (B, q+k, d)
         x = self.in_ln(x)
 
         # ---- masks ----
         T = q + k
-        if ev_mask is None:
-            ev_mask = torch.ones(B, k, dtype=torch.bool, device=dev)
         # key-padding: invalid query/evidence patches are ignored as keys.
         key_pad = torch.cat([~q_mask, ~ev_mask], dim=1)
         sensor_id = (

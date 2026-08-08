@@ -114,13 +114,13 @@ def patch_embedding_fingerprint(enc, device) -> torch.Tensor:
         channel_mask=[True] * 6, dataset=_PROBE["dataset"], stream=_PROBE["stream"],
     )
     pieces = [
-        encoded["patch_Z"].float().flatten(),
-        encoded["patch_window"].float(),
-        encoded["patch_time"].float(),
-        encoded["patch_duration"].float(),
-        encoded["patch_resolution"].float(),
+        encoded["patch_Z"].float().flatten().cpu(),
+        encoded["patch_window"].float().cpu(),
+        encoded["patch_time"].float().cpu(),
+        encoded["patch_duration"].float().cpu(),
+        encoded["patch_resolution"].float().cpu(),
     ]
-    return torch.cat(pieces).cpu()
+    return torch.cat(pieces)
 
 
 def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state=None,

@@ -32,6 +32,7 @@ from training.evidence.bank_guard import (
 )
 from training.evidence.labeltext import ensemble_text
 from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
+from training.evidence.device import resolve_device
 from training.evidence.patch_episodes import (
     PatchTable,
     balanced_memory_log_prior,
@@ -45,21 +46,24 @@ from training.evidence.policy import (
     DISTRACTOR_MODES,
     EPISODE_TYPES,
     LABEL_TEXT_MODES,
+    PHASE_B_TRAINING_REGIME,
+    PHYSICAL_VIEW_MODES,
     SOFT_RETRIEVAL_TEMPERATURE_END,
     SUPPORT_COUNTS,
     PhaseBPolicy,
 )
 from training.evidence.train_patch_decoder import (
     choose_candidates,
+    atomic_torch_save,
     decode_adaptation_episode,
     encode_bank_config_text,
     load_activity_families,
     physical_label_centroids,
-    run_patch_episode,
     sample_queries,
     sample_queries_covering_labels,
     synthetic_smoke_bank,
 )
+from training.evidence.telemetry import PhaseBTelemetry
 from training.tokenizer.eval_transfer import build_encoder
 
 _DIR = Path(__file__).resolve().parent / "outputs"
@@ -82,6 +86,20 @@ def expected_calibration_error(score: np.ndarray, target: np.ndarray, bins: int 
     return float(total)
 
 
+def binary_auprc(score: np.ndarray, target: np.ndarray) -> float:
+    """Average precision for the positive confidence target, without sklearn dependency."""
+    score = np.asarray(score, dtype=np.float64)
+    target = np.asarray(target, dtype=bool)
+    positives = int(target.sum())
+    if positives == 0:
+        return float("nan")
+    order = np.argsort(-score, kind="stable")
+    ranked = target[order]
+    true_positive = np.cumsum(ranked)
+    precision = true_positive / np.arange(1, len(ranked) + 1)
+    return float(precision[ranked].sum() / positives)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--bank", type=Path, default=_DEFAULT_BANK)
@@ -99,20 +117,28 @@ def main() -> None:
     ap.add_argument("--val-episodes", type=int, default=8)
     ap.add_argument("--val-queries", type=int, default=64)
     ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--save-every", type=int, default=100)
+    ap.add_argument("--resume", type=Path, default=None)
+    ap.add_argument("--telemetry-seconds", type=float, default=60.0)
+    ap.add_argument("--telemetry-dir", type=Path, default=None)
     ap.add_argument("--smoke", action="store_true")
     args = ap.parse_args()
     if args.smoke:
         args.device = "cpu"; args.steps = 2; args.batch = 4
         args.val_every = 1; args.val_episodes = 2; args.val_queries = 4
+        args.save_every = 1
+        args.telemetry_seconds = 0.01
         args.predictor = Path("/tmp/halo_phase_b_predictor_smoke.pt")
         args.out = Path("/tmp/halo_phase_b_confidence_smoke.pt") \
             if args.out == _DEFAULT_OUT else args.out
-    if args.steps < 1 or args.batch < 1 or args.val_every < 1:
-        ap.error("steps, batch, and val-every must be positive")
+    if args.steps < 1 or args.batch < 1 or args.val_every < 1 or args.save_every < 1:
+        ap.error("steps, batch, val-every, and save-every must be positive")
     if not 0.0 < args.truth_absent_prob < 1.0:
         ap.error("truth-absent-prob must be in (0,1)")
+    if args.telemetry_seconds <= 0:
+        ap.error("telemetry-seconds must be positive")
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     bank = synthetic_smoke_bank() if args.smoke else torch.load(
@@ -129,8 +155,7 @@ def main() -> None:
         )
     if predictor.get("objective") != "candidate_cross_entropy":
         raise SystemExit("confidence calibration requires the consolidated CE predictor artifact")
-    if predictor.get("training_regime") != \
-            "episodic_memory_adaptation_hard_forward_soft_backward_v1":
+    if predictor.get("training_regime") != PHASE_B_TRAINING_REGIME:
         raise SystemExit(
             "confidence calibration requires a predictor trained with the current adaptation regime"
         )
@@ -140,6 +165,7 @@ def main() -> None:
         d_model=cfg["d_model"], n_layers=cfg["n_layers"], n_heads=cfg["n_heads"],
         candidate_tokens=True, structural_metadata=True,
         support_role=cfg.get("support_role", False),
+        n_retrieval_heads=cfg.get("n_retrieval_heads", cfg["n_subspaces"]),
     )).to(device)
     decoder.load_state_dict(predictor["decoder"])
     retriever = PatchSubspaceRetriever(
@@ -246,29 +272,39 @@ def main() -> None:
     ):
         last_error = None
         for _ in range(20):
+            episode_type = str(local_rng.choice(EPISODE_TYPES))
+            physical_view_mode = str(local_rng.choice(
+                episode_cfg.get("physical_view_modes", PHYSICAL_VIEW_MODES)
+            ))
+            support_count = 0 if episode_type == "semantic_zero_support" \
+                else int(local_rng.choice(SUPPORT_COUNTS))
+            label_mode = "coherent" if support_count == 0 \
+                else str(local_rng.choice(LABEL_TEXT_MODES))
+            capacity = support_capacity_by_label(
+                bank["patch"], index_rows, n_vocab
+            ).to(device)
+            query_labels = torch.unique(y[pool])
+            query_labels = query_labels[torch.isin(query_labels, allowed_vocab)]
+            supportable = torch.nonzero(capacity >= support_count, as_tuple=True)[0]
+            supportable = supportable[torch.isin(supportable, allowed_vocab)]
+            if len(query_labels) < 1 or len(supportable) < 2:
+                continue
+
+            candidate_count = min(
+                int(local_rng.choice(episode_cfg.get("candidate_counts", CANDIDATE_COUNTS))),
+                len(supportable),
+            )
+            mode = str(local_rng.choice(episode_cfg["distractor_modes"]))
             if truth_present:
-                episode_type = str(local_rng.choice(EPISODE_TYPES))
-                support_count = 0 if episode_type == "semantic_zero_support" \
-                    else int(local_rng.choice(SUPPORT_COUNTS))
-                label_mode = "coherent" if support_count == 0 \
-                    else str(local_rng.choice(LABEL_TEXT_MODES))
-                capacity = support_capacity_by_label(
-                    bank["patch"], index_rows, n_vocab
-                ).to(device)
-                present = torch.unique(y[pool])
-                present = present[capacity[present] >= support_count]
-                present = present[torch.isin(present, allowed_vocab)]
+                present = query_labels[capacity[query_labels] >= support_count]
                 if len(present) < 2:
                     continue
-                candidate_count = min(int(local_rng.choice(CANDIDATE_COUNTS)), len(present))
+                candidate_count = min(candidate_count, len(present))
                 seed_count = min(2, candidate_count - 1)
                 seed_labels = torch.as_tensor(
-                    local_rng.choice(
-                        present.cpu().numpy(), size=seed_count, replace=False
-                    ),
+                    local_rng.choice(present.cpu().numpy(), size=seed_count, replace=False),
                     device=device, dtype=torch.long,
                 )
-                mode = str(local_rng.choice(DISTRACTOR_MODES))
                 candidates = choose_candidates(
                     seed_labels, candidate_count, n_vocab, text, physical,
                     truth_present=True, mode=mode, rng=local_rng,
@@ -317,77 +353,53 @@ def main() -> None:
                     query_pool, candidates, y, count, local_rng,
                     config_ids=config, subject_ids=subj,
                 )
-                query = table.gather_queries(
-                    qi, device, expand_verified_events=True,
-                    allowed_window_mask=memory_mask,
+            else:
+                seed_count = min(4, len(query_labels))
+                seed_labels = torch.as_tensor(
+                    local_rng.choice(
+                        query_labels.cpu().numpy(), size=seed_count, replace=False
+                    ),
+                    device=device, dtype=torch.long,
                 )
-                try:
-                    view = build_episode_memory_view(
-                        bank["patch"], index_rows, query, y[qi], candidates,
-                        support_count=support_count, episode_type=episode_type,
-                        label_mode=label_mode, rng=local_rng,
-                    )
-                    labels = episode_label_set(
-                        candidates, text, mode=label_mode, rng=local_rng,
-                        alias_embeddings=alias_embeddings,
-                        canonical_names=vocab,
-                    )
-                    logits, aux = decode_adaptation_episode(
-                        decoder, retriever, bank, index_rows, selector_z,
-                        memory_index, query, view, text, labels.embeddings,
-                        row_prior, policy=policy,
-                        soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
-                        rng=local_rng, config_text=config_text,
-                        live_source=live_source, selector_encoder=tokenizer,
-                        online_requires_grad=False,
-                    )
-                except ValueError as error:
-                    last_error = error
+                qi = sample_queries(
+                    pool, seed_labels, y, count, local_rng,
+                    config_ids=config, subject_ids=subj, label_alpha=0.0,
+                    subject_alpha=float(episode_cfg.get("query_subject_alpha", 0.5)),
+                )
+                eligible_candidates = supportable[~torch.isin(supportable, torch.unique(y[qi]))]
+                if len(eligible_candidates) < 2:
                     continue
-                prediction = candidates[logits.argmax(1)]
-                target = prediction.eq(y[qi])
-                return aux["confidence_features"].detach(), target.float(), {
-                    "truth_present": True,
-                    "correct": float(target.float().mean()),
-                    "candidate_count": len(candidates),
-                    "true_support": support_count,
-                    "episode_type": episode_type,
-                    "label_mode": label_mode,
-                }
-
-            present = torch.unique(y[pool])
-            seed_count = min(4, len(present))
-            seed_labels = torch.tensor(
-                local_rng.choice(present.cpu().numpy(), size=seed_count, replace=False),
-                device=device, dtype=torch.long,
+                candidate_count = min(candidate_count, len(eligible_candidates))
+                candidates = choose_candidates(
+                    y[qi], candidate_count, n_vocab, text, physical,
+                    truth_present=False, mode=mode, rng=local_rng,
+                    allowed_vocab=eligible_candidates, family_ids=family_ids,
+                )
+            query = table.gather_queries(
+                qi, device, expand_verified_events=True,
+                allowed_window_mask=memory_mask,
             )
-            qi = sample_queries(
-                pool, seed_labels, y, count, local_rng,
-                config_ids=config, subject_ids=subj, label_alpha=0.0,
-                subject_alpha=float(episode_cfg.get("query_subject_alpha", 0.5)),
-            )
-            candidate_count = min(
-                n_vocab,
-                int(local_rng.choice(episode_cfg.get("candidate_counts", CANDIDATE_COUNTS))),
-            )
-            mode = str(local_rng.choice(episode_cfg["distractor_modes"]))
-            candidates = choose_candidates(
-                y[qi], candidate_count, n_vocab, text, physical,
-                truth_present=truth_present, mode=mode, rng=local_rng,
-                allowed_vocab=allowed_vocab, family_ids=family_ids,
-            )
-            true_support = 0
-            config_mode = "any"
             try:
-                logits, aux = run_patch_episode(
-                    decoder, retriever, table, bank, index_rows, memory_index,
-                    qi, candidates, text, text,
-                    truth_present=truth_present, true_support=true_support,
-                    config_mode=config_mode, rng=local_rng, policy=policy,
-                    query_window_mask=memory_mask,
-                    config_text=config_text,
-                    live_source=live_source, live_encoder=tokenizer,
-                    live_requires_grad=False,
+                view = build_episode_memory_view(
+                    bank["patch"], index_rows, query, y[qi], candidates,
+                    support_count=support_count, episode_type=episode_type,
+                    label_mode=label_mode, rng=local_rng,
+                    truth_present=truth_present,
+                )
+                labels = episode_label_set(
+                    candidates, text, mode=label_mode, rng=local_rng,
+                    alias_embeddings=alias_embeddings,
+                    canonical_names=vocab,
+                )
+                logits, aux = decode_adaptation_episode(
+                    decoder, retriever, bank, index_rows, selector_z,
+                    memory_index, query, view, text, labels.embeddings,
+                    row_prior, policy=policy,
+                    soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
+                    rng=local_rng, config_text=config_text,
+                    live_source=live_source, selector_encoder=tokenizer,
+                    online_requires_grad=False,
+                    physical_view_mode=physical_view_mode,
                 )
             except ValueError as error:
                 last_error = error
@@ -400,7 +412,10 @@ def main() -> None:
                 "truth_present": truth_present,
                 "correct": float(target.float().mean()),
                 "candidate_count": len(candidates),
-                "true_support": true_support,
+                "true_support": support_count,
+                "episode_type": episode_type,
+                "label_mode": label_mode,
+                "physical_view_mode": physical_view_mode,
             }
         raise RuntimeError("could not draw a feasible confidence episode") from last_error
 
@@ -436,14 +451,93 @@ def main() -> None:
         return {
             "bce": float(loss),
             "auroc": binary_auroc(score, target),
+            "auprc": binary_auprc(score, target),
             "aurc": aurc(1.0 - score, target),
             "ece": expected_calibration_error(score, target),
+            "brier": float(np.mean((score - target.astype(np.float32)) ** 2)),
             "positive_rate": float(target.mean()),
+            "mean_confidence": float(score.mean()),
+            "mean_confidence_positive": float(score[target].mean()),
+            "mean_confidence_negative": float(score[~target].mean()),
         }
 
     best = {"bce": float("inf")}; best_state = None; best_step = 0
     started = time.time()
-    for step in range(1, args.steps + 1):
+    predictor_fp = hashlib.sha256(args.predictor.read_bytes()).hexdigest()
+    state_path = args.out.with_name(f"{args.out.stem}.last{args.out.suffix}")
+    run_config = {
+        "steps": args.steps, "batch": args.batch, "lr": args.lr,
+        "weight_decay": args.weight_decay,
+        "truth_absent_probability": args.truth_absent_prob,
+        "val_episodes": args.val_episodes, "val_queries": args.val_queries,
+        "seed": args.seed,
+    }
+
+    def save_state(step: int) -> None:
+        atomic_torch_save({
+            "kind": "phase_b_confidence_trainer_state_v1",
+            "step": step,
+            "elapsed_seconds": time.time() - started,
+            "run_config": run_config,
+            "bank_fp": bank.get("bank_fp") or bank_fingerprint(bank),
+            "predictor_fp": predictor_fp,
+            "confidence": head.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "best": best, "best_state": best_state, "best_step": best_step,
+            "rng": {"numpy_generator": rng.bit_generator.state,
+                    "torch": torch.get_rng_state(),
+                    "cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else None},
+        }, state_path)
+
+    start_step = 0
+    if args.resume is not None:
+        state = torch.load(args.resume, map_location="cpu", weights_only=False)
+        if state.get("kind") != "phase_b_confidence_trainer_state_v1":
+            raise SystemExit("--resume is not a Phase-B confidence trainer state")
+        if state.get("bank_fp") != (bank.get("bank_fp") or bank_fingerprint(bank)) \
+                or state.get("predictor_fp") != predictor_fp:
+            raise SystemExit("confidence resume state does not match the predictor and bank")
+        if state.get("run_config") != run_config:
+            raise SystemExit("confidence resume configuration differs from the saved run")
+        start_step = int(state["step"])
+        if start_step >= args.steps:
+            raise SystemExit("confidence resume state has already reached --steps")
+        head.load_state_dict(state["confidence"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        best = dict(state["best"]); best_state = state["best_state"]
+        best_step = int(state["best_step"])
+        rng.bit_generator.state = state["rng"]["numpy_generator"]
+        torch.set_rng_state(state["rng"]["torch"].cpu())
+        if device.type == "cuda" and state["rng"].get("cuda") is not None:
+            torch.cuda.set_rng_state_all([value.cpu() for value in state["rng"]["cuda"]])
+        started = time.time() - float(state.get("elapsed_seconds", 0.0))
+        print(f"[confidence] resumed {args.resume} at step {start_step}", flush=True)
+
+    telemetry = PhaseBTelemetry(
+        args.telemetry_dir or (args.out.parent / "telemetry" / args.out.stem),
+        interval_seconds=args.telemetry_seconds,
+        stage="confidence",
+    )
+    telemetry.start(
+        step=start_step,
+        elapsed_seconds=time.time() - started,
+        metadata={
+            "planned_steps": args.steps,
+            "warmup_steps": 0,
+            "grad_clip": 1.0,
+            "output": str(args.out),
+            "predictor": str(args.predictor),
+            "predictor_fp": predictor_fp,
+            "bank_fp": bank.get("bank_fp") or bank_fingerprint(bank),
+            "resume": str(args.resume) if args.resume is not None else None,
+            "run_config": run_config,
+        },
+    )
+
+    for step in range(start_step + 1, args.steps + 1):
+        step_started = time.perf_counter()
         truth_present = bool(rng.random() >= args.truth_absent_prob)
         features, target, episode = draw_features(
             train_pool, train_memory_mask, train_index_rows, train_selector_z,
@@ -456,10 +550,15 @@ def main() -> None:
         if not bool(torch.isfinite(loss)):
             raise FloatingPointError(f"non-finite confidence loss at step {step}")
         optimizer.zero_grad(set_to_none=True); loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            head.parameters(), 1.0, error_if_nonfinite=True
+        )
         optimizer.step(); scheduler.step()
+        validation_metrics = None
         if step == 1 or step % args.val_every == 0:
             metrics = evaluate()
+            validation_metrics = metrics
+            telemetry.set_validation(metrics)
             if metrics["bce"] < best["bce"]:
                 best = dict(metrics); best_step = step
                 best_state = {
@@ -471,10 +570,53 @@ def main() -> None:
                 **{key: round(value, 4) for key, value in metrics.items()},
                 "elapsed_s": round(time.time() - started, 1),
             }), flush=True)
+        with torch.no_grad():
+            score = torch.sigmoid(logit)
+            prediction = score >= 0.5
+            telemetry_metrics = {
+                "loss": float(loss.detach()),
+                "grad_norm": float(grad_norm),
+                "gradient_clipped_fraction": float(float(grad_norm) > 1.0),
+                "target_positive_rate": float(target.mean()),
+                "predicted_confidence_mean": float(score.mean()),
+                "predicted_confidence_std": float(score.float().std(unbiased=False)),
+                "predicted_confidence_min": float(score.min()),
+                "predicted_confidence_max": float(score.max()),
+                "threshold_accuracy": float(prediction.eq(target.bool()).float().mean()),
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                "step_seconds": float(time.perf_counter() - step_started),
+            }
+            if device.type == "cuda":
+                telemetry_metrics.update({
+                    "gpu_allocated_gib": torch.cuda.memory_allocated(device) / 2**30,
+                    "gpu_reserved_gib": torch.cuda.memory_reserved(device) / 2**30,
+                    "gpu_peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30,
+                })
+        category_values = {
+            "truth_present": str(bool(episode["truth_present"])),
+            "episode_type": episode["episode_type"],
+            "label_mode": episode["label_mode"],
+            "physical_view_mode": episode["physical_view_mode"],
+            "support_count": str(episode["true_support"]),
+            "candidate_count": str(episode["candidate_count"]),
+        }
+        telemetry.update(
+            telemetry_metrics,
+            categories=category_values,
+            strata=category_values,
+        )
+        emitted = telemetry.emit(step=step, elapsed_seconds=time.time() - started)
+        if emitted is not None:
+            print(json.dumps({
+                "telemetry": str(telemetry.latest),
+                "step": step,
+                "window_seconds": round(emitted["window_seconds"], 2),
+            }), flush=True)
+        if step % args.save_every == 0 or step == args.steps:
+            save_state(step)
 
     if best_state is None:
         raise RuntimeError("confidence calibration completed without a valid checkpoint")
-    predictor_fp = hashlib.sha256(args.predictor.read_bytes()).hexdigest()
     payload = {
         "confidence": best_state,
         "objective": "correct_and_answerable_bce",
@@ -484,8 +626,10 @@ def main() -> None:
         "truth_absent_probability": args.truth_absent_prob,
         "best_step": best_step, "best_metrics": best,
     }
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, args.out)
+    atomic_torch_save(payload, args.out)
+    telemetry.emit(
+        step=args.steps, elapsed_seconds=time.time() - started, force=True, final=True
+    )
     print(f"[confidence] best step {best_step}: {best} -> {args.out}", flush=True)
 
 

@@ -17,8 +17,8 @@ is the exact ``encode_dataset`` used by ``training.tokenizer.eval_transfer`` (th
 frozen-encoder transfer path), so head-fit features and eval features are produced the same
 way HALO's internal transfer probe produces them.
 
-Backbone: ``training/tokenizer/outputs/pretrain_native/best.pt`` (gitignored; the real
-30k-step d_model-256 run, val kNN-BA 0.659 — NOT the ``pretrain/`` smoke checkpoint).
+Backbone: ``training/tokenizer/outputs/phase_a_headline/best.pt`` (gitignored; the current
+paper encoder — NOT the ``pretrain/`` smoke checkpoint).
 Head cache: ``baselines/halo/halo_conse_head.pt`` (gitignored), stamped with the global
 vocab + a content hash of the backbone so it re-fits if either changes.
 """
@@ -48,7 +48,7 @@ from eval import scoring
 # --- backbone + head-fit hyperparameters (parity with the crosshar/harnet ConSE head-fit) ---
 _REPO = Path(__file__).resolve().parents[2]
 _BACKBONE_CKPT = Path(os.environ.get(
-    "HALO_CKPT", _REPO / "training/tokenizer/outputs/pretrain_native/best.pt"))
+    "HALO_CKPT", _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt"))
 _HEAD_CACHE = Path(os.environ.get(
     "HALO_HEAD_CACHE", Path(__file__).resolve().parent / "halo_conse_head.pt"))
 
@@ -125,7 +125,7 @@ class HALOAdapter(ConSEAdapter):
         if not _BACKBONE_CKPT.exists():
             raise FileNotFoundError(
                 f"HALO checkpoint missing at {_BACKBONE_CKPT}. Point HALO_CKPT at the "
-                "trained Phase-A run (training/tokenizer/outputs/pretrain_native/best.pt).")
+                "current Phase-A run (training/tokenizer/outputs/phase_a_headline/best.pt).")
         from training.tokenizer.eval_transfer import build_encoder   # lazy (loads HALO model pkg)
         ckpt = torch.load(str(_BACKBONE_CKPT), map_location="cpu", weights_only=False)
         enc = build_encoder(ckpt, device)   # already frozen (.eval()); build_encoder sets dropout=0
