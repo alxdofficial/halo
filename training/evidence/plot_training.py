@@ -67,7 +67,7 @@ def render(telemetry_dir: Path, output: Path | None = None) -> Path:
             _line(axes[0, 1], _series(rows, key), label)
         axes[0, 1].set_yscale("symlog", linthresh=1e-4); axes[0, 1].set_title("Gradient norms")
         for key, label in (
-            ("true_support_recall_at_k", "support recall"),
+            ("provided_support_recall_at_k", "provided-support recall"),
             ("provided_support_pool_mass", "support pool mass"),
             ("pool_weight_max_share", "max pool share"),
             ("topk_retained_soft_mass", "retained soft mass"),
@@ -76,7 +76,7 @@ def render(telemetry_dir: Path, output: Path | None = None) -> Path:
         axes[0, 2].set_title("Evidence use")
         for key, label in (
             ("hard_soft_retriever_grad_cosine", "hard/soft grad cosine"),
-            ("soft_to_hard_retriever_grad_ratio", "soft/hard grad ratio"),
+            ("effective_soft_to_hard_retriever_grad_ratio", "effective soft/hard ratio"),
             ("retrieval_normalized_entropy", "soft retrieval entropy"),
             ("pool_normalized_entropy", "pool entropy"),
         ):

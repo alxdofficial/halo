@@ -10,7 +10,7 @@ reject confidence from correctness and truth-absent episodes.
   [`docs/design/PHASE_B_TRAINING_INTENT.md`](../../docs/design/PHASE_B_TRAINING_INTENT.md).
 - **Phase-A artifact handoff:** see
   [`docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`](../../docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md).
-- **Historical research:** `docs/design/EVIDENCE_ENGINE*.md` records earlier experiments and rejected
+- **Historical research:** `docs/archive/EVIDENCE_ENGINE*.md` records earlier experiments and rejected
   branches; it is not configuration guidance.
 - **Shared with the rest of HALO:** the tokenizer (`model/tokenizer/`, physical filterbank +
   extensions). Everything else here — the archetypal memory, the evidence decoder, the training
@@ -64,17 +64,19 @@ python -m training.evidence.train_patch_decoder --device cuda --evidence-budget 
 
 Retrieval K and per-window/per-label contribution limits are derived from that budget. Candidate
 labels are task input. Training cycles evenly over semantic zero-support, ordinary few-support,
-cross-subject/cross-config few-support, and same-subject enrollment. Supported episodes use exactly
+cross-subject few-support, and same-subject enrollment. Supported episodes use exactly
 `1`, `2`, `4`, or `8` independent event/window examples for every candidate and mix coherent labels
 with episode-local neutral aliases. Candidate sets contain `4`, `8`, `12`, or `16` labels. The
 archive has one global upper budget; when the source corpus is smaller no rows are discarded. Its
 active label/config/subject-balanced view rotates every 100 steps.
 
-Physical views are a fixed 50/50 recipe: exact clean source query/support executions, or the full
-virtual-subject plus mild acquisition-augmentation simulation. Validation evaluates every held-out
+Physical views are a fixed 50/50 recipe: stored clean frozen-encoder query/support vectors (or live
+clean forwards when fine-tuning), or the full virtual-subject plus mild acquisition-augmentation
+simulation. Validation evaluates every held-out
 episode both ways and reports clean and augmented balanced accuracy separately.
+Its fixed episodes cycle evenly across held-subject, held-configuration, and jointly held queries.
 
-Inference remains hard top-k. Training attaches a balanced soft all-memory vote only in backward so
+Inference remains hard top-k. Training attaches a 0.1-weighted balanced soft all-memory vote only in backward so
 unselected rows teach retrieval without changing the forward result. Predictor and confidence health
 telemetry is updated about once per minute in separate run directories:
 

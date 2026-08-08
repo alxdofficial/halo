@@ -190,14 +190,18 @@ at zero support because the episode would contain no information connecting an a
 movement.
 
 Candidate distractors include random, language-near, motion-family-near, and physically confusable
-labels. Complete motion families are reserved from predictor training for validation. Results must
+labels. Complete motion families are reserved from predictor training for validation. Training uses
+only rows whose subject and configuration are both in the training partition. Validation queries use
+all three excluded quadrants: held subject, held configuration, and both held. Fixed validation
+episodes cycle evenly across those three transfer conditions. Results must
 be stratified by support count and episode regime; averaging them together would hide whether the
 adaptation mechanism works.
 
 ## 8. Physical Episode Views
 
-Training cycles exactly 50/50 between two physical-view modes. The **clean** mode re-encodes the
-unaltered source query and support executions. The **augmented** mode follows this order:
+Training cycles exactly 50/50 between two physical-view modes. With a frozen tokenizer, the **clean**
+mode uses stored clean vectors whose equivalence to live encoding is guarded by the bank probe; the
+fine-tuning mode uses live clean forwards. The **augmented** mode follows this order:
 
 ```text
 raw source window
@@ -232,10 +236,12 @@ hard path. A balanced soft vote over all eligible rows in the active memory is a
 backward pass:
 
 ```text
-training_logits = hard_logits + soft_logits - stop_gradient(soft_logits)
+training_logits = hard_logits + 0.1 * (soft_logits - stop_gradient(soft_logits))
 ```
 
-The soft temperature anneals from 0.20 to 0.07 over 500 steps. Its prior balances label, source
+The soft temperature anneals from 0.20 to 0.07 over 500 steps. The 0.1 backward-only scale was chosen
+after real-bank probes showed that the unscaled surrogate gradient was 5-8 times the selected hard
+path. Its prior balances label, source
 window, resolution, and represented duration so large labels and dense short-patch grids do not win
 by row count. The estimator is biased by design, but it gives the retrieval projection and query
 path a learning signal when useful support falls outside hard top-k.
@@ -305,8 +311,9 @@ AUROC, and risk/coverage rather than treated as intrinsic uncertainty guarantees
    grids in distinct source-execution units; every window from a chosen same-subject support
    execution is excluded from that subject's query set.
 2. A random-alias support curve showing that examples, not familiar label semantics, drive the gain.
-3. Support-removal and alias-permutation canaries showing that the predictor reads provided support
-   rather than candidate position or canonical-label leakage.
+3. Support-removal and support-label-shuffle canaries showing that the predictor reads provided
+   support. Consistent label-renaming agreement is reported separately as a naming-stability check;
+   it is not evidence of support use.
 4. Held-out-family and held-out-dataset evaluation, with clear wording about whether the motion,
    label string, subject, or only dataset is unseen.
 5. Cross-configuration enrollment results showing that support recorded on one configuration helps

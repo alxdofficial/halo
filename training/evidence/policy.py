@@ -19,6 +19,10 @@ RETRIEVAL_TEMPERATURE = 0.07
 SOFT_RETRIEVAL_TEMPERATURE_START = 0.20
 SOFT_RETRIEVAL_TEMPERATURE_END = 0.07
 SOFT_RETRIEVAL_ANNEAL_STEPS = 500
+# The all-row route is a deliberately biased estimator for rows outside hard top-k. Real-bank
+# probes found its raw retriever gradient 5-8x larger than the selected hard path. Keep the route,
+# but scale it so it teaches missed rows without becoming the effective training objective.
+SOFT_BACKWARD_SCALE = 0.10
 RETRIEVAL_OVERSAMPLE = 8
 MIN_TOPK_PER_SUBSPACE = 4
 MAX_TOPK_PER_SUBSPACE = 32
@@ -45,7 +49,7 @@ PHASE_B_TEST_DATASETS = ("inclusivehar", "usc_had", "tnda_har", "ut_complex")
 
 # Artifact guard for the complete predictor recipe. Bump this whenever a behavioral training path
 # changes even if the decoder parameter schema stays compatible.
-PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_hard_forward_soft_backward_v4"
+PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_hard_forward_soft_backward_v5"
 
 # Fine-tuning constants. The online tokenizer uses a deliberately small LR, while an EMA copy
 # supplies stable retrieval keys and the inference representation.
@@ -100,6 +104,7 @@ class PhaseBPolicy:
             "soft_tau_start": SOFT_RETRIEVAL_TEMPERATURE_START,
             "soft_tau_end": SOFT_RETRIEVAL_TEMPERATURE_END,
             "soft_tau_anneal_steps": SOFT_RETRIEVAL_ANNEAL_STEPS,
+            "soft_backward_scale": SOFT_BACKWARD_SCALE,
             "dynamic_topk_range": [MIN_TOPK_PER_SUBSPACE, MAX_TOPK_PER_SUBSPACE],
         })
         if query_patches is not None:

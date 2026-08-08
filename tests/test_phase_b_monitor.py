@@ -69,6 +69,46 @@ def test_monitor_writes_human_machine_and_plot_outputs(tmp_path):
     assert (tmp_path / "telemetry.png").stat().st_size > 1_000
 
 
+def test_predictor_monitor_uses_post_anneal_effective_retrieval_gates(tmp_path):
+    telemetry = PhaseBTelemetry(tmp_path, interval_seconds=60, run_id="retrieval")
+    telemetry.start(
+        step=0,
+        elapsed_seconds=0,
+        metadata={
+            "planned_steps": 1000,
+            "warmup_steps": 100,
+            "soft_anneal_steps": 500,
+            "n_retrieval_heads": 4,
+        },
+    )
+    telemetry.update({
+        "decoder_grad_norm": 1.0,
+        "retriever_grad_norm": 1.0,
+        "hard_forward_max_abs_error": 0.0,
+        "gradient_clipped_fraction": 0.0,
+        "effective_soft_to_hard_retriever_grad_ratio": 2.5,
+        "hard_soft_retriever_grad_cosine": 0.01,
+        "topk_retained_soft_mass": 0.01,
+        "provided_support_recall_at_k": 0.50,
+    })
+    telemetry.set_validation({
+        "macro_cell_ba": 0.2,
+        "adaptation_macro_cell_ba_gain": 0.0,
+        "support_removal_true_probability_drop": 0.0,
+        "support_label_shuffle_true_probability_drop": 0.0,
+    })
+    telemetry.emit(step=600, elapsed_seconds=60, force=True)
+    codes = {item["code"] for item in assess(tmp_path)["alerts"]}
+    assert {
+        "surrogate_gradient_dominance",
+        "surrogate_gradient_misalignment",
+        "low_hard_soft_overlap",
+        "low_provided_support_recall",
+        "support_removal_inert",
+        "support_labels_inert",
+    } <= codes
+
+
 def test_external_development_and_test_rosters_are_complete_and_disjoint():
     assert set(PHASE_B_DEV_DATASETS).isdisjoint(PHASE_B_TEST_DATASETS)
     assert set(PHASE_B_DEV_DATASETS) | set(PHASE_B_TEST_DATASETS) == set(PRIMARY_EVAL_DATASETS)

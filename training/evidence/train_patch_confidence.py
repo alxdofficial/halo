@@ -39,6 +39,7 @@ from training.evidence.bank_guard import (
 from training.evidence.labeltext import ensemble_text
 from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
 from training.evidence.device import resolve_device
+from training.evidence.folds import VALIDATION_QUERY_POLICY, phase_b_fold_masks
 from training.evidence.patch_episodes import (
     PatchTable,
     balanced_memory_log_prior,
@@ -195,12 +196,13 @@ def main() -> None:
     fold = predictor["fold"]
     val_cfg = torch.tensor(fold["validation_config_ids"], device=device)
     val_subject = torch.tensor(fold["validation_subject_ids"], device=device)
-    is_val_cfg = torch.isin(config, val_cfg)
-    is_val_subject = torch.isin(subj, val_subject)
-    base_train = torch.nonzero(~is_val_cfg & ~is_val_subject, as_tuple=True)[0]
+    if fold.get("validation_query_policy") != VALIDATION_QUERY_POLICY:
+        raise SystemExit("predictor uses an obsolete Phase-B validation-query policy")
+    fold_masks = phase_b_fold_masks(config, subj, val_cfg, val_subject)
+    base_train = torch.nonzero(fold_masks.train_base, as_tuple=True)[0]
     train_pool = base_train[~torch.isin(y[base_train], heldout)]
     val_pool = torch.nonzero(
-        is_val_cfg & is_val_subject & torch.isin(y, heldout), as_tuple=True
+        fold_masks.validation & torch.isin(y, heldout), as_tuple=True
     )[0]
     if not len(train_pool) or not len(val_pool):
         raise SystemExit("predictor fold does not provide confidence train/validation queries")
@@ -289,47 +291,8 @@ def main() -> None:
                     truth_present=True, mode=mode, rng=local_rng,
                     allowed_vocab=present, family_ids=family_ids,
                 )
-                query_pool = pool
-                if episode_type == "cross_subject_few_support":
-                    patch_y = torch.as_tensor(bank["patch"]["y"])[
-                        index_rows.detach().cpu()
-                    ].long().to(device)
-                    patch_cfg = torch.as_tensor(bank["patch"]["cfg"])[
-                        index_rows.detach().cpu()
-                    ].long().to(device)
-                    patch_subj = torch.as_tensor(bank["patch"]["subj"])[
-                        index_rows.detach().cpu()
-                    ].long().to(device)
-                    selected_query_rows = []
-                    for label in candidates.tolist():
-                        label_pool = pool[y[pool].eq(label)]
-                        viable = []
-                        for query_cfg in torch.unique(config[label_pool]).tolist():
-                            config_pool = label_pool[config[label_pool].eq(query_cfg)]
-                            for query_subj in torch.unique(subj[config_pool]).tolist():
-                                if bool((
-                                    patch_y.eq(label)
-                                    & patch_cfg.ne(query_cfg)
-                                    & patch_subj.ne(query_subj)
-                                ).any()):
-                                    viable.append((int(query_cfg), int(query_subj)))
-                        if not viable:
-                            selected_query_rows = []
-                            break
-                        chosen_cfg, chosen_subj = viable[
-                            int(local_rng.integers(len(viable)))
-                        ]
-                        selected_query_rows.append(
-                            label_pool[
-                                config[label_pool].eq(chosen_cfg)
-                                & subj[label_pool].eq(chosen_subj)
-                            ]
-                        )
-                    if not selected_query_rows:
-                        continue
-                    query_pool = torch.cat(selected_query_rows)
                 qi = sample_queries_covering_labels(
-                    query_pool, candidates, y, count, local_rng,
+                    pool, candidates, y, count, local_rng,
                     config_ids=config, subject_ids=subj,
                 )
             else:

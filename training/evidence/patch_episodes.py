@@ -428,6 +428,7 @@ def describe_episode_composition(
     # watch, or two different studies).
     counts = {
         "enrolled_examples": 0, "enrolled_patches": int(len(support_local)),
+        "enrolled_examples_without_matching_query": 0,
         "performed_by_a_different_person": 0, "performed_by_the_same_person": 0,
         "from_the_query_s_own_stream": 0,
         "from_a_second_stream_worn_simultaneously": 0,
@@ -438,13 +439,17 @@ def describe_episode_composition(
         if not len(picked):
             continue
         rows_for_label = q_mask & query_label.eq(int(label)).unsqueeze(1)
-        if not bool(rows_for_label.any()):
-            rows_for_label = q_mask
-        query_subjects = set(q_subj[rows_for_label].tolist())
-        query_configs = set(q_cfg[rows_for_label].tolist())
+        has_matching_query = bool(rows_for_label.any())
+        query_subjects = set(q_subj[rows_for_label].tolist()) if has_matching_query else set()
+        query_configs = set(q_cfg[rows_for_label].tolist()) if has_matching_query else set()
         for execution in torch.unique(unit[picked]).tolist():
             member = picked[unit[picked].eq(execution)]
             counts["enrolled_examples"] += 1
+            if not has_matching_query:
+                # Distractor support has no corresponding query execution. Comparing it with an
+                # unrelated query would overstate same-person and same-stream enrollment.
+                counts["enrolled_examples_without_matching_query"] += 1
+                continue
             key = ("performed_by_the_same_person"
                    if set(subj[member].tolist()) & query_subjects
                    else "performed_by_a_different_person")
@@ -452,9 +457,19 @@ def describe_episode_composition(
             streams = set(cfg[member].tolist())
             if streams & query_configs:
                 counts["from_the_query_s_own_stream"] += 1
-            elif any(frozenset((s, q)) in pairs for s in streams for q in query_configs):
+            outside_streams = streams - query_configs
+            paired_within_support = any(
+                frozenset((left, right)) in pairs
+                for left in streams for right in streams if left < right
+            )
+            paired_outside = {
+                stream for stream in outside_streams
+                if any(frozenset((stream, query_stream)) in pairs
+                       for query_stream in query_configs)
+            }
+            if paired_within_support or paired_outside:
                 counts["from_a_second_stream_worn_simultaneously"] += 1
-            else:
+            if any(stream not in paired_outside for stream in outside_streams):
                 counts["from_an_independently_recorded_stream"] += 1
     counts["synthetic_persona"] = {
         "same_subject_enrollment": "one persona shared by the query and its support",

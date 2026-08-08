@@ -34,6 +34,7 @@ from training.evidence.bank_guard import (
 from training.evidence.labeltext import build_label_variants, ensemble_text
 from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
 from training.evidence.device import resolve_device
+from training.evidence.folds import VALIDATION_QUERY_POLICY, phase_b_fold_masks
 from training.evidence.patch_episodes import (
     EpisodeMemoryView,
     PatchTable,
@@ -61,6 +62,7 @@ from training.evidence.policy import (
     RETRIEVAL_SUBSPACE_DIM,
     RETRIEVAL_SUBSPACES,
     RETRIEVAL_TEMPERATURE,
+    SOFT_BACKWARD_SCALE,
     SOFT_RETRIEVAL_ANNEAL_STEPS,
     SOFT_RETRIEVAL_TEMPERATURE_END,
     SOFT_RETRIEVAL_TEMPERATURE_START,
@@ -821,9 +823,14 @@ def prepare_adaptation_views(
     online_encoder=None,
     online_requires_grad: bool = False,
     physical_view_mode: str = "augmented",
+    reuse_stored_clean: bool = False,
 ):
     """Create episode-specific query/support vectors and selector keys."""
     if live_source is None:
+        return query, query, selector_z, memory_index
+    if physical_view_mode == "clean" and reuse_stored_clean and not online_requires_grad:
+        # Stored fp16 vectors are the clean frozen-encoder path. Re-encoding them only reproduces
+        # the same representation and needlessly serializes CPU augmentation/loading with the GPU.
         return query, query, selector_z, memory_index
     query_specs, support_specs = _episode_view_specs(
         query, view, index_rows, bank["patch"], rng,
@@ -895,6 +902,7 @@ def decode_adaptation_episode(
             rng=rng, live_source=live_source, selector_encoder=selector_encoder,
             online_encoder=online_encoder, online_requires_grad=online_requires_grad,
             physical_view_mode=physical_view_mode,
+            reuse_stored_clean=policy.tokenizer_mode == "frozen",
         )
     )
     selector_query.Z = F.normalize(selector_query.Z, dim=-1)
@@ -985,29 +993,32 @@ def decode_adaptation_episode(
         aux["evidence"], evidence.scores, aux["votes"], aux["pool_weights"],
         ev_mask=evidence.mask, ev_sensor_id=ev_sensor,
     )
-    candidate_weights = _episode_candidate_weights(
-        view, index_rows, patch, canonical_text, candidate_text
-    )
-    soft = retriever.soft_candidate_logits(
-        online_query.Z,
-        memory_online,
-        view.allowed,
-        candidate_weights,
-        row_log_prior,
-        tau=soft_tau,
-        query_mask=query.mask,
-        selected_index=retrieval.index,
-        output_scale=dec.log_out_scale.exp().detach(),
-    )
-    # Forward is exactly the hard decoder. Backward includes the all-row soft retrieval route.
-    logits = hard_logits + (soft.logits - soft.logits.detach())
+    # The soft all-row route exists only to estimate gradients for rows outside hard top-k. It has
+    # no effect under no_grad evaluation, so do not spend validation/confidence time computing it.
+    soft = None
+    logits = hard_logits
+    if torch.is_grad_enabled() and SOFT_BACKWARD_SCALE > 0:
+        candidate_weights = _episode_candidate_weights(
+            view, index_rows, patch, canonical_text, candidate_text
+        )
+        soft = retriever.soft_candidate_logits(
+            online_query.Z,
+            memory_online,
+            view.allowed,
+            candidate_weights,
+            row_log_prior,
+            tau=soft_tau,
+            query_mask=query.mask,
+            selected_index=retrieval.index,
+            output_scale=dec.log_out_scale.exp().detach(),
+        )
+        # Forward remains exactly hard top-k; only the backward estimator is scaled.
+        logits = hard_logits + SOFT_BACKWARD_SCALE * (
+            soft.logits - soft.logits.detach()
+        )
     aux.update({
         "hard_logits": hard_logits,
-        "soft_logits": soft.logits,
-        "soft_entropy": soft.entropy,
-        "soft_normalized_entropy": soft.normalized_entropy,
-        "soft_effective_rows": soft.effective_rows,
-        "soft_topk_mass": soft.retained_mass,
+        "soft_backward_scale": SOFT_BACKWARD_SCALE,
         "retrieval_scores": evidence.scores,
         "retrieval_prior": evidence.weights,
         "evidence_mask": evidence.mask,
@@ -1024,6 +1035,14 @@ def decode_adaptation_episode(
         "retrieval_topk": topk,
         "identity_logits": identity_logits,
     })
+    if soft is not None:
+        aux.update({
+            "soft_logits": soft.logits,
+            "soft_entropy": soft.entropy,
+            "soft_normalized_entropy": soft.normalized_entropy,
+            "soft_effective_rows": soft.effective_rows,
+            "soft_topk_mass": soft.retained_mass,
+        })
     return logits, aux
 
 
@@ -1040,7 +1059,7 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--warmup-steps", type=int, default=100)
-    ap.add_argument("--grad-clip", type=float, default=1.0)
+    ap.add_argument("--grad-clip", type=float, default=20.0)
     ap.add_argument("--layers", type=int, default=3)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--evidence-budget", type=int, default=64,
@@ -1077,7 +1096,7 @@ def main() -> None:
         args.batch = 4
         args.evidence_budget = 8
         args.val_every = 1
-        args.val_episodes = 2
+        args.val_episodes = 3
         args.val_queries = 4
         args.val_frac_cfg = 0.5
         args.val_families = 1
@@ -1147,9 +1166,10 @@ def main() -> None:
     alias_embeddings = encode_neutral_aliases(sbert, device)
     text_gen = torch.Generator(device=device).manual_seed(args.seed)
 
-    # Subject/config-disjoint validation. Held-out families never occur in a training query,
-    # candidate, or memory role. Their validation support comes only from the disjoint base fold.
-    cfg_ids = np.arange(int(cfg.max()) + 1)
+    # Training occupies the non-held-subject/non-held-configuration quadrant. Held-family
+    # validation uses every other quadrant, separately exposing subject, configuration, and joint
+    # transfer instead of silently discarding the two off-diagonal cells.
+    cfg_ids = torch.unique(cfg).cpu().numpy()
     rng.shuffle(cfg_ids)
     n_val_cfg = max(1, int(len(cfg_ids) * args.val_frac_cfg))
     val_cfg = torch.tensor(cfg_ids[:n_val_cfg], device=device)
@@ -1157,10 +1177,9 @@ def main() -> None:
     rng.shuffle(subjects)
     n_val_subject = max(1, int(len(subjects) * args.val_frac_cfg))
     val_subject = torch.tensor(subjects[:n_val_subject], device=device)
-    is_val_cfg = torch.isin(cfg, val_cfg)
-    is_val_subject = torch.isin(subj, val_subject)
-    raw_val_pool = torch.nonzero(is_val_cfg & is_val_subject, as_tuple=True)[0]
-    base_train_pool = torch.nonzero(~is_val_cfg & ~is_val_subject, as_tuple=True)[0]
+    fold_masks = phase_b_fold_masks(cfg, subj, val_cfg, val_subject)
+    raw_val_pool = torch.nonzero(fold_masks.validation, as_tuple=True)[0]
+    base_train_pool = torch.nonzero(fold_masks.train_base, as_tuple=True)[0]
     if not len(raw_val_pool) or not len(base_train_pool):
         raise SystemExit("empty train/validation fold after config x subject split")
     represented_for_validation = torch.unique(y[raw_val_pool])
@@ -1338,11 +1357,25 @@ def main() -> None:
     train_canary_row_log_prior = balanced_memory_log_prior(
         bank["patch"], train_canary_index_rows, device
     )
+    validation_query_pools = []
+    for fold_name in ("subject_only", "configuration_only", "joint"):
+        relation_pool = val_pool[getattr(fold_masks, fold_name)[val_pool]]
+        if len(torch.unique(y[relation_pool])) < 2:
+            raise RuntimeError(
+                f"validation relation {fold_name!r} has fewer than two held-family labels"
+            )
+        validation_query_pools.append((fold_name, relation_pool))
 
     def build_fixed_canaries(pool, rows, *, count, validation, seed_offset):
         canaries = []
         local_rng = np.random.default_rng(args.seed + seed_offset)
         for i in range(count):
+            fold_relation = None
+            episode_pool = pool
+            if validation:
+                fold_relation, episode_pool = validation_query_pools[
+                    i % len(validation_query_pools)
+                ]
             episode_type, requested_support = validation_recipes[i % len(validation_recipes)]
             cycle = i // len(validation_recipes)
             label_mode = (
@@ -1366,7 +1399,7 @@ def main() -> None:
                 for _attempt in range(50):
                     try:
                         qi, query, view, distractor_mode = make_adaptation_episode(
-                            pool, rows, canary_spec,
+                            episode_pool, rows, canary_spec,
                             count=args.val_queries, local_rng=local_rng,
                             validation=validation,
                         )
@@ -1401,6 +1434,7 @@ def main() -> None:
                     "distractor_mode": distractor_mode,
                     "seed": episode_seed,
                     "requested_support": requested_support,
+                    "fold_relation": fold_relation,
                 })
         return canaries
 
@@ -1420,14 +1454,19 @@ def main() -> None:
         if ema_encoder is not None:
             ema_encoder.eval()
         all_pred, all_identity_pred, all_true = [], [], []
-        per_cell, identity_per_cell, true_mass, support_recall = [], [], [], []
+        per_cell, identity_per_cell, true_mass, positive_support_recall = [], [], [], []
         cell_records = []
         random_scores = []
         support_removal_drop = []
-        alias_permutation_agreement = []
+        support_label_shuffle_drop = []
+        label_renaming_agreement = []
         support_removal_by_view = {mode: [] for mode in PHYSICAL_VIEW_MODES}
-        alias_permutation_by_view = {mode: [] for mode in PHYSICAL_VIEW_MODES}
-        ran_adaptation_canary: set[str] = set()
+        support_label_shuffle_by_view = {mode: [] for mode in PHYSICAL_VIEW_MODES}
+        label_renaming_by_view = {mode: [] for mode in PHYSICAL_VIEW_MODES}
+        fold_predictions = {
+            name: {"pred": [], "true": []}
+            for name in ("subject_only", "configuration_only", "joint")
+        }
         eval_selector_z = val_selector_z
         if policy.tokenizer_mode == "ema_finetune":
             eval_selector_z = F.normalize(
@@ -1482,6 +1521,10 @@ def main() -> None:
             all_pred.extend(pred.cpu().tolist())
             all_identity_pred.extend(identity_pred.cpu().tolist())
             all_true.extend(true.cpu().tolist())
+            for fold_name in fold_predictions:
+                member = getattr(fold_masks, fold_name)[qi]
+                fold_predictions[fold_name]["pred"].extend(pred[member].cpu().tolist())
+                fold_predictions[fold_name]["true"].extend(true[member].cpu().tolist())
             selected_true_support = (
                 aux["evidence_support"]
                 & aux["evidence_support_candidate"].eq(target_position.unsqueeze(1))
@@ -1489,9 +1532,11 @@ def main() -> None:
             )
             mass = (aux["pool_weights"] * selected_true_support).sum(1)
             true_mass.extend(mass.cpu().tolist())
-            support_recall.extend(selected_true_support.any(1).float().cpu().tolist())
-            if spec.label_mode == "random_alias" \
-                    and spec.physical_view_mode not in ran_adaptation_canary:
+            recall_values = selected_true_support.any(1).float().cpu().tolist()
+            if spec.support_count > 0:
+                positive_support_recall.extend(recall_values)
+                cell_records[-1]["true_support_recall_at_k"] = float(np.mean(recall_values))
+            if spec.label_mode == "random_alias" and spec.support_count > 0:
                 removed_view = replace(
                     view,
                     allowed=view.allowed & ~view.support_mask.view(1, 1, -1),
@@ -1520,6 +1565,36 @@ def main() -> None:
                 ).cpu().tolist()
                 support_removal_drop.extend(removal_values)
                 support_removal_by_view[spec.physical_view_mode].extend(removal_values)
+
+                # Keep the candidate text fixed while assigning every enrolled execution the next
+                # candidate's label. A model that genuinely uses enrollment labels must react.
+                shuffled_support_candidate = view.support_candidate.clone()
+                shuffled_support_candidate[view.support_mask] = (
+                    shuffled_support_candidate[view.support_mask] + 1
+                ) % len(view.candidate_ids)
+                shuffled_view = replace(
+                    view, support_candidate=shuffled_support_candidate,
+                )
+                shuffled_logits, _ = decode_adaptation_episode(
+                    dec, retriever, bank, val_index_rows, eval_selector_z,
+                    val_memory_index, canary["query"], shuffled_view, text,
+                    canary["candidate_text"], val_row_log_prior, policy=policy,
+                    soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
+                    rng=np.random.default_rng(canary["seed"]),
+                    config_text=config_text, live_source=live_source,
+                    selector_encoder=ema_encoder, online_requires_grad=False,
+                    physical_view_mode=spec.physical_view_mode,
+                )
+                shuffled_probability = torch.softmax(shuffled_logits, dim=1)
+                shuffle_values = (
+                    normal_probability[row, target_position]
+                    - shuffled_probability[row, target_position]
+                ).cpu().tolist()
+                support_label_shuffle_drop.extend(shuffle_values)
+                support_label_shuffle_by_view[spec.physical_view_mode].extend(shuffle_values)
+
+                # Rename every candidate and its enrolled support consistently. This measures label
+                # naming stability; it is intentionally not treated as evidence that support is used.
                 permutation = torch.roll(
                     torch.arange(len(view.candidate_ids), device=device), shifts=1
                 )
@@ -1536,9 +1611,8 @@ def main() -> None:
                 agreement_values = (
                     permuted_logits.argmax(1).eq(logits.argmax(1)).float().cpu().tolist()
                 )
-                alias_permutation_agreement.extend(agreement_values)
-                alias_permutation_by_view[spec.physical_view_mode].extend(agreement_values)
-                ran_adaptation_canary.add(spec.physical_view_mode)
+                label_renaming_agreement.extend(agreement_values)
+                label_renaming_by_view[spec.physical_view_mode].extend(agreement_values)
         zero = [score for support, _, score in per_cell if support == 0]
         low = [score for support, _, score in per_cell if support != 0]
         macro_cell_ba = float(np.mean([score for _, _, score in per_cell]))
@@ -1559,14 +1633,21 @@ def main() -> None:
             "zero_support_ba": float(np.mean(zero)) if zero else float("nan"),
             "positive_support_ba": float(np.mean(low)) if low else float("nan"),
             "random_alias_ba": float(np.mean(random_scores)) if random_scores else float("nan"),
-            "true_support_recall_at_k": float(np.mean(support_recall)),
+            "positive_support_recall_at_k": (
+                float(np.mean(positive_support_recall))
+                if positive_support_recall else float("nan")
+            ),
             "mean_retrieved_true_support_mass": float(np.mean(true_mass)),
             "support_removal_true_probability_drop": (
                 float(np.mean(support_removal_drop)) if support_removal_drop else float("nan")
             ),
-            "alias_permutation_prediction_agreement": (
-                float(np.mean(alias_permutation_agreement))
-                if alias_permutation_agreement else float("nan")
+            "support_label_shuffle_true_probability_drop": (
+                float(np.mean(support_label_shuffle_drop))
+                if support_label_shuffle_drop else float("nan")
+            ),
+            "label_renaming_prediction_agreement": (
+                float(np.mean(label_renaming_agreement))
+                if label_renaming_agreement else float("nan")
             ),
             "support_fallback_fraction": float(np.mean([
                 record["support"] != record["requested_support"] for record in cell_records
@@ -1584,6 +1665,20 @@ def main() -> None:
                 metrics[f"support_k{support}_loss_over_random"] = float(np.mean([
                     record["loss_over_random"] for record in selected_records
                 ]))
+                recalls = [
+                    record["true_support_recall_at_k"] for record in selected_records
+                    if "true_support_recall_at_k" in record
+                ]
+                if recalls:
+                    metrics[f"support_k{support}_true_support_recall_at_k"] = float(
+                        np.mean(recalls)
+                    )
+        for fold_name, values in fold_predictions.items():
+            if values["true"]:
+                metrics[f"validation_fold/{fold_name}_ba"] = balanced_accuracy(
+                    np.asarray(values["pred"]), np.asarray(values["true"])
+                )
+                metrics[f"validation_fold/{fold_name}_queries"] = len(values["true"])
         for episode_type in EPISODE_TYPES:
             selected_records = [
                 record for record in cell_records if record["episode_type"] == episode_type
@@ -1616,9 +1711,13 @@ def main() -> None:
                 float(np.mean(support_removal_by_view[physical_view_mode]))
                 if support_removal_by_view[physical_view_mode] else float("nan")
             )
-            metrics[f"{physical_view_mode}_alias_permutation_prediction_agreement"] = (
-                float(np.mean(alias_permutation_by_view[physical_view_mode]))
-                if alias_permutation_by_view[physical_view_mode] else float("nan")
+            metrics[f"{physical_view_mode}_support_label_shuffle_true_probability_drop"] = (
+                float(np.mean(support_label_shuffle_by_view[physical_view_mode]))
+                if support_label_shuffle_by_view[physical_view_mode] else float("nan")
+            )
+            metrics[f"{physical_view_mode}_label_renaming_prediction_agreement"] = (
+                float(np.mean(label_renaming_by_view[physical_view_mode]))
+                if label_renaming_by_view[physical_view_mode] else float("nan")
             )
 
         # Matched fixed training canaries use the same episode recipe and metrics. Their purpose is
@@ -1797,6 +1896,8 @@ def main() -> None:
             "planned_steps": args.steps,
             "warmup_steps": args.warmup_steps,
             "grad_clip": args.grad_clip,
+            "soft_anneal_steps": SOFT_RETRIEVAL_ANNEAL_STEPS,
+            "soft_backward_scale": SOFT_BACKWARD_SCALE,
             "n_retrieval_heads": RETRIEVAL_SUBSPACES,
             "output": str(args.out),
             "bank_fp": current_bank_fp,
@@ -2061,7 +2162,9 @@ def main() -> None:
             "retrieval_effective_rows": float(aux["soft_effective_rows"].detach()),
             "topk_retained_soft_mass": float(aux["soft_topk_mass"].detach()),
             "selected_row_max_share": selected_concentration,
-            "true_support_recall_at_k": support_recall,
+            "provided_support_recall_at_k": (
+                support_recall if spec.support_count > 0 else None
+            ),
             "provided_support_pool_mass": float(support_pool_mass.mean()),
             "true_label_pool_mass": float(true_label_pool_mass.mean()),
             "pool_normalized_entropy": float(pool_normalized_entropy.mean()),
@@ -2101,6 +2204,9 @@ def main() -> None:
                 probe_metrics["hard_soft_retriever_grad_cosine"] = hard_soft_grad_cosine
             if np.isfinite(hard_soft_grad_ratio):
                 probe_metrics["soft_to_hard_retriever_grad_ratio"] = hard_soft_grad_ratio
+                probe_metrics["effective_soft_to_hard_retriever_grad_ratio"] = (
+                    SOFT_BACKWARD_SCALE * hard_soft_grad_ratio
+                )
             if np.isfinite(subspace_topk_overlap):
                 probe_metrics["subspace_topk_jaccard"] = subspace_topk_overlap
             telemetry_metrics.update(probe_metrics)
@@ -2201,6 +2307,7 @@ def main() -> None:
                 "lr": opt.param_groups[0]["lr"],
                 "retrieval_topk": int(aux["retrieval_topk"]),
                 "soft_tau": round(soft_retrieval_temperature(step), 5),
+                "soft_backward_scale": SOFT_BACKWARD_SCALE,
                 "soft_retrieval_entropy": round(float(aux["soft_entropy"].detach()), 4),
                 "soft_retrieval_normalized_entropy": round(
                     float(aux["soft_normalized_entropy"].detach()), 4
@@ -2273,6 +2380,19 @@ def main() -> None:
         "fold": {
             "validation_config_ids": val_cfg.cpu().tolist(),
             "validation_subject_ids": val_subject.cpu().tolist(),
+            "validation_query_policy": VALIDATION_QUERY_POLICY,
+            "window_counts": {
+                "train_base": int(fold_masks.train_base.sum()),
+                "validation_subject_only": int(fold_masks.subject_only.sum()),
+                "validation_configuration_only": int(fold_masks.configuration_only.sum()),
+                "validation_joint": int(fold_masks.joint.sum()),
+                "validation_query_pool": int(len(val_pool)),
+            },
+            "validation_query_pool": {
+                "labels": int(torch.unique(y[val_pool]).numel()),
+                "subjects": int(torch.unique(subj[val_pool]).numel()),
+                "configurations": int(torch.unique(cfg[val_pool]).numel()),
+            },
         },
         "optimizer_cfg": {
             "lr": args.lr, "weight_decay": args.weight_decay,

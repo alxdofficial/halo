@@ -40,6 +40,7 @@ from training.evidence.train_patch_decoder import (
     family_holdout_labels,
     load_activity_families,
     parameter_gradient_norm,
+    prepare_adaptation_views,
     run_patch_episode,
     sample_queries,
     soft_retrieval_temperature,
@@ -998,6 +999,101 @@ def test_adaptation_identity_control_matches_untrained_decoder_forward():
     assert torch.allclose(aux["hard_logits"], aux["identity_logits"], atol=1e-6)
 
 
+def test_no_grad_adaptation_skips_the_soft_backward_route(monkeypatch):
+    torch.manual_seed(24)
+    bank = _bank()
+    rows = torch.arange(len(bank["patch"]["Z"]))
+    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
+    candidates = torch.tensor([1, 2])
+    view = build_episode_memory_view(
+        bank["patch"], rows, query, torch.tensor([1]), candidates,
+        support_count=0, episode_type="semantic_zero_support", label_mode="coherent",
+        rng=np.random.default_rng(7),
+    )
+    retriever = PatchSubspaceRetriever(8, 2, 4)
+    decoder = EvidenceDecoder(DecoderConfig(
+        d_model=8, text_dim=6, n_heads=2, n_layers=1,
+        candidate_tokens=True, candidate_layers=1,
+        structural_metadata=True, support_role=True,
+    )).eval()
+    selector_z = F.normalize(bank["patch"]["Z"].float(), dim=-1)
+    text = F.normalize(torch.randn(3, 6), dim=-1)
+
+    def forbidden_soft_route(*args, **kwargs):
+        raise AssertionError("evaluation called the backward-only soft route")
+
+    monkeypatch.setattr(retriever, "soft_candidate_logits", forbidden_soft_route)
+    with torch.no_grad():
+        logits, aux = decode_adaptation_episode(
+            decoder, retriever, bank, rows, selector_z,
+            retriever.build_index(selector_z), query, view, text, text[candidates],
+            balanced_memory_log_prior(bank["patch"], rows, "cpu"),
+            policy=PhaseBPolicy(evidence_budget=8), soft_tau=0.2,
+            rng=np.random.default_rng(8),
+        )
+    assert torch.equal(logits, aux["hard_logits"])
+    assert "soft_logits" not in aux
+
+
+def test_clean_frozen_adaptation_reuses_stored_vectors_without_live_encoding():
+    class ForbiddenLiveSource:
+        def __getattr__(self, name):
+            raise AssertionError(f"clean frozen path called {name}")
+
+    bank = _bank()
+    rows = torch.arange(len(bank["patch"]["Z"]))
+    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
+    view = build_episode_memory_view(
+        bank["patch"], rows, query, torch.tensor([1]), torch.tensor([1, 2]),
+        support_count=0, episode_type="semantic_zero_support", label_mode="coherent",
+        rng=np.random.default_rng(7),
+    )
+    retriever = PatchSubspaceRetriever(8, 2, 4)
+    selector_z = F.normalize(bank["patch"]["Z"].float(), dim=-1)
+    memory_index = retriever.build_index(selector_z)
+    selector_query, online_query, memory, episode_index = prepare_adaptation_views(
+        query, view, bank, rows, selector_z, memory_index, retriever,
+        rng=np.random.default_rng(9), live_source=ForbiddenLiveSource(),
+        selector_encoder=object(), online_requires_grad=False, physical_view_mode="clean",
+        reuse_stored_clean=True,
+    )
+    assert selector_query is query and online_query is query
+    assert memory is selector_z and episode_index is memory_index
+
+
+def test_clean_ema_adaptation_reencodes_instead_of_reusing_stale_bank_vectors():
+    class CountingLiveSource:
+        def __init__(self):
+            self.query_calls = 0
+
+        def reencode_query_views(self, query, encoder, specs, *, requires_grad):
+            self.query_calls += 1
+            return replace(query, Z=query.Z + 0.25)
+
+        def encode_patch_rows_with_views(self, rows, specs, encoder, *, requires_grad):
+            return torch.zeros(len(rows), 8)
+
+    bank = _bank()
+    rows = torch.arange(len(bank["patch"]["Z"]))
+    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
+    view = build_episode_memory_view(
+        bank["patch"], rows, query, torch.tensor([1]), torch.tensor([1, 2]),
+        support_count=0, episode_type="semantic_zero_support", label_mode="coherent",
+        rng=np.random.default_rng(7),
+    )
+    retriever = PatchSubspaceRetriever(8, 2, 4)
+    selector_z = F.normalize(bank["patch"]["Z"].float(), dim=-1)
+    source = CountingLiveSource()
+    selector_query, online_query, _, _ = prepare_adaptation_views(
+        query, view, bank, rows, selector_z, retriever.build_index(selector_z), retriever,
+        rng=np.random.default_rng(9), live_source=source, selector_encoder=object(),
+        online_requires_grad=False, physical_view_mode="clean", reuse_stored_clean=False,
+    )
+    assert source.query_calls == 1
+    assert selector_query is online_query
+    assert not torch.equal(selector_query.Z, query.Z)
+
+
 def test_nontruth_labels_follow_the_shared_active_index_policy():
     bank = _bank()
     query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
@@ -1104,6 +1200,52 @@ def test_composition_separates_paired_rig_support_from_independent_stream_suppor
     assert report["from_a_second_stream_worn_simultaneously"] == 1
     assert report["from_the_query_s_own_stream"] == 0
     assert report["synthetic_persona"] == "none applied"
+
+
+def test_composition_reports_both_own_and_paired_streams_in_one_support_event():
+    window = torch.arange(4).repeat_interleave(2)
+    y = torch.zeros(4, dtype=torch.long)
+    subj = torch.tensor([0, 0, 1, 1])
+    cfg = torch.tensor([0, 1, 0, 1])
+    event = torch.tensor([10, 10, 20, 20])
+    verified = torch.ones(4, dtype=torch.bool)
+    patch = {
+        "Z": torch.randn(8, 8).half(), "y": y[window], "subj": subj[window],
+        "cfg": cfg[window], "sensor": cfg[window], "window": window,
+        "event": event[window], "event_verified": verified[window],
+        "time": torch.tensor([0.5, 1.5] * 4), "duration": torch.ones(8),
+        "resolution": torch.tensor([0, 1] * 4), "ordinal": torch.tensor([0, 1] * 4),
+    }
+    bank = {
+        "schema_version": 3, "Z": torch.randn(4, 8).half(), "y": y, "subj": subj,
+        "cfg": cfg, "event": event, "event_verified": verified,
+        "source_row": torch.arange(4), "patch": patch,
+    }
+    pairs = simultaneous_stream_pairs(bank["cfg"], bank["event"])
+    query = PatchTable(bank).gather_queries(torch.tensor([0]), "cpu")
+    view = build_episode_memory_view(
+        bank["patch"], torch.arange(8), query, torch.tensor([0]), torch.tensor([0]),
+        support_count=1, episode_type="ordinary_few_support",
+        label_mode="coherent", rng=np.random.default_rng(2),
+    )
+    report = describe_episode_composition(bank["patch"], torch.arange(8), query, view, pairs)
+    assert report["enrolled_examples"] == 1
+    assert report["from_the_query_s_own_stream"] == 1
+    assert report["from_a_second_stream_worn_simultaneously"] == 1
+
+
+def test_composition_does_not_attribute_distractor_support_to_unrelated_queries():
+    bank = _single_stream_bank()
+    query = PatchTable(bank).gather_queries(torch.tensor([0]), "cpu")
+    view = build_episode_memory_view(
+        bank["patch"], torch.arange(8), query, torch.tensor([0]), torch.tensor([0, 1]),
+        support_count=1, episode_type="ordinary_few_support",
+        label_mode="coherent", rng=np.random.default_rng(3),
+    )
+    report = describe_episode_composition(bank["patch"], torch.arange(8), query, view)
+    assert report["enrolled_examples_without_matching_query"] == 1
+    assert report["performed_by_a_different_person"] == 1
+    assert report["from_the_query_s_own_stream"] == 1
 
 
 def test_activity_family_mapping_is_complete_and_drives_family_distractors():

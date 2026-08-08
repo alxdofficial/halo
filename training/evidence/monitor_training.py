@@ -85,13 +85,14 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
             alert("critical", "hard_forward_mismatch",
                   f"Straight-through forward differs from hard inference by {hard_error:.3g}.")
         warmup = int(metadata.get("warmup_steps", 0))
+        soft_anneal = int(metadata.get("soft_anneal_steps", warmup))
         if step > warmup:
             for name in ("decoder_grad_norm", "retriever_grad_norm"):
                 maximum = _metric(snapshot, name, "max")
                 if math.isfinite(maximum) and maximum == 0.0:
                     alert("critical", "dead_gradient", f"{name} remained zero in the latest window.")
         clipped = _metric(snapshot, "gradient_clipped_fraction")
-        if math.isfinite(clipped) and clipped > 0.8:
+        if step > warmup and math.isfinite(clipped) and clipped > 0.8:
             alert("warning", "persistent_clipping",
                   f"{clipped:.0%} of recent steps exceeded the gradient clip threshold.")
         pool_share = _metric(snapshot, "pool_weight_max_share")
@@ -106,6 +107,32 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
         if math.isfinite(hard_soft_cos) and hard_soft_cos < -0.25:
             alert("warning", "surrogate_gradient_conflict",
                   f"Hard and soft retriever gradients have cosine {hard_soft_cos:.2f}.")
+        effective_ratio = _metric(snapshot, "effective_soft_to_hard_retriever_grad_ratio")
+        if step > soft_anneal and math.isfinite(effective_ratio) and effective_ratio > 2.0:
+            alert(
+                "warning", "surrogate_gradient_dominance",
+                f"Scaled soft retriever gradient is {effective_ratio:.2f}x the hard-path gradient.",
+            )
+        if step > soft_anneal and math.isfinite(effective_ratio) \
+                and effective_ratio > 1.0 and math.isfinite(hard_soft_cos) \
+                and abs(hard_soft_cos) < 0.05:
+            alert(
+                "warning", "surrogate_gradient_misalignment",
+                f"A dominant soft gradient is nearly orthogonal to hard retrieval "
+                f"(cosine {hard_soft_cos:.2f}).",
+            )
+        retained_mass = _metric(snapshot, "topk_retained_soft_mass")
+        if step > soft_anneal and math.isfinite(retained_mass) and retained_mass < 0.02:
+            alert(
+                "warning", "low_hard_soft_overlap",
+                f"Hard top-k retains only {retained_mass:.1%} of balanced soft retrieval mass.",
+            )
+        support_recall = _metric(snapshot, "provided_support_recall_at_k")
+        if step > soft_anneal and math.isfinite(support_recall) and support_recall < 0.65:
+            alert(
+                "warning", "low_provided_support_recall",
+                f"Only {support_recall:.1%} of supported queries retrieve enrolled evidence.",
+            )
         output_scale = _metric(snapshot, "output_scale", "max")
         if math.isfinite(output_scale) and output_scale > 100:
             alert("warning", "output_scale_growth",
@@ -139,10 +166,35 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
         if gain is not None and step > warmup and float(gain) < -0.05:
             alert("warning", "worse_than_identity",
                   f"Held-out adaptation score is {float(gain):.3f} below identity control.")
+        support_drop = validation.get("support_removal_true_probability_drop")
+        if support_drop is not None and step > soft_anneal and float(support_drop) <= 0.01:
+            alert(
+                "warning", "support_removal_inert",
+                f"Removing enrolled support changes true-label probability by only "
+                f"{float(support_drop):.3f}.",
+            )
+        shuffle_drop = validation.get("support_label_shuffle_true_probability_drop")
+        if shuffle_drop is not None and step > soft_anneal and float(shuffle_drop) <= 0.01:
+            alert(
+                "warning", "support_labels_inert",
+                f"Shuffling enrollment labels changes true-label probability by only "
+                f"{float(shuffle_drop):.3f}.",
+            )
         gap = validation.get("train_validation_macro_cell_ba_gap")
-        if gap is not None and step > warmup and float(gap) > 0.25:
+        gap_points = []
+        previous_gap_marker = object()
+        for row in history:
+            row_validation = row.get("validation", {})
+            marker = row_validation.get("macro_cell_ba")
+            row_gap = row_validation.get("train_validation_macro_cell_ba_gap")
+            if marker is not None and row_gap is not None and marker != previous_gap_marker:
+                gap_points.append(float(row_gap))
+                previous_gap_marker = marker
+        baseline_gap = gap_points[0] if gap_points else None
+        if gap is not None and baseline_gap is not None and step > warmup \
+                and float(gap) > 0.25 and float(gap) > baseline_gap + 0.15:
             alert("warning", "large_train_validation_gap",
-                  f"Matched train BA exceeds held-out BA by {float(gap):.3f}.")
+                  f"Train/held-out BA gap grew from {baseline_gap:.3f} to {float(gap):.3f}.")
         validation_points = []
         previous_value = object()
         for row in history:
