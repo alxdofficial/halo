@@ -28,9 +28,11 @@ python -m training.tokenizer.pretrain --smoke --steps 2 \
 Phase B consumes the Phase-A patch representation through:
 
 - memory construction and provenance: `training/evidence/build_memory.py` and `bank_guard.py`;
-- patch retrieval and evidence decoder: `model/evidence/patch_retrieval.py` and `decoder.py`;
-- episodic training and confidence calibration: `training/evidence/train_patch_decoder.py` and
-  `train_patch_confidence.py`.
+- patch retrieval and evidence decoder: `model/evidence/patch_retrieval.py` and
+  `relational_decoder.py`;
+- episodic predictor training: `training/evidence/train_patch_decoder.py`. Confidence calibration
+  is parked and its separate `train_patch_confidence.py` experiment is not part of the active
+  Phase-B claim.
 
 ## Final Phase-A Objective
 

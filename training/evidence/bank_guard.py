@@ -216,7 +216,7 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
 
     We cannot retro-validate a bank that never recorded its build parameters, so the minimum
     enforceable guarantee is that they ARE recorded; consumers that know the expected backbone
-    (eval_patch_decoder, halo_evidence) additionally compare the checkpoint hash themselves.
+    (eval_enrollment, halo_evidence) additionally compare the checkpoint hash themselves.
     """
     missing = [
         k for k in ("vocab_fp", "backbone", "corpus", "embed_probe", "bank_fp")

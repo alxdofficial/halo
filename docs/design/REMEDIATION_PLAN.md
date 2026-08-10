@@ -19,7 +19,7 @@ Legend: ✅ done · ⚠️ partial · ❌ open
 | # | issue | where | fix | status |
 |---|---|---|---|---|
 | 0.1 | Pre-change results will be overwritten by the refits | `eval/results/*.json` (56 files) | Copy to `eval/results_archive/2026-07-20_pre-vocab-fix/` + `git tag results-pre-vocab-fix`. Keeps the meeting numbers reproducible and enables a real before/after. | ❌ |
-| 0.2 | **Mixed-protocol hazard** — `global_labels.json` says 93, bank says 59, nothing warns | `baselines/halo_evidence/adapter.py:90`, `training/evidence/train_decoder.py:140`, `training/evidence/eval_decoder.py` | Assert `bank["vocab"] == eval_data.load_global_labels()`; fail loud with "rebuild the bank" instead of silently blending protocols. | ❌ |
+| 0.2 | **Mixed-protocol hazard** — `global_labels.json` says 93, bank says 59, nothing warns | `baselines/halo_evidence/adapter.py:90`, `training/evidence/train_patch_decoder.py`, `training/evidence/eval_enrollment.py` | Assert `bank["vocab"] == eval_data.load_global_labels()`; fail loud with "rebuild the bank" instead of silently blending protocols. | ❌ |
 | 0.3 | Bank has no provenance vs the vocabulary | `training/evidence/build_memory.py` | Store `vocab_sha` in the bank; the 0.2 guard compares hashes, not just lengths. | ❌ |
 
 **Gate:** a naive `run_baselines` invocation now either produces a single-protocol table or fails loudly.
@@ -95,7 +95,7 @@ anchor and is exactly the cell that gains elevator exemplars.
 |---|---|---|---|
 | 3.1 ❌ **F4** | UniMTS resampled with `np.interp` — **no anti-aliasing**, aliases 100→20 Hz straight into its band, while everyone else uses `resample_poly`. Violates our own stated one-resampler policy. | `baselines/unimts/adapter.py:110` | Switch to `scipy.signal.resample_poly`; re-score; report the delta as a disclosed correction. **Expect UniMTS to improve.** |
 | 3.2 ❌ **F3** | harnet's head fit on 9 datasets vs HALO's 12 — the missing ones supply the **wrist** streams where we beat it | wired already | Run `HARNET_CORPUS=matched python -m eval.run_baselines --baselines harnet_matched`. Report **both** rows (off-the-shelf *and* corpus-matched). **Expect harnet to improve** ⇒ our deficit widens. |
-| 3.3 ❌ **F5** | Headline has **no CIs** and never went through the shared harness | `training/evidence/eval_decoder.py` | Wire the decoder in as a proper adapter so it gets subject-stratified CIs; add a paired per-cell test. Currently 4–3 vs harnet on cells — well inside noise. |
+| 3.3 ❌ **F5** | Headline has **no CIs** and never went through the shared harness | `training/evidence/eval_enrollment.py` | Wire the decoder in as a proper adapter so it gets subject-stratified CIs; add a paired per-cell test. Currently 4–3 vs harnet on cells — well inside noise. |
 | 3.4 ❌ **#157** | **The decisive control.** HALO gets non-parametric retrieval over 164k labeled windows; baselines get only a linear probe on the same corpus | `training/evidence/build_memory.py` (~50 lines to make backbone-agnostic; `harnet/adapter.py:151` `_extract_feats` already exists) | Build an identical bank from **frozen harnet features**, run the identical mechanism. If retrieval-harnet ≈ 46, the contribution is the **mechanism, not our encoder** — publishable, but a different paper. Also add a **prototype-only** variant (93 class means) to test whether 164k windows at inference are even needed. |
 
 ---
@@ -114,7 +114,7 @@ anchor and is exactly the cell that gains elevator exemplars.
 
 | # | issue | where | fix |
 |---|---|---|---|
-| 5.1 ❌ | **Objective too easy** — 0.850 on 18-way episodes; uniform distractors mean fine-grained confusions never appear as negatives | `training/evidence/train_decoder.py` (`sample_H`, candidate sampling) | **Hard-negative sampling** (SBERT-near distractors); larger candidate sets; per-episode text resampling **with λ tuned** (naive version cost −2.6). |
+| 5.1 ❌ | **Objective too easy** — 0.850 on 18-way episodes; uniform distractors mean fine-grained confusions never appear as negatives | `training/evidence/train_patch_decoder.py` (`choose_candidates`) | **Hard-negative sampling** (SBERT-near distractors); larger candidate sets; per-episode text resampling **with λ tuned** (naive version cost −2.6). |
 | 5.2 ❌ | **Proxy/target anti-correlation** — internal metric rose while ZS-XD fell | selection metric in `train_decoder` | Select on an **open-vocab-only slice** (the ~16 eval labels absent from the training vocab) — the only genuinely zero-shot subset. |
 | 5.3 ❌ | Bank is vocabulary-truncated by construction, and cap 8000 is suboptimal | `training/evidence/build_memory.py` | Store label **strings**; move default per-label cap **8000 → 2000** (measured +1.0, half the memory; cap 200 gives 47.9 at 6% of the bank). |
 | 5.4 ❌ | Regressions on usc_had / ut_complex | task #154 | λ sweep (never run) + OOD confidence gate falling back to the untrained mechanism. |

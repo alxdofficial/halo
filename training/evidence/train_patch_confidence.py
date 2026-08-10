@@ -25,7 +25,6 @@ from model.evidence.confidence import (
     binary_auroc,
     expected_calibration_error,
 )
-from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.patch_retrieval import PatchSubspaceRetriever
 from training.evidence.bank_guard import (
     assert_artifact_matches_bank,
@@ -42,29 +41,25 @@ from training.evidence.device import resolve_device
 from training.evidence.folds import VALIDATION_QUERY_POLICY, phase_b_fold_masks
 from training.evidence.patch_episodes import (
     PatchTable,
-    balanced_memory_log_prior,
     build_episode_memory_view,
     support_capacity_by_label,
 )
 from training.evidence.live_encoder import SourcePatchEncoder
 from training.evidence.policy import (
     ACTIVE_WINDOWS_PER_LABEL,
-    CANDIDATE_COUNTS,
-    DISTRACTOR_MODES,
+    CANDIDATE_COUNT_RANGE,
     EPISODE_TYPES,
     LABEL_TEXT_MODES,
     PHASE_B_TRAINING_REGIME,
     PHYSICAL_VIEW_MODES,
-    SOFT_RETRIEVAL_TEMPERATURE_END,
-    SUPPORT_COUNTS,
+    SUPPORT_COUNT_RANGE,
     PhaseBPolicy,
 )
 from training.evidence.train_patch_decoder import (
+    build_decoder,
     choose_candidates,
     atomic_torch_save,
     decode_adaptation_episode,
-    encode_bank_config_text,
-    load_activity_families,
     physical_label_centroids,
     sample_queries,
     sample_queries_covering_labels,
@@ -141,12 +136,7 @@ def main() -> None:
         )
 
     cfg = predictor["cfg"]
-    decoder = EvidenceDecoder(DecoderConfig(
-        d_model=cfg["d_model"], n_layers=cfg["n_layers"], n_heads=cfg["n_heads"],
-        candidate_tokens=True, structural_metadata=True,
-        support_role=cfg.get("support_role", False),
-        n_retrieval_heads=cfg.get("n_retrieval_heads", cfg["n_subspaces"]),
-    )).to(device)
+    decoder = build_decoder(cfg).to(device)
     decoder.load_state_dict(predictor["decoder"])
     retriever = PatchSubspaceRetriever(
         cfg["d_model"], cfg["n_subspaces"], cfg["subspace_dim"], cfg["subspace_ema"]
@@ -232,22 +222,16 @@ def main() -> None:
 
     train_selector_z, train_memory_index = build_index(train_index_rows)
     val_selector_z, val_memory_index = build_index(val_index_rows)
-    train_row_prior = balanced_memory_log_prior(bank["patch"], train_index_rows, device)
-    val_row_prior = balanced_memory_log_prior(bank["patch"], val_index_rows, device)
     sbert = get_sbert_encoder()
     text = ensemble_text(vocab, sbert, 8, train_only=True).to(device)
     alias_embeddings = encode_neutral_aliases(sbert, device)
-    family_ids, _, _ = load_activity_families(vocab)
-    family_ids = family_ids.to(device)
-    config_text = encode_bank_config_text(bank, sbert, device) \
-        if cfg.get("explicit_config_text", False) else None
     train_vocab = torch.arange(n_vocab, device=device)
     train_vocab = train_vocab[~torch.isin(train_vocab, heldout)]
     episode_cfg = predictor["episode_cfg"]
 
     @torch.no_grad()
     def draw_features(
-        pool, memory_mask, index_rows, selector_z, memory_index, row_prior,
+        pool, memory_mask, index_rows, selector_z, memory_index,
         allowed_vocab, local_rng,
         *, truth_present: bool, count: int,
     ):
@@ -258,7 +242,7 @@ def main() -> None:
                 episode_cfg.get("physical_view_modes", PHYSICAL_VIEW_MODES)
             ))
             support_count = 0 if episode_type == "semantic_zero_support" \
-                else int(local_rng.choice(SUPPORT_COUNTS))
+                else int(local_rng.integers(SUPPORT_COUNT_RANGE[0], SUPPORT_COUNT_RANGE[1] + 1))
             label_mode = "coherent" if support_count == 0 \
                 else str(local_rng.choice(LABEL_TEXT_MODES))
             capacity = support_capacity_by_label(
@@ -271,11 +255,10 @@ def main() -> None:
             if len(query_labels) < 1 or len(supportable) < 2:
                 continue
 
+            low, high = episode_cfg.get("candidate_count_range", CANDIDATE_COUNT_RANGE)
             candidate_count = min(
-                int(local_rng.choice(episode_cfg.get("candidate_counts", CANDIDATE_COUNTS))),
-                len(supportable),
+                int(local_rng.integers(low, high + 1)), len(supportable)
             )
-            mode = str(local_rng.choice(episode_cfg["distractor_modes"]))
             if truth_present:
                 present = query_labels[capacity[query_labels] >= support_count]
                 if len(present) < 2:
@@ -288,8 +271,7 @@ def main() -> None:
                 )
                 candidates = choose_candidates(
                     seed_labels, candidate_count, n_vocab, text, physical,
-                    truth_present=True, mode=mode, rng=local_rng,
-                    allowed_vocab=present, family_ids=family_ids,
+                    truth_present=True, rng=local_rng, allowed_vocab=present,
                 )
                 qi = sample_queries_covering_labels(
                     pool, candidates, y, count, local_rng,
@@ -314,8 +296,8 @@ def main() -> None:
                 candidate_count = min(candidate_count, len(eligible_candidates))
                 candidates = choose_candidates(
                     y[qi], candidate_count, n_vocab, text, physical,
-                    truth_present=False, mode=mode, rng=local_rng,
-                    allowed_vocab=eligible_candidates, family_ids=family_ids,
+                    truth_present=False, rng=local_rng,
+                    allowed_vocab=eligible_candidates,
                 )
             query = table.gather_queries(
                 qi, device, expand_verified_events=True,
@@ -336,12 +318,12 @@ def main() -> None:
                 logits, aux = decode_adaptation_episode(
                     decoder, retriever, bank, index_rows, selector_z,
                     memory_index, query, view, text, labels.embeddings,
-                    row_prior, policy=policy,
-                    soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
-                    rng=local_rng, config_text=config_text,
+                    policy=policy,
+                    rng=local_rng,
                     live_source=live_source, selector_encoder=tokenizer,
                     online_requires_grad=False,
                     physical_view_mode=physical_view_mode,
+                    return_confidence_features=True,
                 )
             except ValueError as error:
                 last_error = error
@@ -366,7 +348,7 @@ def main() -> None:
     for index in range(args.val_episodes):
         features, targets, _ = draw_features(
             val_pool, val_memory_mask, val_index_rows, val_selector_z,
-            val_memory_index, val_row_prior,
+            val_memory_index,
             torch.arange(n_vocab, device=device), val_rng,
             truth_present=index % 2 == 0, count=args.val_queries,
         )
@@ -483,7 +465,7 @@ def main() -> None:
         truth_present = bool(rng.random() >= args.truth_absent_prob)
         features, target, episode = draw_features(
             train_pool, train_memory_mask, train_index_rows, train_selector_z,
-            train_memory_index, train_row_prior,
+            train_memory_index,
             train_vocab, rng, truth_present=truth_present, count=args.batch,
         )
         head.train()

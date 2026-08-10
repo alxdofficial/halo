@@ -54,7 +54,7 @@ def render(telemetry_dir: Path, output: Path | None = None) -> Path:
     latest = json.loads((telemetry_dir / "phase_b_telemetry_latest.json").read_text())
     rows = _load(Path(latest["history_file"]))
     output = output or telemetry_dir / "telemetry.png"
-    figure, axes = plt.subplots(2, 3, figsize=(13, 7), constrained_layout=True)
+    figure, axes = plt.subplots(2, 4, figsize=(16, 7), constrained_layout=True)
     stage = latest.get("stage")
     if stage == "predictor":
         _line(axes[0, 0], _series(rows, "loss_over_random"), "CE / random CE")
@@ -62,26 +62,32 @@ def render(telemetry_dir: Path, output: Path | None = None) -> Path:
         axes[0, 0].set_title("Training objective")
         for key, label in (
             ("decoder_grad_norm", "decoder"), ("retriever_grad_norm", "retriever"),
+            ("retriever_task_grad_norm", "retrieval task"),
             ("tokenizer_grad_norm", "tokenizer"), ("preclip_grad_norm", "total pre-clip"),
         ):
             _line(axes[0, 1], _series(rows, key), label)
         axes[0, 1].set_yscale("symlog", linthresh=1e-4); axes[0, 1].set_title("Gradient norms")
         for key, label in (
             ("provided_support_recall_at_k", "provided-support recall"),
-            ("provided_support_pool_mass", "support pool mass"),
-            ("pool_weight_max_share", "max pool share"),
-            ("topk_retained_soft_mass", "retained soft mass"),
+            ("true_support_task_promoted_fraction", "task promotes support"),
+            ("background_task_promoted_fraction", "task promotes background"),
         ):
             _line(axes[0, 2], _series(rows, key), label)
         axes[0, 2].set_title("Evidence use")
         for key, label in (
-            ("hard_soft_retriever_grad_cosine", "hard/soft grad cosine"),
-            ("effective_soft_to_hard_retriever_grad_ratio", "effective soft/hard ratio"),
-            ("retrieval_normalized_entropy", "soft retrieval entropy"),
-            ("pool_normalized_entropy", "pool entropy"),
+            ("candidate_to_evidence_attention_mass", "attention: evidence"),
+            ("candidate_to_query_attention_mass", "attention: query"),
+            ("candidate_to_candidate_attention_mass", "attention: candidates"),
+            ("candidate_to_label_attention_mass", "attention: background labels"),
+            ("candidate_attention_normalized_entropy", "attention entropy"),
         ):
             _line(axes[1, 0], _series(rows, key), label)
-        axes[1, 0].set_title("Retrieval health")
+        _line(
+            axes[1, 0],
+            _validation_series(rows, "retrieval_roster_jaccard_to_previous"),
+            "roster overlap", marker="o",
+        )
+        axes[1, 0].set_title("Attention and roster health")
         for key, label in (
             ("macro_cell_ba", "held-out"), ("identity_macro_cell_ba", "identity"),
             ("train_macro_cell_ba", "matched train"),
@@ -89,6 +95,19 @@ def render(telemetry_dir: Path, output: Path | None = None) -> Path:
         ):
             _line(axes[1, 1], _validation_series(rows, key), label, marker="o")
         axes[1, 1].set_title("Fixed canaries")
+        for name in ("signal", "text", "role", "slot", "time", "group", "relation"):
+            _line(axes[0, 3], _series(rows, f"component_scale/{name}"), name)
+        axes[0, 3].set_title("Token component scales")
+        for key, label in (
+            ("component_grad_norm/query_projection", "query"),
+            ("component_grad_norm/evidence_projection", "evidence"),
+            ("component_grad_norm/text_projection", "text"),
+            ("component_grad_norm/coreference_slot_embeddings", "slot"),
+            ("component_grad_norm/component_scales", "scale gates"),
+        ):
+            _line(axes[1, 3], _series(rows, key), label)
+        axes[1, 3].set_yscale("symlog", linthresh=1e-5)
+        axes[1, 3].set_title("Input-path gradients")
     else:
         _line(axes[0, 0], _series(rows, "loss"), "train BCE")
         _line(axes[0, 0], _validation_series(rows, "bce"), "validation BCE", marker="o")

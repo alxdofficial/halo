@@ -80,17 +80,39 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
         alert("critical", "nonfinite_values", f"Non-finite values occurred: {bad}.")
 
     if stage == "predictor" and snapshot.get("metrics"):
-        hard_error = _metric(snapshot, "hard_forward_max_abs_error", "max")
-        if math.isfinite(hard_error) and hard_error > 1e-6:
-            alert("critical", "hard_forward_mismatch",
-                  f"Straight-through forward differs from hard inference by {hard_error:.3g}.")
         warmup = int(metadata.get("warmup_steps", 0))
-        soft_anneal = int(metadata.get("soft_anneal_steps", warmup))
+        mix = snapshot.get("mix", {})
+        enrollment_mix = mix.get("enrollment_shape", {})
+        if enrollment_mix and int(enrollment_mix.get("partial", 0)) == 0:
+            alert(
+                "critical", "missing_partial_enrollment",
+                "The latest training window contains no partial-enrollment episodes.",
+            )
+        # Regimes are sampled uniformly, not scheduled, so counts are never exactly equal and it
+        # would be noise to say so. What still indicates a broken sampler is a regime that never
+        # appears at all, or one so starved that the window carries almost no signal for it.
+        episode_mix = mix.get("episode_type", {})
+        episode_counts = [int(value) for value in episode_mix.values()]
+        if episode_counts and sum(episode_counts) >= 32:
+            expected = sum(episode_counts) / 4
+            if len(episode_counts) < 4 or min(episode_counts) < 0.25 * expected:
+                alert(
+                    "warning", "starved_episode_regime",
+                    f"Recent episode-regime counts are {episode_mix}; one regime is far below the "
+                    f"uniform expectation of {expected:.0f}.",
+                )
         if step > warmup:
             for name in ("decoder_grad_norm", "retriever_grad_norm"):
                 maximum = _metric(snapshot, name, "max")
                 if math.isfinite(maximum) and maximum == 0.0:
                     alert("critical", "dead_gradient", f"{name} remained zero in the latest window.")
+            grad_ratio = _metric(snapshot, "retriever_to_decoder_grad_ratio")
+            if math.isfinite(grad_ratio) and grad_ratio < 1e-4:
+                alert(
+                    "warning", "weak_retriever_gradient",
+                    f"Retriever/decoder gradient ratio is only {grad_ratio:.2e} in the latest "
+                    "window; retrieval may be learning too slowly to change the roster.",
+                )
         clipped = _metric(snapshot, "gradient_clipped_fraction")
         if step > warmup and math.isfinite(clipped) and clipped > 0.8:
             alert("warning", "persistent_clipping",
@@ -103,40 +125,53 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
         if math.isfinite(row_share) and row_share > 0.25:
             alert("warning", "memory_row_collapse",
                   f"One memory row supplies {row_share:.0%} of recent selections.")
-        hard_soft_cos = _metric(snapshot, "hard_soft_retriever_grad_cosine")
-        if math.isfinite(hard_soft_cos) and hard_soft_cos < -0.25:
-            alert("warning", "surrogate_gradient_conflict",
-                  f"Hard and soft retriever gradients have cosine {hard_soft_cos:.2f}.")
-        effective_ratio = _metric(snapshot, "effective_soft_to_hard_retriever_grad_ratio")
-        if step > soft_anneal and math.isfinite(effective_ratio) and effective_ratio > 2.0:
-            alert(
-                "warning", "surrogate_gradient_dominance",
-                f"Scaled soft retriever gradient is {effective_ratio:.2f}x the hard-path gradient.",
-            )
-        if step > soft_anneal and math.isfinite(effective_ratio) \
-                and effective_ratio > 1.0 and math.isfinite(hard_soft_cos) \
-                and abs(hard_soft_cos) < 0.05:
-            alert(
-                "warning", "surrogate_gradient_misalignment",
-                f"A dominant soft gradient is nearly orthogonal to hard retrieval "
-                f"(cosine {hard_soft_cos:.2f}).",
-            )
-        retained_mass = _metric(snapshot, "topk_retained_soft_mass")
-        if step > soft_anneal and math.isfinite(retained_mass) and retained_mass < 0.02:
-            alert(
-                "warning", "low_hard_soft_overlap",
-                f"Hard top-k retains only {retained_mass:.1%} of balanced soft retrieval mass.",
-            )
         support_recall = _metric(snapshot, "provided_support_recall_at_k")
-        if step > soft_anneal and math.isfinite(support_recall) and support_recall < 0.65:
+        if step > warmup and math.isfinite(support_recall) and support_recall < 0.05:
             alert(
                 "warning", "low_provided_support_recall",
-                f"Only {support_recall:.1%} of supported queries retrieve enrolled evidence.",
+                f"Only {support_recall:.1%} of supported queries retrieve enrolled evidence. "
+                "Background evidence is valid, but a near-zero rate leaves enrollment unusable.",
             )
-        output_scale = _metric(snapshot, "output_scale", "max")
-        if math.isfinite(output_scale) and output_scale > 100:
-            alert("warning", "output_scale_growth",
-                  f"Learned output scale reached {output_scale:.1f}; loss may improve without argmax gains.")
+        evidence_attention = _metric(snapshot, "candidate_to_evidence_attention_mass")
+        query_attention = _metric(snapshot, "candidate_to_query_attention_mass")
+        name_attention = sum(
+            value for value in (
+                _metric(snapshot, "candidate_to_candidate_attention_mass"),
+                _metric(snapshot, "candidate_to_label_attention_mass"),
+            ) if math.isfinite(value)
+        )
+        attention_entropy = _metric(snapshot, "candidate_attention_normalized_entropy")
+        if math.isfinite(evidence_attention) and evidence_attention > 0.95:
+            alert(
+                "critical", "evidence_role_starvation",
+                f"Evidence keys receive {evidence_attention:.1%} of candidate attention; candidate, "
+                "label, and query roles are being numerically starved.",
+            )
+        if math.isfinite(query_attention) and query_attention < 0.01:
+            alert(
+                "warning", "query_attention_inert",
+                f"Candidate tokens assign only {query_attention:.1%} attention to query patches.",
+            )
+        if math.isfinite(evidence_attention) and name_attention < 0.01:
+            alert(
+                "warning", "name_attention_inert",
+                f"Candidate/background label tokens receive only {name_attention:.1%} attention.",
+            )
+        if math.isfinite(attention_entropy) and attention_entropy < 0.10:
+            alert(
+                "warning", "attention_collapse",
+                f"Candidate attention normalized entropy is {attention_entropy:.3f}.",
+            )
+        # The readout is the whole prediction, so a collapsed spread between the best and worst
+        # candidate logit means the model has stopped discriminating at all — a constant predictor
+        # that cross-entropy alone can look tolerable on an unbalanced candidate mix.
+        spread = _metric(snapshot, "candidate_logit_spread", "max")
+        if step > warmup and math.isfinite(spread) and spread < 1e-3:
+            alert(
+                "warning", "collapsed_candidate_logits",
+                f"Best-to-worst candidate logit spread is {spread:.2e}; the readout is emitting a "
+                "constant prediction.",
+            )
         component_names = {
             key for row in history[-6:] for key in row.get("metrics", {})
             if key.startswith("component_grad_norm/")
@@ -153,6 +188,23 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
             alert("warning", "dead_components",
                   "Zero gradient in three consecutive probes: "
                   + ", ".join(dead_components) + ".")
+        component_scales = {
+            key.removeprefix("component_scale/"): _metric(snapshot, key)
+            for key in snapshot.get("metrics", {}) if key.startswith("component_scale/")
+        }
+        finite_scales = [value for value in component_scales.values() if math.isfinite(value)]
+        if len(finite_scales) == 7:
+            scale_ratio = max(finite_scales) / max(min(finite_scales), 1e-12)
+            if scale_ratio > 10.0:
+                alert(
+                    "critical", "component_scale_collapse",
+                    f"Token component scales span {scale_ratio:.1f}x: {component_scales}.",
+                )
+            elif scale_ratio > 4.0:
+                alert(
+                    "warning", "component_scale_imbalance",
+                    f"Token component scales span {scale_ratio:.1f}x: {component_scales}.",
+                )
         subspace_count = int(metadata.get("n_retrieval_heads", 4))
         subspace_mass = [
             _metric(snapshot, f"subspace_{index}_mass") for index in range(subspace_count)
@@ -162,19 +214,27 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
             alert("warning", "retrieval_subspace_collapse",
                   f"Recent retrieval-subspace mass is {[round(value, 3) for value in finite_mass]}.")
         validation = snapshot.get("validation", {})
+        retriever_drift = validation.get("retriever_ema_relative_drift_from_initial")
+        val_every = int(metadata.get("val_every", 0))
+        if retriever_drift is not None and val_every and step >= warmup + 3 * val_every \
+                and float(retriever_drift) < 1e-5:
+            alert(
+                "warning", "retriever_not_moving",
+                "Retriever EMA projection remains effectively identical to initialization.",
+            )
         gain = validation.get("adaptation_macro_cell_ba_gain")
         if gain is not None and step > warmup and float(gain) < -0.05:
             alert("warning", "worse_than_identity",
                   f"Held-out adaptation score is {float(gain):.3f} below identity control.")
         support_drop = validation.get("support_removal_true_probability_drop")
-        if support_drop is not None and step > soft_anneal and float(support_drop) <= 0.01:
+        if support_drop is not None and step > warmup and float(support_drop) <= 0.01:
             alert(
                 "warning", "support_removal_inert",
                 f"Removing enrolled support changes true-label probability by only "
                 f"{float(support_drop):.3f}.",
             )
         shuffle_drop = validation.get("support_label_shuffle_true_probability_drop")
-        if shuffle_drop is not None and step > soft_anneal and float(shuffle_drop) <= 0.01:
+        if shuffle_drop is not None and step > warmup and float(shuffle_drop) <= 0.01:
             alert(
                 "warning", "support_labels_inert",
                 f"Shuffling enrollment labels changes true-label probability by only "

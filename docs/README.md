@@ -9,11 +9,13 @@
 >    — what Phase A actually is, as built, and the artifact handed to Phase B.
 > 4. [**design/PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — what Phase B is,
 >    why memory is an adaptation mechanism, and the evidence required before claiming it works.
+> 5. [**results/PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the current
+>    Phase-B run history, matched tables, confirmed defects, and next-run requirements.
 >
 > Then take every number from Results below, and nothing at all from
 > [`archive/`](archive/README.md).
 
-## Results — the only live table
+## Zero-Shot Baseline Results
 
 Generated from `eval/results/` by `python -m eval.assemble_table`, which refuses to assemble a
 mixed-protocol table. **56 cells** (8 models × 7 zero-shot test sets), all **protocol v4 (93 labels)**,
@@ -23,9 +25,10 @@ as of 2026-08-06.
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | **45.7** | 42.9 | 42.8 | 34.7 | 34.4 | 32.2 | 11.4 | 5.1 |
 
-**harnet (frozen UK-Biobank) is still ahead.** The evidence engine is second and beats the Phase-A +
-ConSE path (34.4) by 8.5 points, but does not beat the strongest baseline. Phase B has not yet had a
-full run under the current recipe, so it has established no claim of its own.
+**harnet (frozen UK-Biobank) is ahead in this completed zero-shot baseline protocol.** These numbers
+precede the current Phase-B adaptation run and must not be mixed with its enrollment tables. The
+current Phase-B empirical status is owned by
+[`results/PHASE_B_TRAINING_STATUS.md`](results/PHASE_B_TRAINING_STATUS.md).
 
 ### Retracted — do not cite
 - the **49.5 "beats harnet"** evidence-decoder headline — retracted twice: first for eval-label text
@@ -55,17 +58,28 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
 - [**PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — the sole Phase-B motivation
   and training contract. Commands live in
   [`training/evidence/README.md`](../training/evidence/README.md).
+- [**PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — historical results from the
+  superseded vote/soft-retrieval run, retained as the empirical motivation for the relational
+  design. Its §4
+  unweighted three-cell mean is retired; see the step-0 control below for the weighting that
+  replaces it.
+- [**PHASE_B_STEP0_CONTROL.md**](results/PHASE_B_STEP0_CONTROL.md) — what Phase-B training actually
+  buys, measured against the system at initialisation. Training pushes zero-shot below its chance
+  floor by destroying a ConSE-like bridge the untrained mechanism already had; at k=2 cross-subject
+  it is a wash, the decoder's +1.25 exactly cancelling the retriever's −1.27.
 - [AUGMENTATIONS.md](design/AUGMENTATIONS.md) — augmentation policy and the told-vs-not-told experiment.
 
 **Planning and open issues**
-- [REMEDIATION_PLAN.md](design/REMEDIATION_PLAN.md) — every known correctness/fairness issue, with
-  status. The first place to look before trusting any result.
+- [REMEDIATION_PLAN.md](design/REMEDIATION_PLAN.md) — historical July audit ledger. Its file paths
+  and status markers are not the current implementation contract; use the Phase-A and Phase-B
+  records above for current readiness.
 - [DATA_SCALING_PLAN.md](design/DATA_SCALING_PLAN.md) — what corpus is reachable and the case for
   broadening.
 
 **Literature**
-- [EVIDENCE_ENGINE_RESEARCH.md](design/EVIDENCE_ENGINE_RESEARCH.md) — prior-art synthesis with real
-  citations and a blunt novelty read. Useful for related work; not a design spec.
+- [EVIDENCE_ENGINE_RESEARCH.md](design/EVIDENCE_ENGINE_RESEARCH.md) — dated July 2026 literature
+  synthesis and decision input. It is not a design or configuration contract; current motivation
+  and decisions live only in `MOTIVATION.md`, `POSITIONING.md`, and `PHASE_B_TRAINING_INTENT.md`.
 
 **Proposed — not decided, not built.** Do not describe these as part of the system.
 - [APPLICATIONS.md](design/APPLICATIONS.md) — what a HAR foundation model could make possible
@@ -75,6 +89,9 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
 ## `data/` — the corpus
 - [DATA_PIPELINE.md](data/DATA_PIPELINE.md) — source → curate → unit→g → resample → window → grids.
 - [DATA_HETEROGENEITY.md](data/DATA_HETEROGENEITY.md) — per-dataset normalization decisions and why.
+- [DATASET_EXPANSION_2026-08.md](data/DATASET_EXPANSION_2026-08.md) — **proposal, nothing acquired.**
+  Candidate training/eval datasets for the rehabilitation-tracking framing, with verified access and
+  disk cost. Its §6 records where it conflicts with `design/DATA_SCALING_PLAN.md`'s frozen-corpus rule.
 
 ## `baselines/` — who we compare against
 - [BASELINES.md](baselines/BASELINES.md) — roster, verified input contracts, frozen-vs-self-train.
@@ -99,5 +116,7 @@ Each carries a banner naming its live replacement.
 - A doc whose central claim is falsified gets a banner and **moves to `archive/`** — kept, not
   deleted, because the record of what we believed and why is part of the work. What changed in the
   2026-08-08 consolidation is that stale docs no longer sit beside live ones.
-- Numbers live in exactly one place: the Results block above, generated from `eval/results/`.
+- Zero-shot baseline numbers live in the table above, generated from `eval/results/`. Phase-B
+  adaptation numbers live only in `results/PHASE_B_TRAINING_STATUS.md`; generated output READMEs are
+  artifact indexes, not competing reports.
 - Cross-session context lives in the memory files (`~/.claude/.../memory/halo-*.md`).

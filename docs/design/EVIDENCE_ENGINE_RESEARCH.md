@@ -3,6 +3,10 @@
 > Produced by a 7-facet research workflow (Consensus + Perplexity/web), 2026-07-14. Companion to
 > `docs/archive/EVIDENCE_ENGINE.md` (historical design) and `PHASE_B_TRAINING_INTENT.md` (current contract). Verdicts are the workflow's;
 > treat as decision input, not gospel — but the citations are real and the novelty read is blunt.
+>
+> **Status:** literature snapshot, not a live implementation plan. Its evidential/confidence and
+> multi-vector recommendations were not adopted into the current consolidated Phase-B predictor.
+> `PHASE_B_TRAINING_INTENT.md` is the sole behavioral contract.
 
 ## 1. TL;DR
 - **Corroborated, yes — heavily.** Every building block of both pipelines has strong, citable precedent:

@@ -69,7 +69,7 @@ def test_monitor_writes_human_machine_and_plot_outputs(tmp_path):
     assert (tmp_path / "telemetry.png").stat().st_size > 1_000
 
 
-def test_predictor_monitor_uses_post_anneal_effective_retrieval_gates(tmp_path):
+def test_predictor_monitor_checks_learned_retrieval_and_support_use(tmp_path):
     telemetry = PhaseBTelemetry(tmp_path, interval_seconds=60, run_id="retrieval")
     telemetry.start(
         step=0,
@@ -77,19 +77,15 @@ def test_predictor_monitor_uses_post_anneal_effective_retrieval_gates(tmp_path):
         metadata={
             "planned_steps": 1000,
             "warmup_steps": 100,
-            "soft_anneal_steps": 500,
             "n_retrieval_heads": 4,
         },
     )
     telemetry.update({
         "decoder_grad_norm": 1.0,
         "retriever_grad_norm": 1.0,
-        "hard_forward_max_abs_error": 0.0,
+        "retriever_to_decoder_grad_ratio": 1.0,
         "gradient_clipped_fraction": 0.0,
-        "effective_soft_to_hard_retriever_grad_ratio": 2.5,
-        "hard_soft_retriever_grad_cosine": 0.01,
-        "topk_retained_soft_mass": 0.01,
-        "provided_support_recall_at_k": 0.50,
+        "provided_support_recall_at_k": 0.01,
     })
     telemetry.set_validation({
         "macro_cell_ba": 0.2,
@@ -100,13 +96,70 @@ def test_predictor_monitor_uses_post_anneal_effective_retrieval_gates(tmp_path):
     telemetry.emit(step=600, elapsed_seconds=60, force=True)
     codes = {item["code"] for item in assess(tmp_path)["alerts"]}
     assert {
-        "surrogate_gradient_dominance",
-        "surrogate_gradient_misalignment",
-        "low_hard_soft_overlap",
         "low_provided_support_recall",
         "support_removal_inert",
         "support_labels_inert",
     } <= codes
+
+
+def test_predictor_monitor_detects_role_attention_starvation_and_weak_credit(tmp_path):
+    telemetry = PhaseBTelemetry(tmp_path, interval_seconds=60, run_id="attention")
+    telemetry.start(
+        step=0,
+        elapsed_seconds=0,
+        metadata={"planned_steps": 1000, "warmup_steps": 10},
+    )
+    telemetry.update({
+        "decoder_grad_norm": 1.0,
+        "retriever_grad_norm": 1e-6,
+        "retriever_to_decoder_grad_ratio": 1e-6,
+        "candidate_to_evidence_attention_mass": 0.99,
+        "candidate_to_query_attention_mass": 0.003,
+        "candidate_to_candidate_attention_mass": 0.004,
+        "candidate_to_label_attention_mass": 0.003,
+        "candidate_attention_normalized_entropy": 0.05,
+    })
+    telemetry.emit(step=100, elapsed_seconds=10, force=True)
+    codes = {item["code"] for item in assess(tmp_path)["alerts"]}
+    assert {
+        "weak_retriever_gradient",
+        "evidence_role_starvation",
+        "query_attention_inert",
+        "name_attention_inert",
+        "attention_collapse",
+    } <= codes
+
+
+def test_predictor_monitor_detects_missing_partial_enrollment(tmp_path):
+    telemetry = PhaseBTelemetry(tmp_path, interval_seconds=60, run_id="episodes")
+    telemetry.start(step=0, elapsed_seconds=0, metadata={"planned_steps": 100})
+    for episode_type in (
+        "semantic_zero_support", "ordinary_few_support",
+        "cross_subject_few_support", "same_subject_enrollment",
+    ):
+        telemetry.update(
+            {"loss": 1.0},
+            categories={"episode_type": episode_type, "enrollment_shape": "full"},
+        )
+    telemetry.emit(step=1, elapsed_seconds=1, force=True)
+    codes = {item["code"] for item in assess(tmp_path)["alerts"]}
+    assert "missing_partial_enrollment" in codes
+
+
+def test_predictor_monitor_detects_token_component_scale_imbalance(tmp_path):
+    telemetry = PhaseBTelemetry(tmp_path, interval_seconds=60, run_id="component-scales")
+    telemetry.start(
+        step=0, elapsed_seconds=0,
+        metadata={"planned_steps": 1000, "warmup_steps": 10},
+    )
+    scales = {
+        "signal": 0.2, "text": 1.0, "role": 1.0, "slot": 1.0,
+        "time": 1.0, "group": 1.0, "relation": 1.0,
+    }
+    telemetry.update({f"component_scale/{name}": value for name, value in scales.items()})
+    telemetry.emit(step=100, elapsed_seconds=10, force=True)
+    codes = {item["code"] for item in assess(tmp_path)["alerts"]}
+    assert "component_scale_imbalance" in codes
 
 
 def test_external_development_and_test_rosters_are_complete_and_disjoint():

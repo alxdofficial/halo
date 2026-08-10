@@ -16,15 +16,6 @@ class PatchRetrieval:
     valid: torch.Tensor       # (B, Q, H, K)
 
 
-@dataclass
-class SoftRetrieval:
-    logits: torch.Tensor
-    entropy: torch.Tensor
-    normalized_entropy: torch.Tensor
-    effective_rows: torch.Tensor
-    retained_mass: torch.Tensor | None
-
-
 class PatchSubspaceRetriever(nn.Module):
     """Project patches into several independently retrieved similarity spaces.
 
@@ -151,86 +142,3 @@ class PatchSubspaceRetriever(nn.Module):
         q_selected = q[batch, query_patch, head]
         ev_selected = ev[batch, torch.arange(E, device=query.device), head]
         return torch.einsum("bes,bes->be", q_selected, ev_selected)
-
-    def soft_candidate_logits(
-        self,
-        query: torch.Tensor,
-        memory: torch.Tensor,
-        allowed_mask: torch.Tensor,
-        candidate_weights: torch.Tensor,
-        row_log_prior: torch.Tensor,
-        *,
-        tau: float,
-        query_mask: torch.Tensor | None = None,
-        selected_index: torch.Tensor | None = None,
-        output_scale: torch.Tensor | float = 10.0,
-    ) -> SoftRetrieval:
-        """Differentiable all-row candidate vote used only as a backward surrogate.
-
-        The hard decoder remains the numerical forward path. This soft route gives the query and
-        online retrieval projection credit for eligible rows that hard top-k did not select.
-        """
-        if tau <= 0:
-            raise ValueError("soft retrieval temperature must be positive")
-        if query.dim() != 3 or memory.dim() != 2:
-            raise ValueError("query and memory must have shapes (B,Q,D) and (N,D)")
-        B, Q, _ = query.shape
-        N = memory.shape[0]
-        if allowed_mask.shape == (B, N):
-            allowed_mask = allowed_mask.unsqueeze(1).expand(B, Q, N)
-        if allowed_mask.shape != (B, Q, N):
-            raise ValueError("allowed_mask does not align with query and memory")
-        if candidate_weights.dim() == 2:
-            if candidate_weights.shape[0] != N:
-                raise ValueError("candidate_weights must have one row per memory item")
-        elif candidate_weights.dim() == 3:
-            if candidate_weights.shape[:2] != (B, N):
-                raise ValueError("batched candidate_weights must have shape (B,N,C)")
-        else:
-            raise ValueError("candidate_weights must have shape (N,C) or (B,N,C)")
-        if row_log_prior.shape != (N,):
-            raise ValueError("row_log_prior must have shape (N,)")
-        if query_mask is None:
-            query_mask = torch.ones(B, Q, dtype=torch.bool, device=query.device)
-        active = allowed_mask & query_mask.unsqueeze(-1)
-        if not bool((active.any(-1) | ~query_mask).all()):
-            raise ValueError("at least one valid query patch has no soft-retrieval rows")
-
-        q = self.project(query, ema=False)
-        m = self.project(memory, ema=False)
-        score = torch.einsum("bqhs,nhs->bqhn", q, m)
-        logit = score / float(tau) + row_log_prior.view(1, 1, 1, N)
-        logit = logit.masked_fill(~active.unsqueeze(2), float("-inf"))
-        # Padding queries are not reduced below; make their softmax finite for diagnostics.
-        logit = logit.masked_fill(~query_mask.unsqueeze(2).unsqueeze(3), 0.0)
-        probability = torch.softmax(logit, dim=-1)
-        probability = probability * query_mask.unsqueeze(2).unsqueeze(3)
-        if candidate_weights.dim() == 2:
-            mass = torch.einsum("bqhn,nc->bqhc", probability, candidate_weights)
-        else:
-            mass = torch.einsum("bqhn,bnc->bqhc", probability, candidate_weights)
-        denominator = query_mask.sum(1).clamp_min(1).to(mass.dtype) * self.n_subspaces
-        candidate_mass = mass.sum(dim=(1, 2)) / denominator.unsqueeze(1)
-        logits = candidate_mass * output_scale
-
-        p = probability.clamp_min(1e-12)
-        entropy_by_query = -(probability * p.log()).sum(-1)
-        eligible = active.sum(-1).clamp_min(2).to(entropy_by_query.dtype)
-        normalized = entropy_by_query / eligible.log().unsqueeze(2)
-        valid_heads = query_mask.unsqueeze(2).expand_as(entropy_by_query)
-        entropy = entropy_by_query[valid_heads].mean()
-        normalized_entropy = normalized[valid_heads].mean()
-        effective_rows = entropy_by_query[valid_heads].exp().mean()
-        retained_mass = None
-        if selected_index is not None:
-            if selected_index.shape[:3] != (B, Q, self.n_subspaces):
-                raise ValueError("selected_index does not align with soft retrieval")
-            retained_mass = probability.gather(-1, selected_index).sum(-1)
-            retained_mass = retained_mass[valid_heads].mean()
-        return SoftRetrieval(
-            logits=logits,
-            entropy=entropy,
-            normalized_entropy=normalized_entropy,
-            effective_rows=effective_rows,
-            retained_mass=retained_mass,
-        )

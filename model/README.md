@@ -22,8 +22,8 @@ than a fixed-width vector.
 | Module | Role |
 |---|---|
 | `patch_retrieval.py` | per-query-patch retrieval over the memory bank, with learned EMA subspaces |
-| `decoder.py` | candidate-aware decoder (`QUERY` / `EVIDENCE` / `CANDIDATE` structural roles) |
-| `confidence.py` | separate correct-and-answerable confidence calibration |
+| `relational_decoder.py` | candidate-aware attention over names, query patches, and evidence roles with balanced learned component scales |
+| `confidence.py` | parked correct-and-answerable confidence experiment; not in active Phase B |
 
 Design of record:
 [`../docs/design/PHASE_B_TRAINING_INTENT.md`](../docs/design/PHASE_B_TRAINING_INTENT.md). Historical

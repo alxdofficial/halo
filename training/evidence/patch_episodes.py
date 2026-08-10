@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -181,18 +182,51 @@ class PatchTable:
             if len(candidates) <= windows_per_label:
                 selected_windows.append(candidates)
                 continue
-            configs = sorted(self.window_cfg[candidates].unique().tolist())
+            # Reserve half the active budget as distinct executions from one subject. Without this,
+            # round-robin subject balancing retained only one window per person and made the
+            # same-subject k=2..8 curriculum impossible despite ample repeated executions in the
+            # archive. The anchor is redrawn on every active-view refresh.
+            reserve_target = min(8, windows_per_label // 2)
+            candidate_unit = torch.where(
+                self.window_event_verified[candidates],
+                self.window_event[candidates] + self.n_windows,
+                candidates,
+            )
+            subject_options = []
+            for subject in self.window_subj[candidates].unique().tolist():
+                member = self.window_subj[candidates].eq(subject)
+                subject_options.append((
+                    int(torch.unique(candidate_unit[member]).numel()), int(subject), member,
+                ))
+            max_units = max(value[0] for value in subject_options)
+            anchor_options = [value for value in subject_options if value[0] == max_units]
+            _, _, anchor_member = anchor_options[int(rng.integers(len(anchor_options)))]
+            anchor_units = torch.unique(candidate_unit[anchor_member]).numpy()
+            chosen_units = rng.choice(
+                anchor_units, size=min(reserve_target, len(anchor_units)), replace=False
+            )
+            reserved = []
+            for unit in chosen_units.tolist():
+                members = candidates[candidate_unit.eq(int(unit))]
+                reserved.append(int(rng.choice(members.numpy())))
+            picked = list(reserved)
+            remaining_candidates = candidates[~torch.isin(
+                candidate_unit, torch.as_tensor(chosen_units, dtype=torch.long)
+            )]
+            remaining_budget = windows_per_label - len(picked)
+            configs = sorted(self.window_cfg[remaining_candidates].unique().tolist())
             # When a label occurs in more configurations than the active-window budget, assigning
             # the remainder to sorted config ids would permanently exclude later datasets/streams.
             # Randomize only the quota order; the supplied generator keeps the roster reproducible.
             configs = [int(value) for value in rng.permutation(configs)]
-            base, extra = divmod(windows_per_label, len(configs))
-            picked = []
+            base, extra = divmod(remaining_budget, max(1, len(configs)))
             for position, config in enumerate(configs):
                 quota = base + int(position < extra)
                 if quota == 0:
                     continue
-                cfg_windows = candidates[self.window_cfg[candidates].eq(config)]
+                cfg_windows = remaining_candidates[
+                    self.window_cfg[remaining_candidates].eq(config)
+                ]
                 # Temper large subjects by drawing subject round-robin within a configuration.
                 subject_buckets = {}
                 for subject in self.window_subj[cfg_windows].unique().tolist():
@@ -205,7 +239,9 @@ class PatchTable:
                             cfg_pick.append(subject_buckets[subject].pop())
                 picked.extend(cfg_pick)
             if len(picked) < windows_per_label:
-                remaining = candidates[~torch.isin(candidates, torch.tensor(picked))]
+                remaining = remaining_candidates[
+                    ~torch.isin(remaining_candidates, torch.tensor(picked))
+                ]
                 take = min(windows_per_label - len(picked), len(remaining))
                 picked.extend(rng.choice(remaining.numpy(), size=take, replace=False).tolist())
             selected_windows.append(torch.tensor(sorted(picked), dtype=torch.long))
@@ -236,7 +272,7 @@ def build_episode_memory_view(
     query_label: torch.Tensor,
     candidates: torch.Tensor,
     *,
-    support_count: int,
+    support_count: int | Sequence[int],
     episode_type: str,
     label_mode: str,
     rng: np.random.Generator,
@@ -244,20 +280,42 @@ def build_episode_memory_view(
 ) -> EpisodeMemoryView:
     """Construct support/background roles without mutating labels stored in the archive.
 
-    Candidate concepts are removed from ordinary background memory. Exactly ``support_count``
-    event/window identities per candidate are then restored as provided support. All patches from
-    one selected identity are retained, including verified synchronous placements.
+    Candidate concepts are removed from ordinary background memory. ``support_count`` event/window
+    identities per candidate are then restored as provided support. All patches from one selected
+    identity are retained, including verified synchronous placements.
+
+    ``support_count`` is either one integer applied to every candidate, or a per-candidate sequence.
+    The per-candidate form is what creates a **partially enrolled** episode: some candidates carry
+    enrolled examples and the rest must be recognized from background memory and their name alone.
+    That mixture is the regime the evidence engine exists for — with a uniform count, every episode
+    is either "nothing is enrolled" (no substrate) or "everything is enrolled" (a prototype
+    classifier is optimal), and neither needs retrieval over background memory.
+
+    A candidate given 0 support keeps its concept ERASED from background memory, exactly as in a
+    zero-support episode, so it can never be recognized by retrieving its own stored examples.
     """
     if episode_type not in {
         "semantic_zero_support", "ordinary_few_support",
         "cross_subject_few_support", "same_subject_enrollment",
     }:
         raise ValueError(f"unknown episode type {episode_type!r}")
-    if support_count < 0:
+    per_candidate = (
+        [int(support_count)] * len(candidates)
+        if isinstance(support_count, (int, np.integer))
+        else [int(value) for value in support_count]
+    )
+    if len(per_candidate) != len(candidates):
+        raise ValueError(
+            f"support_count has {len(per_candidate)} entries for {len(candidates)} candidates"
+        )
+    if any(value < 0 for value in per_candidate):
         raise ValueError("support_count must be nonnegative")
-    if episode_type == "semantic_zero_support" and support_count != 0:
+    if episode_type == "semantic_zero_support" and any(per_candidate):
         raise ValueError("semantic_zero_support requires support_count=0")
-    if label_mode == "random_alias" and support_count == 0:
+    # A candidate presented under a meaningless episode-local alias and given no support is
+    # unanswerable: the name carries no semantics to fall back on. Partial enrollment is therefore
+    # a COHERENT-label construct by definition.
+    if label_mode == "random_alias" and any(value == 0 for value in per_candidate):
         raise ValueError("random aliases are unanswerable without provided support")
 
     device = query.Z.device
@@ -286,6 +344,7 @@ def build_episode_memory_view(
     )
     realized = []
     for candidate_position, label in enumerate(candidates.tolist()):
+        support_count = per_candidate[candidate_position]
         label_rows = y.eq(label) & eligible_support
         if episode_type == "cross_subject_few_support":
             # Person-disjointness only. Acquisition disjointness is deliberately NOT required: 35 of
@@ -299,6 +358,16 @@ def build_episode_memory_view(
             )
             query_subjects = torch.unique(query.subj[related_query_mask])
             label_rows &= ~torch.isin(subj, query_subjects)
+        elif episode_type == "same_subject_enrollment":
+            query_rows = query_label.eq(label)
+            if truth_present and bool(query_rows.any()):
+                related_query_mask = query_rows.unsqueeze(1) & query.mask
+                query_subjects = torch.unique(query.subj[related_query_mask])
+                if len(query_subjects) != 1:
+                    raise ValueError(
+                        "same-subject enrollment requires one real query subject per candidate"
+                    )
+                label_rows &= subj.eq(query_subjects[0])
         units = torch.unique(support_unit[label_rows])
         if len(units) < support_count:
             raise ValueError(
@@ -338,32 +407,6 @@ def build_episode_memory_view(
         episode_type=episode_type,
         label_mode=label_mode,
     )
-
-
-def balanced_memory_log_prior(patch: dict, index_rows: torch.Tensor, device) -> torch.Tensor:
-    """A count-neutral prior over label -> window -> resolution -> represented duration."""
-    rows = index_rows.detach().cpu().long()
-    y = torch.as_tensor(patch["y"])[rows].long().cpu()
-    window = torch.as_tensor(patch["window"])[rows].long().cpu()
-    resolution = torch.as_tensor(patch["resolution"])[rows].long().cpu()
-    duration = torch.as_tensor(patch["duration"])[rows].float().cpu().clamp_min(1e-6)
-    weight = torch.zeros_like(duration)
-    labels = torch.unique(y)
-    for label in labels.tolist():
-        label_rows = torch.nonzero(y.eq(label), as_tuple=True)[0]
-        windows = torch.unique(window[label_rows])
-        for source_window in windows.tolist():
-            window_rows = label_rows[window[label_rows].eq(source_window)]
-            resolutions = torch.unique(resolution[window_rows])
-            for grid in resolutions.tolist():
-                group = window_rows[resolution[window_rows].eq(grid)]
-                weight[group] = (
-                    duration[group] / duration[group].sum().clamp_min(1e-8)
-                    / len(resolutions) / len(windows) / len(labels)
-                )
-    if not bool((weight > 0).all()):
-        raise ValueError("failed to assign a positive prior to every active memory row")
-    return weight.log().to(device)
 
 
 def simultaneous_stream_pairs(
@@ -499,6 +542,7 @@ def queries_from_encoded(
     device,
     *,
     sensor_id: int = -1,
+    subject_ids: torch.Tensor | None = None,
 ) -> QueryPatches:
     """Pack selected windows from ``encode_dataset_detailed`` into a padded query patch set."""
     selected_rows = []
@@ -520,6 +564,10 @@ def queries_from_encoded(
     event = torch.zeros(B, Q, dtype=torch.long, device=device)
     subj = torch.zeros(B, Q, dtype=torch.long, device=device)
     cfg = torch.full((B, Q), int(sensor_id), dtype=torch.long, device=device)
+    if subject_ids is not None:
+        subject_ids = subject_ids.detach().cpu().long()
+        if tuple(subject_ids.shape) != (B,):
+            raise ValueError(f"subject_ids must have shape {(B,)}, got {tuple(subject_ids.shape)}")
     for b, rows in enumerate(selected_rows):
         n = len(rows)
         mask[b, :n] = True
@@ -530,7 +578,7 @@ def queries_from_encoded(
         external_id = -(b + 1)
         window_id[b, :n] = external_id
         event[b, :n] = external_id
-        subj[b, :n] = external_id
+        subj[b, :n] = external_id if subject_ids is None else int(subject_ids[b])
     return QueryPatches(
         Z=Z, mask=mask, time=time, duration=duration, resolution=resolution,
         window=window_id, event=event, subj=subj, cfg=cfg, sensor=cfg.clone(),
@@ -538,210 +586,75 @@ def queries_from_encoded(
     )
 
 
-def build_allowed_mask(
-    patch: dict,
-    index_rows: torch.Tensor,
-    query: QueryPatches,
-    query_label: torch.Tensor,
-    *,
-    truth_present: bool,
-    true_support: int | None,
-    config_mode: str,
-    rng: np.random.Generator,
-) -> torch.Tensor:
-    """Apply leakage, configuration, memory-roster, and per-label support constraints.
-
-    Candidate labels are intentionally absent from this function: they define what the model may
-    answer, while the active index defines what memory actually contains.
-    """
-    device = query.Z.device
-    rows = index_rows.detach().cpu()
-    y = torch.as_tensor(patch["y"])[rows].long().to(device)
-    subj = torch.as_tensor(patch["subj"])[rows].long().to(device)
-    event = torch.as_tensor(patch["event"])[rows].long().to(device)
-    window = torch.as_tensor(patch["window"])[rows].long().to(device)
-    support_unit = _support_units(patch, rows, device)
-    cfg = torch.as_tensor(patch["cfg"])[rows].long().to(device)
-    B, Q = query.mask.shape
-    allowed = (
-        subj.view(1, 1, -1).ne(query.subj.unsqueeze(-1))
-        & event.view(1, 1, -1).ne(query.event.unsqueeze(-1))
-        & window.view(1, 1, -1).ne(query.window.unsqueeze(-1))
-        & query.mask.unsqueeze(-1)
-    )
-    if config_mode == "same":
-        allowed &= cfg.view(1, 1, -1).eq(query.cfg.unsqueeze(-1))
-    elif config_mode == "cross":
-        allowed &= cfg.view(1, 1, -1).ne(query.cfg.unsqueeze(-1))
-    elif config_mode == "query_absent":
-        for batch_index in range(B):
-            query_configs = torch.unique(query.cfg[batch_index, query.mask[batch_index]])
-            allowed[batch_index] &= ~torch.isin(cfg, query_configs).view(1, -1)
-    elif config_mode != "any":
-        raise ValueError(f"unknown config_mode {config_mode!r}")
-
-    # Support is sampled once per source example and shared across its patches. Verified
-    # synchronous placements share an event-level support identity; unpaired data uses a window.
-    for b in range(B):
-        row_allowed = allowed[b].any(0)
-        if not truth_present:
-            row_allowed &= y.ne(query_label[b])
-            allowed[b, :, y.eq(query_label[b])] = False
-        active_labels = torch.unique(y[row_allowed]).tolist()
-        for label in active_labels:
-            # Only familiarity with the truth is an episode condition. Non-truth labels follow the
-            # same balanced active-index policy and are not governed by a second support knob.
-            cap = true_support if truth_present and label == int(query_label[b]) else None
-            if cap is None:
-                continue
-            label_rows = torch.nonzero(row_allowed & y.eq(label), as_tuple=True)[0]
-            label_units = torch.unique(support_unit[label_rows])
-            if len(label_units) <= cap:
-                continue
-            keep_np = rng.choice(label_units.detach().cpu().numpy(), size=cap, replace=False) \
-                if cap > 0 else np.empty(0, dtype=np.int64)
-            keep_unit = torch.from_numpy(np.asarray(keep_np)).to(device)
-            keep = torch.isin(support_unit, keep_unit) \
-                if len(keep_np) else torch.zeros_like(row_allowed)
-            remove = y.eq(label) & ~keep
-            allowed[b, :, remove] = False
-    return allowed
-
-
-def realized_support_examples(
-    patch: dict,
-    index_rows: torch.Tensor,
-    allowed: torch.Tensor,
-    query_label: torch.Tensor,
-) -> torch.Tensor:
-    """Count distinct eligible true-label events/windows for each query episode row."""
-    device = allowed.device
-    rows = index_rows.detach().cpu()
-    y = torch.as_tensor(patch["y"])[rows].long().to(device)
-    support_unit = _support_units(patch, rows, device)
-    counts = []
-    for b in range(allowed.shape[0]):
-        eligible = allowed[b].any(0) & y.eq(query_label[b])
-        counts.append(torch.unique(support_unit[eligible]).numel())
-    return torch.tensor(counts, dtype=torch.long, device=device)
-
-
 def assemble_evidence(
     retrieval: PatchRetrieval,
     online_scores: torch.Tensor,
     index_rows: torch.Tensor,
-    patch: dict,
     *,
     max_evidence: int,
-    max_per_window: int,
-    max_per_label: int,
     tau: float,
 ) -> EvidenceBatch:
-    """Deduplicate/cap retrieved rows and normalize contribution by subspace × resolution."""
+    """Keep the highest-scoring unique memory rows from learned query retrieval."""
+    if max_evidence < 1:
+        raise ValueError("max_evidence must be positive")
+    if tau <= 0:
+        raise ValueError("retrieval temperature must be positive")
+    if online_scores.shape != retrieval.index.shape:
+        raise ValueError("online scores must align with retrieved indices")
+
     B, Q, H, K = retrieval.index.shape
     device = online_scores.device
-    # Roster selection is deliberately non-differentiable. Copy its bounded top-k state once;
-    # scalar reads from CUDA inside this loop would otherwise synchronize once per candidate.
-    retrieval_index_cpu = retrieval.index.detach().cpu()
-    retrieval_valid_cpu = retrieval.valid.detach().cpu()
-    selected_global_cpu = index_rows.detach().cpu()[retrieval_index_cpu]
-    detached_scores_cpu = online_scores.detach().float().cpu()
-    patch_window = torch.as_tensor(patch["window"], dtype=torch.long).cpu()
-    patch_y = torch.as_tensor(patch["y"], dtype=torch.long).cpu()
-    chosen: list[list[tuple[int, float, int, int]]] = []
-    for b in range(B):
-        candidates = []
-        for q in range(Q):
-            for h in range(H):
-                for j in range(K):
-                    if bool(retrieval_valid_cpu[b, q, h, j]):
-                        candidates.append((
-                            int(selected_global_cpu[b, q, h, j]),
-                            float(detached_scores_cpu[b, q, h, j]),
-                            h, q, j,
-                        ))
-        candidates.sort(key=lambda value: value[1], reverse=True)
-        window_count: dict[int, int] = {}
-        label_count: dict[int, int] = {}
-        accepted = []
-        seen_head_patch: set[tuple[int, int]] = set()
-        for global_row, score, head, q_slot, j in candidates:
-            identity = (head, global_row)
-            if identity in seen_head_patch:
-                continue
-            source_window = int(patch_window[global_row])
-            label = int(patch_y[global_row])
-            if window_count.get(source_window, 0) >= max_per_window:
-                continue
-            if label_count.get(label, 0) >= max_per_label:
-                continue
-            seen_head_patch.add(identity)
-            window_count[source_window] = window_count.get(source_window, 0) + 1
-            label_count[label] = label_count.get(label, 0) + 1
-            accepted.append((global_row, score, head, q_slot, j))
-            if len(accepted) >= max_evidence:
-                break
-        if not accepted:
-            raise ValueError("retrieval produced no evidence after leakage and contribution caps")
-        chosen.append(accepted)
+    flat_count = Q * H * K
+    flat_local = retrieval.index.reshape(B, flat_count)
+    flat_valid = retrieval.valid.reshape(B, flat_count)
+    flat_scores = online_scores.reshape(B, flat_count)
+    sortable = flat_scores.detach().masked_fill(~flat_valid, float("-inf"))
+    order = torch.argsort(sortable, dim=1, descending=True, stable=True)
+    sorted_local = torch.gather(flat_local, 1, order)
+    sorted_valid = torch.gather(flat_valid, 1, order)
+    sorted_scores = torch.gather(flat_scores, 1, order)
 
-    E = max(map(len, chosen))
-    index = torch.zeros(B, E, dtype=torch.long, device=device)
-    scores = torch.zeros(B, E, dtype=torch.float32, device=device)
-    mask = torch.zeros(B, E, dtype=torch.bool, device=device)
-    head = torch.zeros(B, E, dtype=torch.long, device=device)
-    query_patch = torch.zeros(B, E, dtype=torch.long, device=device)
-    for b, accepted in enumerate(chosen):
-        n = len(accepted)
-        index[b, :n] = torch.tensor([v[0] for v in accepted], device=device)
-        scores[b, :n] = torch.stack(
-            [online_scores[b, v[3], v[2], v[4]] for v in accepted]
-        )
-        head[b, :n] = torch.tensor([v[2] for v in accepted], device=device)
-        query_patch[b, :n] = torch.tensor([v[3] for v in accepted], device=device)
-        mask[b, :n] = True
-
-    evidence = EvidenceBatch(
-        index=index, weights=torch.zeros_like(scores), scores=scores, mask=mask,
-        head=head, query_patch=query_patch,
-        local_index=torch.zeros(B, E, dtype=torch.long, device=device),
+    # Keep the first (therefore highest-scoring) occurrence of each active-memory row.  scatter-reduce
+    # avoids the historical Python scan and CPU synchronization for every query/head/top-k tuple.
+    rank = torch.arange(flat_count, device=device).view(1, -1).expand(B, -1)
+    first_rank = torch.full(
+        (B, len(index_rows)), flat_count, dtype=torch.long, device=device
     )
-    for b, accepted in enumerate(chosen):
-        n = len(accepted)
-        evidence.local_index[b, :n] = torch.tensor(
-            [int(retrieval_index_cpu[b, value[3], value[2], value[4]]) for value in accepted],
-            device=device,
-        )
-    return reweight_evidence(evidence, scores, patch, tau=tau)
+    first_rank.scatter_reduce_(
+        1, sorted_local, rank.masked_fill(~sorted_valid, flat_count),
+        reduce="amin", include_self=True,
+    )
+    unique = sorted_valid & first_rank.gather(1, sorted_local).eq(rank)
+    unique_count = unique.sum(1)
+    if bool((unique_count == 0).any()):
+        raise ValueError("learned query retrieval produced no evidence")
 
+    E = min(max_evidence, int(unique_count.max()))
+    accepted_rank = rank.masked_fill(~unique, flat_count).topk(
+        E, dim=1, largest=False, sorted=True
+    ).values
+    mask = accepted_rank.lt(flat_count)
+    gather_rank = accepted_rank.clamp_max(flat_count - 1)
+    local_index = torch.gather(sorted_local, 1, gather_rank).masked_fill(~mask, 0)
+    scores = torch.gather(sorted_scores, 1, gather_rank).masked_fill(~mask, 0.0)
 
-def reweight_evidence(
-    evidence: EvidenceBatch,
-    scores: torch.Tensor,
-    patch: dict,
-    *,
-    tau: float,
-) -> EvidenceBatch:
-    """Normalize live pair scores without changing the detached selected evidence roster."""
-    if scores.shape != evidence.index.shape:
-        raise ValueError("evidence scores must align with assembled evidence")
-    device = scores.device
-    patch_resolution = torch.as_tensor(patch["resolution"], device=device, dtype=torch.long)
-    patch_duration = torch.as_tensor(patch["duration"], device=device, dtype=torch.float32)
-    weights = torch.zeros_like(scores)
-    resolution = patch_resolution[evidence.index]
-    duration = patch_duration[evidence.index]
-    B = scores.shape[0]
-    for b in range(B):
-        group_ids = evidence.head[b] * 3 + (resolution[b].clamp(-1, 1) + 1)
-        active_groups = torch.unique(group_ids[evidence.mask[b]])
-        for group in active_groups:
-            select = evidence.mask[b] & group_ids.eq(group)
-            raw = torch.softmax(scores[b, select] / tau, dim=0) * duration[b, select]
-            raw = raw / raw.sum().clamp_min(1e-8)
-            weights[b, select] = raw / len(active_groups)
+    # Flattening order is q -> head -> top-k, matching the selector tensor layout.
+    original_position = torch.gather(order, 1, gather_rank)
+    query_patch = torch.div(original_position, H * K, rounding_mode="floor")
+    head = torch.div(original_position, K, rounding_mode="floor").remainder(H)
+    query_patch = query_patch.masked_fill(~mask, 0)
+    head = head.masked_fill(~mask, 0)
+    global_rows = index_rows.to(device=device, dtype=torch.long)
+    index = global_rows[local_index].masked_fill(~mask, 0)
+
+    weights = torch.softmax(scores.masked_fill(~mask, float("-inf")) / tau, dim=1)
+    weights = weights.masked_fill(~mask, 0.0)
     return EvidenceBatch(
-        index=evidence.index, weights=weights, scores=scores, mask=evidence.mask,
-        head=evidence.head, query_patch=evidence.query_patch,
-        local_index=evidence.local_index,
+        index=index,
+        weights=weights,
+        scores=scores,
+        mask=mask,
+        head=head,
+        query_patch=query_patch,
+        local_index=local_index,
     )

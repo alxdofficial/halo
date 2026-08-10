@@ -58,6 +58,8 @@ def build_enrollment_memory(
     candidate_text: torch.Tensor,
     *,
     excluded_base_labels: torch.Tensor | None = None,
+    support_subject_ids: torch.Tensor | None = None,
+    query_matches_support_config: bool = True,
 ) -> EnrollmentMemory:
     """Append labeled external support patches to a detached active corpus view."""
     device = base_selector_z.device
@@ -72,8 +74,12 @@ def build_enrollment_memory(
             or bool((support_candidate_position >= n_candidates).any()):
         raise ValueError("runtime enrollment candidate positions are out of range")
     counts = torch.bincount(support_candidate_position, minlength=n_candidates)
-    if bool((counts != counts[0]).any()):
-        raise ValueError("every runtime candidate must receive the same support count")
+    if support_subject_ids is not None:
+        support_subject_ids = support_subject_ids.detach().cpu().long()
+        if tuple(support_subject_ids.shape) != tuple(support_windows.shape):
+            raise ValueError("support subject ids must align with support windows")
+        if bool((support_subject_ids < 0).any()):
+            raise ValueError("runtime support subject ids must be nonnegative")
 
     patch_window = encoded["patch_window"].detach().cpu().long()
     selected = torch.isin(patch_window, support_windows)
@@ -90,6 +96,17 @@ def build_enrollment_memory(
     patch_candidate = torch.tensor([
         position_by_window[int(window)] for window in selected_parent.tolist()
     ], dtype=torch.long)
+    if support_subject_ids is None:
+        default_subject = int(torch.as_tensor(base_bank["patch"]["subj"]).max()) + 1
+        patch_subject = torch.full((len(selected_parent),), default_subject, dtype=torch.long)
+    else:
+        subject_by_window = {
+            int(window): int(subject)
+            for window, subject in zip(support_windows.tolist(), support_subject_ids.tolist())
+        }
+        patch_subject = torch.tensor([
+            subject_by_window[int(window)] for window in selected_parent.tolist()
+        ], dtype=torch.long)
 
     base_rows = base_index_rows.detach().cpu().long()
     if len(base_selector_z) != len(base_rows):
@@ -126,6 +143,7 @@ def build_enrollment_memory(
 
     support_y = candidate_ids.detach().cpu()[patch_candidate]
     support_cfg_id = int(base("cfg", torch.long).max()) + 1
+    query_cfg_id = support_cfg_id if query_matches_support_config else support_cfg_id + 1
     temporary_patch = {
         "Z": torch.cat([
             base("Z").cpu(), encoded["patch_Z"][selected_rows].detach().cpu().half()
@@ -133,7 +151,7 @@ def build_enrollment_memory(
         "y": torch.cat([base("y", torch.long).cpu(), support_y]),
         "subj": torch.cat([
             base("subj", torch.long).cpu(),
-            torch.full((n_support,), int(base("subj", torch.long).max()) + 1),
+            patch_subject,
         ]),
         "cfg": torch.cat([
             base("cfg", torch.long).cpu(),
@@ -183,5 +201,5 @@ def build_enrollment_memory(
         canonical_text=torch.cat([canonical_text, candidate_text], dim=0),
         candidate_text=candidate_text,
         support_units_per_candidate=counts.to(device),
-        runtime_sensor_id=support_cfg_id,
+        runtime_sensor_id=query_cfg_id,
     )

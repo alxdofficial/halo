@@ -16,12 +16,12 @@ Entry points: `pretrain.py` (train), `pretrain_data.py` (corpus + temperature sa
 ## `evidence/` — Phase B (memory + evidence prediction)
 
 Builds a patch-level memory bank from a frozen Phase-A checkpoint, retrieves per query patch, and
-trains one candidate-set predictor objective. Reject confidence is calibrated afterwards while the
-predictor remains frozen; no `UNKNOWN` candidate is introduced.
+trains one candidate-set predictor objective. No `UNKNOWN` candidate is introduced. A separate
+frozen-predictor confidence experiment exists but is parked and is not part of the current launch.
 
 Entry points: `build_memory.py` (bank), `train_patch_decoder.py` (candidate-CE predictor),
-`train_patch_confidence.py` (separate calibration), and `eval_patch_decoder.py` (evaluation plus
-identity control).
+`eval_enrollment.py` (zero/full/partial support, same/cross-configuration evaluation, and matched
+controls), and the parked `train_patch_confidence.py` calibration experiment.
 
 ## `diagnostics/` — cross-cutting analyses
 

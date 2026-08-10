@@ -3,8 +3,10 @@
 > **Canonical Phase-B motivation and executable contract. Read this before configuring, launching,
 > or interpreting Phase-B training.**
 >
-> Status: implementation-aligned as of 2026-08-08. Phase A is complete; the first full run of this
-> Phase-B recipe has not yet established its empirical claims.
+> Status: implementation-aligned as of 2026-08-09. Phase A is complete. The current relational,
+> learned-query Phase-B path has passed unit and synthetic integration tests but has not yet been
+> trained at scale. [`../results/PHASE_B_TRAINING_STATUS.md`](../results/PHASE_B_TRAINING_STATUS.md)
+> records the superseded run that motivated this design. The sealed test roster has not been used.
 
 This document owns both the reason Phase B exists and the constraints that make its training match
 that reason. `training/evidence/README.md` owns commands. `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`
@@ -51,8 +53,8 @@ labels and retraining are plentiful. The intended advantages are immediate enrol
 output head, operational reuse of one model, inspectable analogues, and explicit handling of
 acquisition heterogeneity.
 
-For the broader project positioning and prior-art caveats, see `MOTIVATION.md`, `POSITIONING.md`,
-and `EVIDENCE_ENGINE_RESEARCH.md`. In particular, the claim is not that prior work ignores
+For the broader project positioning and prior-art caveats, see `MOTIVATION.md` and
+`POSITIONING.md`. In particular, the claim is not that prior work ignores
 heterogeneity. The narrower hypothesis is that configuration-aware representations and example
 enrollment can work together across label and acquisition shifts.
 
@@ -110,15 +112,21 @@ The standard capacity policy is deliberately small:
   current corpus yields 248,351 encoded windows, so the cap does not bind and no balancing is
   applied.** The archive is therefore whatever the 50,000-per-stream scan ceiling produced, and is
   strongly imbalanced (`sitting` 28,648 windows against a 30-window minimum). Balance is restored
-  downstream by the active view, which equalises to 16 windows per label;
-- active view: up to 16 source windows per label, refreshed every 100 steps;
+  downstream by the active view, which caps every label at 16 windows;
+- active view: up to 16 source windows per label, refreshed every 100 steps. Half of each capped
+  label budget reserves distinct executions from one randomly rotated anchor subject; the remainder
+  is configuration- and subject-balanced. This preserves the repeated-person executions required
+  by the same-subject curriculum without allowing one subject to occupy the whole view;
 - evidence budget: 64 final patch rows per query;
-- candidate counts: four, eight, twelve, or sixteen;
-- support counts: one, two, four, or eight independent executions per candidate.
+- candidate counts: an integer sampled from two through sixteen;
+- support counts: an integer sampled from one through eight independent executions per enrolled
+  candidate.
 
-Retrieval K and per-window/per-label contribution limits are derived from the evidence budget. They
-are not independent knobs. One support execution is one verified physical event, including its
-synchronous placements; unpaired data uses one source window.
+Retrieval K is derived from the evidence budget. The final roster is the highest-scoring unique
+memory rows across query patches and learned subspaces; no per-label or per-window cap alters that
+ranking. One support identity is one verified physical event; all rows from that event that are
+present in the active view are bound together. The active window budget does not promise that every
+synchronous placement is present. Unpaired data uses one source window.
 
 Exact query windows and verified synchronous events are excluded from memory. Candidate concepts
 are removed from ordinary background memory before the selected support rows are restored. This is
@@ -126,15 +134,13 @@ what prevents the model from solving a random-alias episode through a hidden can
 
 ## 6. Candidate-Conditioned Evidence
 
-The decoder receives a permutation-equivariant set containing query patches and retrieved evidence.
-A query token combines its physical patch vector with the `QUERY` role and an explicit no-label
-embedding. Each evidence item is one bound token: its retrieved physical patch and attached label
-text are summed with either the `EVIDENCE` or `PROVIDED_SUPPORT` role. Keeping them in one token
-prevents attention from losing which label belongs to which physical exemplar. Evidence also carries
-the learned retrieval-subspace identity that selected it. Candidate labels are separate tokens with
-the `CANDIDATE` role; candidate self-attention and cross-attention read the physical query/evidence
-set. Patch center, duration, resolution, sensor/source membership, and validity are supplied as
-structural metadata.
+The sole decoder is a relational transformer over `[candidate names; background label names; query
+patches; retrieved evidence]`. Candidate, label, query, evidence, and provided-support roles are
+explicit embeddings. Randomized episode-local coreference slots bind a retrieved evidence row to
+its candidate or background-label token without placing text directly on the physical row. Source
+window groups are randomized independently, so neither slot nor group identity can become a stable
+label shortcut. Query/evidence configuration, subject, sensor, and physical time are supplied as
+relations or structural metadata.
 
 Candidate tokens are intentionally enabled. This resolves the older wording discrepancy: **there
 are no per-label classifier parameters, but the generic decoder is trained to reason over frozen
@@ -142,26 +148,72 @@ text embeddings of the labels supplied at runtime.** An unseen label string is r
 is encoded through the same frozen text interface, not because the model has a learned output row
 for that label.
 
-The decoder emits candidate logits from retrieval-weighted evidence. There is no explicit
-`UNKNOWN` candidate. Ambiguity and lack of support are handled by a separate confidence stage so
-the predictor is not rewarded for always choosing a safe unknown output.
+A candidate logit is the readout on its token, and nothing else. Selected cosine scores are first
+converted to a shift-invariant log-relative prior over the valid evidence rows:
+
+```text
+retrieval bias = log_softmax(score / temperature) + log(valid evidence count)
+```
+
+Equal scores therefore contribute zero bias, adding a common offset changes nothing, and only
+within-roster preferences affect attention. This is the numerical contract across Phase B: Phase-A
+patch vectors, label-text vectors, and retrieval projections are L2 normalized at the decoder or
+retrieval boundary; the relative prior
+has the same scale as ordinary attention logits; summed token features pass through LayerNorm; and
+the candidate readout is trained with ordinary unscaled cross-entropy. Because selection is a hard
+top-k over frozen memory vectors, the relative attention prior is the only differentiable route from
+the candidate loss back to the retriever projection. `dL/ds < 0` means "increase this row relative
+to the other selected rows," rather than rewarding the absolute common mode of a high cosine.
+
+An earlier revision made the logit a zero-initialized residual over a closed-form base — prototype
+similarity where the retriever had surfaced a candidate's enrolled rows, a label-text vote
+otherwise — on the argument that this gave a non-random floor and made the learned contribution
+directly measurable. Measurement rejected it. On the real bank the prototype branch was reachable
+for only **15.5%** of decisions, because the retriever selects a candidate's declared support just
+21.7% of the time for the true candidate and 2.0% for the others; so ~85% of base scores were the
+label-text vote this decoder exists to replace. Worse, the two branches sat **6.4 logits apart**
+(602:1 odds), so the base decided by *which branch a candidate landed on* rather than by any
+comparison. The instrument had become the model, and it is gone.
+
+Enrollment remains fully available: declared support carries the `PROVIDED_SUPPORT` role and a
+coreference slot binding it to its candidate, so the stack can compare the query against it
+directly. It has to learn that comparison rather than be handed a closed-form version of it.
+
+There is no explicit `UNKNOWN` candidate. Confidence calibration code remains available as a parked
+follow-up experiment, but it is not part of the current Phase-B launch or claim.
 
 ## 7. Episodic Adaptation Curriculum
 
-Training cycles equally through four regimes:
+Training samples uniformly from four regimes:
 
 1. `semantic_zero_support`: coherent candidate names and no examples of candidate concepts in
    memory.
-2. `ordinary_few_support`: balanced support for every candidate with independent mild acquisition
-   variation.
+2. `ordinary_few_support`: enrolled candidates receive balanced support with independent mild
+   acquisition variation; enrollment may be partial or full.
 3. `cross_subject_few_support`: support and query come from different physical subjects — a hard
    constraint — and receive different virtual-subject styles. **Acquisition disjointness is allowed
    but not required.** Support drawn from another stream happens wherever the label supports it and
    is counted, never demanded; see §7.1.
-4. `same_subject_enrollment`: support and query share one virtual-subject style but receive
-   independent acquisition variation, simulating enrollment and later recognition for one person.
-   Note that this regime places no constraint on *real* subject identity — the shared persona is
-   synthetic, and the underlying executions may come from different people.
+4. `same_subject_enrollment`: support and query are distinct executions from the same real subject.
+   Augmented views additionally share one virtual-subject style while receiving independent
+   acquisition variation. Clean views therefore rehearse real same-person enrollment rather than
+   silently pairing two different people.
+
+One optimizer step contains eight independently constructed episodes with eight query executions
+each. Every episode has its own candidate set, support overlay, label aliases, physical
+view/persona, and support count; only the immutable archive and trainable model parameters are
+shared. Gradients are accumulated across the eight episode forwards and applied once. This keeps
+64-query throughput while exposing eight adaptation tasks instead of 64 queries from one task.
+
+Every condition is drawn uniformly per episode rather than balanced within a batch. An earlier
+revision cycled shuffled strata for exact per-batch coverage, which forced `episodes-per-step` to be
+a multiple of four and bought nothing at real scale — 3,000 steps times eight episodes samples each
+condition hundreds of times regardless. What survives is the *space*, because `eval_enrollment`
+grades those cells and training has to cover them. Partial enrollment is a random proper subset of
+candidates receiving support while the remaining candidate concepts stay erased from memory; it
+falls out of drawing the enrolled count uniformly from one to the candidate count rather than being
+a named stratum. Random aliases remain full-support only because an arbitrary name with no binding
+example is unanswerable. The realized mix is reported in telemetry.
 
 ### 7.1 Why cross-configuration is an allower, not a prerequisite
 
@@ -179,27 +231,44 @@ synchronised rig such as xrf_v2's placements or nfi_fared's back+wrist), and fro
 recorded stream (wisdm's phone and watch, or two different studies). Those counts appear per batch in
 the telemetry and in the periodic training line.
 
-**Scope limit for the paper.** Cross-configuration enrollment is only testable on the 58 labels that
-appear on more than one stream — 33 of them via synchronised multi-placement rigs, 25 via two
-different studies. No code change extends this; only a corpus with the same activity recorded on more
-than one device would.
+**Scope limit for the paper.** Cross-configuration enrollment is only testable where the same
+activity and subject identifiers exist on more than one stream. The external evaluator now builds
+those support/query pairs explicitly and skips unsupported pairs; no resampling or synthetic pairing
+can substitute for a corpus that actually recorded both configurations.
 
-Supported episodes use one, two, four, or eight independent support executions for every candidate.
-They split evenly between coherent activity text and random aliases. Random aliases are forbidden
-at zero support because the episode would contain no information connecting an arbitrary word to a
-movement.
+Under the current external roster, Shoaib supplies this cross-configuration check only in the
+development protocol. None of the sealed datasets supplies a valid cross-configuration enrollment
+cohort. TNDA-HAR has one subject and window-level execution identifiers, so it contributes only the
+coherent zero-support condition; it cannot support a genuine same- or cross-subject enrollment
+claim. Sealed adaptation claims therefore come from InclusiveHAR, USC-HAD, and UT-Complex, and the
+paper must report that scope rather than pooling unsupported TNDA-HAR cells.
 
-Candidate distractors include random, language-near, motion-family-near, and physically confusable
-labels. Complete motion families are reserved from predictor training for validation. Training uses
+During training, an enrolled candidate receives an independently sampled integer from one through
+eight support executions; an unenrolled candidate receives zero. Fixed validation and external
+reporting curves use one, two, four, and eight so every checkpoint is compared at identical,
+interpretable anchors. Full-support episodes enroll every candidate, while partial episodes enroll
+a random proper subset. Random aliases are forbidden at zero or partial support because an
+unenrolled arbitrary name would contain no information connecting it to a movement.
+
+Half of every episode's distractors are the labels nearest the truth by the mean of text cosine and
+physical-centroid cosine, and half are drawn at random. All-random distractors would make most
+episodes trivial in the full 93-label vocabulary; all-near would drop the easy cases the model also has to
+get right. Complete motion families are reserved from predictor training for validation. Training uses
 only rows whose subject and configuration are both in the training partition. Validation queries use
 all three excluded quadrants: held subject, held configuration, and both held. Fixed validation
-episodes cycle evenly across those three transfer conditions. Results must
+canaries include coherent partial, coherent full, random-alias full, and semantic zero-support
+recipes at every supported `k`, each evaluated through clean and augmented views. The default 39
+base canaries are the complete 13-recipe by three-transfer-condition Cartesian product, so fold
+metrics cannot be confounded by different episode mixtures. Internal held-family canaries use
+zero-support, ordinary, and
+cross-subject episodes; real same-subject enrollment is measured by the external evaluator because
+the held-subject memory partition intentionally contains no rows from its query people. Results must
 be stratified by support count and episode regime; averaging them together would hide whether the
 adaptation mechanism works.
 
 ## 8. Physical Episode Views
 
-Training cycles exactly 50/50 between two physical-view modes. With a frozen tokenizer, the **clean**
+Training samples two physical-view modes with equal probability. With a frozen tokenizer, the **clean**
 mode uses stored clean vectors whose equivalence to live encoding is guarded by the bank probe; the
 fine-tuning mode uses live clean forwards. The **augmented** mode follows this order:
 
@@ -226,35 +295,43 @@ sampled per execution rather than used as a candidate identity.
 
 The clean half closes the train/deployment gap: ordinary runtime queries and enrollment examples are
 not synthetically transformed. Held-out validation runs each identical episode through both modes and
-reports `clean_macro_cell_ba` and `augmented_macro_cell_ba` separately; checkpoint selection uses their
-equal-weight mean. A model may therefore earn robustness without hiding a regression on clean input.
+reports `clean_macro_cell_ba` and `augmented_macro_cell_ba` separately. Checkpoint selection uses the
+fixed held-family low-support cells described below, which contain both views equally. A model may
+therefore earn robustness without hiding a regression on clean input.
 
-## 9. Hard Retrieval and Gradient Flow
+## 9. Learned Query Retrieval and Gradient Flow
 
-Inference uses hard top-k retrieval. During training, the numerical forward remains exactly that
-hard path. A balanced soft vote over all eligible rows in the active memory is attached only in the
-backward pass:
+After the episode defines which rows physically exist in memory and applies leakage exclusions, the
+forward roster is selected only by learned query-to-memory similarity in projected physical
+subspaces. No fixed support bonus, label-text similarity, configuration weight, per-label/window
+retrieval cap, manually constructed eligibility roster, or backward-only vote can add or promote a
+row. Enrollment identity is used only as an episode label, loss target, and telemetry annotation.
 
-```text
-training_logits = hard_logits + 0.1 * (soft_logits - stop_gradient(soft_logits))
-```
+Hard top-k selection is non-differentiable. Candidate cross-entropy trains the scores of selected
+support and background evidence together with the relational decoder, reaching the retriever through
+the attention bias those scores apply. That is the only retriever objective.
 
-The soft temperature anneals from 0.20 to 0.07 over 500 steps. The 0.1 backward-only scale was chosen
-after real-bank probes showed that the unscaled surrogate gradient was 5-8 times the selected hard
-path. Its prior balances label, source
-window, resolution, and represented duration so large labels and dense short-patch grids do not win
-by row count. The estimator is biased by design, but it gives the retrieval projection and query
-path a learning signal when useful support falls outside hard top-k.
+An earlier revision added a multiple-instance support-boundary loss over eligible memory, promoting
+the best true-support match above the evidence-budget cutoff. It has been removed. It was introduced
+when the decoder could not reach the retriever at all (`grad_residual_to_retriever` measured exactly
+0.0 in 8/8 probes), a premise the attention bias removed; its positives were the *true* candidate's
+support, making it label-conditioned during training and absent at evaluation; and it was the only
+mechanism in the system that scored against rows outside the forward roster, contradicting the
+explicit decision to accept gradient for selected rows only. The accepted cost is that a missed
+support row can no longer be promoted.
 
-Required telemetry includes exact hard-forward equivalence, non-selected-row gradient, hard/soft
-gradient norms, retained soft mass, true-support recall, selected-row entropy, candidate entropy,
-candidate margin, row/subspace utilization, cross-subspace top-k overlap, identity-control gain, and
-support-removal effects.
+Required telemetry includes assembled true-support recall, fixed-canary roster churn, selected-row
+and retrieval-prior entropy, candidate entropy and margin, candidate-to-role attention mass,
+row/subspace utilization, raw pre-deduplication cross-subspace overlap, retriever/decoder gradient
+ratio, component gradients, and support-removal/label-shuffle effects.
 
-Telemetry is interpreted per episode type, support count, candidate count, label mode, and physical
-view rather than only as a global average. Candidate CE is normalized by `log(candidate_count)`.
+Telemetry is interpreted per episode type, enrollment shape, support count, candidate count, label
+mode, and physical view rather than only as a global average. Optimization uses standard candidate
+cross-entropy, averaged equally over the eight independent episodes. `CE / log(candidate_count)` is
+reported only as a chance-relative diagnostic; using it for gradients over-weighted two-candidate
+episodes by roughly three times relative to sixteen-candidate episodes.
 Expected modules expose component gradient norms, non-finite gradients stop before an optimizer
-update, and the hard/soft retriever probes report both norm ratio and cosine. Every launch immediately
+update. Every launch immediately
 replaces stale health output with a run-identified heartbeat. A CPU-only monitor turns the latest
 snapshot into green/warning/critical health, a text summary, and an optional plot.
 
@@ -269,7 +346,8 @@ The optional `ema_finetune` mode is a warm-started experiment, not joint trainin
 2. The raw query, provided support, and selected background windows are reloaded.
 3. Those bounded windows are re-forwarded through the online tokenizer with gradients.
 4. Candidate cross-entropy updates the online tokenizer, retriever, and decoder.
-5. EMA keys are refreshed in deterministic shards, and inference uses the saved EMA tokenizer.
+5. The small active key view is fully refreshed on its normal 100-step cadence, and inference uses
+   the saved EMA tokenizer.
 
 This avoids retaining a graph for the full bank while still supporting end-to-end fine-tuning after
 selection. It also means a fine-tuned deployment no longer has the same deletion and model-versioning
@@ -277,17 +355,22 @@ properties as pure non-parametric enrollment; those modes must not be conflated 
 
 ## 11. Objective and Confidence
 
-The predictor has one objective: candidate-set cross-entropy on answerable, truth-present episodes.
-There is no corpus-classification auxiliary head, metric-learning loss, subject-adversarial loss,
+The objective is candidate-set cross-entropy on answerable, truth-present episodes, and nothing
+else. There is no auxiliary retrieval term, corpus-classification head, subject-adversarial loss,
 EDL predictor loss, repeatability penalty, or explicit unknown target.
 
-After predictor training, the predictor is frozen. A separate confidence head is trained with BCE to
-predict `correct AND answerable` from evidence and retrieval diagnostics. Truth-present and
-truth-absent samples use the same physical augmentation, support-overlay, retrieval, and decoder
-path; truth-absent samples differ only in that their true concept is excluded from candidates and
-memory. Confidence never changes candidate
-logits. Thresholds and operating points must be selected on validation data and reported with ECE,
-AUROC, and risk/coverage rather than treated as intrinsic uncertainty guarantees.
+The default run is 3,000 optimizer steps at learning rate `2e-4`, with a 300-step linear warmup and
+cosine decay to zero. At eight episodes and eight queries per step this is 24,000 independently
+constructed adaptation episodes and 192,000 query executions.
+
+Checkpoint selection is predeclared and uses fixed held-family `k=1/2` canaries. Its scalar is
+`low_k_balanced_accuracy + 0.5 * (low_k_balanced_accuracy - identity_balanced_accuracy)`: absolute
+quality is primary, while learned gain over the matched identity control also matters. Every
+validation milestone is saved, so the selector can be audited against external development curves.
+
+The separate confidence head and truth-absent episode generator are parked. If resumed, predictor
+weights remain frozen and calibration must be reported with ECE, AUROC, and risk/coverage; none of
+those claims belong to the current Phase-B experiment.
 
 ## 12. Non-Negotiable Controls
 
@@ -298,7 +381,8 @@ AUROC, and risk/coverage rather than treated as intrinsic uncertainty guarantees
   hide failure on runtime candidates.
 - Do not train only at high support, with a fixed candidate roster, or with same-configuration
   support. Those choices raise the easy training score while removing the claimed capability.
-- Do not give only the true candidate support. Equal support per candidate prevents count leakage.
+- Do not give only the true candidate support. Within the enrolled subset, every candidate receives
+  the same support count; partial episodes choose the subset independently of the query truth.
 - Do not use random aliases at zero support or tune thresholds on evaluation labels.
 - Do not introduce subject-invariance objectives by default. Subject-specific movement character is
   needed for enrollment, while acquisition nuisances are the intended robustness target.
@@ -306,8 +390,9 @@ AUROC, and risk/coverage rather than treated as intrinsic uncertainty guarantees
 
 ## 13. Required Evidence Before Making the Claim
 
-1. Support curves at zero, one, two, four, and eight examples per candidate, reported separately for
-   same-subject and cross-subject/configuration enrollment. Enrollment is drawn from corrected native
+1. Support curves at zero, one, two, four, and eight examples per enrolled candidate, reported
+   separately for full and half-candidate partial enrollment and for same-subject, cross-subject,
+   same-configuration, and cross-configuration conditions. Enrollment is drawn from corrected native
    grids in distinct source-execution units; every window from a chosen same-subject support
    execution is excluded from that subject's query set.
 2. A random-alias support curve showing that examples, not familiar label semantics, drive the gain.
@@ -320,15 +405,15 @@ AUROC, and risk/coverage rather than treated as intrinsic uncertainty guarantees
    a query from another.
 6. Identity-control comparisons and telemetry ruling out candidate-position, memory-row, retrieval-
    subspace, or low-entropy selection collapse.
-7. Confidence ECE, AUROC, and risk/coverage on held-out families and truth-absent episodes.
-8. External enrollment curves must use one fixed subject/candidate/query cohort and nested,
+7. External enrollment curves must use one fixed subject/candidate/query cohort and nested,
    execution-independent support prefixes. Report unsupported cells instead of substituting windows
    or changing the cohort. Compare against support removal, shuffled support labels, prototypes, and
    a fitted few-shot head on exactly the same support/query split.
-9. Development uses the registered external development roster. The external test roster is selected
+8. Development uses the registered external development roster. The external test roster is selected
    explicitly only after design and checkpoint choices are frozen; report seen and unseen activity
-   concepts separately.
-10. Treat the subject as the independent unit for uncertainty. Report paired subject-bootstrap
+   separately for Phase-A vocabulary exposure and Phase-B candidate-training exposure; also record
+   whether the dataset, subject, and exact label string were seen.
+9. Treat the subject as the independent unit for uncertainty. Report paired subject-bootstrap
     intervals for adaptation gains over identity, support-removed, shuffled-label, prototype, and
     fitted-head controls. Keep development, sealed-test, and custom artifacts in distinct files.
 
@@ -354,9 +439,9 @@ change. None of these longitudinal claims are implemented or established by the 
 - episode overlays and leakage masks: `training/evidence/patch_episodes.py`;
 - labels and aliases: `training/evidence/episode_labels.py` and `labeltext.py`;
 - physical views: `training/evidence/subject_style.py` and `data/scripts/augmentations.py`;
-- retrieval and decoder: `model/evidence/patch_retrieval.py` and `decoder.py`;
-- predictor and confidence stages: `training/evidence/train_patch_decoder.py` and
-  `train_patch_confidence.py`;
+- retrieval and decoder: `model/evidence/patch_retrieval.py` and `relational_decoder.py`;
+- predictor stage: `training/evidence/train_patch_decoder.py`;
+- parked confidence experiment: `training/evidence/train_patch_confidence.py`;
 - deployment-style enrollment evaluation: `training/evidence/eval_enrollment.py`;
 - live health output: `training/evidence/telemetry.py`.
 

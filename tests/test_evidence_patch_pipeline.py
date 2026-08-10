@@ -1,6 +1,5 @@
 """Regression tests for source-aware patch evidence, learned retrieval, and confidence."""
 
-from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -14,7 +13,6 @@ from model.evidence.confidence import (
     confidence_features,
     expected_calibration_error,
 )
-from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.patch_retrieval import PatchSubspaceRetriever
 from training.evidence.build_memory import archive_budget_balanced_keep, label_config_balanced_keep
 from training.evidence.bank_guard import assert_patch_bank
@@ -22,29 +20,33 @@ from training.evidence.patch_episodes import (
     EpisodeMemoryView,
     PatchTable,
     assemble_evidence,
-    balanced_memory_log_prior,
-    build_allowed_mask,
     build_episode_memory_view,
     describe_episode_composition,
     queries_from_encoded,
     simultaneous_stream_pairs,
 )
-from training.evidence.policy import PHYSICAL_VIEW_MODES, PhaseBPolicy
+from training.evidence.policy import (
+    CANDIDATE_COUNT_RANGE,
+    EPISODE_TYPES,
+    PHYSICAL_VIEW_MODES,
+    SUPPORT_COUNT_RANGE,
+    PhaseBPolicy,
+)
 from training.evidence.live_encoder import PatchViewSpec, SourcePatchEncoder
 from training.tokenizer.eval_transfer import encode_dataset_detailed
 from training.evidence.train_patch_decoder import (
     EpisodeCurriculum,
     _episode_view_specs,
-    choose_candidates,
-    decode_adaptation_episode,
     family_holdout_labels,
     load_activity_families,
+    milestone_checkpoint_path,
     parameter_gradient_norm,
-    prepare_adaptation_views,
+    phase_b_source_fingerprint,
     prepare_support_feasible_query_pool,
-    run_patch_episode,
     sample_queries,
-    soft_retrieval_temperature,
+    sample_queries_covering_labels,
+    structured_fingerprint,
+    validation_canary_cases,
 )
 from training.evidence.subject_style import SubjectStyle, apply_subject_style
 from training.evidence.runtime_memory import build_enrollment_memory
@@ -52,7 +54,10 @@ from training.evidence.eval_enrollment import (
     _support_and_query_rows,
     build_paired_enrollment_plans,
     paired_subject_summary,
+    phase_b_evaluation_source_fingerprint,
+    summarize_protocol_capabilities,
 )
+from training.evidence.build_comparison_table import assert_matched_evaluation_provenance
 from training.evidence.device import resolve_device
 
 
@@ -133,6 +138,18 @@ def test_cross_subject_query_pool_leaves_requested_support_on_other_people():
     assert pool.tolist() == [8]
 
 
+def test_same_subject_query_pool_reserves_support_from_the_query_person():
+    bank = _support_feasibility_bank([0] * 5 + [1] * 4)
+    labels, pool = prepare_support_feasible_query_pool(
+        torch.arange(9), torch.arange(9), bank, torch.tensor([0]),
+        support_count=4, episode_type="same_subject_enrollment",
+        rng=np.random.default_rng(7),
+    )
+    assert labels.tolist() == [0]
+    assert len(pool) == 1
+    assert len(torch.unique(bank["subj"][pool])) == 1
+
+
 def test_patch_bank_foreign_keys_and_event_expansion():
     bank = _bank()
     assert_patch_bank(bank, context="test")
@@ -205,13 +222,106 @@ def test_global_archive_budget_is_exact_and_preserves_rare_labels():
     assert set(configs[keep & labels.eq(0)].tolist()) == {0, 1}
 
 
-def test_phase_b_policy_derives_non_conflicting_retrieval_limits():
+def test_phase_b_policy_derives_query_driven_topk_from_evidence_budget():
     policy = PhaseBPolicy(evidence_budget=64)
-    assert policy.max_per_window == 4
-    assert policy.max_per_label == 12
-    assert policy.max_per_window <= policy.max_per_label <= policy.evidence_budget
     assert policy.topk_per_subspace(16) == 8
     assert policy.topk_per_subspace(32) == 4
+
+
+def test_phase_b_source_fingerprint_binds_file_names_and_contents(tmp_path):
+    first = tmp_path / "first.py"
+    second = tmp_path / "second.py"
+    first.write_text("VALUE = 1\n")
+    second.write_text("VALUE = 1\n")
+    original = phase_b_source_fingerprint([first, second])
+    second.write_text("VALUE = 2\n")
+    assert phase_b_source_fingerprint([first, second]) != original
+    assert phase_b_source_fingerprint([second, first]) != original
+
+
+def test_phase_b_evaluation_fingerprint_binds_evaluator_sources(tmp_path):
+    first = tmp_path / "eval.py"
+    first.write_text("PROTOCOL = 1\n")
+    original = phase_b_evaluation_source_fingerprint([first])
+    first.write_text("PROTOCOL = 2\n")
+    assert phase_b_evaluation_source_fingerprint([first]) != original
+
+
+def test_validation_canaries_cross_every_recipe_with_every_transfer_fold():
+    recipes = [("zero", 0), ("few", 4)]
+    folds = [("subject", torch.tensor([1])), ("config", torch.tensor([2])),
+             ("joint", torch.tensor([3]))]
+    cases = validation_canary_cases(recipes, folds)
+    assert len(cases) == len(recipes) * len(folds)
+    assert {(case[0], case[3]) for case in cases} == {
+        (fold_name, recipe) for fold_name, _ in folds for recipe in recipes
+    }
+
+
+def test_comparison_rejects_missing_or_mixed_evaluator_provenance():
+    common = {
+        "evaluation_regime": "v1",
+        "evaluation_source_fp": "source-a",
+        "evaluation_protocol_fp": "protocol-a",
+    }
+    assert_matched_evaluation_provenance({
+        "step0": {"meta": dict(common)}, "trained": {"meta": dict(common)},
+    })
+    with pytest.raises(SystemExit, match="evaluation_source_fp"):
+        assert_matched_evaluation_provenance({
+            "step0": {"meta": dict(common)},
+            "trained": {"meta": {**common, "evaluation_source_fp": "source-b"}},
+        })
+    with pytest.raises(SystemExit, match="evaluation_protocol_fp"):
+        assert_matched_evaluation_provenance({
+            "step0": {"meta": dict(common)},
+            "legacy": {"meta": {**common, "evaluation_protocol_fp": None}},
+        })
+
+
+def test_protocol_capabilities_do_not_overclaim_unsupported_transfers():
+    protocol = {
+        "same": {
+            "status": "ok", "support_ceiling": 8,
+            "subject_relation": "cross_subject",
+            "configuration_relation": "same_configuration",
+        },
+        "pseudo_execution": {
+            "status": "unverified_window_level_execution_ids", "support_ceiling": 0,
+            "subject_relation": "same_subject",
+            "configuration_relation": "same_configuration",
+        },
+    }
+    capabilities = summarize_protocol_capabilities(protocol)
+    assert capabilities["cross_subject_enrollment"]
+    assert not capabilities["same_subject_enrollment"]
+    assert not capabilities["cross_configuration_enrollment"]
+    assert len(capabilities["limitations"]) == 2
+
+
+def test_structured_fingerprint_detects_canary_content_and_order():
+    first = {
+        "rows": torch.tensor([1, 2]),
+        "spec": ["coherent", 1],
+    }
+    changed = {
+        "rows": torch.tensor([1, 3]),
+        "spec": ["coherent", 1],
+    }
+    reordered = {
+        "rows": torch.tensor([1, 2]),
+        "spec": [1, "coherent"],
+    }
+    assert structured_fingerprint(first) == structured_fingerprint(first)
+    assert structured_fingerprint(first) != structured_fingerprint(changed)
+    assert structured_fingerprint(first) != structured_fingerprint(reordered)
+
+
+def test_milestone_checkpoint_path_is_separate_and_step_specific(tmp_path):
+    output = tmp_path / "predictor.pt"
+    assert milestone_checkpoint_path(output, 200) == (
+        tmp_path / "predictor.milestones" / "step_000200.pt"
+    )
 
 
 def test_explicit_cuda_request_never_silently_falls_back(monkeypatch):
@@ -241,7 +351,7 @@ def test_adaptation_episode_removes_candidate_background_and_equalizes_support()
     query = PatchTable(bank).gather_queries(torch.tensor([0, 4, 8]), "cpu")
     view = build_episode_memory_view(
         patch, torch.arange(n), query, torch.tensor([0, 1, 2]), torch.tensor([0, 1, 2]),
-        support_count=2, episode_type="same_subject_enrollment", label_mode="random_alias",
+        support_count=2, episode_type="ordinary_few_support", label_mode="random_alias",
         rng=np.random.default_rng(3),
     )
     assert view.support_units_per_candidate.tolist() == [2, 2, 2]
@@ -278,20 +388,69 @@ def test_adaptation_episode_removes_candidate_background_and_equalizes_support()
         )
 
 
-def test_episode_curriculum_is_exactly_balanced_and_soft_tau_is_bounded():
+def test_episode_curriculum_covers_every_condition_it_is_evaluated_on():
+    """Sampling replaced scheduling, so coverage is statistical rather than exact.
+
+    What still has to hold is that nothing `eval_enrollment` grades can go unsampled, and that the
+    ranges are respected end to end — a silently truncated range would train a model that is
+    off-distribution on the very cells it is scored on.
+    """
     curriculum = EpisodeCurriculum(np.random.default_rng(4))
-    specs = [curriculum.sample() for _ in range(40)]
-    types = [spec.episode_type for spec in specs]
-    physical_views = [spec.physical_view_mode for spec in specs]
-    assert {name: types.count(name) for name in set(types)} == {
-        name: 10 for name in set(types)
-    }
-    assert {name: physical_views.count(name) for name in PHYSICAL_VIEW_MODES} == {
-        name: 20 for name in PHYSICAL_VIEW_MODES
-    }
-    assert soft_retrieval_temperature(0) == pytest.approx(0.20)
-    assert soft_retrieval_temperature(500) == pytest.approx(0.07)
-    assert soft_retrieval_temperature(5000) == pytest.approx(0.07)
+    specs = [spec for _ in range(200) for spec in curriculum.sample_batch(8)]
+
+    assert set(spec.episode_type for spec in specs) == set(EPISODE_TYPES)
+    assert set(spec.physical_view_mode for spec in specs) == set(PHYSICAL_VIEW_MODES)
+    assert set(spec.enrollment_shape for spec in specs) == {"zero", "partial", "full"}
+    assert set(spec.label_mode for spec in specs) == {"coherent", "random_alias"}
+
+    candidate_counts = [spec.candidate_count for spec in specs]
+    support_counts = [spec.support_count for spec in specs if spec.support_count]
+    assert (min(candidate_counts), max(candidate_counts)) == CANDIDATE_COUNT_RANGE
+    assert (min(support_counts), max(support_counts)) == SUPPORT_COUNT_RANGE
+
+
+def test_episode_curriculum_invariants_hold_for_every_sampled_episode():
+    """The three conditions that make an episode answerable at all."""
+    specs = [
+        spec for _ in range(200)
+        for spec in EpisodeCurriculum(np.random.default_rng(9)).sample_batch(8)
+    ]
+    for spec in specs:
+        if spec.episode_type == "semantic_zero_support":
+            # Nothing is enrolled, so a meaningless alias would leave no substrate to answer from.
+            assert spec.support_count == 0 and spec.label_mode == "coherent"
+        if spec.label_mode == "random_alias":
+            # An un-enrolled candidate under an alias carries no information at all.
+            assert spec.support_count > 0 and not spec.partially_enrolled
+        if spec.partially_enrolled:
+            assert 1 <= spec.enrolled_candidate_count < spec.candidate_count
+
+
+def test_episode_curriculum_is_deterministic_and_takes_any_positive_batch():
+    assert (
+        EpisodeCurriculum(np.random.default_rng(17)).sample_batch(8)
+        == EpisodeCurriculum(np.random.default_rng(17)).sample_batch(8)
+    )
+    # The old scheduler demanded a multiple of the four episode types; sampling does not.
+    assert len(EpisodeCurriculum(np.random.default_rng(1)).sample_batch(6)) == 6
+    with pytest.raises(ValueError, match="positive"):
+        EpisodeCurriculum(np.random.default_rng(1)).sample_batch(0)
+
+
+def test_partial_episode_query_draw_covers_enrolled_and_unenrolled_sides():
+    y = torch.arange(8).repeat_interleave(3)
+    pool = torch.arange(len(y))
+    selected = sample_queries_covering_labels(
+        pool,
+        torch.arange(8),
+        y,
+        4,
+        np.random.default_rng(5),
+        config_ids=torch.zeros_like(y),
+        subject_ids=torch.arange(len(y)),
+        required_labels=torch.tensor([1, 6]),
+    )
+    assert {1, 6} <= set(y[selected].tolist())
 
 
 def test_episode_view_specs_clean_is_exact_identity_and_augmented_is_not():
@@ -329,29 +488,6 @@ def test_episode_view_specs_clean_is_exact_identity_and_augmented_is_not():
         )
 
 
-def test_soft_backward_reaches_nonselected_memory_and_straight_through_is_hard_forward():
-    torch.manual_seed(5)
-    retriever = PatchSubspaceRetriever(8, n_subspaces=2, subspace_dim=4)
-    query = F.normalize(torch.randn(1, 1, 8), dim=-1).requires_grad_()
-    memory = F.normalize(torch.randn(4, 8), dim=-1).detach().requires_grad_()
-    allowed = torch.ones(1, 1, 4, dtype=torch.bool)
-    candidate_weights = torch.tensor([
-        [1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0],
-    ])
-    prior = torch.full((4,), -np.log(4.0))
-    soft = retriever.soft_candidate_logits(
-        query, memory, allowed, candidate_weights, prior, tau=0.2,
-        selected_index=torch.tensor([[[[0], [0]]]]),
-    )
-    hard = torch.tensor([[3.0, -1.0]], requires_grad=True)
-    straight_through = hard + soft.logits - soft.logits.detach()
-    assert torch.equal(straight_through.detach(), hard.detach())
-    F.cross_entropy(straight_through, torch.tensor([1])).backward()
-    assert memory.grad is not None
-    assert float(memory.grad[1:].abs().sum()) > 0
-    assert query.grad is not None and float(query.grad.abs().sum()) > 0
-
-
 def test_subject_style_preserves_gravity_scale_shape_and_masked_slots():
     rate = 50.0
     t = np.arange(300) / rate
@@ -367,13 +503,6 @@ def test_subject_style_preserves_gravity_scale_shape_and_masked_slots():
     assert np.isfinite(styled).all()
     assert np.linalg.norm(styled[:, :3].mean(0) - before_mean) < 0.05
     assert np.count_nonzero(styled[:, 3:]) == 0
-
-
-def test_balanced_soft_prior_has_equal_label_mass():
-    bank = _bank()
-    prior = balanced_memory_log_prior(bank["patch"], torch.arange(8), "cpu").exp()
-    masses = [float(prior[bank["patch"]["y"].eq(label)].sum()) for label in (0, 1, 2)]
-    assert max(masses) - min(masses) < 1e-6
 
 
 def test_runtime_enrollment_appends_equal_support_without_mutating_base_bank():
@@ -403,6 +532,28 @@ def test_runtime_enrollment_appends_equal_support_without_mutating_base_bank():
     assert view.allowed.all()
     assert torch.equal(view.query_label, memory.candidate_ids)
     assert bool(query.sensor.eq(memory.runtime_sensor_id).all())
+
+    partial = build_enrollment_memory(
+        bank, torch.arange(8), F.normalize(bank["patch"]["Z"].float(), dim=-1),
+        encoded, torch.tensor([0, 1]), torch.tensor([0, 0]), canonical, candidates,
+        support_subject_ids=torch.tensor([10, 11]),
+    )
+    assert partial.support_units_per_candidate.tolist() == [2, 0]
+    assert set(partial.bank["patch"]["subj"][partial.support_mask.cpu()].tolist()) == {10, 11}
+    identified_query = queries_from_encoded(
+        encoded, torch.tensor([2, 3]), "cpu", sensor_id=partial.runtime_sensor_id,
+        subject_ids=torch.tensor([10, 12]),
+    )
+    assert identified_query.subj[:, 0].tolist() == [10, 12]
+
+    cross_config = build_enrollment_memory(
+        bank, torch.arange(8), F.normalize(bank["patch"]["Z"].float(), dim=-1),
+        encoded, torch.tensor([0, 1]), torch.tensor([0, 1]), canonical, candidates,
+        support_subject_ids=torch.tensor([10, 12]),
+        query_matches_support_config=False,
+    )
+    support_cfg = cross_config.bank["patch"]["cfg"][cross_config.support_mask.cpu()]
+    assert not bool(support_cfg.eq(cross_config.runtime_sensor_id).any())
 
     zero = build_enrollment_memory(
         bank, torch.arange(8), F.normalize(bank["patch"]["Z"].float(), dim=-1),
@@ -476,6 +627,33 @@ def test_paired_enrollment_plan_uses_nested_support_and_fixed_queries():
         query_executions = {executions[row] for row in plan.query_rows}
         assert support_executions.isdisjoint(query_executions)
         assert all(rows[:1] == (rows[0],) for rows in plan.support_rows)
+
+
+def test_paired_enrollment_plan_supports_cross_configuration_sources():
+    query_labels = np.repeat(
+        np.asarray(["walk", "walk", "walk", "sit", "sit", "sit"], dtype=object), 2
+    )
+    query_subjects = np.asarray(["s1"] * 12, dtype=object)
+    query_executions = np.repeat(
+        np.asarray(["w0", "w1", "w2", "s0", "s1", "s2"], dtype=object), 2
+    )
+    support_labels = query_labels.copy()
+    support_subjects = query_subjects.copy()
+    support_executions = query_executions.copy()
+    plans, coverage = build_paired_enrollment_plans(
+        query_labels, query_subjects, query_executions, ["walk", "sit"],
+        requested_support=[0, 1, 2], mode="same_subject", seed=11,
+        support_labels=support_labels,
+        support_subjects=support_subjects,
+        support_execution_ids=support_executions,
+    )
+    assert coverage["support_ceiling"] == 2
+    assert len(plans) == 1
+    plan = plans[0]
+    selected = {support_executions[row] for rows in plan.support_rows for row in rows}
+    remaining = {query_executions[row] for row in plan.query_rows}
+    assert selected.isdisjoint(remaining)
+    assert set(query_labels[plan.query_rows]) == {"walk", "sit"}
 
 
 def test_paired_enrollment_rejects_window_level_execution_ids():
@@ -646,44 +824,6 @@ def test_patch_bank_guard_requires_valid_sensor_identity():
         assert_patch_bank(bank, context="test")
 
 
-def test_allowed_mask_excludes_subject_event_window_and_caps_support_by_window():
-    bank = _bank()
-    table = PatchTable(bank)
-    query = table.gather_queries(torch.tensor([2]), "cpu")
-    rows = torch.arange(8)
-    allowed = build_allowed_mask(
-        bank["patch"], rows, query, torch.tensor([1]),
-        truth_present=True, true_support=0, config_mode="any",
-        rng=np.random.default_rng(2),
-    )
-    # Query's own subject/event/window and every true-label support row are excluded.
-    assert not allowed[..., bank["patch"]["subj"].eq(1)].any()
-    assert not allowed[..., bank["patch"]["event"].eq(20)].any()
-    assert not allowed[..., bank["patch"]["y"].eq(1)].any()
-    # Label 0's two placements are one verified physical event, so support=1 retains both sensors.
-    retained_label0 = rows[allowed[0, 0] & bank["patch"]["y"].eq(0)]
-    assert len(torch.unique(bank["patch"]["window"][retained_label0])) == 2
-    assert len(retained_label0) == 4
-
-
-def test_query_absent_excludes_every_config_in_a_multisensor_query():
-    bank = _bank()
-    query = PatchTable(bank).gather_queries(torch.tensor([0]), "cpu")
-    rows = torch.arange(8)
-    cross = build_allowed_mask(
-        bank["patch"], rows, query, torch.tensor([0]),
-        truth_present=True, true_support=None,
-        config_mode="cross", rng=np.random.default_rng(4),
-    )
-    assert cross.any()  # each sensor can use configurations belonging to the other query sensor
-    absent = build_allowed_mask(
-        bank["patch"], rows, query, torch.tensor([0]),
-        truth_present=True, true_support=None,
-        config_mode="query_absent", rng=np.random.default_rng(4),
-    )
-    assert not absent.any()  # this tiny bank has only the two configurations in the query session
-
-
 def test_subspace_retrieval_is_independent_masked_and_differentiable():
     torch.manual_seed(3)
     retriever = PatchSubspaceRetriever(8, n_subspaces=3, subspace_dim=4, ema_decay=0.5)
@@ -726,135 +866,65 @@ def test_subspace_ema_update_tracks_the_online_projection():
     assert torch.allclose(retriever.ema_proj, old.lerp(retriever.proj, 0.5))
 
 
-def test_assemble_evidence_caps_windows_and_normalizes_head_resolution_groups():
+def test_assemble_evidence_uses_learned_score_order_and_global_deduplication():
     from model.evidence.patch_retrieval import PatchRetrieval
 
-    bank = _bank()
-    # B=1,Q=1,H=2,K=2, with two heads selecting patches from both resolutions.
+    # Both heads select row 0. Only its highest-scoring occurrence may reach the roster.
     retrieval = PatchRetrieval(
-        index=torch.tensor([[[[0, 2], [1, 3]]]]),
+        index=torch.tensor([[[[0, 2], [0, 3]]]]),
         score=torch.ones(1, 1, 2, 2),
         valid=torch.ones(1, 1, 2, 2, dtype=torch.bool),
     )
-    online = torch.tensor([[[[0.9, 0.8], [0.7, 0.6]]]], requires_grad=True)
+    online = torch.tensor([[[[0.9, 0.8], [0.95, 0.6]]]], requires_grad=True)
     result = assemble_evidence(
-        retrieval, online, torch.arange(8), bank["patch"],
-        max_evidence=4, max_per_window=2, max_per_label=4, tau=0.1,
+        retrieval, online, torch.arange(8), max_evidence=4, tau=0.1,
     )
+    assert result.index[result.mask].tolist() == [0, 2, 3]
+    assert result.head[result.mask].tolist() == [1, 0, 1]
     assert torch.allclose(result.weights.sum(1), torch.ones(1))
     assert len(torch.unique(result.head[result.mask])) == 2
-    result.weights.sum().backward()
-    assert online.grad is not None
+    (result.weights * result.scores).sum().backward()
+    assert online.grad is not None and bool((online.grad != 0).any())
+    assert float(online.grad[0, 0, 0, 0]) == 0.0
 
 
-def _decoder_inputs(B=2, Q=3, K=5, C=4, d=16, text=12):
-    gen = torch.Generator().manual_seed(9)
-    zq = torch.randn(B, Q, d, generator=gen)
-    zev = torch.randn(B, K, d, generator=gen)
-    ev_text = F.normalize(torch.randn(B, K, text, generator=gen), dim=-1)
-    candidate = F.normalize(torch.randn(B, C, text, generator=gen), dim=-1)
-    weights = torch.softmax(torch.randn(B, K, generator=gen), dim=1)
-    return dict(zq=zq, zev=zev, ev_label_text=ev_text, w_retr=weights,
-                cand_text=candidate)
+def test_vectorized_evidence_assembly_matches_reference_scan():
+    from model.evidence.patch_retrieval import PatchRetrieval
 
-
-def test_candidate_decoder_is_identity_at_init_and_candidate_permutation_equivariant():
-    torch.manual_seed(10)
-    cfg = DecoderConfig(
-        d_model=16, text_dim=12, n_heads=4, n_layers=1,
-        candidate_tokens=True, candidate_layers=1, structural_metadata=True,
+    generator = torch.Generator().manual_seed(23)
+    B, Q, H, K, N = 3, 5, 4, 6, 17
+    local = torch.randint(N, (B, Q, H, K), generator=generator)
+    valid = torch.rand(B, Q, H, K, generator=generator) > 0.2
+    valid[:, 0, 0, 0] = True
+    score = torch.randn(B, Q, H, K, generator=generator)
+    retrieval = PatchRetrieval(local, torch.zeros_like(score), valid)
+    global_rows = torch.arange(N) * 3 + 11
+    result = assemble_evidence(
+        retrieval, score, global_rows, max_evidence=9, tau=0.2,
     )
-    dec = EvidenceDecoder(cfg).eval()
-    inputs = _decoder_inputs()
-    retrieval_head = torch.tensor([[0, 1, 2, 3, 0]] * 2)
-    with torch.no_grad():
-        logits = dec(**inputs, ev_retrieval_head=retrieval_head)
-    votes = torch.relu(torch.einsum(
-        "bkt,bct->bkc",
-        F.normalize(inputs["ev_label_text"], dim=-1),
-        F.normalize(inputs["cand_text"], dim=-1),
-    ))
-    reference = cfg.out_scale_init * torch.einsum("bk,bkc->bc", inputs["w_retr"], votes)
-    assert torch.allclose(logits, reference, atol=1e-5)
 
-    # Open the candidate residual so the test exercises candidate attention, not only init identity.
-    with torch.no_grad():
-        dec.candidate_refiner.weight.normal_(0, 0.02)
-    perm = torch.tensor([2, 0, 3, 1])
-    with torch.no_grad():
-        a = dec(**inputs)
-        b = dec(**{**inputs, "cand_text": inputs["cand_text"][:, perm]})
-    assert torch.allclose(a[:, perm], b, atol=1e-5)
-
-
-def test_retrieval_subspace_identity_reaches_evidence_attention():
-    torch.manual_seed(14)
-    dec = EvidenceDecoder(DecoderConfig(
-        d_model=16, text_dim=12, n_heads=4, n_layers=1,
-        candidate_tokens=True, candidate_layers=1, structural_metadata=True,
-        n_retrieval_heads=4,
-    )).train()
-    with torch.no_grad():
-        dec.refiner[-1].weight.normal_(0, 0.02)
-    heads = torch.tensor([[0, 1, 2, 3, 0]] * 2)
-    dec(**_decoder_inputs(), ev_retrieval_head=heads).sum().backward()
-    assert dec.retrieval_head_emb.weight.grad is not None
-    assert float(dec.retrieval_head_emb.weight.grad[1:].abs().sum()) > 0
-
-
-def test_multiquery_masks_and_structural_metadata_are_operational():
-    torch.manual_seed(11)
-    dec = EvidenceDecoder(DecoderConfig(
-        d_model=16, text_dim=12, n_heads=4, n_layers=1,
-        candidate_tokens=True, candidate_layers=1, structural_metadata=True,
-    )).eval()
-    with torch.no_grad():
-        dec.refiner[-1].weight.normal_(0, 0.02)
-    inputs = _decoder_inputs()
-    q_mask = torch.tensor([[True, True, False], [True, True, False]])
-    metadata = dict(
-        q_mask=q_mask,
-        q_time=torch.tensor([[0.5, 1.5, 99.0]] * 2),
-        q_duration=torch.tensor([[1.0, 1.0, 99.0]] * 2),
-        q_resolution=torch.tensor([[0, 1, 1]] * 2),
-        q_sensor_id=torch.tensor([[0, 1, 2]] * 2),
-    )
-    changed_padding = {**metadata}
-    changed_padding["q_time"] = metadata["q_time"].clone()
-    changed_padding["q_time"][:, 2] = -500.0
-    with torch.no_grad():
-        a = dec(**inputs, **metadata)
-        b = dec(**inputs, **changed_padding)
-    assert torch.allclose(a, b, atol=1e-5)
-
-
-def test_same_sensor_relation_bias_is_trainable_and_permutation_safe():
-    torch.manual_seed(13)
-    dec = EvidenceDecoder(DecoderConfig(
-        d_model=16, text_dim=12, n_heads=4, n_layers=1,
-        candidate_tokens=True, candidate_layers=1, structural_metadata=True,
-    )).train()
-    inputs = _decoder_inputs()
-    B, Q = inputs["zq"].shape[:2]
-    q_sensor = torch.tensor([[0, 0, 1]] * B)
-    ev_sensor = torch.tensor([[0, 1, 1, 2, 2]] * B)
-    with torch.no_grad():
-        dec.refiner[-1].weight.normal_(0, 0.02)
-    dec(**inputs, q_sensor_id=q_sensor, ev_sensor_id=ev_sensor).sum().backward()
-    assert dec.same_sensor_bias.grad is not None
-
-    dec.eval()
-    perm = torch.tensor([3, 0, 4, 1, 2])
-    permuted = {
-        **inputs,
-        "zev": inputs["zev"][:, perm],
-        "ev_label_text": inputs["ev_label_text"][:, perm],
-        "w_retr": inputs["w_retr"][:, perm],
-    }
-    with torch.no_grad():
-        a = dec(**inputs, q_sensor_id=q_sensor, ev_sensor_id=ev_sensor)
-        b = dec(**permuted, q_sensor_id=q_sensor, ev_sensor_id=ev_sensor[:, perm])
-    assert torch.allclose(a, b, atol=1e-5)
+    for b in range(B):
+        reference = []
+        for q in range(Q):
+            for h in range(H):
+                for k in range(K):
+                    if valid[b, q, h, k]:
+                        reference.append((
+                            int(global_rows[local[b, q, h, k]]),
+                            float(score[b, q, h, k]), h, q,
+                        ))
+        reference.sort(key=lambda value: value[1], reverse=True)
+        unique = []
+        seen = set()
+        for row in reference:
+            if row[0] not in seen:
+                seen.add(row[0]); unique.append(row)
+            if len(unique) == 9:
+                break
+        n = int(result.mask[b].sum())
+        assert result.index[b, :n].tolist() == [row[0] for row in unique]
+        assert result.head[b, :n].tolist() == [row[2] for row in unique]
+        assert result.query_patch[b, :n].tolist() == [row[3] for row in unique]
 
 
 def test_confidence_features_are_finite_and_candidate_entropy_is_normalized():
@@ -879,297 +949,6 @@ def test_confidence_quality_metrics_reward_correct_ranking_and_calibration():
     assert binary_auprc(good, target) == pytest.approx(1.0)
     assert binary_auprc(reversed_score, target) < 0.5
     assert expected_calibration_error(good, target) < 0.2
-
-
-def test_patch_episode_smoke_has_finite_gradients_and_attribution():
-    torch.manual_seed(12)
-    bank = _bank()
-    table = PatchTable(bank)
-    retriever = PatchSubspaceRetriever(8, 2, 4)
-    dec = EvidenceDecoder(DecoderConfig(
-        d_model=8, text_dim=6, n_heads=2, n_layers=1,
-        candidate_tokens=True, candidate_layers=1, structural_metadata=True,
-    ))
-    index_rows = torch.arange(len(bank["patch"]["Z"]))
-    memory = F.normalize(bank["patch"]["Z"].float(), dim=-1)
-    memory_index = retriever.build_index(memory)
-    text = F.normalize(torch.randn(3, 6), dim=-1)
-    logits, aux = run_patch_episode(
-        dec, retriever, table, bank, index_rows, memory_index,
-        torch.tensor([0]), torch.tensor([0, 1, 2]), text, text,
-        truth_present=True, true_support=0,
-        config_mode="any", rng=np.random.default_rng(4),
-        policy=PhaseBPolicy(evidence_budget=8),
-        query_window_mask=torch.ones(4, dtype=torch.bool),
-    )
-    loss = F.cross_entropy(logits, torch.tensor([0]))
-    loss.backward()
-    assert torch.isfinite(logits).all()
-    assert retriever.proj.grad is not None
-    assert {"evidence_index", "evidence_sensor", "evidence_head", "evidence_query_patch"} <= set(aux)
-
-
-def test_live_patch_episode_backpropagates_into_the_online_tokenizer():
-    class TinyOnlineTokenizer(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.projection = torch.nn.Parameter(torch.eye(8) + 0.01 * torch.randn(8, 8))
-
-    class FakeLiveSource:
-        def __init__(self, bank):
-            self.bank = bank
-
-        def reencode_query(self, query, encoder, *, requires_grad):
-            assert requires_grad
-            z = (query.Z @ encoder.projection) * query.mask.unsqueeze(-1)
-            return replace(query, Z=z)
-
-        def reencode_evidence(self, evidence, encoder, *, requires_grad):
-            assert requires_grad
-            base = self.bank["patch"]["Z"].float()[evidence.index]
-            return (base @ encoder.projection) * evidence.mask.unsqueeze(-1)
-
-    torch.manual_seed(21)
-    bank = _bank()
-    table = PatchTable(bank)
-    retriever = PatchSubspaceRetriever(8, 2, 4)
-    decoder = EvidenceDecoder(DecoderConfig(
-        d_model=8, text_dim=6, n_heads=2, n_layers=1,
-        candidate_tokens=True, candidate_layers=1, structural_metadata=True,
-    ))
-    # Match the real fine-tuning phase, which begins only after the identity heads have opened.
-    with torch.no_grad():
-        decoder.refiner[-1].weight.normal_(0, 0.02)
-        decoder.candidate_refiner.weight.normal_(0, 0.02)
-        for block in decoder.blocks:
-            block.ls1.fill_(1.0)
-            block.ls2.fill_(1.0)
-    tokenizer = TinyOnlineTokenizer()
-    index_rows = torch.arange(len(bank["patch"]["Z"]))
-    memory_index = retriever.build_index(F.normalize(bank["patch"]["Z"].float(), dim=-1))
-    text = F.normalize(torch.randn(3, 6), dim=-1)
-    logits, aux = run_patch_episode(
-        decoder, retriever, table, bank, index_rows, memory_index,
-        torch.tensor([2]), torch.tensor([0, 1, 2]), text, text,
-        truth_present=True, true_support=0, config_mode="any",
-        rng=np.random.default_rng(8), policy=PhaseBPolicy(evidence_budget=8),
-        query_window_mask=torch.ones(4, dtype=torch.bool),
-        live_source=FakeLiveSource(bank), live_encoder=tokenizer,
-        live_requires_grad=True,
-    )
-    F.cross_entropy(logits, torch.tensor([1])).backward()
-    assert aux["retrieval_scores"].requires_grad
-    assert tokenizer.projection.grad is not None
-    assert float(tokenizer.projection.grad.abs().sum()) > 0
-
-
-def test_adaptation_straight_through_path_backpropagates_into_online_tokenizer():
-    class TinyOnlineTokenizer(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.projection = torch.nn.Parameter(torch.eye(8) + 0.01 * torch.randn(8, 8))
-
-    class FakeAdaptationSource:
-        def __init__(self, bank):
-            self.bank = bank
-
-        def reencode_query_views(self, query, encoder, specs, *, requires_grad):
-            value = query.Z @ encoder.projection
-            if not requires_grad:
-                value = value.detach()
-            return replace(query, Z=value * query.mask.unsqueeze(-1))
-
-        def encode_patch_rows_with_views(self, rows, specs, encoder, *, requires_grad):
-            value = self.bank["patch"]["Z"].float()[rows] @ encoder.projection
-            return value if requires_grad else value.detach()
-
-        def reencode_evidence(self, evidence, encoder, *, requires_grad):
-            value = self.bank["patch"]["Z"].float()[evidence.index] @ encoder.projection
-            return value * evidence.mask.unsqueeze(-1)
-
-    torch.manual_seed(22)
-    bank = _bank()
-    table = PatchTable(bank)
-    query = table.gather_queries(torch.tensor([2]), "cpu")
-    rows = torch.arange(8)
-    candidates = torch.tensor([1, 2])
-    view = build_episode_memory_view(
-        bank["patch"], rows, query, torch.tensor([1]), candidates,
-        support_count=0, episode_type="semantic_zero_support", label_mode="coherent",
-        rng=np.random.default_rng(4),
-    )
-    retriever = PatchSubspaceRetriever(8, 2, 4)
-    decoder = EvidenceDecoder(DecoderConfig(
-        d_model=8, text_dim=6, n_heads=2, n_layers=1,
-        candidate_tokens=True, candidate_layers=1,
-        structural_metadata=True, support_role=True,
-    ))
-    with torch.no_grad():
-        decoder.refiner[-1].weight.normal_(0, 0.02)
-        decoder.candidate_refiner.weight.normal_(0, 0.02)
-        for block in decoder.blocks:
-            block.ls1.fill_(1.0)
-            block.ls2.fill_(1.0)
-    tokenizer = TinyOnlineTokenizer()
-    selector_z = F.normalize(bank["patch"]["Z"].float(), dim=-1)
-    memory_index = retriever.build_index(selector_z)
-    text = F.normalize(torch.tensor([
-        [1.0, 0.2, 0.0, 0.0, 0.0, 0.0],
-        [1.0, 0.0, 0.1, 0.0, 0.0, 0.0],
-        [0.6, 0.8, 0.0, 0.0, 0.0, 0.0],
-    ]), dim=-1)
-    logits, aux = decode_adaptation_episode(
-        decoder, retriever, bank, rows, selector_z, memory_index,
-        query, view, text, text[candidates],
-        balanced_memory_log_prior(bank["patch"], rows, "cpu"),
-        policy=PhaseBPolicy(evidence_budget=8), soft_tau=0.2,
-        rng=np.random.default_rng(9),
-        live_source=FakeAdaptationSource(bank),
-        selector_encoder=tokenizer, online_encoder=tokenizer,
-        online_requires_grad=True,
-    )
-    assert torch.equal(logits.detach(), aux["hard_logits"].detach())
-    F.cross_entropy(logits, torch.tensor([0])).backward()
-    assert tokenizer.projection.grad is not None
-    assert float(tokenizer.projection.grad.abs().sum()) > 0
-
-
-def test_adaptation_identity_control_matches_untrained_decoder_forward():
-    torch.manual_seed(23)
-    bank = _bank()
-    rows = torch.arange(len(bank["patch"]["Z"]))
-    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
-    candidates = torch.tensor([1, 2])
-    view = build_episode_memory_view(
-        bank["patch"], rows, query, torch.tensor([1]), candidates,
-        support_count=0, episode_type="semantic_zero_support", label_mode="coherent",
-        rng=np.random.default_rng(7),
-    )
-    retriever = PatchSubspaceRetriever(8, 2, 4)
-    decoder = EvidenceDecoder(DecoderConfig(
-        d_model=8, text_dim=6, n_heads=2, n_layers=1,
-        candidate_tokens=True, candidate_layers=1,
-        structural_metadata=True, support_role=True,
-    )).eval()
-    selector_z = F.normalize(bank["patch"]["Z"].float(), dim=-1)
-    text = F.normalize(torch.randn(3, 6), dim=-1)
-    _, aux = decode_adaptation_episode(
-        decoder, retriever, bank, rows, selector_z,
-        retriever.build_index(selector_z), query, view, text, text[candidates],
-        balanced_memory_log_prior(bank["patch"], rows, "cpu"),
-        policy=PhaseBPolicy(evidence_budget=8), soft_tau=0.2,
-        rng=np.random.default_rng(8),
-    )
-    assert torch.allclose(aux["hard_logits"], aux["identity_logits"], atol=1e-6)
-
-
-def test_no_grad_adaptation_skips_the_soft_backward_route(monkeypatch):
-    torch.manual_seed(24)
-    bank = _bank()
-    rows = torch.arange(len(bank["patch"]["Z"]))
-    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
-    candidates = torch.tensor([1, 2])
-    view = build_episode_memory_view(
-        bank["patch"], rows, query, torch.tensor([1]), candidates,
-        support_count=0, episode_type="semantic_zero_support", label_mode="coherent",
-        rng=np.random.default_rng(7),
-    )
-    retriever = PatchSubspaceRetriever(8, 2, 4)
-    decoder = EvidenceDecoder(DecoderConfig(
-        d_model=8, text_dim=6, n_heads=2, n_layers=1,
-        candidate_tokens=True, candidate_layers=1,
-        structural_metadata=True, support_role=True,
-    )).eval()
-    selector_z = F.normalize(bank["patch"]["Z"].float(), dim=-1)
-    text = F.normalize(torch.randn(3, 6), dim=-1)
-
-    def forbidden_soft_route(*args, **kwargs):
-        raise AssertionError("evaluation called the backward-only soft route")
-
-    monkeypatch.setattr(retriever, "soft_candidate_logits", forbidden_soft_route)
-    with torch.no_grad():
-        logits, aux = decode_adaptation_episode(
-            decoder, retriever, bank, rows, selector_z,
-            retriever.build_index(selector_z), query, view, text, text[candidates],
-            balanced_memory_log_prior(bank["patch"], rows, "cpu"),
-            policy=PhaseBPolicy(evidence_budget=8), soft_tau=0.2,
-            rng=np.random.default_rng(8),
-        )
-    assert torch.equal(logits, aux["hard_logits"])
-    assert "soft_logits" not in aux
-
-
-def test_clean_frozen_adaptation_reuses_stored_vectors_without_live_encoding():
-    class ForbiddenLiveSource:
-        def __getattr__(self, name):
-            raise AssertionError(f"clean frozen path called {name}")
-
-    bank = _bank()
-    rows = torch.arange(len(bank["patch"]["Z"]))
-    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
-    view = build_episode_memory_view(
-        bank["patch"], rows, query, torch.tensor([1]), torch.tensor([1, 2]),
-        support_count=0, episode_type="semantic_zero_support", label_mode="coherent",
-        rng=np.random.default_rng(7),
-    )
-    retriever = PatchSubspaceRetriever(8, 2, 4)
-    selector_z = F.normalize(bank["patch"]["Z"].float(), dim=-1)
-    memory_index = retriever.build_index(selector_z)
-    selector_query, online_query, memory, episode_index = prepare_adaptation_views(
-        query, view, bank, rows, selector_z, memory_index, retriever,
-        rng=np.random.default_rng(9), live_source=ForbiddenLiveSource(),
-        selector_encoder=object(), online_requires_grad=False, physical_view_mode="clean",
-        reuse_stored_clean=True,
-    )
-    assert selector_query is query and online_query is query
-    assert memory is selector_z and episode_index is memory_index
-
-
-def test_clean_ema_adaptation_reencodes_instead_of_reusing_stale_bank_vectors():
-    class CountingLiveSource:
-        def __init__(self):
-            self.query_calls = 0
-
-        def reencode_query_views(self, query, encoder, specs, *, requires_grad):
-            self.query_calls += 1
-            return replace(query, Z=query.Z + 0.25)
-
-        def encode_patch_rows_with_views(self, rows, specs, encoder, *, requires_grad):
-            return torch.zeros(len(rows), 8)
-
-    bank = _bank()
-    rows = torch.arange(len(bank["patch"]["Z"]))
-    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
-    view = build_episode_memory_view(
-        bank["patch"], rows, query, torch.tensor([1]), torch.tensor([1, 2]),
-        support_count=0, episode_type="semantic_zero_support", label_mode="coherent",
-        rng=np.random.default_rng(7),
-    )
-    retriever = PatchSubspaceRetriever(8, 2, 4)
-    selector_z = F.normalize(bank["patch"]["Z"].float(), dim=-1)
-    source = CountingLiveSource()
-    selector_query, online_query, _, _ = prepare_adaptation_views(
-        query, view, bank, rows, selector_z, retriever.build_index(selector_z), retriever,
-        rng=np.random.default_rng(9), live_source=source, selector_encoder=object(),
-        online_requires_grad=False, physical_view_mode="clean", reuse_stored_clean=False,
-    )
-    assert source.query_calls == 1
-    assert selector_query is online_query
-    assert not torch.equal(selector_query.Z, query.Z)
-
-
-def test_nontruth_labels_follow_the_shared_active_index_policy():
-    bank = _bank()
-    query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
-    rows = torch.arange(8)
-    # Candidate labels do not constrain the physical memory index.
-    allowed = build_allowed_mask(
-        bank["patch"], rows, query, torch.tensor([1]),
-        truth_present=True, true_support=0,
-        config_mode="any", rng=np.random.default_rng(3),
-    )
-    retained = rows[allowed[0, 0] & bank["patch"]["y"].eq(0)]
-    assert len(torch.unique(bank["patch"]["window"][retained])) == 2
 
 
 def _single_stream_bank():
@@ -1206,6 +985,32 @@ def test_cross_subject_support_works_for_a_label_recorded_on_only_one_stream():
     assert len(support), "a single-stream label must still be able to supply cross-subject support"
     assert set(bank["patch"]["subj"][support].tolist()) == {1}, "support must be another person"
     assert set(bank["patch"]["cfg"][support].tolist()) == {0}, "same stream is allowed, not excluded"
+
+
+def test_same_subject_enrollment_uses_a_distinct_execution_from_the_same_real_person():
+    window = torch.arange(4)
+    subject = torch.tensor([0, 0, 1, 1])
+    patch = {
+        "Z": torch.randn(4, 8), "y": torch.zeros(4, dtype=torch.long), "subj": subject,
+        "cfg": torch.zeros(4, dtype=torch.long), "sensor": torch.zeros(4, dtype=torch.long),
+        "window": window, "event": window, "event_verified": torch.zeros(4, dtype=torch.bool),
+        "time": torch.ones(4), "duration": torch.ones(4),
+        "resolution": torch.zeros(4, dtype=torch.long), "ordinal": torch.zeros(4, dtype=torch.long),
+    }
+    bank = {
+        "Z": torch.randn(4, 8), "y": patch["y"], "subj": subject,
+        "cfg": patch["cfg"], "event": window,
+        "event_verified": patch["event_verified"], "patch": patch,
+    }
+    query = PatchTable(bank).gather_queries(torch.tensor([0]), "cpu")
+    view = build_episode_memory_view(
+        patch, torch.arange(4), query, torch.tensor([0]), torch.tensor([0]),
+        support_count=1, episode_type="same_subject_enrollment",
+        label_mode="coherent", rng=np.random.default_rng(2),
+    )
+    support = view.support_rows
+    assert patch["subj"][support].tolist() == [0]
+    assert patch["window"][support].tolist() == [1]
 
 
 def test_episode_composition_names_what_the_support_actually_was():
@@ -1312,25 +1117,138 @@ def test_composition_does_not_attribute_distractor_support_to_unrelated_queries(
     assert report["from_the_query_s_own_stream"] == 1
 
 
-def test_activity_family_mapping_is_complete_and_drives_family_distractors():
+def test_activity_family_mapping_is_complete_and_drives_validation_holdout():
+    """Families no longer pick distractors, but they still define the held-out validation family."""
     import json
 
     vocab = json.load(open("data/labels/global_labels.json"))["labels"]
     family_ids, families, fingerprint = load_activity_families(vocab)
     assert len(family_ids) == len(vocab)
     assert len(fingerprint) == 16
-    walking = vocab.index("walking")
-    candidate = choose_candidates(
-        torch.tensor([walking]), 6, len(vocab),
-        F.normalize(torch.randn(len(vocab), 8), dim=-1),
-        F.normalize(torch.randn(len(vocab), 8), dim=-1),
-        truth_present=True, mode="motion_family", rng=np.random.default_rng(5),
-        family_ids=family_ids,
-    )
-    distractors = candidate[candidate.ne(walking)]
-    assert torch.isin(family_ids[distractors], family_ids[torch.tensor([walking])]).any()
     heldout = family_holdout_labels(family_ids, torch.arange(len(vocab)), 1)
     chosen_family = torch.unique(family_ids[heldout])
     assert len(chosen_family) == 1
     expected = torch.nonzero(family_ids.eq(chosen_family[0]), as_tuple=True)[0]
     assert set(heldout.tolist()) == set(expected.tolist())
+
+
+def _mixed_overlap_bank(n_labels=3, windows_per_label=4):
+    """Minimal synthetic patch bank: one window per patch, one subject per window."""
+    y = torch.arange(n_labels).repeat_interleave(windows_per_label)
+    n = len(y)
+    window = torch.arange(n)
+    patch = {
+        "Z": torch.randn(n, 8), "y": y, "subj": torch.arange(n),
+        "cfg": torch.zeros(n, dtype=torch.long), "sensor": torch.zeros(n, dtype=torch.long),
+        "window": window, "event": window, "event_verified": torch.zeros(n, dtype=torch.bool),
+        "time": torch.ones(n), "duration": torch.ones(n),
+        "resolution": torch.zeros(n, dtype=torch.long), "ordinal": torch.zeros(n, dtype=torch.long),
+    }
+    bank = {
+        "Z": torch.randn(n, 8), "y": y, "subj": torch.arange(n),
+        "cfg": torch.zeros(n, dtype=torch.long), "event": window,
+        "event_verified": torch.zeros(n, dtype=torch.bool), "patch": patch,
+    }
+    return bank, patch, n
+
+
+def test_partially_enrolled_episode_keeps_unenrolled_candidates_out_of_memory():
+    """Fix 0: some candidates enrolled, the rest recognizable only by name + related background.
+
+    This is the regime the evidence engine exists for. With a uniform support count every episode
+    is either fully un-enrolled (no substrate at all) or fully enrolled (a prototype over the
+    declared support is optimal and neither retrieval nor language is needed).
+    """
+    # FIVE labels but only three candidates, so labels 3 and 4 are genuine background and the
+    # "background survives" assertion below is not vacuous.
+    bank, patch, n = _mixed_overlap_bank(n_labels=5)
+    query = PatchTable(bank).gather_queries(torch.tensor([0, 4, 8]), "cpu")
+    view = build_episode_memory_view(
+        patch, torch.arange(n), query, torch.tensor([0, 1, 2]), torch.tensor([0, 1, 2]),
+        support_count=[2, 0, 1], episode_type="ordinary_few_support", label_mode="coherent",
+        rng=np.random.default_rng(7),
+    )
+    assert view.support_units_per_candidate.tolist() == [2, 0, 1]
+    # Candidate 1 is un-enrolled: it has NO support rows and its concept stays erased from
+    # background memory, so it can never be recognized by retrieving its own stored examples.
+    unenrolled = patch["y"].eq(1)
+    assert not bool(view.support_mask[unenrolled].any())
+    assert not bool(view.allowed[..., unenrolled].any())
+    # The enrolled candidates are visible only through their own restored support.
+    for label, expected in ((0, 2), (2, 1)):
+        rows = patch["y"].eq(label)
+        assert torch.equal(view.allowed[0, 0, rows], view.support_mask[rows])
+        assert int(view.support_candidate[view.support_mask & rows][0]) == (0 if label == 0 else 2)
+        assert len(torch.unique(torch.arange(n)[view.support_mask & rows])) >= expected
+    # Non-candidate background (labels 3 and 4) is untouched and stays available as the semantic
+    # bridge the un-enrolled candidate has to be recognized through.
+    background = ~torch.isin(patch["y"], torch.tensor([0, 1, 2]))
+    assert int(background.sum()) == 8
+    assert bool(view.allowed[..., background].all())
+
+
+def test_partial_enrollment_rejects_meaningless_names_and_length_mismatch():
+    bank, patch, n = _mixed_overlap_bank()
+    query = PatchTable(bank).gather_queries(torch.tensor([0, 4, 8]), "cpu")
+    common = dict(
+        patch=patch, index_rows=torch.arange(n), query=query,
+        query_label=torch.tensor([0, 1, 2]), candidates=torch.tensor([0, 1, 2]),
+        rng=np.random.default_rng(0),
+    )
+    # An un-enrolled candidate under an episode-local alias carries no information at all.
+    with pytest.raises(ValueError, match="unanswerable"):
+        build_episode_memory_view(
+            **common, support_count=[1, 0, 1],
+            episode_type="ordinary_few_support", label_mode="random_alias",
+        )
+    with pytest.raises(ValueError, match="3 candidates"):
+        build_episode_memory_view(
+            **common, support_count=[1, 1],
+            episode_type="ordinary_few_support", label_mode="coherent",
+        )
+    with pytest.raises(ValueError, match="semantic_zero_support requires"):
+        build_episode_memory_view(
+            **common, support_count=[0, 1, 0],
+            episode_type="semantic_zero_support", label_mode="coherent",
+        )
+
+
+def test_curriculum_only_mixes_overlap_where_it_is_answerable():
+    from training.evidence.train_patch_decoder import (
+        EpisodeCurriculum, _partial_enrollment_plan,
+    )
+
+    curriculum = EpisodeCurriculum(np.random.default_rng(0))
+    specs = [spec for _ in range(250) for spec in curriculum.sample_batch(8)]
+    mixed = [s for s in specs if s.partially_enrolled]
+    # Partial enrollment used to be an exact 1-in-4 stratum. It is now the outcome of three
+    # independent draws (supported, coherent, and fewer candidates enrolled than exist), so it is
+    # checked as a healthy share rather than a fixed fraction. Vanishing here would silently remove
+    # the only regime where retrieval over background memory is required at all.
+    assert 0.3 < len(mixed) / len(specs) < 0.55
+    for spec in mixed:
+        assert spec.label_mode == "coherent"          # aliases would be unanswerable
+        assert spec.support_count > 0
+        assert 0 < spec.enrolled_candidate_count < spec.candidate_count
+        plan = _partial_enrollment_plan(spec, spec.candidate_count, np.random.default_rng(1))
+        assert sum(1 for v in plan if v) == spec.enrolled_candidate_count
+        assert set(plan) == {0, spec.support_count}
+    # A spec without partial enrollment still returns the plain integer, so the uniform path and
+    # every fixed-k evaluation cell are byte-for-byte unchanged.
+    uniform = next(s for s in specs if not s.partially_enrolled)
+    assert _partial_enrollment_plan(uniform, uniform.candidate_count, np.random.default_rng(1)) \
+        == uniform.support_count
+
+
+def test_decoder_score_temperature_matches_the_retrieval_temperature():
+    """The decoder divides the retrieval score by its own constant before using it as an attention
+    bias, while `assemble_evidence` divides the same scores by `RETRIEVAL_TEMPERATURE` to form the
+    pool weights that telemetry reports. If the two drift apart, `pool_normalized_entropy` silently
+    stops describing how concentrated the decoder's attention actually is — and that metric is what
+    the `pool_collapse` alert watches. The model package cannot import the training package, so the
+    constant is duplicated; this is the guard on that duplication.
+    """
+    from model.evidence.relational_decoder import RelationalDecoderConfig
+    from training.evidence.policy import RETRIEVAL_TEMPERATURE
+
+    assert RelationalDecoderConfig().score_temperature == RETRIEVAL_TEMPERATURE

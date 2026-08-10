@@ -1,8 +1,10 @@
 """Train the Phase-B patch evidence predictor on answerable candidate episodes.
 
-The sole predictor objective is cross-entropy over the runtime candidate set. True-label support,
-acquisition configuration, candidate-set size, and distractor difficulty vary as episode inputs.
-Reject confidence is calibrated later by ``train_patch_confidence`` with this predictor frozen.
+The only objective is cross-entropy over the runtime candidate set. It reaches the retriever through
+the attention bias each evidence row's retrieval score applies, which is the sole differentiable path
+back to the projection — selection itself is a hard top-k over frozen memory vectors. True-label
+support, acquisition configuration, and candidate-set size vary as episode inputs. Confidence
+calibration is a parked, separate experiment and is not computed on this training path.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -20,9 +22,15 @@ import torch
 import torch.nn.functional as F
 
 from eval.scoring import get_sbert_encoder
-from model.evidence.confidence import confidence_features
-from model.evidence.decoder import DecoderConfig, EvidenceDecoder
 from model.evidence.patch_retrieval import PatchSubspaceRetriever
+from model.evidence.relational_decoder import (
+    RelationalDecoderConfig,
+    RelationalEvidenceDecoder,
+    build_coreference_slots,
+    build_window_groups,
+    label_text_votes,
+    retrieval_vote_base,
+)
 from training.evidence.bank_guard import (
     assert_embedding_path_current,
     assert_bank_matches_backbone,
@@ -39,12 +47,8 @@ from training.evidence.patch_episodes import (
     EpisodeMemoryView,
     PatchTable,
     assemble_evidence,
-    balanced_memory_log_prior,
-    build_allowed_mask,
     build_episode_memory_view,
     describe_episode_composition,
-    reweight_evidence,
-    realized_support_examples,
     simultaneous_stream_pairs,
     support_capacity_by_label,
 )
@@ -52,38 +56,52 @@ from training.evidence.live_encoder import PatchViewSpec, SourcePatchEncoder
 from training.evidence.policy import (
     ACTIVE_REFRESH_STEPS,
     ACTIVE_WINDOWS_PER_LABEL,
-    CANDIDATE_COUNTS,
-    DISTRACTOR_MODES,
+    ALIAS_PROBABILITY,
+    CANDIDATE_COUNT_RANGE,
+    EPISODES_PER_STEP,
+    RETRIEVAL_VOTE_SCALE,
     EPISODE_TYPES,
     LABEL_TEXT_MODES,
     PHASE_B_TRAINING_REGIME,
     PHYSICAL_VIEW_MODES,
+    QUERIES_PER_EPISODE,
     RETRIEVAL_PROJECTION_EMA,
     RETRIEVAL_SUBSPACE_DIM,
     RETRIEVAL_SUBSPACES,
     RETRIEVAL_TEMPERATURE,
-    SOFT_BACKWARD_SCALE,
-    SOFT_RETRIEVAL_ANNEAL_STEPS,
-    SOFT_RETRIEVAL_TEMPERATURE_END,
-    SOFT_RETRIEVAL_TEMPERATURE_START,
-    SUPPORT_COUNTS,
+    SUPPORT_COUNT_RANGE,
+    VALIDATION_CANDIDATE_COUNTS,
+    VALIDATION_SUPPORT_COUNTS,
     TOKENIZER_EMA_DECAY,
     TOKENIZER_FINETUNE_WARMUP_STEPS,
-    TOKENIZER_KEY_REFRESH_SHARDS,
-    TOKENIZER_KEY_REFRESH_STEPS,
     TOKENIZER_LR_SCALE,
     PhaseBPolicy,
 )
 from training.evidence.subject_style import sample_subject_style
 from training.evidence.telemetry import PhaseBTelemetry
-from training.tokenizer.pretrain_data import stream_channel_descriptions
 from training.tokenizer.eval_transfer import build_encoder
 
 _DIR = Path(__file__).resolve().parent / "outputs"
 _DEFAULT_BANK = _DIR / "memory_bank.pt"
 _DEFAULT_OUT = _DIR / "patch_evidence_predictor.pt"
-_FAMILY_PATH = Path(__file__).resolve().parents[2] / "data/labels/activity_families.json"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_FAMILY_PATH = _REPO_ROOT / "data/labels/activity_families.json"
+_PHASE_B_BEHAVIOR_PATHS = (
+    "training/evidence/train_patch_decoder.py",
+    "training/evidence/patch_episodes.py",
+    "training/evidence/policy.py",
+    "training/evidence/episode_labels.py",
+    "training/evidence/subject_style.py",
+    "training/evidence/live_encoder.py",
+    "model/evidence/relational_decoder.py",
+    "model/evidence/patch_retrieval.py",
+    "data/scripts/augmentations.py",
+)
 SEED = 20260725
+# Gradient decomposition retains the current episode graph, so sample it periodically rather than on
+# every optimizer update. The fixed cadence also prevents an end-of-step heartbeat from repeatedly
+# firing just before the following step has a chance to observe that telemetry is due.
+RETRIEVAL_DIAGNOSTIC_STEPS = 25
 
 
 @dataclass(frozen=True)
@@ -93,52 +111,108 @@ class AdaptationEpisodeSpec:
     candidate_count: int
     label_mode: str
     physical_view_mode: str = "augmented"
+    # None  -> every candidate is enrolled with `support_count` (full enrollment).
+    # int n -> only n of the candidates are enrolled; the rest get zero support and keep their
+    #          concept erased from background memory, so they must be recognized from their name
+    #          and from semantically related background rows.
+    enrolled_candidate_count: int | None = None
+
+    @property
+    def partially_enrolled(self) -> bool:
+        return self.enrolled_candidate_count is not None
+
+    @property
+    def enrollment_shape(self) -> str:
+        if self.support_count == 0:
+            return "zero"
+        return "partial" if self.partially_enrolled else "full"
+
+
+def validation_canary_cases(recipes, fold_pools):
+    """Return the complete recipe-by-transfer-fold validation grid.
+
+    Keeping this Cartesian product explicit prevents checkpoint-selection folds from accidentally
+    receiving different mixtures of support counts, label modes, or enrollment shapes.
+    """
+    return [
+        (fold_name, fold_pool, recipe_index, recipe)
+        for recipe_index, recipe in enumerate(recipes)
+        for fold_name, fold_pool in fold_pools
+    ]
+
+
+def _partial_enrollment_plan(
+    spec: "AdaptationEpisodeSpec", n_candidates: int, rng: np.random.Generator
+) -> int | list[int]:
+    """Per-candidate support counts for one episode.
+
+    Returns the plain integer (every candidate enrolled) unless the spec asks for partial
+    enrollment, in which case a random subset of size `enrolled_candidate_count` keeps the support
+    and the remainder drop to zero.
+    """
+    enrolled = spec.enrolled_candidate_count
+    if enrolled is None or spec.support_count == 0 or n_candidates < 2:
+        return spec.support_count
+    enrolled = max(1, min(int(enrolled), n_candidates - 1))
+    plan = [0] * n_candidates
+    for position in rng.choice(n_candidates, size=enrolled, replace=False):
+        plan[int(position)] = spec.support_count
+    return plan
 
 
 class EpisodeCurriculum:
-    """Exact balanced cycle over the four agreed adaptation regimes."""
+    """Sample independent adaptation episodes.
+
+    Every condition `eval_enrollment` reports is drawn uniformly per episode. An earlier revision
+    scheduled them instead — cycling shuffled strata for exact per-batch coverage — which forced
+    `episodes_per_step` to be a multiple of four and had to pad enumerated count tuples up to the
+    batch size. At the 3,000-step default every condition is sampled hundreds of times regardless,
+    so the balancing machinery only mattered for short smoke runs, which seed
+    their rng anyway. The realized mix is reported in telemetry rather than prescribed here.
+    """
 
     def __init__(self, rng: np.random.Generator):
         self.rng = rng
-        self._queue: list[str] = []
-        self._view_queue: list[str] = []
 
-    def sample(self) -> AdaptationEpisodeSpec:
-        if not self._queue:
-            self._queue = list(self.rng.permutation(EPISODE_TYPES))
-        if not self._view_queue:
-            self._view_queue = list(self.rng.permutation(PHYSICAL_VIEW_MODES))
-        episode_type = self._queue.pop()
-        physical_view_mode = self._view_queue.pop()
+    def sample_batch(self, count: int) -> list[AdaptationEpisodeSpec]:
+        if count < 1:
+            raise ValueError("episodes_per_step must be positive")
+        return [self._sample_episode() for _ in range(count)]
+
+    def _sample_episode(self) -> AdaptationEpisodeSpec:
+        episode_type = str(self.rng.choice(EPISODE_TYPES))
+        physical_view_mode = str(self.rng.choice(PHYSICAL_VIEW_MODES))
+        candidate_count = int(self.rng.integers(
+            CANDIDATE_COUNT_RANGE[0], CANDIDATE_COUNT_RANGE[1] + 1
+        ))
         if episode_type == "semantic_zero_support":
-            support_count = 0
-            label_mode = "coherent"
-        else:
-            support_count = int(self.rng.choice(SUPPORT_COUNTS))
-            label_mode = str(self.rng.choice(LABEL_TEXT_MODES))
+            return AdaptationEpisodeSpec(
+                episode_type=episode_type,
+                support_count=0,
+                candidate_count=candidate_count,
+                label_mode="coherent",
+                physical_view_mode=physical_view_mode,
+            )
+
+        alias = bool(self.rng.random() < ALIAS_PROBABILITY)
+        # An aliased candidate's name carries no information, so every candidate in an alias episode
+        # must be enrolled or it is unanswerable. Otherwise how many are enrolled is a single
+        # uniform draw over 1..candidate_count, and drawing all of them *is* full enrollment — so
+        # partial and full fall out of one sample instead of being separately named strata.
+        enrolled = candidate_count if alias else int(
+            self.rng.integers(1, candidate_count + 1)
+        )
         return AdaptationEpisodeSpec(
             episode_type=episode_type,
-            support_count=support_count,
-            candidate_count=int(self.rng.choice(CANDIDATE_COUNTS)),
-            label_mode=label_mode,
+            support_count=int(self.rng.integers(
+                SUPPORT_COUNT_RANGE[0], SUPPORT_COUNT_RANGE[1] + 1
+            )),
+            candidate_count=candidate_count,
+            label_mode="random_alias" if alias else "coherent",
             physical_view_mode=physical_view_mode,
+            enrolled_candidate_count=None if enrolled >= candidate_count else enrolled,
         )
 
-    def state_dict(self) -> dict:
-        return {
-            "queue": list(self._queue),
-            "view_queue": list(self._view_queue),
-        }
-
-    def load_state_dict(self, state: dict) -> None:
-        queue = list(state.get("queue", []))
-        if any(value not in EPISODE_TYPES for value in queue):
-            raise ValueError("resume checkpoint contains an invalid episode curriculum queue")
-        view_queue = list(state.get("view_queue", []))
-        if any(value not in PHYSICAL_VIEW_MODES for value in view_queue):
-            raise ValueError("resume checkpoint contains an invalid physical-view queue")
-        self._queue = queue
-        self._view_queue = view_queue
 
 
 def atomic_torch_save(payload: dict, path: Path) -> None:
@@ -149,14 +223,67 @@ def atomic_torch_save(payload: dict, path: Path) -> None:
     os.replace(temporary, path)
 
 
-def soft_retrieval_temperature(step: int) -> float:
-    fraction = min(1.0, max(0.0, float(step) / SOFT_RETRIEVAL_ANNEAL_STEPS))
-    return (
-        SOFT_RETRIEVAL_TEMPERATURE_START
-        + fraction * (
-            SOFT_RETRIEVAL_TEMPERATURE_END - SOFT_RETRIEVAL_TEMPERATURE_START
+def phase_b_source_fingerprint(paths=None) -> str:
+    """Fingerprint every source file that defines predictor-training behavior."""
+    digest = hashlib.sha256()
+    for value in paths or _PHASE_B_BEHAVIOR_PATHS:
+        path = Path(value)
+        if not path.is_absolute():
+            path = _REPO_ROOT / path
+        if not path.is_file():
+            raise FileNotFoundError(f"Phase-B behavior source is missing: {path}")
+        name = str(path.relative_to(_REPO_ROOT)) if path.is_relative_to(_REPO_ROOT) else str(path)
+        payload = path.read_bytes()
+        digest.update(name.encode("utf-8"))
+        digest.update(len(payload).to_bytes(8, "little"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
+def _update_structured_hash(digest, value) -> None:
+    """Hash nested canary state without relying on pickle implementation details."""
+    if value is None:
+        digest.update(b"none")
+    elif is_dataclass(value) and not isinstance(value, type):
+        digest.update(f"dataclass:{type(value).__qualname__}".encode("utf-8"))
+        for field in fields(value):
+            digest.update(field.name.encode("utf-8"))
+            _update_structured_hash(digest, getattr(value, field.name))
+    elif isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu().contiguous()
+        digest.update(f"tensor:{tensor.dtype}:{tuple(tensor.shape)}".encode("utf-8"))
+        digest.update(tensor.numpy().tobytes())
+    elif isinstance(value, np.ndarray):
+        array = np.ascontiguousarray(value)
+        digest.update(f"ndarray:{array.dtype}:{array.shape}".encode("utf-8"))
+        digest.update(array.tobytes())
+    elif isinstance(value, np.generic):
+        _update_structured_hash(digest, value.item())
+    elif isinstance(value, dict):
+        digest.update(b"dict")
+        for key in sorted(value, key=lambda item: (type(item).__name__, repr(item))):
+            _update_structured_hash(digest, key)
+            _update_structured_hash(digest, value[key])
+    elif isinstance(value, (list, tuple)):
+        digest.update(f"{type(value).__name__}:{len(value)}".encode("utf-8"))
+        for item in value:
+            _update_structured_hash(digest, item)
+    elif isinstance(value, (str, int, float, bool)):
+        digest.update(
+            f"scalar:{type(value).__name__}:{value!r}".encode("utf-8")
         )
-    )
+    else:
+        raise TypeError(f"unsupported canary fingerprint value: {type(value).__name__}")
+
+
+def structured_fingerprint(value) -> str:
+    digest = hashlib.sha256()
+    _update_structured_hash(digest, value)
+    return digest.hexdigest()
+
+
+def milestone_checkpoint_path(output: Path, step: int) -> Path:
+    return output.parent / f"{output.stem}.milestones" / f"step_{step:06d}{output.suffix}"
 
 
 def balanced_accuracy(pred: np.ndarray, true: np.ndarray) -> float:
@@ -276,30 +403,6 @@ def load_activity_families(vocab: list[str]) -> tuple[torch.Tensor, dict[str, li
     return ids, families, fingerprint
 
 
-def encode_bank_config_text(bank: dict, sbert, device) -> torch.Tensor:
-    """Frozen text embeddings for the optional explicit acquisition-text ablation."""
-    names = bank["cfg_names"]
-    rates = bank["cfg_rate_hz"]
-    prompts = []
-    for config_id in range(len(names)):
-        key = names[config_id] if config_id in names else names[str(config_id)]
-        rate = rates[config_id] if config_id in rates else rates[str(config_id)]
-        try:
-            dataset, stream = key.split("/", 1)
-            descriptions = stream_channel_descriptions(dataset, stream)
-            prompt = (
-                "sensor configuration: " + "; ".join(descriptions)
-                + f"; sampling rate {float(rate):g} hertz"
-            )
-        except (ValueError, KeyError):
-            prompt = (
-                "sensor configuration: " + str(key).replace("/", ", ")
-                + f"; sampling rate {float(rate):g} hertz"
-            )
-        prompts.append(prompt)
-    return torch.from_numpy(sbert(prompts).astype(np.float32)).to(device)
-
-
 def choose_candidates(
     query_labels: torch.Tensor,
     n_candidates: int,
@@ -308,12 +411,21 @@ def choose_candidates(
     physical_centroids: torch.Tensor,
     *,
     truth_present: bool,
-    mode: str,
     rng: np.random.Generator,
     allowed_vocab: torch.Tensor | None = None,
-    family_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Candidate set with random, language-near, physical-near, or mixed distractors."""
+    """Candidate set: half the distractors are the nearest confusable labels, half are random.
+
+    Distractor difficulty is deliberately not a knob. All-random distractors make most episodes
+    trivial — the full vocabulary rarely lands two similar activities in the same set by chance —
+    while all-near distractors drop the easy cases the model also has to get right. Half and half
+    gives both in every episode. Nearness averages label-text cosine with physical-centroid cosine
+    so that neither modality alone defines "confusable".
+
+    An earlier revision offered five named modes (random / language / motion_family / physical /
+    mixed) drawn at random per episode. Nothing ever measured a difference between them, and four of
+    the five produced episodes that were uniformly easy or uniformly hard.
+    """
     device = text_table.device
     truth = torch.unique(query_labels).long()
     allowed = (
@@ -332,50 +444,23 @@ def choose_candidates(
     if n_distractors > len(pool):
         n_distractors = len(pool)
 
-    if mode == "random":
-        chosen = rng.choice(pool.cpu().numpy(), size=n_distractors, replace=False)
-    elif mode == "motion_family":
-        if family_ids is None:
-            raise ValueError("motion_family distractors require the canonical family mapping")
-        family_ids = family_ids.to(device)
-        nearby = pool[torch.isin(family_ids[pool], torch.unique(family_ids[truth]))]
-        near_count = min(n_distractors, len(nearby))
-        near = (
-            rng.choice(nearby.cpu().numpy(), size=near_count, replace=False)
-            if near_count else np.empty(0, dtype=np.int64)
-        )
-        remaining = pool[~torch.isin(pool, torch.as_tensor(near, device=device))]
-        random_count = n_distractors - near_count
-        random_part = (
-            rng.choice(remaining.cpu().numpy(), size=random_count, replace=False)
-            if random_count else np.empty(0, dtype=np.int64)
-        )
-        chosen = np.concatenate([near, random_part])
+    score = 0.5 * (
+        F.normalize(text_table[pool], dim=-1)
+        @ F.normalize(text_table[truth], dim=-1).t()
+    ).max(dim=1).values + 0.5 * (
+        F.normalize(physical_centroids[pool], dim=-1)
+        @ F.normalize(physical_centroids[truth], dim=-1).t()
+    ).max(dim=1).values
+    near = pool[score.topk(min(n_distractors // 2, len(pool))).indices]
+    remainder_pool = pool[~torch.isin(pool, near)]
+    random_count = n_distractors - len(near)
+    if random_count:
+        chosen = np.concatenate([
+            near.cpu().numpy(),
+            rng.choice(remainder_pool.cpu().numpy(), size=random_count, replace=False),
+        ])
     else:
-        if mode not in {"language", "physical", "mixed"}:
-            raise ValueError(f"unknown distractor mode {mode!r}")
-        language_score = (
-            F.normalize(text_table[pool], dim=-1)
-            @ F.normalize(text_table[truth], dim=-1).t()
-        ).max(dim=1).values
-        physical_score = (
-            F.normalize(physical_centroids[pool], dim=-1)
-            @ F.normalize(physical_centroids[truth], dim=-1).t()
-        ).max(dim=1).values
-        score = language_score if mode == "language" else physical_score
-        if mode == "mixed":
-            score = 0.5 * language_score + 0.5 * physical_score
-        near_count = n_distractors if mode != "mixed" else n_distractors // 2
-        near = pool[score.topk(min(near_count, len(pool))).indices]
-        remainder_pool = pool[~torch.isin(pool, near)]
-        random_count = n_distractors - len(near)
-        if random_count:
-            random_part = rng.choice(
-                remainder_pool.cpu().numpy(), size=random_count, replace=False
-            )
-            chosen = np.concatenate([near.cpu().numpy(), random_part])
-        else:
-            chosen = near.cpu().numpy()
+        chosen = near.cpu().numpy()
     result = torch.cat([
         required.to(device),
         torch.as_tensor(chosen, device=device, dtype=torch.long),
@@ -475,17 +560,25 @@ def sample_queries_covering_labels(
     *,
     config_ids: torch.Tensor,
     subject_ids: torch.Tensor,
+    required_labels: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Guarantee candidate coverage, then fill the episode with balanced query draws."""
     generator = torch.Generator(device=labels.device).manual_seed(
         int(rng.integers(0, 2**31 - 1))
     )
-    if n < len(labels):
-        chosen_labels = labels[torch.randperm(
-            len(labels), generator=generator, device=labels.device,
-        )[:n]]
-    else:
-        chosen_labels = labels
+    required_labels = (
+        labels[:0] if required_labels is None else torch.unique(required_labels.long())
+    )
+    if bool((~torch.isin(required_labels, labels)).any()):
+        raise ValueError("required query labels must be members of the episode candidate set")
+    if len(required_labels) > n:
+        raise ValueError("query count is smaller than required query-label coverage")
+    remaining_labels = labels[~torch.isin(labels, required_labels)]
+    extra_count = min(n - len(required_labels), len(remaining_labels))
+    extra = remaining_labels[torch.randperm(
+        len(remaining_labels), generator=generator, device=labels.device,
+    )[:extra_count]]
+    chosen_labels = torch.cat([required_labels, extra])
     rows = [
         sample_queries(
             pool, label.view(1), y, 1, rng,
@@ -523,9 +616,10 @@ def prepare_support_feasible_query_pool(
 
     A Phase-B support overlay is shared by every query in an episode. Sampling many query
     executions first can therefore exclude more than the single unit assumed by a ``k + 1``
-    capacity check. For ordinary/enrollment episodes, reserve ``k`` active support units and remove
-    those identities from the query pool. For cross-subject episodes, choose one query subject per
-    label only when at least ``k`` units remain on other subjects.
+    capacity check. Ordinary episodes reserve ``k`` active support units and remove those identities
+    from the query pool. Same-subject episodes additionally choose one real subject per candidate
+    and reserve support from that person. Cross-subject episodes choose one query subject per label
+    only when at least ``k`` units remain on other subjects.
     """
     if support_count == 0:
         return labels, pool
@@ -570,6 +664,31 @@ def prepare_support_feasible_query_pool(
                 continue
             query_subject = int(rng.choice(np.asarray(viable_subjects)))
             query_part = label_pool[window_subj[label_pool].eq(query_subject)]
+        elif episode_type == "same_subject_enrollment":
+            viable = []
+            label_pool_units = pool_unit[label_pool_mask]
+            for subject in torch.unique(window_subj[label_pool]).tolist():
+                subject_mask = window_subj[label_pool].eq(subject)
+                subject_pool = label_pool[subject_mask]
+                available = active_label & active_subj.eq(subject)
+                units = torch.unique(active_unit[available])
+                if len(units) < support_count:
+                    continue
+                reserved = torch.as_tensor(
+                    rng.choice(
+                        units.detach().cpu().numpy(), size=support_count, replace=False
+                    ),
+                    device=device,
+                    dtype=torch.long,
+                )
+                query_part = subject_pool[
+                    ~torch.isin(label_pool_units[subject_mask], reserved)
+                ]
+                if len(query_part):
+                    viable.append((int(subject), query_part))
+            if not viable:
+                continue
+            _, query_part = viable[int(rng.integers(len(viable)))]
         else:
             units = torch.unique(active_unit[active_label])
             if len(units) < support_count:
@@ -624,229 +743,105 @@ def family_holdout_labels(
     )[0]
 
 
-def decode_patch_queries(
-    dec: EvidenceDecoder,
-    retriever: PatchSubspaceRetriever,
-    bank: dict,
-    index_rows: torch.Tensor,
-    memory_index: torch.Tensor,
-    query,
-    allowed: torch.Tensor,
-    candidates: torch.Tensor,
-    t_ev: torch.Tensor,
-    t_cand: torch.Tensor,
+def build_decoder(cfg: dict):
+    """Construct the sole supported Phase-B relational decoder."""
+    return RelationalEvidenceDecoder(RelationalDecoderConfig(
+        d_model=cfg["d_model"], n_layers=cfg["n_layers"], n_heads=cfg["n_heads"],
+    ))
+
+
+def readout_telemetry(aux: dict) -> dict:
+    """Telemetry for the sole supported relational readout."""
+    result = {
+        "candidate_logit_abs_mean": float(aux["logit_abs_mean"]),
+        "candidate_logit_spread": float(aux["logit_spread"]),
+        "background_label_tokens": float(aux["n_label_tokens"]),
+    }
+    for name in (
+        "retrieval_score_mean",
+        "retrieval_score_within_row_std",
+        "retrieval_attention_bias_abs_mean",
+        "retrieval_attention_bias_abs_max",
+        "candidate_attention_normalized_entropy",
+        "candidate_to_candidate_attention_mass",
+        "candidate_to_label_attention_mass",
+        "candidate_to_query_attention_mass",
+        "candidate_to_evidence_attention_mass",
+    ):
+        if name in aux:
+            result[name] = float(aux[name])
+    return result
+
+
+def _same_as_any_query_patch(ev_value, q_value, q_mask):
+    """(B,M) True where an evidence row matches ANY valid query patch on this attribute.
+
+    A query window can span several sensors and, after event expansion, several source rows, so
+    "same configuration as the query" is a property of the set, not of an arbitrary first patch.
+    """
+    return ((ev_value.unsqueeze(1) == q_value.unsqueeze(2)) & q_mask.unsqueeze(2)).any(1)
+
+
+def relational_decode(
+    dec: RelationalEvidenceDecoder,
     *,
-    policy: PhaseBPolicy,
-    memory_config_text: torch.Tensor | None = None,
-    query_config_text: torch.Tensor | None = None,
-    live_source: SourcePatchEncoder | None = None,
-    live_encoder=None,
-    live_requires_grad: bool = False,
-    query_already_live: bool = False,
+    query,
+    evidence,
+    ev_Z: torch.Tensor,
+    ev_label_text: torch.Tensor,
+    ev_y: torch.Tensor,
+    ev_window: torch.Tensor,
+    ev_cfg: torch.Tensor,
+    ev_subj: torch.Tensor,
+    ev_sensor: torch.Tensor,
+    ev_time: torch.Tensor,
+    ev_support: torch.Tensor,
+    ev_support_candidate: torch.Tensor,
+    candidate_text: torch.Tensor,
+    canonical_text: torch.Tensor,
+    generator: torch.Generator,
+    return_attention: bool = False,
 ) -> tuple[torch.Tensor, dict]:
-    """Retrieve and decode an already-packed query patch set."""
-    device = next(dec.parameters()).device
-    patch = bank["patch"]
-    if live_source is not None and not query_already_live:
-        if live_encoder is None:
-            raise ValueError("live_source requires a live tokenizer encoder")
-        query = live_source.reencode_query(
-            query, live_encoder, requires_grad=live_requires_grad
-        )
-    query.Z = F.normalize(query.Z, dim=-1)
-    query_patches = int(query.mask.sum(1).max())
-    topk = policy.topk_per_subspace(query_patches)
-    retrieval = retriever.retrieve(
-        query.Z, memory_index, allowed, topk, query_mask=query.mask
+    """Assemble the relational token set for one episode and read out candidate logits."""
+    n_candidates = candidate_text.shape[-2]
+    slots = build_coreference_slots(
+        ev_y, evidence.mask, ev_support, ev_support_candidate, n_candidates,
+        n_slots=dec.cfg.n_slots, generator=generator,
     )
-    if live_source is None:
-        memory_Z = F.normalize(
-            torch.as_tensor(patch["Z"])[index_rows.cpu()].float().to(device), dim=-1
-        )
-        online_score = retriever.score_selected(query.Z, memory_Z, retrieval.index)
-        evidence = assemble_evidence(
-            retrieval, online_score, index_rows, patch,
-            max_evidence=policy.evidence_budget,
-            max_per_window=policy.max_per_window,
-            max_per_label=policy.max_per_label,
-            tau=RETRIEVAL_TEMPERATURE,
-        )
-        ev_Z = None
-    else:
-        # Global selection stays detached. Only the bounded final roster is re-encoded, then its
-        # query/evidence similarities are recomputed with the online projection and tokenizer.
-        evidence = assemble_evidence(
-            retrieval, retrieval.score, index_rows, patch,
-            max_evidence=policy.evidence_budget,
-            max_per_window=policy.max_per_window,
-            max_per_label=policy.max_per_label,
-            tau=RETRIEVAL_TEMPERATURE,
-        )
-        ev_Z = F.normalize(
-            live_source.reencode_evidence(
-                evidence, live_encoder, requires_grad=live_requires_grad
-            ),
-            dim=-1,
-        )
-        online_score = retriever.score_pairs(
-            query.Z, ev_Z, evidence.head, evidence.query_patch
-        )
-        evidence = reweight_evidence(
-            evidence, online_score, patch, tau=RETRIEVAL_TEMPERATURE
-        )
-    ev_idx = evidence.index
-
-    def ev_field(name, dtype=None):
-        value = torch.as_tensor(patch[name])[ev_idx.detach().cpu()].to(device)
-        return value.to(dtype=dtype) if dtype is not None else value
-
-    ev_y = ev_field("y", torch.long)
-    ev_window = ev_field("window", torch.long)
-    ev_cfg = ev_field("cfg", torch.long)
-    ev_sensor = ev_field("sensor", torch.long)
-    if ev_Z is None:
-        ev_Z = F.normalize(ev_field("Z", torch.float32), dim=-1)
-    window_ids = torch.cat([query.window, ev_window], dim=1)
-    if memory_config_text is not None:
-        ev_config_text = memory_config_text[ev_cfg]
-        if query_config_text is None:
-            if bool((query.cfg[query.mask] < 0).any()):
-                raise ValueError(
-                    "external/unknown query configs need explicit query_config_text"
-                )
-            query_config_text = memory_config_text[query.cfg.clamp_min(0)]
-    else:
-        ev_config_text = None
+    q_group, ev_group = build_window_groups(
+        query.window, query.mask, ev_window, evidence.mask,
+        n_groups=dec.cfg.n_groups, generator=generator,
+    )
     logits, aux = dec(
-        zq=query.Z,
-        zev=ev_Z,
-        ev_label_text=t_ev[ev_y],
-        w_retr=evidence.weights,
-        cand_text=t_cand[candidates],
-        ev_mask=evidence.mask,
-        q_mask=query.mask,
-        q_config_text=query_config_text,
-        ev_config_text=ev_config_text,
-        q_time=query.time,
-        ev_time=ev_field("time", torch.float32),
-        q_duration=query.duration,
-        ev_duration=ev_field("duration", torch.float32),
-        q_resolution=query.resolution,
-        ev_resolution=ev_field("resolution", torch.long),
-        q_sensor_id=query.sensor,
-        ev_sensor_id=ev_sensor,
-        ev_retrieval_head=evidence.head,
-        window_id=window_ids,
+        cand_text=candidate_text,
+        label_text=canonical_text[slots.label_ids],
+        label_mask=slots.label_mask,
+        slot_ids=slots.slot_ids,
+        zq=query.Z, q_mask=query.mask,
+        zev=ev_Z, ev_mask=evidence.mask,
+        ev_slot=slots.ev_slot, ev_support_mask=ev_support,
+        ev_score=evidence.scores,
+        q_time=query.time, ev_time=ev_time,
+        q_group=q_group, ev_group=ev_group,
+        ev_same_config=_same_as_any_query_patch(ev_cfg, query.cfg, query.mask),
+        ev_same_subject=_same_as_any_query_patch(ev_subj, query.subj, query.mask),
+        ev_same_sensor=_same_as_any_query_patch(ev_sensor, query.sensor, query.mask),
         return_aux=True,
+        return_attention=return_attention,
     )
-    features = confidence_features(
-        aux["evidence"], evidence.scores, aux["votes"], aux["pool_weights"],
-        ev_mask=evidence.mask, ev_sensor_id=ev_sensor,
-    )
-    raw_candidate = F.normalize(t_cand[candidates], dim=-1)
-    raw_evidence = F.normalize(t_ev[ev_y], dim=-1)
-    identity_votes = torch.relu(torch.einsum("bkt,ct->bkc", raw_evidence, raw_candidate))
-    identity_logits = dec.cfg.out_scale_init * torch.einsum(
-        "bk,bkc->bc", evidence.weights, identity_votes
-    )
+    # The confidence head consumes a candidate mass, a per-row vote and a pooling weight. The
+    # model's own posterior IS the candidate mass; the per-row text vote survives only as an
+    # agreement statistic. The head is fitted afterwards with the predictor frozen, so it
+    # calibrates against these definitions.
     aux.update({
-        "retrieval_prior": evidence.weights,
-        "retrieval_scores": evidence.scores,
-        "evidence_mask": evidence.mask,
-        "evidence_head": evidence.head,
-        "evidence_index": evidence.index,
-        "evidence_window": ev_window,
-        "evidence_sensor": ev_sensor,
-        "evidence_resolution": ev_field("resolution", torch.long),
-        "evidence_query_patch": evidence.query_patch,
-        "retrieval_topk": topk,
-        "confidence_features": features,
-        "candidate_ids": candidates,
-        "query_repr": query.Z[query.mask],
-        "evidence_label": ev_y,
-        "identity_logits": identity_logits,
+        "evidence": torch.softmax(logits, dim=1),
+        "votes": label_text_votes(ev_label_text, candidate_text),
+        "pool_weights": evidence.weights,
+        "label_token_ids": slots.label_ids,
+        "label_token_mask": slots.label_mask,
+        "n_label_tokens": int(slots.label_mask.sum(1).max()),
     })
     return logits, aux
-
-
-def run_patch_episode(
-    dec: EvidenceDecoder,
-    retriever: PatchSubspaceRetriever,
-    table: PatchTable,
-    bank: dict,
-    index_rows: torch.Tensor,
-    memory_index: torch.Tensor,
-    qi: torch.Tensor,
-    candidates: torch.Tensor,
-    t_ev: torch.Tensor,
-    t_cand: torch.Tensor,
-    *,
-    truth_present: bool,
-    true_support: int | None,
-    config_mode: str,
-    rng: np.random.Generator,
-    policy: PhaseBPolicy,
-    query_window_mask: torch.Tensor | None = None,
-    config_text: torch.Tensor | None = None,
-    live_source: SourcePatchEncoder | None = None,
-    live_encoder=None,
-    live_requires_grad: bool = False,
-) -> tuple[torch.Tensor, dict]:
-    """One patch-level training episode with all leakage exclusions."""
-    device = next(dec.parameters()).device
-    query = table.gather_queries(
-        qi, device, expand_verified_events=True, allowed_window_mask=query_window_mask
-    )
-    y_window = torch.as_tensor(bank["y"], device=device, dtype=torch.long)
-    query_label = y_window[qi]
-    allowed = build_allowed_mask(
-        bank["patch"], index_rows, query, query_label,
-        truth_present=truth_present, true_support=true_support,
-        config_mode=config_mode, rng=rng,
-    )
-    support = realized_support_examples(
-        bank["patch"], index_rows, allowed, query_label
-    )
-    if truth_present and true_support is not None and bool((support < true_support).any()):
-        raise ValueError(
-            f"requested true support {true_support} but only {int(support.min())} is eligible"
-        )
-    if truth_present and true_support is None and bool((support < 1).any()):
-        raise ValueError("requested true support all but at least one query has no eligible support")
-    logits, aux = decode_patch_queries(
-        dec, retriever, bank, index_rows, memory_index, query, allowed,
-        candidates, t_ev, t_cand, policy=policy, memory_config_text=config_text,
-        live_source=live_source, live_encoder=live_encoder,
-        live_requires_grad=live_requires_grad,
-    )
-    aux["query_label"] = query_label
-    aux["realized_true_support"] = support
-    return logits, aux
-
-
-def _episode_candidate_weights(
-    view: EpisodeMemoryView,
-    index_rows: torch.Tensor,
-    patch: dict,
-    canonical_text: torch.Tensor,
-    candidate_text: torch.Tensor,
-) -> torch.Tensor:
-    """Map active rows to candidate votes for the soft backward route."""
-    device = candidate_text.device
-    n_rows, n_candidates = len(index_rows), len(view.candidate_ids)
-    if view.label_mode == "coherent":
-        row_y = torch.as_tensor(patch["y"])[index_rows.detach().cpu()].long().to(device)
-        weights = torch.relu(
-            F.normalize(canonical_text[row_y], dim=-1)
-            @ F.normalize(candidate_text, dim=-1).t()
-        )
-    else:
-        weights = torch.zeros(n_rows, n_candidates, device=device)
-    if bool(view.support_mask.any()):
-        weights[view.support_mask] = F.one_hot(
-            view.support_candidate[view.support_mask], num_classes=n_candidates
-        ).to(weights.dtype)
-    return weights
 
 
 def _episode_view_specs(
@@ -956,7 +951,7 @@ def prepare_adaptation_views(
 
 
 def decode_adaptation_episode(
-    dec: EvidenceDecoder,
+    dec: RelationalEvidenceDecoder,
     retriever: PatchSubspaceRetriever,
     bank: dict,
     index_rows: torch.Tensor,
@@ -966,19 +961,18 @@ def decode_adaptation_episode(
     view: EpisodeMemoryView,
     canonical_text: torch.Tensor,
     candidate_text: torch.Tensor,
-    row_log_prior: torch.Tensor,
     *,
     policy: PhaseBPolicy,
-    soft_tau: float,
     rng: np.random.Generator,
-    config_text: torch.Tensor | None = None,
     live_source: SourcePatchEncoder | None = None,
     selector_encoder=None,
     online_encoder=None,
     online_requires_grad: bool = False,
     physical_view_mode: str = "augmented",
+    return_attention: bool = False,
+    return_confidence_features: bool = False,
 ) -> tuple[torch.Tensor, dict]:
-    """Hard-forward decoder plus an all-memory soft backward estimator."""
+    """Retrieve with learned query keys and apply the relational evidence decoder."""
     device = next(dec.parameters()).device
     patch = bank["patch"]
     selector_query, online_query, memory_online, selector_episode_index = (
@@ -1002,10 +996,8 @@ def decode_adaptation_episode(
         online_query.Z, memory_online, retrieval.index
     )
     evidence = assemble_evidence(
-        retrieval, online_score, index_rows, patch,
+        retrieval, online_score, index_rows,
         max_evidence=policy.evidence_budget,
-        max_per_window=policy.max_per_window,
-        max_per_label=policy.max_per_label,
         tau=RETRIEVAL_TEMPERATURE,
     )
     if evidence.local_index is None:
@@ -1032,7 +1024,10 @@ def decode_adaptation_episode(
     ev_window = ev_field("window", torch.long)
     ev_cfg = ev_field("cfg", torch.long)
     ev_sensor = ev_field("sensor", torch.long)
-    ev_support_position = view.support_candidate[evidence.local_index].clamp_min(0)
+    # Keep the raw binding: -1 means "not support". `build_coreference_slots` needs the sentinel to
+    # tell a genuine candidate 0 from an unbound row, and clamping here would hide that.
+    ev_support_binding = view.support_candidate[evidence.local_index]
+    ev_support_position = ev_support_binding.clamp_min(0)
     ev_label_text = canonical_text[ev_y].clone()
     if bool(ev_support.any()):
         ev_label_text = torch.where(
@@ -1040,72 +1035,36 @@ def decode_adaptation_episode(
             candidate_text[ev_support_position],
             ev_label_text,
         )
-    if config_text is not None:
-        ev_config_text = config_text[ev_cfg]
-        query_config_text = config_text[query.cfg.clamp_min(0)]
-    else:
-        ev_config_text = query_config_text = None
-    hard_logits, aux = dec(
-        zq=online_query.Z,
-        zev=ev_Z,
-        ev_label_text=ev_label_text,
-        w_retr=evidence.weights,
-        cand_text=candidate_text,
-        ev_mask=evidence.mask,
-        ev_support_mask=ev_support,
-        q_mask=query.mask,
-        q_config_text=query_config_text,
-        ev_config_text=ev_config_text,
-        q_time=query.time,
+    hard_logits, aux = relational_decode(
+        dec,
+        query=online_query, evidence=evidence, ev_Z=ev_Z,
+        ev_label_text=ev_label_text, ev_y=ev_y, ev_window=ev_window,
+        ev_cfg=ev_cfg, ev_subj=ev_field("subj", torch.long), ev_sensor=ev_sensor,
         ev_time=ev_field("time", torch.float32),
-        q_duration=query.duration,
-        ev_duration=ev_field("duration", torch.float32),
-        q_resolution=query.resolution,
-        ev_resolution=ev_field("resolution", torch.long),
-        q_sensor_id=query.sensor,
-        ev_sensor_id=ev_sensor,
-        ev_retrieval_head=evidence.head,
-        window_id=torch.cat([query.window, ev_window], dim=1),
-        return_aux=True,
+        ev_support=ev_support, ev_support_candidate=ev_support_binding,
+        candidate_text=candidate_text, canonical_text=canonical_text,
+        generator=torch.Generator().manual_seed(int(rng.integers(0, 2**31 - 1))),
+        return_attention=return_attention,
     )
-    raw_candidate = F.normalize(candidate_text, dim=-1)
-    raw_evidence = F.normalize(ev_label_text, dim=-1)
-    identity_votes = torch.relu(torch.einsum("bkt,ct->bkc", raw_evidence, raw_candidate))
-    identity_logits = dec.cfg.out_scale_init * torch.einsum(
-        "bk,bkc->bc", evidence.weights, identity_votes
+    identity_logits = retrieval_vote_base(
+        ev_label_text, candidate_text, evidence.weights, scale=RETRIEVAL_VOTE_SCALE
     )
-    aux["confidence_features"] = confidence_features(
-        aux["evidence"], evidence.scores, aux["votes"], aux["pool_weights"],
-        ev_mask=evidence.mask, ev_sensor_id=ev_sensor,
-    )
-    # The soft all-row route exists only to estimate gradients for rows outside hard top-k. It has
-    # no effect under no_grad evaluation, so do not spend validation/confidence time computing it.
-    soft = None
+    if return_confidence_features:
+        # Confidence calibration is parked and runs as a separate frozen-predictor stage. Avoid its
+        # candidate-wise Python/device work on every predictor train/eval call.
+        from model.evidence.confidence import confidence_features
+        aux["confidence_features"] = confidence_features(
+            aux["evidence"], evidence.scores, aux["votes"], aux["pool_weights"],
+            ev_mask=evidence.mask, ev_sensor_id=ev_sensor,
+        )
     logits = hard_logits
-    if torch.is_grad_enabled() and SOFT_BACKWARD_SCALE > 0:
-        candidate_weights = _episode_candidate_weights(
-            view, index_rows, patch, canonical_text, candidate_text
-        )
-        soft = retriever.soft_candidate_logits(
-            online_query.Z,
-            memory_online,
-            view.allowed,
-            candidate_weights,
-            row_log_prior,
-            tau=soft_tau,
-            query_mask=query.mask,
-            selected_index=retrieval.index,
-            output_scale=dec.log_out_scale.exp().detach(),
-        )
-        # Forward remains exactly hard top-k; only the backward estimator is scaled.
-        logits = hard_logits + SOFT_BACKWARD_SCALE * (
-            soft.logits - soft.logits.detach()
-        )
+
     aux.update({
         "hard_logits": hard_logits,
-        "soft_backward_scale": SOFT_BACKWARD_SCALE,
         "retrieval_scores": evidence.scores,
         "retrieval_prior": evidence.weights,
+        "raw_retrieval_index": retrieval.index,
+        "raw_retrieval_valid": retrieval.valid,
         "evidence_mask": evidence.mask,
         "evidence_index": evidence.index,
         "evidence_local_index": evidence.local_index,
@@ -1116,19 +1075,194 @@ def decode_adaptation_episode(
         "evidence_head": evidence.head,
         "candidate_ids": view.candidate_ids,
         "query_label": view.query_label,
-        "realized_true_support": view.support_units_per_candidate,
+        "realized_true_support": view.support_units_per_candidate[
+            label_index(view.candidate_ids, int(canonical_text.shape[0]), device)[view.query_label]
+        ],
         "retrieval_topk": topk,
         "identity_logits": identity_logits,
     })
-    if soft is not None:
-        aux.update({
-            "soft_logits": soft.logits,
-            "soft_entropy": soft.entropy,
-            "soft_normalized_entropy": soft.normalized_entropy,
-            "soft_effective_rows": soft.effective_rows,
-            "soft_topk_mass": soft.retained_mass,
-        })
     return logits, aux
+
+
+def training_episode_telemetry(
+    *,
+    spec: AdaptationEpisodeSpec,
+    candidates: torch.Tensor,
+    target: torch.Tensor,
+    true_label: torch.Tensor,
+    aux: dict,
+    candidate_loss: torch.Tensor,
+    normalized_candidate_loss: torch.Tensor,
+    index_size: int,
+    draw_attempts: int,
+    composition: dict,
+    detailed: bool,
+    retrieval_score_gradient: torch.Tensor | None = None,
+) -> tuple[dict, dict, dict]:
+    """Detach one independent episode into scalar telemetry and curriculum categories."""
+    with torch.no_grad():
+        probability = torch.softmax(aux["hard_logits"], dim=1)
+        entropy = -(probability * probability.clamp_min(1e-12).log()).sum(1)
+        entropy = entropy / max(np.log(len(candidates)), 1e-8)
+        top2 = probability.topk(min(2, len(candidates)), dim=1).values
+        margin = top2[:, 0] - (top2[:, 1] if top2.shape[1] > 1 else 0)
+        accuracy = float(aux["hard_logits"].argmax(1).eq(target).float().mean())
+        chance = 1.0 / len(candidates)
+
+        evidence_mask = aux["evidence_mask"]
+        selected = aux["evidence_local_index"][evidence_mask]
+        selected_counts = torch.bincount(selected, minlength=index_size).float()
+        selected_concentration = float(
+            selected_counts.max() / selected_counts.sum().clamp_min(1)
+        )
+        selected_true_support = (
+            aux["evidence_support"]
+            & aux["evidence_support_candidate"].eq(target.unsqueeze(1))
+            & evidence_mask
+        )
+        enrolled_query = aux["realized_true_support"].gt(0)
+        support_recall = (
+            float(selected_true_support.any(1)[enrolled_query].float().mean())
+            if bool(enrolled_query.any()) else None
+        )
+
+        pool_weights = aux["pool_weights"].masked_fill(~evidence_mask, 0.0)
+        pool_entropy = -(
+            pool_weights * pool_weights.clamp_min(1e-12).log()
+        ).sum(1)
+        pool_valid = evidence_mask.sum(1).clamp_min(2).float()
+        support_pool_mass = (
+            pool_weights * aux["evidence_support"].to(pool_weights.dtype)
+        ).sum(1)
+        true_label_pool_mass = (
+            pool_weights
+            * aux["evidence_label"].eq(true_label.unsqueeze(1)).to(pool_weights.dtype)
+        ).sum(1)
+        target_hist = torch.bincount(target, minlength=len(candidates)).float()
+        head_mass = torch.zeros(RETRIEVAL_SUBSPACES, device=pool_weights.device)
+        head_mass.scatter_add_(
+            0, aux["evidence_head"][evidence_mask], pool_weights[evidence_mask]
+        )
+        head_mass = head_mass / head_mass.sum().clamp_min(1e-8)
+        unique_windows = float(np.mean([
+            torch.unique(aux["evidence_window"][b, row]).numel()
+            for b, row in enumerate(evidence_mask)
+        ]))
+        unique_labels = float(np.mean([
+            torch.unique(aux["evidence_label"][b, row]).numel()
+            for b, row in enumerate(evidence_mask)
+        ]))
+
+        metrics = {
+            "candidate_loss": float(candidate_loss),
+            "loss_over_random": float(normalized_candidate_loss),
+            "loss_improvement_over_random": 1.0 - float(normalized_candidate_loss),
+            "train_accuracy": accuracy,
+            "chance_normalized_train_accuracy": (accuracy - chance) / (1.0 - chance),
+            "selected_row_max_share": selected_concentration,
+            "provided_support_recall_at_k": support_recall,
+            "provided_support_pool_mass": float(support_pool_mass.mean()),
+            "true_label_pool_mass": float(true_label_pool_mass.mean()),
+            "enrolled_query_fraction": float(enrolled_query.float().mean()),
+            "pool_normalized_entropy": float((pool_entropy / pool_valid.log()).mean()),
+            "pool_effective_evidence": float(pool_entropy.exp().mean()),
+            "pool_weight_max_share": float(pool_weights.max(1).values.mean()),
+            "candidate_normalized_entropy": float(entropy.mean()),
+            "candidate_top1_margin": float(margin.mean()),
+            "target_position_max_share": float(target_hist.max() / target_hist.sum()),
+            "unique_evidence_windows": unique_windows,
+            "unique_evidence_labels": unique_labels,
+            "episode_draw_attempts": float(draw_attempts),
+            "realized_true_support": float(aux["realized_true_support"].float().mean()),
+            **readout_telemetry(aux),
+            **{
+                f"subspace_{head}_mass": float(value)
+                for head, value in enumerate(head_mass)
+            },
+            **{
+                f"enrolled_{name}": float(value)
+                for name, value in composition.items() if isinstance(value, int)
+            },
+        }
+        if retrieval_score_gradient is not None:
+            score_gradient = retrieval_score_gradient.detach()
+            valid_gradient = score_gradient[evidence_mask]
+            if valid_gradient.numel():
+                promoted = score_gradient < 0
+                support_selected = selected_true_support
+                background_selected = evidence_mask & ~support_selected
+                metrics.update({
+                    "selected_score_task_grad_abs_mean": float(valid_gradient.abs().mean()),
+                    "selected_score_task_promoted_fraction": float(
+                        promoted[evidence_mask].float().mean()
+                    ),
+                    "true_support_task_promoted_fraction": (
+                        float(promoted[support_selected].float().mean())
+                        if bool(support_selected.any()) else None
+                    ),
+                    "background_task_promoted_fraction": (
+                        float(promoted[background_selected].float().mean())
+                        if bool(background_selected.any()) else None
+                    ),
+                    "background_task_promotion_share": float(
+                        (-score_gradient).clamp_min(0)[background_selected].sum()
+                        / (-score_gradient).clamp_min(0)[evidence_mask].sum().clamp_min(1e-12)
+                    ),
+                    "true_support_score_task_grad_mean": (
+                        float(score_gradient[support_selected].mean())
+                        if bool(support_selected.any()) else None
+                    ),
+                    "background_score_task_grad_mean": (
+                        float(score_gradient[background_selected].mean())
+                        if bool(background_selected.any()) else None
+                    ),
+                    "true_support_score_task_grad_abs_mean": (
+                        float(score_gradient[support_selected].abs().mean())
+                        if bool(support_selected.any()) else None
+                    ),
+                    "background_score_task_grad_abs_mean": (
+                        float(score_gradient[background_selected].abs().mean())
+                        if bool(background_selected.any()) else None
+                    ),
+                })
+        if detailed:
+            overlap_values = []
+            raw_index = aux["raw_retrieval_index"].detach().cpu()
+            raw_valid = aux["raw_retrieval_valid"].detach().cpu()
+            for batch_index in range(raw_index.shape[0]):
+                for query_patch in range(raw_index.shape[1]):
+                    for left in range(RETRIEVAL_SUBSPACES):
+                        left_rows = torch.unique(raw_index[batch_index, query_patch, left][
+                            raw_valid[batch_index, query_patch, left]
+                        ])
+                        for right in range(left + 1, RETRIEVAL_SUBSPACES):
+                            right_rows = torch.unique(raw_index[batch_index, query_patch, right][
+                                raw_valid[batch_index, query_patch, right]
+                            ])
+                            union = torch.unique(torch.cat([left_rows, right_rows])).numel()
+                            if union:
+                                overlap_values.append(
+                                    float(torch.isin(left_rows, right_rows).sum()) / union
+                                )
+            if overlap_values:
+                metrics["raw_subspace_topk_jaccard"] = float(np.mean(overlap_values))
+
+    categories = {
+        "episode_type": spec.episode_type,
+        "label_mode": spec.label_mode,
+        "physical_view_mode": spec.physical_view_mode,
+        "enrollment_shape": spec.enrollment_shape,
+        "support_count": str(spec.support_count),
+        "enrolled_candidate_count": str(spec.enrolled_candidate_count),
+        "candidate_count": str(len(candidates)),
+        "target_position": target.detach().cpu().tolist(),
+        "synthetic_persona": composition["synthetic_persona"],
+    }
+    strata = {key: categories[key] for key in (
+        "episode_type", "label_mode", "physical_view_mode", "enrollment_shape",
+        "support_count", "candidate_count",
+    )}
+    return metrics, categories, strata
 
 
 def main() -> None:
@@ -1139,24 +1273,25 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=_DEFAULT_OUT)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--steps", type=int, default=3000)
-    ap.add_argument("--batch", type=int, default=None,
-                    help="episode batch (default: 8 frozen, 4 ema_finetune)")
-    ap.add_argument("--lr", type=float, default=5e-4)
+    ap.add_argument("--episodes-per-step", type=int, default=EPISODES_PER_STEP,
+                    help="independently randomized adaptation episodes per optimizer step")
+    ap.add_argument("--queries-per-episode", type=int, default=QUERIES_PER_EPISODE,
+                    help="query executions sharing one episode's candidate/support context")
+    ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--weight-decay", type=float, default=0.01)
-    ap.add_argument("--warmup-steps", type=int, default=100)
+    ap.add_argument("--warmup-steps", type=int, default=300)
     ap.add_argument("--grad-clip", type=float, default=20.0)
     ap.add_argument("--layers", type=int, default=3)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--evidence-budget", type=int, default=64,
                     help="sole retrieval-capacity knob; K and contribution caps are derived")
     ap.add_argument("--tokenizer-mode", choices=("frozen", "ema_finetune"), default="frozen")
-    ap.add_argument("--explicit-config-text", action="store_true",
-                    help="ablation: re-inject acquisition/config text already conditioned in Phase A")
     ap.add_argument("--val-families", type=int, default=2,
                     help="complete canonical activity families excluded from every training role")
     ap.add_argument("--val-frac-cfg", type=float, default=0.2)
     ap.add_argument("--val-every", type=int, default=200)
-    ap.add_argument("--val-episodes", type=int, default=32)
+    ap.add_argument("--val-episodes", type=int, default=39,
+                    help="fixed canaries (39 is the full 13-recipe x 3-transfer-fold grid)")
     ap.add_argument("--val-queries", type=int, default=32)
     ap.add_argument("--label-variants", type=int, default=16)
     ap.add_argument("--telemetry-seconds", type=float, default=60.0)
@@ -1178,7 +1313,8 @@ def main() -> None:
             ap.error("synthetic --smoke supports frozen mode; live fine-tuning is tested on grids")
         args.device = "cpu"
         args.steps = 2
-        args.batch = 4
+        args.episodes_per_step = 4
+        args.queries_per_episode = 2
         args.evidence_budget = 8
         args.val_every = 1
         args.val_episodes = 3
@@ -1193,7 +1329,8 @@ def main() -> None:
         if args.tokenizer_mode != "frozen":
             ap.error("--real-smoke checks the default frozen launch path")
         args.steps = 3
-        args.batch = 2
+        args.episodes_per_step = 4
+        args.queries_per_episode = 2
         args.evidence_budget = 16
         args.val_every = 1
         args.val_episodes = 4
@@ -1205,10 +1342,11 @@ def main() -> None:
             Path("/tmp/halo_phase_b_predictor_real_smoke.pt")
             if args.out == _DEFAULT_OUT else args.out
         )
-    if args.batch is None:
-        args.batch = 4 if args.tokenizer_mode == "ema_finetune" else 8
-    if args.steps < 1 or args.batch < 1 or args.val_every < 1 or args.save_every < 1:
-        ap.error("steps, batch, val-every, and save-every must be positive")
+    if args.steps < 1 or args.queries_per_episode < 1 \
+            or args.val_every < 1 or args.save_every < 1:
+        ap.error("steps, queries-per-episode, val-every, and save-every must be positive")
+    if args.episodes_per_step < 1:
+        ap.error("episodes-per-step must be positive")
     if args.warmup_steps < 0 or args.grad_clip <= 0:
         ap.error("warmup-steps must be nonnegative and grad-clip must be positive")
     if args.telemetry_seconds <= 0:
@@ -1242,8 +1380,6 @@ def main() -> None:
 
     sbert = get_sbert_encoder()
     text = ensemble_text(vocab, sbert, 8, train_only=True).to(device)
-    config_text = encode_bank_config_text(bank, sbert, device) \
-        if args.explicit_config_text else None
     variants = (
         build_label_variants(vocab, sbert, args.label_variants, train_only=True).to(device)
         if args.label_variants > 0 else None
@@ -1288,16 +1424,13 @@ def main() -> None:
     memory_window_mask[train_pool] = True
     val_memory_window_mask = torch.zeros(len(Z), dtype=torch.bool, device=device)
     val_memory_window_mask[base_train_pool] = True
-    val_window_mask = torch.zeros(len(Z), dtype=torch.bool, device=device)
-    val_window_mask[val_pool] = True
     retriever = PatchSubspaceRetriever(
         d, RETRIEVAL_SUBSPACES, RETRIEVAL_SUBSPACE_DIM, RETRIEVAL_PROJECTION_EMA
     ).to(device)
-    dec = EvidenceDecoder(DecoderConfig(
-        d_model=d, n_layers=args.layers, n_heads=args.heads,
-        candidate_tokens=True, structural_metadata=True, support_role=True,
-        n_retrieval_heads=RETRIEVAL_SUBSPACES,
-    )).to(device)
+    decoder_cfg = {
+        "d_model": d, "n_layers": args.layers, "n_heads": args.heads,
+    }
+    dec = build_decoder(decoder_cfg).to(device)
     params = dec.param_groups(args.weight_decay) + [
         {"params": retriever.parameters(), "weight_decay": args.weight_decay},
     ]
@@ -1356,7 +1489,6 @@ def main() -> None:
         torch.as_tensor(bank["patch"]["Z"])[index_rows].float().to(device), dim=-1
     )
     memory_index = retriever.build_index(selector_z)
-    row_log_prior = balanced_memory_log_prior(bank["patch"], index_rows, device)
     curriculum = EpisodeCurriculum(rng)
 
     def build_selector_index(rows, *, encoder=None):
@@ -1381,20 +1513,30 @@ def main() -> None:
         capacity = support_capacity_by_label(bank["patch"], rows, n_vocab).to(device)
         required = spec.support_count + (0 if validation else 1)
         present = present[capacity[present] >= required]
+        present, _ = prepare_support_feasible_query_pool(
+            pool,
+            rows,
+            bank,
+            present,
+            support_count=spec.support_count,
+            episode_type=spec.episode_type,
+            rng=local_rng,
+        )
         allowed_vocab = present if validation else present[
             ~torch.isin(present, heldout_labels)
         ]
         candidate_count = min(spec.candidate_count, len(allowed_vocab))
         if candidate_count < 2:
             raise ValueError(
-                "no eligible support-feasible labels for an adaptation episode"
+                "no eligible support-feasible labels for an adaptation episode: "
+                f"type={spec.episode_type}, support={spec.support_count}, "
+                f"eligible_labels={len(allowed_vocab)}"
             )
         seed_count = min(2, candidate_count - 1)
         seed = local_rng.choice(
             allowed_vocab.detach().cpu().numpy(), size=seed_count, replace=False
         )
         seed_labels = torch.as_tensor(seed, device=device, dtype=torch.long)
-        mode = str(DISTRACTOR_MODES[int(local_rng.integers(len(DISTRACTOR_MODES)))])
         candidates = choose_candidates(
             seed_labels,
             candidate_count,
@@ -1402,10 +1544,8 @@ def main() -> None:
             text,
             physical,
             truth_present=True,
-            mode=mode,
             rng=local_rng,
             allowed_vocab=allowed_vocab,
-            family_ids=family_ids,
         )
         # choose_candidates may have fewer rows when the represented pool is tiny.
         candidates = candidates[torch.isin(candidates, allowed_vocab)]
@@ -1422,41 +1562,79 @@ def main() -> None:
             raise ValueError(
                 "no eligible support-feasible labels for an adaptation episode"
             )
+        support_plan = _partial_enrollment_plan(spec, len(candidates), local_rng)
+        required_query_labels = None
+        if isinstance(support_plan, list):
+            enrolled_positions = np.flatnonzero(np.asarray(support_plan) > 0)
+            unenrolled_positions = np.flatnonzero(np.asarray(support_plan) == 0)
+            required_query_labels = candidates[torch.tensor([
+                int(local_rng.choice(enrolled_positions)),
+                int(local_rng.choice(unenrolled_positions)),
+            ], device=device)]
         qi = sample_queries_covering_labels(
             episode_query_pool, candidates, y, count, local_rng,
             config_ids=cfg, subject_ids=subj,
+            required_labels=required_query_labels,
         )
+        episode_window_mask = memory_window_mask
+        if validation:
+            episode_window_mask = torch.zeros(len(Z), dtype=torch.bool, device=device)
+            episode_window_mask[pool] = True
         query = table.gather_queries(
             qi,
             device,
             expand_verified_events=True,
-            allowed_window_mask=(val_window_mask if validation else memory_window_mask),
+            allowed_window_mask=episode_window_mask,
         )
+        # Candidate selection above already guarantees every candidate can supply
+        # `spec.support_count` units, so zeroing a subset is always feasible and never changes which
+        # labels are in play — only which of them arrive enrolled.
         view = build_episode_memory_view(
             bank["patch"], rows, query, y[qi], candidates,
-            support_count=spec.support_count,
+            support_count=support_plan,
             episode_type=spec.episode_type,
             label_mode=spec.label_mode,
             rng=local_rng,
         )
-        return qi, query, view, mode
+        return qi, query, view
 
     # Fixed canaries cover the full support curriculum. The held-out set is the checkpoint-selection
     # target; a smaller matched training set provides an interpretable generalization gap.
-    validation_recipes = [("semantic_zero_support", 0)] + [
-        (episode_type, support)
-        for episode_type in EPISODE_TYPES if episode_type != "semantic_zero_support"
-        for support in SUPPORT_COUNTS
+    supported_episode_types = [
+        name for name in EPISODE_TYPES if name != "semantic_zero_support"
     ]
+    supported_validation_modes = (
+        ("coherent", True),
+        ("coherent", False),
+        ("random_alias", False),
+    )
+    def canary_recipes(episode_types):
+        recipes = [("semantic_zero_support", 0, "coherent", False)]
+        for support_index, support in enumerate(VALIDATION_SUPPORT_COUNTS):
+            for mode_index, (label_mode, partial) in enumerate(supported_validation_modes):
+                recipes.append((
+                    episode_types[
+                        (support_index * len(supported_validation_modes) + mode_index)
+                        % len(episode_types)
+                    ],
+                    support,
+                    label_mode,
+                    partial,
+                ))
+        return recipes
+
+    # A held-subject validation query cannot, by definition, obtain real same-subject support from
+    # the subject-disjoint validation memory. Keep that condition in matched training canaries and
+    # the external enrollment evaluator rather than silently substituting a synthetic identity.
+    validation_recipes = canary_recipes([
+        "ordinary_few_support", "cross_subject_few_support",
+    ])
+    training_recipes = canary_recipes(supported_episode_types)
     val_selector_z = F.normalize(
         torch.as_tensor(bank["patch"]["Z"])[val_index_rows].float().to(device), dim=-1
     )
-    val_row_log_prior = balanced_memory_log_prior(bank["patch"], val_index_rows, device)
     train_canary_index_rows = index_rows.clone()
     train_canary_selector_z = selector_z.detach().clone()
-    train_canary_row_log_prior = balanced_memory_log_prior(
-        bank["patch"], train_canary_index_rows, device
-    )
     validation_query_pools = []
     for fold_name in ("subject_only", "configuration_only", "joint"):
         relation_pool = val_pool[getattr(fold_masks, fold_name)[val_pool]]
@@ -1466,39 +1644,42 @@ def main() -> None:
             )
         validation_query_pools.append((fold_name, relation_pool))
 
-    def build_fixed_canaries(pool, rows, *, count, validation, seed_offset):
+    def build_fixed_canaries(pool, rows, *, recipes, count, validation, seed_offset):
         canaries = []
         local_rng = np.random.default_rng(args.seed + seed_offset)
+        cases = (
+            validation_canary_cases(recipes, validation_query_pools)
+            if validation else
+            [(None, pool, recipe_index, recipe) for recipe_index, recipe in enumerate(recipes)]
+        )
         for i in range(count):
-            fold_relation = None
-            episode_pool = pool
-            if validation:
-                fold_relation, episode_pool = validation_query_pools[
-                    i % len(validation_query_pools)
-                ]
-            episode_type, requested_support = validation_recipes[i % len(validation_recipes)]
-            cycle = i // len(validation_recipes)
-            label_mode = (
-                "coherent" if requested_support == 0
-                else LABEL_TEXT_MODES[(cycle + i) % len(LABEL_TEXT_MODES)]
-            )
+            fold_relation, episode_pool, recipe_index, recipe = cases[i % len(cases)]
+            episode_type, requested_support, label_mode, partial = recipe
             episode_seed = args.seed + seed_offset * 1000 + i
             support_attempts = [requested_support]
             if requested_support:
                 support_attempts += [
-                    value for value in reversed(SUPPORT_COUNTS) if value < requested_support
+                    value for value in reversed(VALIDATION_SUPPORT_COUNTS)
+                    if value < requested_support
                 ]
             built = None
             for support in support_attempts:
+                candidate_count = VALIDATION_CANDIDATE_COUNTS[
+                    recipe_index % len(VALIDATION_CANDIDATE_COUNTS)
+                ]
                 canary_spec = AdaptationEpisodeSpec(
                     episode_type=episode_type,
                     support_count=support,
-                    candidate_count=CANDIDATE_COUNTS[i % len(CANDIDATE_COUNTS)],
+                    candidate_count=candidate_count,
                     label_mode=label_mode,
+                    enrolled_candidate_count=(
+                        max(1, candidate_count // 2)
+                        if partial and support > 0 else None
+                    ),
                 )
                 for _attempt in range(50):
                     try:
-                        qi, query, view, distractor_mode = make_adaptation_episode(
+                        qi, query, view = make_adaptation_episode(
                             episode_pool, rows, canary_spec,
                             count=args.val_queries, local_rng=local_rng,
                             validation=validation,
@@ -1509,7 +1690,7 @@ def main() -> None:
                             canonical_names=vocab,
                         )
                         built = (
-                            canary_spec, qi, query, view, distractor_mode, label_set
+                            canary_spec, qi, query, view, label_set
                         )
                         break
                     except ValueError:
@@ -1522,7 +1703,7 @@ def main() -> None:
                     f"could not construct {split} adaptation canary requested_support="
                     f"{requested_support}"
                 )
-            canary_spec, qi, query, view, distractor_mode, label_set = built
+            canary_spec, qi, query, view, label_set = built
             for physical_view_mode in PHYSICAL_VIEW_MODES:
                 canaries.append({
                     "spec": replace(canary_spec, physical_view_mode=physical_view_mode),
@@ -1531,7 +1712,6 @@ def main() -> None:
                     "view": view,
                     "candidate_text": label_set.embeddings,
                     "candidate_phrases": label_set.phrases,
-                    "distractor_mode": distractor_mode,
                     "seed": episode_seed,
                     "requested_support": requested_support,
                     "fold_relation": fold_relation,
@@ -1539,17 +1719,31 @@ def main() -> None:
         return canaries
 
     val_specs = build_fixed_canaries(
-        val_pool, val_index_rows, count=args.val_episodes,
+        val_pool, val_index_rows, recipes=validation_recipes, count=args.val_episodes,
         validation=True, seed_offset=1,
     )
     train_canary_specs = build_fixed_canaries(
         train_pool, train_canary_index_rows,
-        count=min(args.val_episodes, len(validation_recipes)),
+        recipes=training_recipes,
+        count=min(args.val_episodes, len(training_recipes)),
         validation=False, seed_offset=2,
     )
+    current_canary_fp = structured_fingerprint({
+        "validation_index_rows": val_index_rows,
+        "validation_canaries": val_specs,
+        "training_index_rows": train_canary_index_rows,
+        "training_canaries": train_canary_specs,
+    })
+
+    initial_validation_rosters = None
+    previous_validation_rosters = None
+    initial_validation_retriever = None
+    previous_validation_retriever = None
 
     @torch.no_grad()
     def evaluate():
+        nonlocal initial_validation_rosters, previous_validation_rosters
+        nonlocal initial_validation_retriever, previous_validation_retriever
         dec.eval(); retriever.eval()
         if ema_encoder is not None:
             ema_encoder.eval()
@@ -1563,6 +1757,7 @@ def main() -> None:
         support_removal_by_view = {mode: [] for mode in PHYSICAL_VIEW_MODES}
         support_label_shuffle_by_view = {mode: [] for mode in PHYSICAL_VIEW_MODES}
         label_renaming_by_view = {mode: [] for mode in PHYSICAL_VIEW_MODES}
+        current_validation_rosters = []
         fold_predictions = {
             name: {"pred": [], "true": []}
             for name in ("subject_only", "configuration_only", "joint")
@@ -1582,10 +1777,8 @@ def main() -> None:
             logits, aux = decode_adaptation_episode(
                 dec, retriever, bank, val_index_rows, eval_selector_z, val_memory_index,
                 canary["query"], view, text, canary["candidate_text"],
-                val_row_log_prior, policy=policy,
-                soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
+                policy=policy,
                 rng=np.random.default_rng(canary["seed"]),
-                config_text=config_text,
                 live_source=live_source, selector_encoder=ema_encoder,
                 online_requires_grad=False,
                 physical_view_mode=spec.physical_view_mode,
@@ -1608,16 +1801,23 @@ def main() -> None:
             )
             cell_records.append({
                 "support": spec.support_count,
+                "enrolled_candidates": int(view.support_units_per_candidate.gt(0).sum()),
                 "requested_support": canary["requested_support"],
                 "physical_view_mode": spec.physical_view_mode,
                 "episode_type": spec.episode_type,
                 "label_mode": spec.label_mode,
+                "enrollment_shape": spec.enrollment_shape,
                 "ba": cell_ba,
                 "identity_ba": identity_cell_ba,
                 "loss_over_random": normalized_ce,
             })
             if spec.label_mode == "random_alias":
                 random_scores.append(cell_ba)
+            for batch_index in range(len(aux["evidence_index"])):
+                row = aux["evidence_mask"][batch_index]
+                current_validation_rosters.append(frozenset(
+                    aux["evidence_index"][batch_index, row].cpu().tolist()
+                ))
             all_pred.extend(pred.cpu().tolist())
             all_identity_pred.extend(identity_pred.cpu().tolist())
             all_true.extend(true.cpu().tolist())
@@ -1632,11 +1832,18 @@ def main() -> None:
             )
             mass = (aux["pool_weights"] * selected_true_support).sum(1)
             true_mass.extend(mass.cpu().tolist())
-            recall_values = selected_true_support.any(1).float().cpu().tolist()
+            enrolled_query = aux["realized_true_support"].gt(0)
+            if bool(enrolled_query.any()):
+                enrolled_recall = selected_true_support.any(1)[enrolled_query].float().cpu().tolist()
+                positive_support_recall.extend(enrolled_recall)
+                cell_records[-1]["true_support_recall_at_k"] = float(
+                    np.mean(enrolled_recall)
+                )
             if spec.support_count > 0:
-                positive_support_recall.extend(recall_values)
-                cell_records[-1]["true_support_recall_at_k"] = float(np.mean(recall_values))
-            if spec.label_mode == "random_alias" and spec.support_count > 0:
+                cell_records[-1]["enrolled_query_fraction"] = float(
+                    enrolled_query.float().mean()
+                )
+            if spec.support_count > 0:
                 removed_view = replace(
                     view,
                     allowed=view.allowed & ~view.support_mask.view(1, 1, -1),
@@ -1649,10 +1856,9 @@ def main() -> None:
                 removed_logits, _ = decode_adaptation_episode(
                     dec, retriever, bank, val_index_rows, eval_selector_z,
                     val_memory_index, canary["query"], removed_view, text,
-                    canary["candidate_text"], val_row_log_prior, policy=policy,
-                    soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
+                    canary["candidate_text"], policy=policy,
                     rng=np.random.default_rng(canary["seed"]),
-                    config_text=config_text, live_source=live_source,
+                    live_source=live_source,
                     selector_encoder=ema_encoder, online_requires_grad=False,
                     physical_view_mode=spec.physical_view_mode,
                 )
@@ -1678,10 +1884,9 @@ def main() -> None:
                 shuffled_logits, _ = decode_adaptation_episode(
                     dec, retriever, bank, val_index_rows, eval_selector_z,
                     val_memory_index, canary["query"], shuffled_view, text,
-                    canary["candidate_text"], val_row_log_prior, policy=policy,
-                    soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
+                    canary["candidate_text"], policy=policy,
                     rng=np.random.default_rng(canary["seed"]),
-                    config_text=config_text, live_source=live_source,
+                    live_source=live_source,
                     selector_encoder=ema_encoder, online_requires_grad=False,
                     physical_view_mode=spec.physical_view_mode,
                 )
@@ -1693,26 +1898,26 @@ def main() -> None:
                 support_label_shuffle_drop.extend(shuffle_values)
                 support_label_shuffle_by_view[spec.physical_view_mode].extend(shuffle_values)
 
-                # Rename every candidate and its enrolled support consistently. This measures label
-                # naming stability; it is intentionally not treated as evidence that support is used.
-                permutation = torch.roll(
-                    torch.arange(len(view.candidate_ids), device=device), shifts=1
-                )
-                permuted_logits, _ = decode_adaptation_episode(
-                    dec, retriever, bank, val_index_rows, eval_selector_z,
-                    val_memory_index, canary["query"], view, text,
-                    canary["candidate_text"][permutation], val_row_log_prior,
-                    policy=policy, soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
-                    rng=np.random.default_rng(canary["seed"]),
-                    config_text=config_text, live_source=live_source,
-                    selector_encoder=ema_encoder, online_requires_grad=False,
-                    physical_view_mode=spec.physical_view_mode,
-                )
-                agreement_values = (
-                    permuted_logits.argmax(1).eq(logits.argmax(1)).float().cpu().tolist()
-                )
-                label_renaming_agreement.extend(agreement_values)
-                label_renaming_by_view[spec.physical_view_mode].extend(agreement_values)
+                if spec.label_mode == "random_alias":
+                    # Rename every candidate and its enrolled support consistently. This measures
+                    # naming stability; it is not treated as evidence that support is used.
+                    permutation = torch.roll(
+                        torch.arange(len(view.candidate_ids), device=device), shifts=1
+                    )
+                    permuted_logits, _ = decode_adaptation_episode(
+                        dec, retriever, bank, val_index_rows, eval_selector_z,
+                        val_memory_index, canary["query"], view, text,
+                        canary["candidate_text"][permutation], policy=policy,
+                        rng=np.random.default_rng(canary["seed"]),
+                        live_source=live_source,
+                        selector_encoder=ema_encoder, online_requires_grad=False,
+                        physical_view_mode=spec.physical_view_mode,
+                    )
+                    agreement_values = (
+                        permuted_logits.argmax(1).eq(logits.argmax(1)).float().cpu().tolist()
+                    )
+                    label_renaming_agreement.extend(agreement_values)
+                    label_renaming_by_view[spec.physical_view_mode].extend(agreement_values)
         zero = [score for support, _, score in per_cell if support == 0]
         low = [score for support, _, score in per_cell if support != 0]
         macro_cell_ba = float(np.mean([score for _, _, score in per_cell]))
@@ -1753,7 +1958,44 @@ def main() -> None:
                 record["support"] != record["requested_support"] for record in cell_records
             ])),
         }
-        for support in (0, *SUPPORT_COUNTS):
+        if initial_validation_rosters is None:
+            initial_validation_rosters = list(current_validation_rosters)
+        if previous_validation_rosters is None:
+            previous_validation_rosters = list(current_validation_rosters)
+        if initial_validation_retriever is None:
+            initial_validation_retriever = retriever.ema_proj.detach().clone()
+        if previous_validation_retriever is None:
+            previous_validation_retriever = retriever.ema_proj.detach().clone()
+
+        def roster_jaccard(left, right):
+            union = left | right
+            return len(left & right) / len(union) if union else 1.0
+
+        metrics.update({
+            "retrieval_roster_jaccard_to_initial": float(np.mean([
+                roster_jaccard(now, initial)
+                for now, initial in zip(current_validation_rosters, initial_validation_rosters)
+            ])),
+            "retrieval_roster_jaccard_to_previous": float(np.mean([
+                roster_jaccard(now, previous)
+                for now, previous in zip(current_validation_rosters, previous_validation_rosters)
+            ])),
+            "retrieval_roster_changed_fraction": float(np.mean([
+                now != previous
+                for now, previous in zip(current_validation_rosters, previous_validation_rosters)
+            ])),
+            "retriever_ema_relative_drift_from_initial": float(
+                (retriever.ema_proj - initial_validation_retriever).norm()
+                / initial_validation_retriever.norm().clamp_min(1e-12)
+            ),
+            "retriever_ema_relative_drift_since_validation": float(
+                (retriever.ema_proj - previous_validation_retriever).norm()
+                / previous_validation_retriever.norm().clamp_min(1e-12)
+            ),
+        })
+        previous_validation_rosters = list(current_validation_rosters)
+        previous_validation_retriever = retriever.ema_proj.detach().clone()
+        for support in (0, *VALIDATION_SUPPORT_COUNTS):
             selected_records = [record for record in cell_records if record["support"] == support]
             if selected_records:
                 metrics[f"support_k{support}_macro_cell_ba"] = float(np.mean([
@@ -1795,6 +2037,18 @@ def main() -> None:
                 metrics[f"label_mode/{label_mode}_macro_cell_ba"] = float(np.mean([
                     record["ba"] for record in selected_records
                 ]))
+        for enrollment_shape in ("zero", "partial", "full"):
+            selected_records = [
+                record for record in cell_records
+                if record["enrollment_shape"] == enrollment_shape
+            ]
+            if selected_records:
+                metrics[f"enrollment/{enrollment_shape}_macro_cell_ba"] = float(np.mean([
+                    record["ba"] for record in selected_records
+                ]))
+                metrics[f"enrollment/{enrollment_shape}_identity_macro_cell_ba"] = float(
+                    np.mean([record["identity_ba"] for record in selected_records])
+                )
         for physical_view_mode in PHYSICAL_VIEW_MODES:
             view_scores = [
                 score for _, mode, score in per_cell if mode == physical_view_mode
@@ -1820,6 +2074,27 @@ def main() -> None:
                 if label_renaming_by_view[physical_view_mode] else float("nan")
             )
 
+        low_support_records = [
+            record for record in cell_records if record["support"] in {1, 2}
+        ]
+        if not low_support_records:
+            raise RuntimeError("fixed validation canaries contain no k=1/2 adaptation cells")
+        selection_low_k_ba = float(np.mean([
+            record["ba"] for record in low_support_records
+        ]))
+        selection_low_k_identity_ba = float(np.mean([
+            record["identity_ba"] for record in low_support_records
+        ]))
+        selection_low_k_gain = selection_low_k_ba - selection_low_k_identity_ba
+        # Absolute low-k quality is primary; a smaller identity-gain term ensures the selected
+        # checkpoint demonstrates learned evidence use rather than merely tracking its control.
+        metrics.update({
+            "selection_low_k_ba": selection_low_k_ba,
+            "selection_low_k_identity_ba": selection_low_k_identity_ba,
+            "selection_low_k_adaptation_gain": selection_low_k_gain,
+            "checkpoint_selection_score": selection_low_k_ba + 0.5 * selection_low_k_gain,
+        })
+
         # Matched fixed training canaries use the same episode recipe and metrics. Their purpose is
         # diagnosis, not checkpoint selection: the held-out-family score above remains authoritative.
         train_selector = train_canary_selector_z
@@ -1837,10 +2112,8 @@ def main() -> None:
             logits, aux = decode_adaptation_episode(
                 dec, retriever, bank, train_canary_index_rows, train_selector, train_index,
                 canary["query"], canary["view"], text, canary["candidate_text"],
-                train_canary_row_log_prior, policy=policy,
-                soft_tau=SOFT_RETRIEVAL_TEMPERATURE_END,
+                policy=policy,
                 rng=np.random.default_rng(canary["seed"]),
-                config_text=config_text,
                 live_source=live_source, selector_encoder=ema_encoder,
                 online_requires_grad=False,
                 physical_view_mode=spec.physical_view_mode,
@@ -1853,6 +2126,9 @@ def main() -> None:
             identity_pred = canary["view"].candidate_ids[aux["identity_logits"].argmax(1)]
             train_records.append({
                 "support": spec.support_count,
+                "enrolled_candidates": int(
+                    canary["view"].support_units_per_candidate.gt(0).sum()
+                ),
                 "ba": balanced_accuracy(pred.cpu().numpy(), true.cpu().numpy()),
                 "identity_ba": balanced_accuracy(
                     identity_pred.cpu().numpy(), true.cpu().numpy()
@@ -1876,16 +2152,17 @@ def main() -> None:
         )
         return metrics
 
-    best = {"macro_cell_ba": -float("inf")}
+    best = {"checkpoint_selection_score": -float("inf")}
     best_step = 0
     best_state = None
     t0 = time.time()
     active_refreshes = 0
-    tokenizer_key_refreshes = 0
     state_path = args.out.with_name(f"{args.out.stem}.last{args.out.suffix}")
     run_config = {
         "steps": args.steps,
-        "batch": args.batch,
+        "episodes_per_step": args.episodes_per_step,
+        "queries_per_episode": args.queries_per_episode,
+        "queries_per_step": args.episodes_per_step * args.queries_per_episode,
         "lr": args.lr,
         "weight_decay": args.weight_decay,
         "warmup_steps": args.warmup_steps,
@@ -1894,7 +2171,6 @@ def main() -> None:
         "heads": args.heads,
         "evidence_budget": args.evidence_budget,
         "tokenizer_mode": args.tokenizer_mode,
-        "explicit_config_text": bool(args.explicit_config_text),
         "val_families": args.val_families,
         "val_frac_cfg": args.val_frac_cfg,
         "val_episodes": args.val_episodes,
@@ -1903,574 +2179,64 @@ def main() -> None:
         "seed": args.seed,
     }
     current_bank_fp = bank.get("bank_fp") or bank_fingerprint(bank)
+    current_source_fp = phase_b_source_fingerprint()
+    train_cfg_ids = torch.unique(cfg[train_pool]).cpu().tolist()
+    train_subject_ids = torch.unique(subj[train_pool]).cpu().tolist()
+    cfg_name_map = bank.get("cfg_names", {})
+    subject_name_map = bank.get("subj_names", {})
 
-    def save_trainer_state(step: int) -> None:
-        state = {
-            "kind": "phase_b_patch_decoder_trainer_state_v1",
-            "step": step,
-            "elapsed_seconds": time.time() - t0,
-            "run_config": run_config,
-            "bank_fp": current_bank_fp,
-            "decoder": dec.state_dict(),
-            "retriever": retriever.state_dict(),
-            "optimizer": opt.state_dict(),
-            "scheduler": sched.state_dict(),
-            "tokenizer_online": (
-                online_encoder.state_dict() if online_encoder is not None else None
-            ),
-            "tokenizer_ema": (
-                ema_encoder.state_dict() if online_encoder is not None else None
-            ),
-            "best": best,
-            "best_step": best_step,
-            "best_state": best_state,
-            "index_rows": index_rows.detach().cpu(),
-            "selector_z": selector_z.detach().cpu(),
-            "active_refreshes": active_refreshes,
-            "tokenizer_key_refreshes": tokenizer_key_refreshes,
-            "rng": {
-                "numpy_generator": rng.bit_generator.state,
-                "torch": torch.get_rng_state(),
-                "cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else None,
-                "text_generator": text_gen.get_state(),
-                "curriculum": curriculum.state_dict(),
-            },
-        }
-        atomic_torch_save(state, state_path)
+    def metadata_name(mapping, index):
+        if isinstance(mapping, dict):
+            return str(mapping.get(index, mapping.get(str(index), index)))
+        return str(mapping[index])
 
-    start_step = 0
-    if args.resume is not None:
-        resume = torch.load(args.resume, map_location="cpu", weights_only=False)
-        if resume.get("kind") != "phase_b_patch_decoder_trainer_state_v1":
-            raise SystemExit("--resume is not a Phase-B patch-decoder trainer state")
-        if resume.get("bank_fp") != current_bank_fp:
-            raise SystemExit("resume checkpoint was built against a different memory bank")
-        if resume.get("run_config") != run_config:
-            differing = sorted(
-                key for key in set(run_config) | set(resume.get("run_config", {}))
-                if run_config.get(key) != resume.get("run_config", {}).get(key)
-            )
-            raise SystemExit(f"resume configuration differs in: {differing}")
-        start_step = int(resume["step"])
-        if start_step >= args.steps:
-            raise SystemExit(
-                f"resume state is already at step {start_step}, not below --steps {args.steps}"
-            )
-        dec.load_state_dict(resume["decoder"])
-        retriever.load_state_dict(resume["retriever"])
-        opt.load_state_dict(resume["optimizer"])
-        sched.load_state_dict(resume["scheduler"])
-        if online_encoder is not None:
-            if resume.get("tokenizer_online") is None or resume.get("tokenizer_ema") is None:
-                raise SystemExit("ema_finetune resume state lacks tokenizer weights")
-            online_encoder.load_state_dict(resume["tokenizer_online"])
-            ema_encoder.load_state_dict(resume["tokenizer_ema"])
-        best = dict(resume["best"])
-        best_step = int(resume["best_step"])
-        best_state = resume.get("best_state")
-        index_rows = resume["index_rows"].long().cpu()
-        selector_z = resume["selector_z"].float().to(device)
-        memory_index = retriever.build_index(selector_z)
-        row_log_prior = balanced_memory_log_prior(bank["patch"], index_rows, device)
-        active_refreshes = int(resume.get("active_refreshes", 0))
-        tokenizer_key_refreshes = int(resume.get("tokenizer_key_refreshes", 0))
-        saved_rng = resume["rng"]
-        rng.bit_generator.state = saved_rng["numpy_generator"]
-        torch.set_rng_state(saved_rng["torch"].cpu())
-        if device.type == "cuda" and saved_rng.get("cuda") is not None:
-            torch.cuda.set_rng_state_all([state.cpu() for state in saved_rng["cuda"]])
-        text_gen.set_state(saved_rng["text_generator"].cpu())
-        curriculum.load_state_dict(saved_rng["curriculum"])
-        t0 = time.time() - float(resume.get("elapsed_seconds", 0.0))
-        print(f"[patch-dec] resumed {args.resume} at step {start_step}", flush=True)
-
-    telemetry = PhaseBTelemetry(
-        args.telemetry_dir or (args.out.parent / "telemetry" / args.out.stem),
-        interval_seconds=args.telemetry_seconds,
-        stage="predictor",
-    )
-    telemetry.start(
-        step=start_step,
-        elapsed_seconds=time.time() - t0,
-        metadata={
-            "planned_steps": args.steps,
-            "warmup_steps": args.warmup_steps,
-            "grad_clip": args.grad_clip,
-            "soft_anneal_steps": SOFT_RETRIEVAL_ANNEAL_STEPS,
-            "soft_backward_scale": SOFT_BACKWARD_SCALE,
-            "n_retrieval_heads": RETRIEVAL_SUBSPACES,
-            "output": str(args.out),
-            "bank_fp": current_bank_fp,
-            "tokenizer_mode": args.tokenizer_mode,
-            "resume": str(args.resume) if args.resume is not None else None,
-            "run_config": run_config,
-        },
-    )
-
-    for step in range(start_step + 1, args.steps + 1):
-        step_started = time.perf_counter()
-        dec.train(); retriever.train()
-        if online_encoder is not None:
-            online_encoder.train()
-        tokenizer_active = online_encoder is not None and step > TOKENIZER_FINETUNE_WARMUP_STEPS
-        active_refreshed = False
-        if step > 1 and (step - 1) % ACTIVE_REFRESH_STEPS == 0:
-            index_rows = table.sample_index_rows(
-                memory_window_mask,
-                ACTIVE_WINDOWS_PER_LABEL,
-                np.random.default_rng(args.seed + 10_000 + step),
-            )
-            selector_values = (
-                live_source.encode_patch_rows(
-                    index_rows, ema_encoder, requires_grad=False
-                ).detach().to(device)
-                if tokenizer_active else
-                torch.as_tensor(bank["patch"]["Z"])[index_rows].float().to(device)
-            )
-            selector_z = F.normalize(selector_values, dim=-1)
-            memory_index = retriever.build_index(selector_z)
-            row_log_prior = balanced_memory_log_prior(bank["patch"], index_rows, device)
-            active_refreshes += 1
-            active_refreshed = True
-
-        episode_error = None
-        spec = curriculum.sample()
-        if args.smoke and spec.support_count > 1:
-            spec = AdaptationEpisodeSpec(
-                spec.episode_type, 1, spec.candidate_count, spec.label_mode,
-                spec.physical_view_mode,
-            )
-        for _attempt in range(20):
-            t_ev, t_cand = (
-                (text, text) if variants is None else sample_text_tables(variants, text_gen)
-            )
-            try:
-                qi, query, view, distractor_mode = make_adaptation_episode(
-                    train_pool, index_rows, spec, count=args.batch,
-                    local_rng=rng, validation=False,
-                )
-                episode_labels = episode_label_set(
-                    view.candidate_ids,
-                    t_cand,
-                    mode=spec.label_mode,
-                    rng=rng,
-                    alias_embeddings=alias_embeddings,
-                    canonical_names=vocab,
-                )
-                logits, aux = decode_adaptation_episode(
-                    dec, retriever, bank, index_rows, selector_z, memory_index,
-                    query, view, t_ev, episode_labels.embeddings,
-                    row_log_prior,
-                    policy=policy,
-                    soft_tau=soft_retrieval_temperature(step),
-                    rng=rng,
-                    config_text=config_text,
-                    live_source=live_source,
-                    selector_encoder=ema_encoder,
-                    online_encoder=online_encoder,
-                    online_requires_grad=tokenizer_active,
-                    physical_view_mode=spec.physical_view_mode,
-                )
-                break
-            except ValueError as exc:
-                if not any(token in str(exc) for token in (
-                    "no eligible", "no evidence", "support units", "no episodic memory",
-                    "no cross-subject/configuration support",
-                )):
-                    raise
-                episode_error = exc
-        else:
-            raise RuntimeError(
-                "could not draw a feasible adaptation episode in 20 attempts"
-            ) from episode_error
-        candidates = view.candidate_ids
-        target = label_index(candidates, n_vocab, device)[y[qi]]
-        if bool((target < 0).any()):
-            raise RuntimeError("answerable episode omitted a query label from candidates")
-        loss = F.cross_entropy(logits, target)
-        if not bool(torch.isfinite(loss)):
-            raise FloatingPointError(f"non-finite Phase-B loss at step {step}")
-        opt.zero_grad(set_to_none=True)
-        hard_retriever_grad = soft_retriever_grad = float("nan")
-        hard_soft_grad_cosine = hard_soft_grad_ratio = float("nan")
-        telemetry_due = telemetry.due()
-        if telemetry_due:
-            hard_probe = F.cross_entropy(aux["hard_logits"], target)
-            soft_proxy = aux["hard_logits"].detach() + (
-                aux["soft_logits"] - aux["soft_logits"].detach()
-            )
-            soft_probe = F.cross_entropy(soft_proxy, target)
-            hard_grad = torch.autograd.grad(
-                hard_probe, retriever.proj, retain_graph=True, allow_unused=True
-            )[0]
-            soft_grad = torch.autograd.grad(
-                soft_probe, retriever.proj, retain_graph=True, allow_unused=True
-            )[0]
-            hard_retriever_grad = 0.0 if hard_grad is None else float(hard_grad.norm())
-            soft_retriever_grad = 0.0 if soft_grad is None else float(soft_grad.norm())
-            if hard_grad is not None and soft_grad is not None:
-                hard_flat = hard_grad.detach().float().flatten()
-                soft_flat = soft_grad.detach().float().flatten()
-                denominator = hard_flat.norm() * soft_flat.norm()
-                if float(denominator) > 0:
-                    hard_soft_grad_cosine = float(
-                        torch.dot(hard_flat, soft_flat) / denominator
-                    )
-                hard_soft_grad_ratio = float(
-                    soft_flat.norm() / hard_flat.norm().clamp_min(1e-12)
-                )
-        loss.backward()
-        dec_grad = parameter_gradient_norm(dec.parameters(), device)
-        retrieval_grad = parameter_gradient_norm(retriever.parameters(), device)
-        tokenizer_grad = torch.tensor(0.0, device=device)
-        if online_encoder is not None:
-            tokenizer_grad = parameter_gradient_norm(online_encoder.parameters(), device)
-        component_gradients = {}
-        if telemetry_due:
-            components = {
-                "evidence_attention": dec.blocks,
-                "evidence_text_refiner": dec.refiner,
-                "evidence_pool": dec.pool_phi,
-                "candidate_attention": dec.candidate_blocks,
-                "candidate_refiner": dec.candidate_refiner,
-                "role_embeddings": dec.role_emb,
-                "retrieval_head_embeddings": dec.retrieval_head_emb,
-            }
-            for name, module in components.items():
-                if module is not None:
-                    component_gradients[f"component_grad_norm/{name}"] = float(
-                        parameter_gradient_norm(module.parameters(), device)
-                    )
-            for name in ("same_window_bias", "same_sensor_bias", "log_out_scale"):
-                parameter = getattr(dec, name, None)
-                if parameter is not None:
-                    component_gradients[f"component_grad_norm/{name}"] = (
-                        0.0 if parameter.grad is None else float(parameter.grad.detach().abs())
-                    )
-        trainable_params = list(dec.parameters()) + list(retriever.parameters())
-        if online_encoder is not None:
-            trainable_params += [p for p in online_encoder.parameters() if p.requires_grad]
-        preclip_grad = torch.nn.utils.clip_grad_norm_(
-            trainable_params, args.grad_clip, error_if_nonfinite=True,
-        )
-        opt.step(); sched.step(); retriever.update_ema()
-        if tokenizer_active:
-            update_tokenizer_ema(ema_encoder, online_encoder)
-        if step % TOKENIZER_KEY_REFRESH_STEPS == 0:
-            if tokenizer_active and not active_refreshed:
-                ema_encoder.eval()
-                selector_z = live_source.refresh_shard(
-                    index_rows, selector_z, ema_encoder,
-                    shard=tokenizer_key_refreshes,
-                    n_shards=TOKENIZER_KEY_REFRESH_SHARDS,
-                )
-                tokenizer_key_refreshes += 1
-            memory_index = retriever.build_index(selector_z)
-
-        with torch.no_grad():
-            hard_probability = torch.softmax(aux["hard_logits"], dim=1)
-            hard_entropy = -(
-                hard_probability * hard_probability.clamp_min(1e-12).log()
-            ).sum(1)
-            hard_entropy = hard_entropy / max(np.log(len(candidates)), 1e-8)
-            top2 = hard_probability.topk(min(2, len(candidates)), dim=1).values
-            candidate_margin = top2[:, 0] - (top2[:, 1] if top2.shape[1] > 1 else 0)
-            train_accuracy = float(aux["hard_logits"].argmax(1).eq(target).float().mean())
-            chance_accuracy = 1.0 / len(candidates)
-            chance_normalized_accuracy = (
-                (train_accuracy - chance_accuracy) / (1.0 - chance_accuracy)
-            )
-            selected = aux["evidence_local_index"][aux["evidence_mask"]]
-            counts = torch.bincount(selected, minlength=len(index_rows)).float()
-            selected_concentration = float(counts.max() / counts.sum().clamp_min(1))
-            true_position = target
-            selected_true_support = (
-                aux["evidence_support"]
-                & aux["evidence_support_candidate"].eq(true_position.unsqueeze(1))
-                & aux["evidence_mask"]
-            )
-            support_recall = float(selected_true_support.any(1).float().mean())
-            pool_weights = aux["pool_weights"].masked_fill(~aux["evidence_mask"], 0.0)
-            pool_entropy = -(
-                pool_weights * pool_weights.clamp_min(1e-12).log()
-            ).sum(1)
-            pool_valid = aux["evidence_mask"].sum(1).clamp_min(2).float()
-            pool_normalized_entropy = pool_entropy / pool_valid.log()
-            pool_max_share = pool_weights.max(1).values
-            support_pool_mass = (
-                pool_weights * aux["evidence_support"].to(pool_weights.dtype)
-            ).sum(1)
-            true_label_pool_mass = (
-                pool_weights
-                * aux["evidence_label"].eq(y[qi].unsqueeze(1)).to(pool_weights.dtype)
-            ).sum(1)
-            target_hist = torch.bincount(target, minlength=len(candidates)).float()
-            target_position_max_share = float(target_hist.max() / target_hist.sum())
-            head_mass = torch.zeros(RETRIEVAL_SUBSPACES, device=device)
-            head_mass.scatter_add_(
-                0,
-                aux["evidence_head"][aux["evidence_mask"]],
-                aux["pool_weights"][aux["evidence_mask"]],
-            )
-            head_mass = head_mass / head_mass.sum().clamp_min(1e-8)
-            unique_windows = float(np.mean([
-                torch.unique(aux["evidence_window"][b, row]).numel()
-                for b, row in enumerate(aux["evidence_mask"])
-            ]))
-            unique_labels = float(np.mean([
-                torch.unique(aux["evidence_label"][b, row]).numel()
-                for b, row in enumerate(aux["evidence_mask"])
-            ]))
-            subspace_topk_overlap = float("nan")
-            if telemetry_due:
-                overlap_values = []
-                evidence_index_cpu = aux["evidence_index"].detach().cpu()
-                evidence_head_cpu = aux["evidence_head"].detach().cpu()
-                evidence_mask_cpu = aux["evidence_mask"].detach().cpu()
-                for batch_index in range(len(evidence_index_cpu)):
-                    for left in range(RETRIEVAL_SUBSPACES):
-                        left_rows = torch.unique(evidence_index_cpu[batch_index][
-                            evidence_mask_cpu[batch_index]
-                            & evidence_head_cpu[batch_index].eq(left)
-                        ])
-                        for right in range(left + 1, RETRIEVAL_SUBSPACES):
-                            right_rows = torch.unique(evidence_index_cpu[batch_index][
-                                evidence_mask_cpu[batch_index]
-                                & evidence_head_cpu[batch_index].eq(right)
-                            ])
-                            union = torch.unique(torch.cat([left_rows, right_rows])).numel()
-                            if union:
-                                intersection = torch.isin(left_rows, right_rows).sum().item()
-                                overlap_values.append(intersection / union)
-                if overlap_values:
-                    subspace_topk_overlap = float(np.mean(overlap_values))
-        telemetry_metrics = {
-            "loss": float(loss.detach()),
-            "loss_over_random": float(loss.detach()) / max(np.log(len(candidates)), 1e-8),
-            "loss_improvement_over_random": float(np.log(len(candidates)) - float(loss.detach())),
-            "train_accuracy": train_accuracy,
-            "chance_normalized_train_accuracy": chance_normalized_accuracy,
-            "hard_forward_max_abs_error": float(
-                (logits.detach() - aux["hard_logits"].detach()).abs().max()
-            ),
-            "decoder_grad_norm": float(dec_grad),
-            "retriever_grad_norm": float(retrieval_grad),
-            "tokenizer_grad_norm": float(tokenizer_grad),
-            "preclip_grad_norm": float(preclip_grad),
-            "gradient_clipped_fraction": float(float(preclip_grad) > args.grad_clip),
-            "retrieval_normalized_entropy": float(aux["soft_normalized_entropy"].detach()),
-            "retrieval_effective_rows": float(aux["soft_effective_rows"].detach()),
-            "topk_retained_soft_mass": float(aux["soft_topk_mass"].detach()),
-            "selected_row_max_share": selected_concentration,
-            "provided_support_recall_at_k": (
-                support_recall if spec.support_count > 0 else None
-            ),
-            "provided_support_pool_mass": float(support_pool_mass.mean()),
-            "true_label_pool_mass": float(true_label_pool_mass.mean()),
-            "pool_normalized_entropy": float(pool_normalized_entropy.mean()),
-            "pool_effective_evidence": float(pool_entropy.exp().mean()),
-            "pool_weight_max_share": float(pool_max_share.mean()),
-            "candidate_normalized_entropy": float(hard_entropy.mean()),
-            "candidate_top1_margin": float(candidate_margin.mean()),
-            "target_position_max_share": target_position_max_share,
-            "unique_evidence_windows": unique_windows,
-            "unique_evidence_labels": unique_labels,
-            "evidence_refinement_norm": float(aux["delta_norm"]),
-            "candidate_refinement_norm": float(aux["candidate_delta_norm"]),
-            "output_scale": float(dec.log_out_scale.detach().exp()),
-            "same_window_attention_bias": float(dec.same_window_bias.detach()),
-            "same_sensor_attention_bias": float(dec.same_sensor_bias.detach()),
-            "learning_rate": float(opt.param_groups[0]["lr"]),
-            "episode_draw_attempts": float(_attempt + 1),
-            "realized_true_support": float(aux["realized_true_support"].float().mean()),
-            "step_seconds": float(time.perf_counter() - step_started),
-        }
-        if device.type == "cuda":
-            telemetry_metrics.update({
-                "gpu_allocated_gib": torch.cuda.memory_allocated(device) / 2**30,
-                "gpu_reserved_gib": torch.cuda.memory_reserved(device) / 2**30,
-                "gpu_peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30,
-            })
-        if telemetry_due:
-            probe_metrics = {
-                "hard_retriever_probe_grad_norm": hard_retriever_grad,
-                "soft_retriever_probe_grad_norm": soft_retriever_grad,
-                "hard_soft_logit_mean_abs_difference": float(
-                    (aux["hard_logits"].detach() - aux["soft_logits"].detach()).abs().mean()
-                ),
-                **component_gradients,
-            }
-            if np.isfinite(hard_soft_grad_cosine):
-                probe_metrics["hard_soft_retriever_grad_cosine"] = hard_soft_grad_cosine
-            if np.isfinite(hard_soft_grad_ratio):
-                probe_metrics["soft_to_hard_retriever_grad_ratio"] = hard_soft_grad_ratio
-                probe_metrics["effective_soft_to_hard_retriever_grad_ratio"] = (
-                    SOFT_BACKWARD_SCALE * hard_soft_grad_ratio
-                )
-            if np.isfinite(subspace_topk_overlap):
-                probe_metrics["subspace_topk_jaccard"] = subspace_topk_overlap
-            telemetry_metrics.update(probe_metrics)
-        telemetry_metrics.update({
-            f"subspace_{head}_mass": float(value)
-            for head, value in enumerate(head_mass)
-        })
-        # What this batch actually enrolled, in recorded executions. Cross-stream support is allowed
-        # but never required, so these counts are the only record of how much of it a run really saw.
-        composition = describe_episode_composition(
-            bank["patch"], index_rows, query, view, simultaneous_pairs
-        )
-        telemetry_metrics.update({
-            f"enrolled_{name}": float(value)
-            for name, value in composition.items() if isinstance(value, int)
-        })
-        category_values = {
-            "episode_type": spec.episode_type,
-            "label_mode": spec.label_mode,
-            "physical_view_mode": spec.physical_view_mode,
-            "support_count": str(spec.support_count),
-            "candidate_count": str(len(candidates)),
-            "target_position": target.detach().cpu().tolist(),
-            "synthetic_persona": composition["synthetic_persona"],
-        }
-        telemetry.update(
-            telemetry_metrics,
-            categories=category_values,
-            strata={key: category_values[key] for key in (
-                "episode_type", "label_mode", "physical_view_mode",
-                "support_count", "candidate_count",
-            )},
-        )
-
-        if step == 1 or step % args.val_every == 0:
-            metrics = evaluate()
-            telemetry.set_validation(metrics)
-            better = metrics["macro_cell_ba"] > best["macro_cell_ba"]
-            if better:
-                best, best_step = dict(metrics), step
-                best_state = {
-                    "decoder": {k: v.detach().cpu().clone() for k, v in dec.state_dict().items()},
-                    "retriever": {
-                        k: v.detach().cpu().clone() for k, v in retriever.state_dict().items()
-                    },
-                }
-                if online_encoder is not None:
-                    best_state["tokenizer_online"] = {
-                        k: v.detach().cpu().clone() for k, v in online_encoder.state_dict().items()
-                    }
-                    best_state["tokenizer_ema"] = {
-                        k: v.detach().cpu().clone() for k, v in ema_encoder.state_dict().items()
-                    }
-            mask = aux["evidence_mask"]
-            usage = torch.zeros(RETRIEVAL_SUBSPACES, device=device)
-            usage.scatter_add_(
-                0, aux["evidence_head"][mask], aux["pool_weights"][mask]
-            )
-            usage = usage / usage.sum().clamp_min(1e-8)
-            true_mass = (
-                aux["pool_weights"]
-                * aux["evidence_label"].eq(y[qi].unsqueeze(1)).to(aux["pool_weights"].dtype)
-            ).sum(1).mean()
-            tokenizer_ema_drift = 0.0
-            if online_encoder is not None:
-                delta_sq = sum(
-                    (online.detach().float() - ema.detach().float()).square().sum()
-                    for online, ema in zip(
-                        online_encoder.parameters(), ema_encoder.parameters(), strict=True
-                    )
-                )
-                base_sq = sum(
-                    ema.detach().float().square().sum() for ema in ema_encoder.parameters()
-                )
-                tokenizer_ema_drift = float(torch.sqrt(delta_sq / base_sq.clamp_min(1e-12)))
-            print(json.dumps({
-                "step": step, "loss": round(float(loss.detach()), 5),
-                "candidate_count": len(candidates),
-                "episode_type": spec.episode_type,
-                "label_mode": spec.label_mode,
-                "physical_view_mode": spec.physical_view_mode,
-                "true_support": spec.support_count,
-                "realized_true_support_mean": round(
-                    float(aux["realized_true_support"].float().mean()), 3
-                ),
-                "retrieved_true_mass": round(float(true_mass.detach()), 4),
-                "head_usage": [round(float(value.detach()), 4) for value in usage],
-                "decoder_grad_norm": round(float(dec_grad), 4),
-                "retriever_grad_norm": round(float(retrieval_grad), 4),
-                "tokenizer_grad_norm": round(float(tokenizer_grad), 4),
-                "tokenizer_active": tokenizer_active,
-                "tokenizer_ema_relative_drift": round(tokenizer_ema_drift, 6),
-                "active_index_refreshes": active_refreshes,
-                "tokenizer_key_refreshes": tokenizer_key_refreshes,
-                "preclip_grad_norm": round(float(preclip_grad), 4),
-                "delta_norm": round(float(aux["delta_norm"]), 4),
-                "candidate_delta_norm": round(float(aux["candidate_delta_norm"]), 4),
-                "lr": opt.param_groups[0]["lr"],
-                "retrieval_topk": int(aux["retrieval_topk"]),
-                "soft_tau": round(soft_retrieval_temperature(step), 5),
-                "soft_backward_scale": SOFT_BACKWARD_SCALE,
-                "soft_retrieval_entropy": round(float(aux["soft_entropy"].detach()), 4),
-                "soft_retrieval_normalized_entropy": round(
-                    float(aux["soft_normalized_entropy"].detach()), 4
-                ),
-                "soft_effective_rows": round(float(aux["soft_effective_rows"].detach()), 2),
-                "soft_topk_retained_mass": round(
-                    float(aux["soft_topk_mass"].detach()), 4
-                ),
-                "evidence_count_mean": round(float(mask.sum(1).float().mean()), 2),
-                "unique_evidence_windows_mean": round(float(np.mean([
-                    torch.unique(aux["evidence_window"][b, row]).numel()
-                    for b, row in enumerate(mask)
-                ])), 2),
-                "distractor_mode": distractor_mode,
-                "this_batch_enrolled": composition,
-                **{key: round(value, 4) for key, value in metrics.items()},
-                "best_macro_cell_ba": round(best["macro_cell_ba"], 4),
-                "elapsed_s": round(time.time() - t0, 1),
-            }), flush=True)
-        emitted = telemetry.emit(step=step, elapsed_seconds=time.time() - t0)
-        if emitted is not None:
-            print(json.dumps({
-                "telemetry": str(telemetry.latest),
-                "step": step,
-                "window_seconds": round(emitted["window_seconds"], 2),
-            }), flush=True)
-        if step % args.save_every == 0 or step == args.steps:
-            save_trainer_state(step)
-
-    if best_state is None:
-        raise RuntimeError("training completed without a valid checkpoint")
-    payload = {
-        **best_state,
+    phase_b_train_configs = [metadata_name(cfg_name_map, index) for index in train_cfg_ids]
+    phase_b_train_subjects = [
+        metadata_name(subject_name_map, index) for index in train_subject_ids
+    ]
+    predictor_metadata = {
         "cfg": {
-            "d_model": d, "n_layers": args.layers, "n_heads": args.heads,
-            "candidate_tokens": True, "structural_metadata": True,
-            "support_role": True,
-            "explicit_config_text": bool(args.explicit_config_text),
+            **decoder_cfg,
             "n_subspaces": RETRIEVAL_SUBSPACES,
             "n_retrieval_heads": RETRIEVAL_SUBSPACES,
+            "episodes_per_step": args.episodes_per_step,
+            "queries_per_episode": args.queries_per_episode,
+            "queries_per_step": args.episodes_per_step * args.queries_per_episode,
             "subspace_dim": RETRIEVAL_SUBSPACE_DIM,
             "subspace_ema": RETRIEVAL_PROJECTION_EMA,
             "tokenizer_mode": policy.tokenizer_mode,
         },
         "episode_cfg": {
             "episode_types": list(EPISODE_TYPES),
-            "candidate_counts": list(CANDIDATE_COUNTS),
-            "support_counts": list(SUPPORT_COUNTS),
+            "candidate_count_range": list(CANDIDATE_COUNT_RANGE),
+            "support_count_range": list(SUPPORT_COUNT_RANGE),
             "physical_view_modes": list(PHYSICAL_VIEW_MODES),
-            "clean_physical_view_share": 0.5,
+            "clean_physical_view_share": 0.5,  # expected, not exact per batch
             "label_text_modes": list(LABEL_TEXT_MODES),
-            "mixture": "balanced_cycle",
-            "distractor_modes": list(DISTRACTOR_MODES),
+            "mixture": "uniform_per_episode",
+            "batch_structure": "independent_episodes",
+            "episodes_per_step": args.episodes_per_step,
+            "queries_per_episode": args.queries_per_episode,
+            "alias_probability": ALIAS_PROBABILITY,
             "query_balance": "hierarchical",
             "query_subject_alpha": 0.5,
-            "candidate_support_policy": "equal_count_remove_canonical_background",
-            "physical_views": "balanced_exact_clean_or_subject_style_then_phase_b_generic",
+            "candidate_support_policy": "episode_local_zero_partial_or_equal_full",
+            "physical_views": "sampled_clean_or_subject_style_then_phase_b_generic",
         },
         "retrieval_cfg": {**policy.as_dict(), "index_seed": args.seed + 2},
         "phase_b_policy": policy.as_dict(),
         "memory_schema": int(bank["schema_version"]),
-        "bank_fp": bank.get("bank_fp") or bank_fingerprint(bank),
-        "backbone": bank["backbone"], "vocab": vocab,
+        "bank_fp": current_bank_fp,
+        "backbone": bank["backbone"],
+        "vocab": vocab,
+        "phase_b_train_labels": [
+            vocab[index] for index in torch.unique(y[train_pool]).cpu().tolist()
+        ],
+        "phase_b_train_config_names": phase_b_train_configs,
+        "phase_b_train_datasets": sorted({
+            name.split("/", 1)[0] for name in phase_b_train_configs
+        }),
+        "phase_b_train_subject_names": phase_b_train_subjects,
         "heldout_labels": heldout_labels.cpu().tolist(),
         "heldout_activity_families": sorted({
             name for name, labels in activity_families.items()
@@ -2500,14 +2266,503 @@ def main() -> None:
             "tokenizer_lr_scale": TOKENIZER_LR_SCALE,
             "tokenizer_ema_decay": TOKENIZER_EMA_DECAY,
             "tokenizer_finetune_warmup_steps": TOKENIZER_FINETUNE_WARMUP_STEPS,
-            "tokenizer_key_refresh_steps": TOKENIZER_KEY_REFRESH_STEPS,
-            "tokenizer_key_refresh_shards": TOKENIZER_KEY_REFRESH_SHARDS,
         },
         "objective": "candidate_cross_entropy",
-        "phase_b_schema_version": 3,
+        "objective_cfg": {
+            "candidate_gradient_loss": "raw_cross_entropy",
+            "candidate_diagnostic_normalization": "divide_by_log_candidate_count",
+            "episode_reduction": "equal_mean",
+        },
+        "phase_b_schema_version": 6,
         "training_regime": PHASE_B_TRAINING_REGIME,
-        "best_step": best_step, "best_metrics": best,
+        "training_source_fp": current_source_fp,
+        "validation_canary_fp": current_canary_fp,
     }
+
+    def snapshot_predictor_state() -> dict:
+        state = {
+            "decoder": {
+                key: value.detach().cpu().clone() for key, value in dec.state_dict().items()
+            },
+            "retriever": {
+                key: value.detach().cpu().clone()
+                for key, value in retriever.state_dict().items()
+            },
+        }
+        if online_encoder is not None:
+            state["tokenizer_online"] = {
+                key: value.detach().cpu().clone()
+                for key, value in online_encoder.state_dict().items()
+            }
+            state["tokenizer_ema"] = {
+                key: value.detach().cpu().clone()
+                for key, value in ema_encoder.state_dict().items()
+            }
+        return state
+
+    def make_predictor_payload(
+        model_state: dict,
+        *,
+        checkpoint_step: int,
+        checkpoint_metrics: dict,
+        selection: str,
+    ) -> dict:
+        return {
+            **model_state,
+            **predictor_metadata,
+            "checkpoint_step": checkpoint_step,
+            "checkpoint_metrics": dict(checkpoint_metrics),
+            # Retain the historical names for evaluator and artifact compatibility.
+            "best_step": checkpoint_step,
+            "best_metrics": dict(checkpoint_metrics),
+            "checkpoint_selection": selection,
+        }
+
+    def save_trainer_state(step: int) -> None:
+        state = {
+            "kind": "phase_b_patch_decoder_trainer_state_v4",
+            "step": step,
+            "elapsed_seconds": time.time() - t0,
+            "run_config": run_config,
+            "bank_fp": current_bank_fp,
+            "training_regime": PHASE_B_TRAINING_REGIME,
+            "training_source_fp": current_source_fp,
+            "validation_canary_fp": current_canary_fp,
+            "decoder": dec.state_dict(),
+            "retriever": retriever.state_dict(),
+            "optimizer": opt.state_dict(),
+            "scheduler": sched.state_dict(),
+            "tokenizer_online": (
+                online_encoder.state_dict() if online_encoder is not None else None
+            ),
+            "tokenizer_ema": (
+                ema_encoder.state_dict() if online_encoder is not None else None
+            ),
+            "best": best,
+            "best_step": best_step,
+            "best_state": best_state,
+            "index_rows": index_rows.detach().cpu(),
+            "selector_z": selector_z.detach().cpu(),
+            "active_refreshes": active_refreshes,
+            "rng": {
+                "numpy_generator": rng.bit_generator.state,
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else None,
+                "text_generator": text_gen.get_state(),
+            },
+        }
+        atomic_torch_save(state, state_path)
+
+    start_step = 0
+    if args.resume is not None:
+        resume = torch.load(args.resume, map_location="cpu", weights_only=False)
+        if resume.get("kind") != "phase_b_patch_decoder_trainer_state_v4":
+            raise SystemExit(
+                "--resume is not a protocol-bound Phase-B trainer state; "
+                "legacy states cannot safely restore checkpoint selection"
+            )
+        if resume.get("bank_fp") != current_bank_fp:
+            raise SystemExit("resume checkpoint was built against a different memory bank")
+        if resume.get("training_regime") != PHASE_B_TRAINING_REGIME:
+            raise SystemExit("resume checkpoint was built under a different training regime")
+        if resume.get("training_source_fp") != current_source_fp:
+            raise SystemExit("Phase-B behavior source changed since the resume state was written")
+        if resume.get("validation_canary_fp") != current_canary_fp:
+            raise SystemExit("fixed Phase-B validation canaries changed since the resume state")
+        if resume.get("run_config") != run_config:
+            differing = sorted(
+                key for key in set(run_config) | set(resume.get("run_config", {}))
+                if run_config.get(key) != resume.get("run_config", {}).get(key)
+            )
+            raise SystemExit(f"resume configuration differs in: {differing}")
+        start_step = int(resume["step"])
+        if start_step >= args.steps:
+            raise SystemExit(
+                f"resume state is already at step {start_step}, not below --steps {args.steps}"
+            )
+        dec.load_state_dict(resume["decoder"])
+        retriever.load_state_dict(resume["retriever"])
+        opt.load_state_dict(resume["optimizer"])
+        sched.load_state_dict(resume["scheduler"])
+        if online_encoder is not None:
+            if resume.get("tokenizer_online") is None or resume.get("tokenizer_ema") is None:
+                raise SystemExit("ema_finetune resume state lacks tokenizer weights")
+            online_encoder.load_state_dict(resume["tokenizer_online"])
+            ema_encoder.load_state_dict(resume["tokenizer_ema"])
+        best = dict(resume["best"])
+        best_step = int(resume["best_step"])
+        best_state = resume.get("best_state")
+        index_rows = resume["index_rows"].long().cpu()
+        selector_z = resume["selector_z"].float().to(device)
+        memory_index = retriever.build_index(selector_z)
+        active_refreshes = int(resume.get("active_refreshes", 0))
+        saved_rng = resume["rng"]
+        rng.bit_generator.state = saved_rng["numpy_generator"]
+        torch.set_rng_state(saved_rng["torch"].cpu())
+        if device.type == "cuda" and saved_rng.get("cuda") is not None:
+            torch.cuda.set_rng_state_all([state.cpu() for state in saved_rng["cuda"]])
+        text_gen.set_state(saved_rng["text_generator"].cpu())
+        t0 = time.time() - float(resume.get("elapsed_seconds", 0.0))
+        print(f"[patch-dec] resumed {args.resume} at step {start_step}", flush=True)
+
+    telemetry = PhaseBTelemetry(
+        args.telemetry_dir or (args.out.parent / "telemetry" / args.out.stem),
+        interval_seconds=args.telemetry_seconds,
+        stage="predictor",
+    )
+    telemetry.start(
+        step=start_step,
+        elapsed_seconds=time.time() - t0,
+        metadata={
+            "planned_steps": args.steps,
+            "warmup_steps": args.warmup_steps,
+            "val_every": args.val_every,
+            "grad_clip": args.grad_clip,
+            "n_retrieval_heads": RETRIEVAL_SUBSPACES,
+            "output": str(args.out),
+            "bank_fp": current_bank_fp,
+            "tokenizer_mode": args.tokenizer_mode,
+            "resume": str(args.resume) if args.resume is not None else None,
+            "run_config": run_config,
+            "numerical_policy": {
+                "patch_embeddings": "l2_normalized",
+                "retrieval_attention_prior": "log_softmax_over_valid_plus_log_count",
+                "token_inputs": "unit_direction_components_with_learned_positive_scales_then_ln",
+                "candidate_loss": "raw_cross_entropy",
+            },
+        },
+    )
+
+    for step in range(start_step + 1, args.steps + 1):
+        step_started = time.perf_counter()
+        dec.train(); retriever.train()
+        if online_encoder is not None:
+            online_encoder.train()
+        tokenizer_active = online_encoder is not None and step > TOKENIZER_FINETUNE_WARMUP_STEPS
+        if step > 1 and (step - 1) % ACTIVE_REFRESH_STEPS == 0:
+            index_rows = table.sample_index_rows(
+                memory_window_mask,
+                ACTIVE_WINDOWS_PER_LABEL,
+                np.random.default_rng(args.seed + 10_000 + step),
+            )
+            selector_values = (
+                live_source.encode_patch_rows(
+                    index_rows, ema_encoder, requires_grad=False
+                ).detach().to(device)
+                if tokenizer_active else
+                torch.as_tensor(bank["patch"]["Z"])[index_rows].float().to(device)
+            )
+            selector_z = F.normalize(selector_values, dim=-1)
+            memory_index = retriever.build_index(selector_z)
+            active_refreshes += 1
+
+        opt.zero_grad(set_to_none=True)
+        telemetry_due = (
+            telemetry.due() or step == start_step + 1
+            or step % RETRIEVAL_DIAGNOSTIC_STEPS == 0
+        )
+        specs = curriculum.sample_batch(args.episodes_per_step)
+        if args.smoke:
+            specs = [
+                replace(spec, support_count=min(spec.support_count, 1)) for spec in specs
+            ]
+        episode_records = []
+        step_loss = 0.0
+        hard_grad_sum = torch.zeros_like(retriever.proj) if telemetry_due else None
+
+        for episode_number, spec in enumerate(specs):
+            episode_error = None
+            for attempt in range(20):
+                t_ev, t_cand = (
+                    (text, text) if variants is None else sample_text_tables(variants, text_gen)
+                )
+                try:
+                    qi, query, view = make_adaptation_episode(
+                        train_pool, index_rows, spec, count=args.queries_per_episode,
+                        local_rng=rng, validation=False,
+                    )
+                    episode_labels = episode_label_set(
+                        view.candidate_ids,
+                        t_cand,
+                        mode=spec.label_mode,
+                        rng=rng,
+                        alias_embeddings=alias_embeddings,
+                        canonical_names=vocab,
+                    )
+                    logits, aux = decode_adaptation_episode(
+                        dec, retriever, bank, index_rows, selector_z, memory_index,
+                        query, view, t_ev, episode_labels.embeddings,
+                        policy=policy,
+                        rng=rng,
+                        live_source=live_source,
+                        selector_encoder=ema_encoder,
+                        online_encoder=online_encoder,
+                        online_requires_grad=tokenizer_active,
+                        physical_view_mode=spec.physical_view_mode,
+                        return_attention=telemetry_due,
+                    )
+                    break
+                except ValueError as exc:
+                    if not any(token in str(exc) for token in (
+                        "no eligible", "no evidence", "support units", "no episodic memory",
+                        "no cross-subject/configuration support",
+                    )):
+                        raise
+                    episode_error = exc
+            else:
+                raise RuntimeError(
+                    f"could not draw feasible adaptation episode {episode_number + 1}/"
+                    f"{len(specs)} in 20 attempts"
+                ) from episode_error
+
+            candidates = view.candidate_ids
+            true_label = y[qi]
+            target = label_index(candidates, n_vocab, device)[true_label]
+            if bool((target < 0).any()):
+                raise RuntimeError("answerable episode omitted a query label from candidates")
+            candidate_loss = F.cross_entropy(logits, target)
+            normalized_candidate_loss = candidate_loss / max(
+                np.log(len(candidates)), 1e-8
+            )
+            episode_objective = candidate_loss / len(specs)
+            if not bool(torch.isfinite(episode_objective)):
+                raise FloatingPointError(
+                    f"non-finite Phase-B loss at step {step}, episode {episode_number + 1}"
+                )
+
+            retrieval_score_gradient = None
+            if telemetry_due:
+                hard_probe = F.cross_entropy(aux["hard_logits"], target)
+                hard_probe = hard_probe / len(specs)
+                hard_grad, retrieval_score_gradient = torch.autograd.grad(
+                    hard_probe, (retriever.proj, aux["retrieval_scores"]),
+                    retain_graph=True, allow_unused=True,
+                )
+                if hard_grad is not None:
+                    hard_grad_sum.add_(hard_grad.detach())
+            episode_objective.backward()
+            step_loss += float(episode_objective.detach())
+
+            composition = describe_episode_composition(
+                bank["patch"], index_rows, query, view, simultaneous_pairs
+            )
+            episode_metrics, categories, strata = training_episode_telemetry(
+                spec=spec,
+                candidates=candidates,
+                target=target,
+                true_label=true_label,
+                aux=aux,
+                candidate_loss=candidate_loss.detach(),
+                normalized_candidate_loss=normalized_candidate_loss.detach(),
+                index_size=len(index_rows),
+                draw_attempts=attempt + 1,
+                composition=composition,
+                detailed=telemetry_due,
+                retrieval_score_gradient=retrieval_score_gradient,
+            )
+            episode_records.append({
+                "metrics": episode_metrics,
+                "categories": categories,
+                "strata": strata,
+                "retrieval_topk": int(aux["retrieval_topk"]),
+                "evidence_count": float(aux["evidence_mask"].sum(1).float().mean()),
+            })
+
+        dec_grad = parameter_gradient_norm(dec.parameters(), device)
+        retrieval_grad = parameter_gradient_norm(retriever.parameters(), device)
+        tokenizer_grad = torch.tensor(0.0, device=device)
+        if online_encoder is not None:
+            tokenizer_grad = parameter_gradient_norm(online_encoder.parameters(), device)
+        component_gradients = {}
+        if telemetry_due:
+            components = {
+                "relational_attention": dec.blocks,
+                "candidate_readout": dec.readout,
+                "role_embeddings": dec.role_emb,
+                "coreference_slot_embeddings": dec.slot_emb,
+                "window_group_embeddings": dec.group_emb,
+                "query_projection": dec.proj_query,
+                "evidence_projection": dec.proj_evidence,
+                "text_projection": dec.proj_text,
+                "component_scales": dec.component_log_scale,
+            }
+            for name, module in components.items():
+                if module is not None:
+                    component_gradients[f"component_grad_norm/{name}"] = float(
+                        parameter_gradient_norm(module.parameters(), device)
+                    )
+        trainable_params = list(dec.parameters()) + list(retriever.parameters())
+        if online_encoder is not None:
+            trainable_params += [p for p in online_encoder.parameters() if p.requires_grad]
+        preclip_grad = torch.nn.utils.clip_grad_norm_(
+            trainable_params, args.grad_clip, error_if_nonfinite=True,
+        )
+        opt.step(); sched.step(); retriever.update_ema()
+        if tokenizer_active:
+            update_tokenizer_ema(ema_encoder, online_encoder)
+        task_objective = float(np.mean([
+            record["metrics"]["loss_over_random"] for record in episode_records
+        ]))
+        optimizer_metrics = {
+            "loss": step_loss,
+            "task_objective": task_objective,
+            "decoder_grad_norm": float(dec_grad),
+            "retriever_grad_norm": float(retrieval_grad),
+            "retriever_to_decoder_grad_ratio": float(
+                retrieval_grad / dec_grad.clamp_min(1e-12)
+            ),
+            "tokenizer_grad_norm": float(tokenizer_grad),
+            "preclip_grad_norm": float(preclip_grad),
+            "gradient_clipped_fraction": float(float(preclip_grad) > args.grad_clip),
+            "learning_rate": float(opt.param_groups[0]["lr"]),
+            "episodes_per_step": float(len(specs)),
+            "queries_per_step": float(len(specs) * args.queries_per_episode),
+            "step_seconds": float(time.perf_counter() - step_started),
+        }
+        if device.type == "cuda":
+            optimizer_metrics.update({
+                "gpu_allocated_gib": torch.cuda.memory_allocated(device) / 2**30,
+                "gpu_reserved_gib": torch.cuda.memory_reserved(device) / 2**30,
+                "gpu_peak_allocated_gib": torch.cuda.max_memory_allocated(device) / 2**30,
+            })
+        if telemetry_due:
+            task_grad_norm = hard_grad_sum.norm()
+            optimizer_metrics.update({
+                "hard_retriever_probe_grad_norm": float(task_grad_norm),
+                "retriever_task_grad_norm": float(task_grad_norm),
+                **component_gradients,
+            })
+            optimizer_metrics.update({
+                f"component_scale/{name}": float(value.detach())
+                for name, value in dec.component_scales().items()
+            })
+        for record in episode_records:
+            telemetry.update(
+                record["metrics"], categories=record["categories"], strata=record["strata"]
+            )
+        telemetry.update(optimizer_metrics)
+
+        if step == 1 or step % args.val_every == 0:
+            metrics = evaluate()
+            telemetry.set_validation(metrics)
+            better = (
+                metrics["checkpoint_selection_score"]
+                > best["checkpoint_selection_score"]
+            )
+            milestone_state = snapshot_predictor_state()
+            if better:
+                best, best_step = dict(metrics), step
+                best_state = milestone_state
+            milestone_path = milestone_checkpoint_path(args.out, step)
+            atomic_torch_save(
+                make_predictor_payload(
+                    milestone_state,
+                    checkpoint_step=step,
+                    checkpoint_metrics=metrics,
+                    selection="unselected_validation_milestone",
+                ),
+                milestone_path,
+            )
+            def episode_mean(key):
+                values = [
+                    record["metrics"].get(key) for record in episode_records
+                    if record["metrics"].get(key) is not None
+                ]
+                return float(np.mean(values)) if values else None
+
+            def category_mix(key):
+                values = [record["categories"][key] for record in episode_records]
+                return {value: values.count(value) for value in sorted(set(values))}
+
+            tokenizer_ema_drift = 0.0
+            if online_encoder is not None:
+                delta_sq = sum(
+                    (online.detach().float() - ema.detach().float()).square().sum()
+                    for online, ema in zip(
+                        online_encoder.parameters(), ema_encoder.parameters(), strict=True
+                    )
+                )
+                base_sq = sum(
+                    ema.detach().float().square().sum() for ema in ema_encoder.parameters()
+                )
+                tokenizer_ema_drift = float(torch.sqrt(delta_sq / base_sq.clamp_min(1e-12)))
+            print(json.dumps({
+                "step": step,
+                "loss": round(step_loss, 5),
+                "episodes_per_step": len(specs),
+                "queries_per_episode": args.queries_per_episode,
+                "queries_per_step": len(specs) * args.queries_per_episode,
+                "episode_type_mix": category_mix("episode_type"),
+                "enrollment_shape_mix": category_mix("enrollment_shape"),
+                "label_mode_mix": category_mix("label_mode"),
+                "physical_view_mix": category_mix("physical_view_mode"),
+                "candidate_count_mix": category_mix("candidate_count"),
+                "support_count_mix": category_mix("support_count"),
+                "realized_true_support_mean": round(
+                    episode_mean("realized_true_support") or 0.0, 3
+                ),
+                "retrieved_true_mass": round(episode_mean("true_label_pool_mass") or 0.0, 4),
+                "provided_support_recall_at_k": (
+                    round(episode_mean("provided_support_recall_at_k"), 4)
+                    if episode_mean("provided_support_recall_at_k") is not None else None
+                ),
+                "head_usage": [
+                    round(episode_mean(f"subspace_{head}_mass") or 0.0, 4)
+                    for head in range(RETRIEVAL_SUBSPACES)
+                ],
+                "decoder_grad_norm": round(float(dec_grad), 4),
+                "retriever_grad_norm": round(float(retrieval_grad), 4),
+                "tokenizer_grad_norm": round(float(tokenizer_grad), 4),
+                "tokenizer_active": tokenizer_active,
+                "tokenizer_ema_relative_drift": round(tokenizer_ema_drift, 6),
+                "active_index_refreshes": active_refreshes,
+                "preclip_grad_norm": round(float(preclip_grad), 4),
+                "candidate_logit_spread": round(
+                    episode_mean("candidate_logit_spread") or 0.0, 4
+                ),
+                "lr": opt.param_groups[0]["lr"],
+                "retrieval_topk": sorted({
+                    record["retrieval_topk"] for record in episode_records
+                }),
+                "evidence_count_mean": round(float(np.mean([
+                    record["evidence_count"] for record in episode_records
+                ])), 2),
+                "unique_evidence_windows_mean": round(
+                    episode_mean("unique_evidence_windows") or 0.0, 2
+                ),
+                **{key: round(value, 4) for key, value in metrics.items()},
+                "best_checkpoint_selection_score": round(
+                    best["checkpoint_selection_score"], 4
+                ),
+                "elapsed_s": round(time.time() - t0, 1),
+            }), flush=True)
+        # Emit only after a step that collected the expensive diagnostics. If the wall-clock
+        # interval expires during validation, the following step observes `due()` and publishes a
+        # complete health snapshot rather than one missing attention/credit-assignment metrics.
+        emitted = (
+            telemetry.emit(
+                step=step, elapsed_seconds=time.time() - t0,
+                force=step % RETRIEVAL_DIAGNOSTIC_STEPS == 0,
+            )
+            if telemetry_due else None
+        )
+        if emitted is not None:
+            print(json.dumps({
+                "telemetry": str(telemetry.latest),
+                "step": step,
+                "window_seconds": round(emitted["window_seconds"], 2),
+            }), flush=True)
+        if step % args.save_every == 0 or step == args.steps:
+            save_trainer_state(step)
+
+    if best_state is None:
+        raise RuntimeError("training completed without a valid checkpoint")
+    payload = make_predictor_payload(
+        best_state,
+        checkpoint_step=best_step,
+        checkpoint_metrics=best,
+        selection="held_family_low_k_ba_plus_half_identity_gain",
+    )
     atomic_torch_save(payload, args.out)
     telemetry.emit(
         step=args.steps, elapsed_seconds=time.time() - t0, force=True, final=True

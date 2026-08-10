@@ -266,14 +266,6 @@ class SourcePatchEncoder:
         # came from. Returning them to the row-id device caused GPU->CPU->GPU copies on index refresh.
         return unique_vectors[inverse.to(unique_vectors.device)]
 
-    def reencode_query(self, query: QueryPatches, encoder, *, requires_grad: bool) -> QueryPatches:
-        if bool((query.row[query.mask] < 0).any()):
-            raise ValueError("external queries cannot be recovered from the training memory bank")
-        live = self.encode_patch_rows(query.row[query.mask], encoder, requires_grad=requires_grad)
-        z = query.Z.new_zeros(query.Z.shape)
-        z = z.masked_scatter(query.mask.unsqueeze(-1).expand_as(z), live.reshape(-1))
-        return replace(query, Z=z)
-
     def reencode_query_views(
         self,
         query: QueryPatches,
@@ -314,23 +306,3 @@ class SourcePatchEncoder:
         z = live.new_zeros((*evidence.index.shape, d))
         z = z.masked_scatter(evidence.mask.unsqueeze(-1).expand_as(z), live.reshape(-1))
         return z
-
-    def refresh_shard(
-        self,
-        index_rows: torch.Tensor,
-        selector_z: torch.Tensor,
-        encoder,
-        *,
-        shard: int,
-        n_shards: int,
-    ) -> torch.Tensor:
-        """Refresh one deterministic source-window shard of detached active keys."""
-        parent = torch.as_tensor(self.bank["patch"]["window"])[index_rows.cpu()].long()
-        windows = torch.unique(parent, sorted=True)
-        chosen = windows[torch.arange(len(windows)).remainder(n_shards).eq(shard % n_shards)]
-        active_positions = torch.nonzero(torch.isin(parent, chosen), as_tuple=True)[0]
-        if not len(active_positions):
-            return selector_z
-        rows = index_rows.cpu()[active_positions]
-        live = self.encode_patch_rows(rows, encoder, requires_grad=False).detach()
-        return selector_z.index_copy(0, active_positions.to(selector_z.device), live.to(selector_z))
