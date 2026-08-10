@@ -70,27 +70,37 @@ For a measured compute-shape experiment, use the explicit names
 `--episodes-per-step` and `--queries-per-episode`; any positive count is accepted. There is no
 ambiguous predictor `--batch` argument.
 
-Retrieval K is derived from that budget. The final roster contains the highest-scoring unique rows
+Retrieval K is derived from that budget. At deployment the final roster contains the highest-scoring unique rows
 across query patches and learned subspaces; no label or window cap changes the ranking. Candidate
-labels are task input. Every episode draws its own condition uniformly rather than following a
-schedule: episode type (semantic zero-support, ordinary few-support, cross-subject few-support,
-same-subject enrollment), `1`-`8` support examples per enrolled candidate, `2`-`16` candidate
-labels, and how many of those candidates are enrolled — drawing all of them is full enrollment,
-fewer is partial. One third of supported episodes relabel their candidates with episode-local
-neutral aliases; those are always fully enrolled, because an alias name carries no information for
-an un-enrolled candidate. Distractors are half nearest-confusable and half random in every episode.
-The realized mix is reported in telemetry rather than prescribed. The
+labels are task input. Each normal optimizer step anchors one exact coherent support/zero-support
+counterfactual pair and one fully enrolled alias episode; the remaining episodes are independent
+draws. The pair reuses the query, candidate set, candidate phrasing, and physical query view, changing
+only the support overlay. Support counts remain `1`-`8`. Candidate difficulty progresses from 2-4
+mostly random labels, through 4-8 mixed labels, to the deployment 2-16 range with mostly
+nearest-confusable distractors. Independently drawn supported episodes choose how many candidates
+are enrolled — drawing all is full enrollment and fewer is partial. Independent supported draws
+use a one-third alias probability in addition to the guaranteed alias anchor. Alias episodes relabel
+their candidates with episode-local neutral names and are always fully enrolled, because an alias
+name carries no information for an un-enrolled candidate. The realized mix is reported in telemetry. The
 archive has one global upper budget; when the source corpus is smaller no rows are discarded. Its
-active view rotates every 100 steps and caps each label at 16 windows: half the budget reserves
+active view rotates every 5 steps and caps each label at 16 windows: half the budget reserves
 distinct executions from one rotating anchor subject for same-subject enrollment, while the other
 half remains configuration- and subject-balanced.
+
+During the first third of training, up to four times the deployment evidence budget from the same
+hard query-driven shortlist is exposed to the decoder with a softer score prior. Budget and
+temperature anneal exactly to the 64-row, temperature-0.07 deployment recipe; validation always uses
+that deployment recipe. Selection remains hard, but more plausible selected rows receive task
+gradient before the roster narrows.
 
 Physical views are drawn 50/50 per episode (in expectation, not exactly per batch): stored clean frozen-encoder query/support vectors (or live
 clean forwards when fine-tuning), or the full virtual-subject plus mild acquisition-augmentation
 simulation. Validation evaluates every held-out
 episode both ways and reports clean and augmented balanced accuracy separately.
-Its default 39 fixed base episodes form the complete 13-recipe by three-transfer-fold Cartesian
+Its default 48 fixed base episodes form the complete 16-recipe by three-transfer-fold Cartesian
 product across held-subject, held-configuration, and jointly held queries.
+Four zero-support recipes cover candidate counts 2, 4, 8, and 16; the remaining recipes cover
+coherent partial/full and alias-full support at k=1,2,4,8.
 Those internally subject-disjoint folds omit same-subject enrollment by construction; the external
 enrollment evaluator measures genuine same-person support on source data that identifies people.
 
@@ -153,7 +163,8 @@ python -m training.evidence.monitor_training \
   --render --watch 60
 ```
 
-Predictor telemetry includes raw optimization CE plus candidate-count-normalized diagnostic CE,
+Predictor telemetry includes group-balanced optimization CE and each of its four raw group means
+(semantic k=0, partial-unenrolled, coherent-enrolled, and alias-enrolled), plus candidate-count-normalized diagnostic CE,
 training accuracy, per-curriculum-stratum metrics, component gradients, retriever/decoder gradient
 ratio, clipping, evidence-role attention mass and entropy, evidence-pool concentration, assembled
 support recall, raw pre-deduplication subspace overlap, fixed-canary roster churn, candidate logit

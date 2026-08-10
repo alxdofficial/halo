@@ -103,6 +103,17 @@ def test_relative_retrieval_score_bias_changes_the_prediction():
     assert not torch.allclose(equal, changed, atol=1e-6)
 
 
+def test_training_score_temperature_softens_the_same_selected_roster():
+    decoder = _decoder()
+    inputs, _ = _episode()
+    with torch.no_grad():
+        deployment = decoder(**inputs, score_temperature=0.07)
+        exploratory = decoder(**inputs, score_temperature=0.20)
+    assert not torch.allclose(deployment, exploratory, atol=1e-7)
+    with pytest.raises(ValueError, match="positive"):
+        decoder(**inputs, score_temperature=0.0)
+
+
 def test_retrieval_bias_is_shift_invariant_and_uniform_scores_are_neutral():
     decoder = _decoder()
     inputs, _ = _episode()

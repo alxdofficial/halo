@@ -162,6 +162,25 @@ def test_predictor_monitor_detects_token_component_scale_imbalance(tmp_path):
     assert "component_scale_imbalance" in codes
 
 
+def test_predictor_monitor_detects_zero_support_checkpoint_regression(tmp_path):
+    telemetry = PhaseBTelemetry(
+        tmp_path, interval_seconds=60, run_id="k0-guard", stage="predictor"
+    )
+    telemetry.start(
+        step=0, elapsed_seconds=0,
+        metadata={"planned_steps": 1000, "warmup_steps": 10},
+    )
+    telemetry.set_validation({
+        "support_k0_macro_cell_ba": 0.20,
+        "support_k0_identity_macro_cell_ba": 0.30,
+        "zero_support_guard_floor": 0.32,
+        "zero_support_guard_tolerance": 0.01,
+    })
+    telemetry.emit(step=100, elapsed_seconds=10, force=True)
+    codes = {item["code"] for item in assess(tmp_path)["alerts"]}
+    assert {"zero_support_below_identity", "zero_support_guard_failed"} <= codes
+
+
 def test_external_development_and_test_rosters_are_complete_and_disjoint():
     assert set(PHASE_B_DEV_DATASETS).isdisjoint(PHASE_B_TEST_DATASETS)
     assert set(PHASE_B_DEV_DATASETS) | set(PHASE_B_TEST_DATASETS) == set(PRIMARY_EVAL_DATASETS)

@@ -79,7 +79,7 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
         bad = ", ".join(f"{key}={count}" for key, count in snapshot["nonfinite"].items())
         alert("critical", "nonfinite_values", f"Non-finite values occurred: {bad}.")
 
-    if stage == "predictor" and snapshot.get("metrics"):
+    if stage == "predictor" and (snapshot.get("metrics") or snapshot.get("validation")):
         warmup = int(metadata.get("warmup_steps", 0))
         mix = snapshot.get("mix", {})
         enrollment_mix = mix.get("enrollment_shape", {})
@@ -88,9 +88,10 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
                 "critical", "missing_partial_enrollment",
                 "The latest training window contains no partial-enrollment episodes.",
             )
-        # Regimes are sampled uniformly, not scheduled, so counts are never exactly equal and it
-        # would be noise to say so. What still indicates a broken sampler is a regime that never
-        # appears at all, or one so starved that the window carries almost no signal for it.
+        # Anchor episodes guarantee the core loss conditions, while the remaining regimes are
+        # sampled stochastically, so counts need not be exactly equal. What still indicates a broken
+        # sampler is a regime that never appears at all, or one so starved that the telemetry window
+        # carries almost no signal for it.
         episode_mix = mix.get("episode_type", {})
         episode_counts = [int(value) for value in episode_mix.values()]
         if episode_counts and sum(episode_counts) >= 32:
@@ -99,7 +100,7 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
                 alert(
                     "warning", "starved_episode_regime",
                     f"Recent episode-regime counts are {episode_mix}; one regime is far below the "
-                    f"uniform expectation of {expected:.0f}.",
+                    f"rough four-regime reference count of {expected:.0f}.",
                 )
         if step > warmup:
             for name in ("decoder_grad_norm", "retriever_grad_norm"):
@@ -226,6 +227,24 @@ def assess(telemetry_dir: Path, stale_seconds: float = 150.0) -> dict:
         if gain is not None and step > warmup and float(gain) < -0.05:
             alert("warning", "worse_than_identity",
                   f"Held-out adaptation score is {float(gain):.3f} below identity control.")
+        k0_score = validation.get("support_k0_macro_cell_ba")
+        k0_identity = validation.get("support_k0_identity_macro_cell_ba")
+        k0_floor = validation.get("zero_support_guard_floor")
+        k0_tolerance = float(validation.get("zero_support_guard_tolerance", 0.0))
+        if k0_score is not None and k0_identity is not None \
+                and float(k0_score) < float(k0_identity) - 0.05:
+            alert(
+                "warning", "zero_support_below_identity",
+                f"Held-out k=0 BA {float(k0_score):.3f} is below the identity retrieval control "
+                f"{float(k0_identity):.3f}.",
+            )
+        if k0_score is not None and k0_floor is not None \
+                and float(k0_score) + k0_tolerance < float(k0_floor):
+            alert(
+                "critical", "zero_support_guard_failed",
+                f"Held-out k=0 BA {float(k0_score):.3f} is below the checkpoint floor "
+                f"{float(k0_floor):.3f}; this checkpoint is ineligible for selection.",
+            )
         support_drop = validation.get("support_removal_true_probability_drop")
         if support_drop is not None and step > warmup and float(support_drop) <= 0.01:
             alert(

@@ -188,7 +188,8 @@ class PhaseBTelemetry:
             self.start(step=step, elapsed_seconds=elapsed_seconds)
         if not force and not self.due():
             return None
-        if not self.numeric and not self.categories and not self.nonfinite and not final:
+        if not self.numeric and not self.categories and not self.nonfinite \
+                and not self.last_validation and not final:
             return None
         window_seconds = time.monotonic() - self.last_emit
         metrics = {

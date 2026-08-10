@@ -113,11 +113,13 @@ The standard capacity policy is deliberately small:
   applied.** The archive is therefore whatever the 50,000-per-stream scan ceiling produced, and is
   strongly imbalanced (`sitting` 28,648 windows against a 30-window minimum). Balance is restored
   downstream by the active view, which caps every label at 16 windows;
-- active view: up to 16 source windows per label, refreshed every 100 steps. Half of each capped
+- active view: up to 16 source windows per label, refreshed every 5 steps. Half of each capped
   label budget reserves distinct executions from one randomly rotated anchor subject; the remainder
   is configuration- and subject-balanced. This preserves the repeated-person executions required
   by the same-subject curriculum without allowing one subject to occupy the whole view;
-- evidence budget: 64 final patch rows per query;
+- evidence budget: 64 final patch rows per query. During the first third of training, a wider
+  shortlist begins at 256 rows with retrieval-prior temperature 0.20 and anneals to the exact
+  64-row, temperature-0.07 deployment recipe;
 - candidate counts: an integer sampled from two through sixteen;
 - support counts: an integer sampled from one through eight independent executions per enrolled
   candidate.
@@ -184,7 +186,7 @@ follow-up experiment, but it is not part of the current Phase-B launch or claim.
 
 ## 7. Episodic Adaptation Curriculum
 
-Training samples uniformly from four regimes:
+Training covers four regimes:
 
 1. `semantic_zero_support`: coherent candidate names and no examples of candidate concepts in
    memory.
@@ -199,17 +201,16 @@ Training samples uniformly from four regimes:
    acquisition variation. Clean views therefore rehearse real same-person enrollment rather than
    silently pairing two different people.
 
-One optimizer step contains eight independently constructed episodes with eight query executions
-each. Every episode has its own candidate set, support overlay, label aliases, physical
-view/persona, and support count; only the immutable archive and trainable model parameters are
-shared. Gradients are accumulated across the eight episode forwards and applied once. This keeps
-64-query throughput while exposing eight adaptation tasks instead of 64 queries from one task.
+One optimizer step contains eight episodes with eight query executions each. One coherent partial-
+support episode is paired with a zero-support counterfactual that reuses its exact query, candidates,
+candidate phrasing, and physical query view; only the support-memory overlay differs. One fully
+enrolled random-alias episode is also guaranteed so every loss condition is represented. Remaining
+episodes are independent draws. Apart from the counterfactual pair, every episode has its own
+candidate set, support overlay, label aliases, physical view/persona, and support count; only the
+immutable archive and trainable model parameters are shared. Gradients are accumulated across the
+eight episode forwards and applied once.
 
-Every condition is drawn uniformly per episode rather than balanced within a batch. An earlier
-revision cycled shuffled strata for exact per-batch coverage, which forced `episodes-per-step` to be
-a multiple of four and bought nothing at real scale — 3,000 steps times eight episodes samples each
-condition hundreds of times regardless. What survives is the *space*, because `eval_enrollment`
-grades those cells and training has to cover them. Partial enrollment is a random proper subset of
+Partial enrollment is a random proper subset of
 candidates receiving support while the remaining candidate concepts stay erased from memory; it
 falls out of drawing the enrolled count uniformly from one to the candidate count rather than being
 a named stratum. Random aliases remain full-support only because an arbitrary name with no binding
@@ -250,15 +251,16 @@ interpretable anchors. Full-support episodes enroll every candidate, while parti
 a random proper subset. Random aliases are forbidden at zero or partial support because an
 unenrolled arbitrary name would contain no information connecting it to a movement.
 
-Half of every episode's distractors are the labels nearest the truth by the mean of text cosine and
-physical-centroid cosine, and half are drawn at random. All-random distractors would make most
-episodes trivial in the full 93-label vocabulary; all-near would drop the easy cases the model also has to
-get right. Complete motion families are reserved from predictor training for validation. Training uses
+Candidate difficulty is staged: the first 20% of training uses 2-4 candidates with 25% hard
+distractors, the next 40% uses 4-8 with 50% hard distractors, and the remainder uses the complete
+2-16 range with 75% hard distractors. Hardness is the mean of text cosine and physical-centroid
+cosine; other distractors are random. Complete motion families are reserved from predictor training for validation. Training uses
 only rows whose subject and configuration are both in the training partition. Validation queries use
 all three excluded quadrants: held subject, held configuration, and both held. Fixed validation
 canaries include coherent partial, coherent full, random-alias full, and semantic zero-support
-recipes at every supported `k`, each evaluated through clean and augmented views. The default 39
-base canaries are the complete 13-recipe by three-transfer-condition Cartesian product, so fold
+recipes at every supported `k`, each evaluated through clean and augmented views. Four semantic
+zero-support recipes cover candidate counts 2, 4, 8, and 16. The default 48
+base canaries are the complete 16-recipe by three-transfer-condition Cartesian product, so fold
 metrics cannot be confounded by different episode mixtures. Internal held-family canaries use
 zero-support, ordinary, and
 cross-subject episodes; real same-subject enrollment is measured by the external evaluator because
@@ -356,16 +358,22 @@ properties as pure non-parametric enrollment; those modes must not be conflated 
 ## 11. Objective and Confidence
 
 The objective is candidate-set cross-entropy on answerable, truth-present episodes, and nothing
-else. There is no auxiliary retrieval term, corpus-classification head, subject-adversarial loss,
+else. Per-query CE is reduced separately for semantic zero support, partial-enrollment queries whose
+candidate is unenrolled, coherent enrolled queries, and alias enrolled queries; the four present
+group means receive equal weight. There is no auxiliary retrieval term, corpus-classification head, subject-adversarial loss,
 EDL predictor loss, repeatability penalty, or explicit unknown target.
 
 The default run is 3,000 optimizer steps at learning rate `2e-4`, with a 300-step linear warmup and
-cosine decay to zero. At eight episodes and eight queries per step this is 24,000 independently
-constructed adaptation episodes and 192,000 query executions.
+cosine decay to zero. At eight episodes and eight queries per step this is 24,000 instantiated
+adaptation episodes and 192,000 query executions; 3,000 support/zero pairs intentionally
+share their query context.
 
-Checkpoint selection is predeclared and uses fixed held-family `k=1/2` canaries. Its scalar is
+Checkpoint selection is predeclared and uses fixed held-family `k=1/2` canaries. Its adaptation scalar is
 `low_k_balanced_accuracy + 0.5 * (low_k_balanced_accuracy - identity_balanced_accuracy)`: absolute
-quality is primary, while learned gain over the matched identity control also matters. Every
+quality is primary, while learned gain over the matched identity control also matters. A checkpoint
+is eligible only when its fixed zero-support score remains within one point of the stronger of the
+step-zero zero-support score and its matched current identity score. Step zero is retained as the
+fallback if every trained milestone violates that floor. Every
 validation milestone is saved, so the selector can be audited against external development curves.
 
 The separate confidence head and truth-absent episode generator are parked. If resumed, predictor

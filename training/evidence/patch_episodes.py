@@ -10,6 +10,9 @@ import torch
 
 from model.evidence.patch_retrieval import PatchRetrieval
 
+# Shared empty result for labels with no eligible windows under a memory mask.
+_EMPTY_LONG = torch.empty(0, dtype=torch.long)
+
 
 @dataclass
 class QueryPatches:
@@ -74,6 +77,7 @@ class PatchTable:
         sorted_window = window[order]
         counts = torch.bincount(sorted_window, minlength=self.n_windows)
         self.offsets = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(0)])
+        self._label_candidate_cache: dict[bytes, dict[int, torch.Tensor]] = {}
         self.label_rows: dict[int, torch.Tensor] = {}
         labels = torch.as_tensor(self.patch["y"], dtype=torch.long).cpu()
         for label in torch.unique(labels).tolist():
@@ -90,6 +94,42 @@ class PatchTable:
                 self.event_windows[int(event)] = sorted_rows[
                     int(offsets[position]):int(offsets[position + 1])
                 ]
+
+    def label_candidate_windows(self, memory_window_mask: torch.Tensor) -> dict[int, torch.Tensor]:
+        """Eligible window ids per label, ascending — the grouping `sample_index_rows` scans for.
+
+        Recomputing `nonzero(mask & window_label.eq(label))` per label walked all
+        ``n_windows`` twice for each of the 93 labels on every active-index refresh, which was the
+        whole 300 ms cost of a refresh. The grouping depends only on the mask and the (immutable)
+        window labels, so it is built once per distinct mask — in practice two, the training and
+        validation memories. One stable sort reproduces the per-label ascending order exactly.
+        """
+        mask = memory_window_mask.detach().cpu().bool()
+        key = mask.numpy().tobytes()
+        cached = self._label_candidate_cache.get(key)
+        if cached is not None:
+            return cached
+
+        eligible = torch.nonzero(mask, as_tuple=True)[0]
+        grouped: dict[int, torch.Tensor] = {label: _EMPTY_LONG for label in self.label_rows}
+        if len(eligible):
+            labels = self.window_label[eligible]
+            order = torch.argsort(labels, stable=True)
+            # `eligible` is ascending and the sort is stable, so each run stays ascending.
+            sorted_labels, sorted_windows = labels[order], eligible[order]
+            values, counts = torch.unique_consecutive(sorted_labels, return_counts=True)
+            bounds = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(0)])
+            for position, label in enumerate(values.tolist()):
+                if int(label) in grouped:
+                    grouped[int(label)] = sorted_windows[
+                        int(bounds[position]):int(bounds[position + 1])
+                    ]
+
+        # A handful of entries covers the training and validation memories a run actually uses.
+        if len(self._label_candidate_cache) >= 4:
+            self._label_candidate_cache.pop(next(iter(self._label_candidate_cache)))
+        self._label_candidate_cache[key] = grouped
+        return grouped
 
     def rows_for_windows(self, windows: torch.Tensor) -> list[torch.Tensor]:
         rows = []
@@ -171,17 +211,18 @@ class PatchTable:
         rng: np.random.Generator,
     ) -> torch.Tensor:
         """Label/config/subject-balanced source windows, retaining all of their patch grids."""
-        memory_window_mask = memory_window_mask.detach().cpu().bool()
         if windows_per_label < 1:
             raise ValueError("windows_per_label must be positive")
+        label_candidates = self.label_candidate_windows(memory_window_mask)
         selected_windows = []
         for label in sorted(self.label_rows):
-            candidates = torch.nonzero(
-                memory_window_mask & self.window_label.eq(label), as_tuple=True
-            )[0]
+            candidates = label_candidates[label]
             if len(candidates) <= windows_per_label:
                 selected_windows.append(candidates)
                 continue
+            # Hoisted out of the loops below: each was re-indexing the same rows once per subject
+            # or per configuration.
+            candidate_subj = self.window_subj[candidates]
             # Reserve half the active budget as distinct executions from one subject. Without this,
             # round-robin subject balancing retained only one window per person and made the
             # same-subject k=2..8 curriculum impossible despite ample repeated executions in the
@@ -192,15 +233,30 @@ class PatchTable:
                 self.window_event[candidates] + self.n_windows,
                 candidates,
             )
-            subject_options = []
-            for subject in self.window_subj[candidates].unique().tolist():
-                member = self.window_subj[candidates].eq(subject)
-                subject_options.append((
-                    int(torch.unique(candidate_unit[member]).numel()), int(subject), member,
-                ))
-            max_units = max(value[0] for value in subject_options)
-            anchor_options = [value for value in subject_options if value[0] == max_units]
-            _, _, anchor_member = anchor_options[int(rng.integers(len(anchor_options)))]
+            # Distinct units per subject, counted in one pass. The per-subject
+            # `unique(candidate_unit[subject_mask])` loop this replaces ran once for every
+            # (label, subject) pair — 13k tensor comparisons and 5k uniques per refresh. Subjects
+            # stay in ascending order, so the anchor tie-break sees the same list as before and the
+            # RNG is consumed identically.
+            subjects = candidate_subj.unique()
+            # (subject, unit) packed into one integer; both are non-negative ids so the packing is
+            # injective. `torch.unique(..., dim=0)` would express this directly but sorts row-wise
+            # and measured slower than the loop it replaces.
+            unit_stride = int(candidate_unit.max()) + 1
+            distinct = torch.unique(candidate_subj * unit_stride + candidate_unit)
+            distinct_subject = torch.div(distinct, unit_stride, rounding_mode="floor")
+            units_per_subject = torch.bincount(
+                torch.searchsorted(subjects, distinct_subject.contiguous()),
+                minlength=len(subjects),
+            )
+            max_units = int(units_per_subject.max())
+            anchor_positions = torch.nonzero(
+                units_per_subject.eq(max_units), as_tuple=True
+            )[0]
+            anchor_subject = int(
+                subjects[anchor_positions[int(rng.integers(len(anchor_positions)))]]
+            )
+            anchor_member = candidate_subj.eq(anchor_subject)
             anchor_units = torch.unique(candidate_unit[anchor_member]).numpy()
             chosen_units = rng.choice(
                 anchor_units, size=min(reserve_target, len(anchor_units)), replace=False
@@ -214,7 +270,8 @@ class PatchTable:
                 candidate_unit, torch.as_tensor(chosen_units, dtype=torch.long)
             )]
             remaining_budget = windows_per_label - len(picked)
-            configs = sorted(self.window_cfg[remaining_candidates].unique().tolist())
+            remaining_cfg = self.window_cfg[remaining_candidates]
+            configs = sorted(remaining_cfg.unique().tolist())
             # When a label occurs in more configurations than the active-window budget, assigning
             # the remainder to sorted config ids would permanently exclude later datasets/streams.
             # Randomize only the quota order; the supplied generator keeps the roster reproducible.
@@ -224,14 +281,23 @@ class PatchTable:
                 quota = base + int(position < extra)
                 if quota == 0:
                     continue
-                cfg_windows = remaining_candidates[
-                    self.window_cfg[remaining_candidates].eq(config)
-                ]
+                cfg_windows = remaining_candidates[remaining_cfg.eq(config)]
                 # Temper large subjects by drawing subject round-robin within a configuration.
-                subject_buckets = {}
-                for subject in self.window_subj[cfg_windows].unique().tolist():
-                    values = cfg_windows[self.window_subj[cfg_windows].eq(subject)].numpy()
-                    subject_buckets[int(subject)] = list(rng.permutation(values))
+                # Grouped with one stable sort rather than a mask per subject; `unique` is ascending
+                # and the sort is stable, so each bucket holds the same windows in the same order
+                # and `rng.permutation` is called on identical arrays in identical sequence.
+                cfg_subj = self.window_subj[cfg_windows]
+                bucket_order = torch.argsort(cfg_subj, stable=True)
+                bucket_subj = cfg_subj[bucket_order]
+                bucket_windows = cfg_windows[bucket_order].numpy()
+                values, counts = torch.unique_consecutive(bucket_subj, return_counts=True)
+                edges = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(0)])
+                subject_buckets = {
+                    int(subject): list(
+                        rng.permutation(bucket_windows[int(edges[i]):int(edges[i + 1])])
+                    )
+                    for i, subject in enumerate(values.tolist())
+                }
                 cfg_pick = []
                 while len(cfg_pick) < quota and any(subject_buckets.values()):
                     for subject in sorted(subject_buckets):
@@ -531,8 +597,18 @@ def support_capacity_by_label(
     labels = torch.as_tensor(patch["y"])[rows].long()
     units = _support_units(patch, rows, torch.device("cpu"))
     capacity = torch.zeros(n_labels, dtype=torch.long)
-    for label in torch.unique(labels).tolist():
-        capacity[int(label)] = torch.unique(units[labels.eq(label)]).numel()
+    if not len(labels):
+        return capacity
+    # Count distinct (label, unit) pairs in one pass instead of rescanning the whole active index
+    # once per label. The pair is packed into a single integer rather than using
+    # `torch.unique(..., dim=0)`, which sorts row-wise and measured 5.6x *slower* than the per-label
+    # loop it would replace. Labels and units are both non-negative ids, so the packing is injective.
+    stride = int(units.max()) + 1
+    distinct = torch.unique(labels * stride + units)
+    capacity.index_add_(
+        0, torch.div(distinct, stride, rounding_mode="floor"),
+        torch.ones(len(distinct), dtype=torch.long),
+    )
     return capacity
 
 

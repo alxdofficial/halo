@@ -260,6 +260,7 @@ class RelationalEvidenceDecoder(nn.Module):
         ev_slot,              # (B, M) long    index into slot_ids (C+L == unbound)
         ev_support_mask,      # (B, M) bool    declared support rather than retrieved background
         ev_score=None,        # (B, M) float   differentiable retrieval similarity for this row
+        score_temperature=None, # scalar training override; deployment uses cfg.score_temperature
         q_time=None,          # (B, P)  window-relative seconds
         ev_time=None,         # (B, M)
         q_group=None,         # (B, P) long    source-window group ids (randomised per episode)
@@ -367,6 +368,12 @@ class RelationalEvidenceDecoder(nn.Module):
                   + self._component("relation", relation))
         if ev_score is not None and tuple(ev_score.shape) != (B, M):
             raise ValueError(f"ev_score must have shape {(B, M)}, got {tuple(ev_score.shape)}")
+        score_temperature = (
+            self.cfg.score_temperature
+            if score_temperature is None else float(score_temperature)
+        )
+        if score_temperature <= 0:
+            raise ValueError("score_temperature must be positive")
 
         x = self.in_ln(torch.cat([cand_tok, label_tok, q_tok, ev_tok], dim=1))
         # Candidates are always valid keys, so no row can be fully padded and the softmax is safe.
@@ -381,7 +388,7 @@ class RelationalEvidenceDecoder(nn.Module):
         # module docstring.
         ev_bias = (
             relative_evidence_attention_bias(
-                ev_score.to(x.dtype), ev_mask, self.cfg.score_temperature
+                ev_score.to(x.dtype), ev_mask, score_temperature
             ) if ev_score is not None
             else torch.zeros(B, M, dtype=x.dtype, device=device)
         )

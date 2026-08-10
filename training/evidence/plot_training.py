@@ -59,6 +59,13 @@ def render(telemetry_dir: Path, output: Path | None = None) -> Path:
     if stage == "predictor":
         _line(axes[0, 0], _series(rows, "loss_over_random"), "CE / random CE")
         _line(axes[0, 0], _series(rows, "chance_normalized_train_accuracy"), "chance-normalized acc")
+        for name, label in (
+            ("semantic_k0", "CE: k=0"),
+            ("partial_unenrolled", "CE: unenrolled"),
+            ("coherent_enrolled", "CE: enrolled"),
+            ("alias_enrolled", "CE: alias"),
+        ):
+            _line(axes[0, 0], _series(rows, f"query_group_loss/{name}"), label)
         axes[0, 0].set_title("Training objective")
         for key, label in (
             ("decoder_grad_norm", "decoder"), ("retriever_grad_norm", "retriever"),
@@ -92,6 +99,9 @@ def render(telemetry_dir: Path, output: Path | None = None) -> Path:
             ("macro_cell_ba", "held-out"), ("identity_macro_cell_ba", "identity"),
             ("train_macro_cell_ba", "matched train"),
             ("random_alias_ba", "random alias"),
+            ("support_k0_macro_cell_ba", "k=0"),
+            ("support_k0_identity_macro_cell_ba", "k=0 identity"),
+            ("zero_support_guard_floor", "k=0 guard"),
         ):
             _line(axes[1, 1], _validation_series(rows, key), label, marker="o")
         axes[1, 1].set_title("Fixed canaries")

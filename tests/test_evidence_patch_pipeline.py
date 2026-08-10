@@ -35,14 +35,17 @@ from training.evidence.policy import (
 from training.evidence.live_encoder import PatchViewSpec, SourcePatchEncoder
 from training.tokenizer.eval_transfer import encode_dataset_detailed
 from training.evidence.train_patch_decoder import (
+    AdaptationEpisodeSpec,
     EpisodeCurriculum,
     _episode_view_specs,
+    checkpoint_is_better,
     family_holdout_labels,
     load_activity_families,
     milestone_checkpoint_path,
     parameter_gradient_norm,
     phase_b_source_fingerprint,
     prepare_support_feasible_query_pool,
+    query_loss_group_ids,
     sample_queries,
     sample_queries_covering_labels,
     structured_fingerprint,
@@ -396,7 +399,10 @@ def test_episode_curriculum_covers_every_condition_it_is_evaluated_on():
     off-distribution on the very cells it is scored on.
     """
     curriculum = EpisodeCurriculum(np.random.default_rng(4))
-    specs = [spec for _ in range(200) for spec in curriculum.sample_batch(8)]
+    specs = [
+        spec for step in range(1, 201)
+        for spec in curriculum.sample_batch(8, step=step, total_steps=200)
+    ]
 
     assert set(spec.episode_type for spec in specs) == set(EPISODE_TYPES)
     assert set(spec.physical_view_mode for spec in specs) == set(PHYSICAL_VIEW_MODES)
@@ -411,9 +417,12 @@ def test_episode_curriculum_covers_every_condition_it_is_evaluated_on():
 
 def test_episode_curriculum_invariants_hold_for_every_sampled_episode():
     """The three conditions that make an episode answerable at all."""
+    curriculum = EpisodeCurriculum(np.random.default_rng(9))
     specs = [
         spec for _ in range(200)
-        for spec in EpisodeCurriculum(np.random.default_rng(9)).sample_batch(8)
+        for spec in curriculum.sample_batch(
+            8, step=150, total_steps=200
+        )
     ]
     for spec in specs:
         if spec.episode_type == "semantic_zero_support":
@@ -435,6 +444,44 @@ def test_episode_curriculum_is_deterministic_and_takes_any_positive_batch():
     assert len(EpisodeCurriculum(np.random.default_rng(1)).sample_batch(6)) == 6
     with pytest.raises(ValueError, match="positive"):
         EpisodeCurriculum(np.random.default_rng(1)).sample_batch(0)
+
+
+def test_curriculum_builds_one_exact_counterfactual_pair_and_stages_difficulty():
+    curriculum = EpisodeCurriculum(np.random.default_rng(31))
+    early = curriculum.sample_batch(8, step=1, total_steps=100)
+    middle = curriculum.sample_batch(8, step=40, total_steps=100)
+    late = curriculum.sample_batch(8, step=100, total_steps=100)
+
+    for specs in (early, middle, late):
+        paired = [spec for spec in specs if spec.counterfactual_pair_id == 0]
+        assert {spec.counterfactual_role for spec in paired} == {"support", "zero"}
+        support = next(spec for spec in paired if spec.counterfactual_role == "support")
+        zero = next(spec for spec in paired if spec.counterfactual_role == "zero")
+        assert support.candidate_count == zero.candidate_count
+        assert support.physical_view_mode == zero.physical_view_mode
+        assert support.label_mode == zero.label_mode == "coherent"
+        assert support.partially_enrolled and zero.support_count == 0
+        assert any(spec.label_mode == "random_alias" for spec in specs)
+
+    assert all(2 <= spec.candidate_count <= 4 for spec in early)
+    assert all(4 <= spec.candidate_count <= 8 for spec in middle)
+    assert all(2 <= spec.candidate_count <= 16 for spec in late)
+    assert {spec.distractor_hard_fraction for spec in early} == {0.25}
+    assert {spec.distractor_hard_fraction for spec in middle} == {0.5}
+    assert {spec.distractor_hard_fraction for spec in late} == {0.75}
+
+
+def test_query_loss_groups_separate_zero_unenrolled_enrolled_and_alias_rows():
+    zero = AdaptationEpisodeSpec("semantic_zero_support", 0, 4, "coherent")
+    coherent = AdaptationEpisodeSpec(
+        "ordinary_few_support", 2, 4, "coherent", enrolled_candidate_count=2
+    )
+    alias = AdaptationEpisodeSpec("ordinary_few_support", 2, 4, "random_alias")
+    assert query_loss_group_ids(zero, torch.tensor([0, 0])).tolist() == [0, 0]
+    assert query_loss_group_ids(coherent, torch.tensor([0, 2, 0, 2])).tolist() == [1, 2, 1, 2]
+    assert query_loss_group_ids(alias, torch.tensor([2, 2])).tolist() == [3, 3]
+    with pytest.raises(ValueError, match="must all carry"):
+        query_loss_group_ids(alias, torch.tensor([2, 0]))
 
 
 def test_partial_episode_query_draw_covers_enrolled_and_unenrolled_sides():
@@ -1219,7 +1266,10 @@ def test_curriculum_only_mixes_overlap_where_it_is_answerable():
     )
 
     curriculum = EpisodeCurriculum(np.random.default_rng(0))
-    specs = [spec for _ in range(250) for spec in curriculum.sample_batch(8)]
+    specs = [
+        spec for step in range(1, 251)
+        for spec in curriculum.sample_batch(8, step=step, total_steps=250)
+    ]
     mixed = [s for s in specs if s.partially_enrolled]
     # Partial enrollment used to be an exact 1-in-4 stratum. It is now the outcome of three
     # independent draws (supported, coherent, and fewer candidates enrolled than exist), so it is
@@ -1252,3 +1302,42 @@ def test_decoder_score_temperature_matches_the_retrieval_temperature():
     from training.evidence.policy import RETRIEVAL_TEMPERATURE
 
     assert RelationalDecoderConfig().score_temperature == RETRIEVAL_TEMPERATURE
+
+
+def test_training_retrieval_curriculum_converges_exactly_to_deployment_recipe():
+    from training.evidence.policy import (
+        RETRIEVAL_EXPLORATION_BUDGET_MULTIPLIER,
+        RETRIEVAL_EXPLORATION_TEMPERATURE,
+        RETRIEVAL_TEMPERATURE,
+    )
+
+    policy = PhaseBPolicy(evidence_budget=64)
+    initial_budget, initial_temperature = policy.training_retrieval(1, 3000)
+    final_budget, final_temperature = policy.training_retrieval(3000, 3000)
+    assert initial_budget == 64 * RETRIEVAL_EXPLORATION_BUDGET_MULTIPLIER
+    assert initial_temperature == RETRIEVAL_EXPLORATION_TEMPERATURE
+    assert final_budget == policy.evidence_budget
+    assert final_temperature == pytest.approx(RETRIEVAL_TEMPERATURE)
+
+
+def test_checkpoint_selection_never_promotes_a_zero_support_guard_failure():
+    fallback = {
+        "zero_support_guard_pass": False,
+        "adaptation_selection_score": 0.1,
+    }
+    failed_but_higher = {
+        "zero_support_guard_pass": False,
+        "adaptation_selection_score": 0.9,
+    }
+    eligible = {
+        "zero_support_guard_pass": True,
+        "adaptation_selection_score": 0.2,
+    }
+    better_eligible = {
+        "zero_support_guard_pass": True,
+        "adaptation_selection_score": 0.3,
+    }
+    assert not checkpoint_is_better(failed_but_higher, fallback)
+    assert checkpoint_is_better(eligible, fallback)
+    assert checkpoint_is_better(better_eligible, eligible)
+    assert not checkpoint_is_better(eligible, better_eligible)

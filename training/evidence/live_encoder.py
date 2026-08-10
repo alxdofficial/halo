@@ -173,15 +173,27 @@ class SourcePatchEncoder:
             counts = torch.bincount(encoded_parent, minlength=len(local_keys))
             offsets = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(0)])
             global_to_cfg_local = {key_i: position for position, key_i in enumerate(local_keys)}
-            for request_i, key_i in enumerate(occurrence_key):
-                if key_i not in global_to_cfg_local:
-                    continue
-                local_window = global_to_cfg_local[key_i]
-                patch_ordinal = int(ordinal[request_i])
-                if patch_ordinal >= int(counts[local_window]):
-                    raise RuntimeError(f"{cfg_name}: augmented patch layout differs from the bank")
-                encoded_row = order[int(offsets[local_window]) + patch_ordinal]
-                vectors[request_i] = encoded["patch_Z"][encoded_row.to(encoded["patch_Z"].device)]
+            # One gather, not one per patch. The row-at-a-time form issued a host->device copy and a
+            # separate index op for every requested occurrence, so a single episode paid hundreds of
+            # tiny transfers; the selected rows and their order are unchanged.
+            wanted = torch.as_tensor(
+                [index for index, key_i in enumerate(occurrence_key)
+                 if key_i in global_to_cfg_local],
+                dtype=torch.long,
+            )
+            if not len(wanted):
+                continue
+            local_window = torch.as_tensor(
+                [global_to_cfg_local[occurrence_key[int(index)]] for index in wanted],
+                dtype=torch.long,
+            )
+            patch_ordinal = ordinal[wanted]
+            if bool((patch_ordinal >= counts[local_window]).any()):
+                raise RuntimeError(f"{cfg_name}: augmented patch layout differs from the bank")
+            encoded_rows = order[offsets[local_window] + patch_ordinal]
+            gathered = encoded["patch_Z"][encoded_rows.to(encoded["patch_Z"].device)]
+            for position, request_i in enumerate(wanted.tolist()):
+                vectors[request_i] = gathered[position]
         if any(value is None for value in vectors):
             raise RuntimeError("failed to encode every augmented Phase-B patch occurrence")
         return torch.stack(vectors)  # type: ignore[arg-type]

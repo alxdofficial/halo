@@ -11,7 +11,12 @@ from dataclasses import asdict, dataclass
 # of unrelated one-off patches.
 ARCHIVE_BUDGET_WINDOWS = 250_000
 ACTIVE_WINDOWS_PER_LABEL = 16
-ACTIVE_REFRESH_STEPS = 100
+# How often the retrievable memory bank is redrawn from the reservoir. At 100 a 3000-step run only
+# ever made ~13% of the 248k-window reservoir reachable — the rest was encoded, stored and never
+# retrievable. At 5 that becomes ~71%. The cadence used to be pinned by cost: redrawing took ~300 ms
+# because the sampler rescanned every window once per label. That scan is now precomputed, so a
+# refresh costs ~88 ms and the whole cadence adds ~26 s to a ~40 min run.
+ACTIVE_REFRESH_STEPS = 5
 RETRIEVAL_SUBSPACES = 4
 RETRIEVAL_SUBSPACE_DIM = 64
 RETRIEVAL_PROJECTION_EMA = 0.995
@@ -20,12 +25,25 @@ RETRIEVAL_OVERSAMPLE = 8
 MIN_TOPK_PER_SUBSPACE = 4
 MAX_TOPK_PER_SUBSPACE = 32
 
+# Training begins by exposing more of the already-retrieved hard shortlist to the differentiable
+# evidence decoder.  Both values anneal to the exact deployment recipe over the first third of the
+# run; validation and inference always use the deployment values above.  This gives plausible rows
+# outside the eventual evidence roster a gradient early on without introducing full-bank soft
+# retrieval or a train-time candidate-conditioned selector.
+RETRIEVAL_EXPLORATION_FRACTION = 1 / 3
+RETRIEVAL_EXPLORATION_BUDGET_MULTIPLIER = 4
+RETRIEVAL_EXPLORATION_TEMPERATURE = 0.20
+
+# Zero-support checkpoint selection is a guardrail around the adaptation objective. Fixed canaries
+# are deterministic, but one percentage point avoids rejecting a checkpoint over tiny floating-point
+# and stochastic-kernel differences while still preventing a meaningful semantic-transfer collapse.
+ZERO_SUPPORT_GUARD_TOLERANCE = 0.01
+
 # The adaptation conditions. These exist because `eval_enrollment` reports them: training has to
 # cover the conditions we evaluate on or the model is off-distribution at test time. They are
-# sampled uniformly per episode, NOT scheduled — an earlier revision cycled a shuffled copy of the
-# tuple for exact long-run 25% coverage, which forced `episodes_per_step` to be a multiple of four
-# and bought nothing at the 3,000-step default, where every condition is still sampled hundreds of
-# times.
+# sampled independently outside one load-bearing counterfactual support/zero pair and one guaranteed
+# alias episode per optimizer step. The independently sampled remainder retains broad stochastic
+# coverage while those anchors ensure every balanced loss group is present.
 EPISODE_TYPES = (
     "semantic_zero_support",
     "ordinary_few_support",
@@ -46,9 +64,10 @@ CANDIDATE_COUNT_RANGE = (2, 16)
 VALIDATION_SUPPORT_COUNTS = (1, 2, 4, 8)
 VALIDATION_CANDIDATE_COUNTS = (2, 3, 4, 8, 12, 16)
 
-# One optimizer update is an intentionally small collection of independent adaptation tasks.  These
+# One optimizer update is an intentionally small collection of adaptation tasks. These
 # two values describe compute shape, not model behavior: every episode below gets its own candidate
-# set, support overlay, aliases, distractors, physical view, and query executions.  Keeping them as
+# set, support overlay, aliases, distractors, physical view, and query executions, except for the
+# deliberately matched support/zero counterfactual pair. Keeping them as
 # named recipe constants prevents the old ambiguous `batch` from being mistaken for episode count.
 EPISODES_PER_STEP = 8
 QUERIES_PER_EPISODE = 8
@@ -83,7 +102,7 @@ PHASE_B_TEST_DATASETS = ("inclusivehar", "usc_had", "tnda_har", "ut_complex")
 
 # Artifact guard for the complete predictor recipe. Bump this whenever a behavioral training path
 # changes even if the decoder parameter schema stays compatible.
-PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_v14_balanced_token_components"
+PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_v17_k0_credit_wider_reservoir"
 
 # Evaluation artifacts are independently versioned from training artifacts. A training-only change
 # must not invalidate a held-out protocol, while a cohort/scoring/runtime-memory change must never
@@ -118,6 +137,28 @@ class PhaseBPolicy:
         )
         return max(MIN_TOPK_PER_SUBSPACE, min(MAX_TOPK_PER_SUBSPACE, raw))
 
+    def training_retrieval(self, step: int, total_steps: int) -> tuple[int, float]:
+        """Return the training evidence budget and score temperature for this optimizer step.
+
+        The selector still performs the same hard query-driven top-k lookup. Only the number of
+        unique retrieved rows shown to the decoder, and the softness of their relative attention
+        prior, differ during the early credit-assignment curriculum.
+        """
+        if step < 1 or total_steps < 1:
+            raise ValueError("step and total_steps must be positive")
+        anneal_steps = max(1, math.ceil(total_steps * RETRIEVAL_EXPLORATION_FRACTION))
+        progress = min(1.0, max(0.0, (step - 1) / max(1, anneal_steps - 1)))
+        multiplier = (
+            RETRIEVAL_EXPLORATION_BUDGET_MULTIPLIER
+            + (1.0 - RETRIEVAL_EXPLORATION_BUDGET_MULTIPLIER) * progress
+        )
+        budget = max(self.evidence_budget, int(round(self.evidence_budget * multiplier)))
+        temperature = (
+            RETRIEVAL_EXPLORATION_TEMPERATURE
+            + (RETRIEVAL_TEMPERATURE - RETRIEVAL_EXPLORATION_TEMPERATURE) * progress
+        )
+        return budget, float(temperature)
+
     def as_dict(self, *, query_patches: int | None = None) -> dict:
         value = asdict(self)
         value.update({
@@ -129,6 +170,12 @@ class PhaseBPolicy:
             "max_evidence": self.evidence_budget,
             "tau_retr": RETRIEVAL_TEMPERATURE,
             "dynamic_topk_range": [MIN_TOPK_PER_SUBSPACE, MAX_TOPK_PER_SUBSPACE],
+            "training_retrieval_curriculum": {
+                "anneal_fraction": RETRIEVAL_EXPLORATION_FRACTION,
+                "initial_budget_multiplier": RETRIEVAL_EXPLORATION_BUDGET_MULTIPLIER,
+                "initial_temperature": RETRIEVAL_EXPLORATION_TEMPERATURE,
+                "final_temperature": RETRIEVAL_TEMPERATURE,
+            },
         })
         if query_patches is not None:
             value["topk_per_subspace"] = self.topk_per_subspace(query_patches)
