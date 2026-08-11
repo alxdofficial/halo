@@ -88,6 +88,10 @@ class SourcePatchEncoder:
         raw = np.asarray(self.data[key][source_row], dtype=np.float32).copy()
         if spec.subject_style is not None:
             raw = apply_subject_style(raw, float(ref.rate_hz), ref.mask, spec.subject_style)
+        return self._apply_generic_view(raw, ref, spec)
+
+    def _apply_generic_view(self, raw: np.ndarray, ref, spec: PatchViewSpec) -> np.ndarray:
+        """Apply the occurrence-local generic transform after any shared subject transform."""
         if spec.generic_seed is None:
             return raw
         role_text, sensor_text, sensor_id = stream_sensor_texts(
@@ -113,6 +117,31 @@ class SourcePatchEncoder:
             raise RuntimeError("Phase-B generic augmentation changed source patch layout")
         sample.data[:, ~torch.as_tensor(ref.mask, dtype=torch.bool)] = 0.0
         return sample.data.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def _view_windows(
+        self,
+        cfg_id: int,
+        keys: list[tuple[int, PatchViewSpec]],
+    ) -> np.ndarray:
+        """Materialize equal-stream views, batching windows that share one virtual subject."""
+        key = self.cfg_names[int(cfg_id)]
+        ref = self.refs[key]
+        source_row = torch.as_tensor(self.bank["source_row"])
+        rows = [int(source_row[parent]) for parent, _spec in keys]
+        windows = np.asarray(self.data[key][rows], dtype=np.float32).copy()
+
+        by_style: dict[SubjectStyle, list[int]] = {}
+        for position, (_parent, spec) in enumerate(keys):
+            if spec.subject_style is not None:
+                by_style.setdefault(spec.subject_style, []).append(position)
+        for style, positions in by_style.items():
+            windows[positions] = apply_subject_style(
+                windows[positions], float(ref.rate_hz), ref.mask, style
+            )
+
+        for position, (_parent, spec) in enumerate(keys):
+            windows[position] = self._apply_generic_view(windows[position], ref, spec)
+        return windows
 
     def encode_patch_rows_with_views(
         self,
@@ -151,10 +180,7 @@ class SourcePatchEncoder:
             local_keys = torch.nonzero(key_cfg.eq(cfg_id), as_tuple=True)[0].tolist()
             cfg_name = self.cfg_names[int(cfg_id)]
             ref = self.refs[cfg_name]
-            windows = np.stack([
-                self._view_window(cfg_id, keys[key_i][0], keys[key_i][1])
-                for key_i in local_keys
-            ])
+            windows = self._view_windows(cfg_id, [keys[key_i] for key_i in local_keys])
             encoded = encode_dataset_detailed(
                 encoder,
                 windows,
@@ -290,6 +316,20 @@ class SourcePatchEncoder:
             raise ValueError("one query view is required for each episode batch row")
         if bool((query.row[query.mask] < 0).any()):
             raise ValueError("external queries cannot be physically augmented from this bank")
+        occurrence_specs = self.query_occurrence_view_specs(query, view_specs)
+        live = self.encode_patch_rows_with_views(
+            query.row[query.mask], occurrence_specs, encoder, requires_grad=requires_grad
+        )
+        return self.query_with_embeddings(query, live)
+
+    @staticmethod
+    def query_occurrence_view_specs(
+        query: QueryPatches,
+        view_specs: list[PatchViewSpec],
+    ) -> list[PatchViewSpec]:
+        """Expand one execution-level view into one deterministic spec per patch occurrence."""
+        if len(view_specs) != query.Z.shape[0]:
+            raise ValueError("one query view is required for each episode batch row")
         occurrence_specs = []
         for batch_row, spec in enumerate(view_specs):
             active_windows = query.window[batch_row, query.mask[batch_row]].detach().cpu().tolist()
@@ -298,9 +338,17 @@ class SourcePatchEncoder:
                     int(spec.generic_seed) + 1_000_003 * int(source_window)
                 ) % (2**31 - 1)
                 occurrence_specs.append(PatchViewSpec(spec.subject_style, seed))
-        live = self.encode_patch_rows_with_views(
-            query.row[query.mask], occurrence_specs, encoder, requires_grad=requires_grad
-        )
+        return occurrence_specs
+
+    @staticmethod
+    def query_with_embeddings(query: QueryPatches, live: torch.Tensor) -> QueryPatches:
+        """Replace valid query-patch vectors without changing any structural metadata."""
+        expected = int(query.mask.sum())
+        if live.dim() != 2 or len(live) != expected or live.shape[1] != query.Z.shape[-1]:
+            raise ValueError(
+                f"live query embeddings must have shape {(expected, query.Z.shape[-1])}, "
+                f"got {tuple(live.shape)}"
+            )
         z = query.Z.new_zeros(query.Z.shape)
         z = z.masked_scatter(query.mask.unsqueeze(-1).expand_as(z), live.reshape(-1))
         return replace(query, Z=z)

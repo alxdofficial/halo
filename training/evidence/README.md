@@ -70,6 +70,16 @@ For a measured compute-shape experiment, use the explicit names
 `--episodes-per-step` and `--queries-per-episode`; any positive count is accepted. There is no
 ambiguous predictor `--batch` argument.
 
+On the project RTX 4090, the frozen-tokenizer recipe measures about 0.35 seconds per optimizer step
+and 3.35 seconds per complete 48-base-canary validation, projecting the default 3,000-step run to
+roughly 18.5-19 minutes including validation. Augmented query/support views remain episode-specific,
+but each optimizer step groups their frozen-tokenizer encoding by stream so the GPU receives useful
+batches. Fixed validation views cache only their frozen Phase-A embeddings; each validation still
+rebuilds the current learned retrieval projection and reruns every decoder/control prediction.
+Detailed attention and retrieval-credit diagnostics are sampled every 100 steps or when the
+one-minute telemetry interval or validation is due; objective and curriculum-health metrics remain
+continuous.
+
 Retrieval K is derived from that budget. At deployment the final roster contains the highest-scoring unique rows
 across query patches and learned subspaces; no label or window cap changes the ranking. Candidate
 labels are task input. Each normal optimizer step anchors one exact coherent support/zero-support
@@ -183,5 +193,5 @@ python -m training.evidence.train_patch_decoder --device cuda \
 ```
 
 Fine-tuning starts after a fixed decoder warm-up so the relational decoder first develops a
-nontrivial physical path. The active EMA key view is fully refreshed on the normal 100-step memory
+nontrivial physical path. The active EMA key view is fully refreshed on the normal 5-step memory
 cadence. Inference uses the saved EMA tokenizer.

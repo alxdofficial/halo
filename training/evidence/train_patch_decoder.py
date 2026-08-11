@@ -103,7 +103,7 @@ SEED = 20260725
 # Gradient decomposition retains the current episode graph, so sample it periodically rather than on
 # every optimizer update. The fixed cadence also prevents an end-of-step heartbeat from repeatedly
 # firing just before the following step has a chance to observe that telemetry is due.
-RETRIEVAL_DIAGNOSTIC_STEPS = 25
+RETRIEVAL_DIAGNOSTIC_STEPS = 100
 QUERY_LOSS_GROUPS = (
     "semantic_k0",
     "partial_unenrolled",
@@ -852,6 +852,52 @@ _ACTIVE_SUPPORT_UNITS_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
 _ACTIVE_SUPPORT_UNITS_CACHE_SIZE = 4
 
 
+class QuerySupportPool:
+    """CPU grouping of an immutable query pool by label and subject-support identity."""
+
+    __slots__ = ("pool", "by_label")
+
+    def __init__(self, bank: dict, pool: torch.Tensor, unit_offset: int):
+        pool_host = pool.detach().cpu().long()
+        window_y = torch.as_tensor(bank["y"], dtype=torch.long)
+        window_subj = torch.as_tensor(bank["subj"], dtype=torch.long)
+        window_event = torch.as_tensor(bank["event"], dtype=torch.long)
+        window_verified = torch.as_tensor(bank["event_verified"], dtype=torch.bool)
+        pool_unit = torch.where(
+            window_verified[pool_host], window_event[pool_host] + unit_offset, pool_host
+        )
+        pool_y = window_y[pool_host]
+        pool_subj = window_subj[pool_host]
+        self.pool = pool
+        self.by_label: dict[int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        order = torch.argsort(pool_y, stable=True)
+        labels, counts = torch.unique_consecutive(pool_y[order], return_counts=True)
+        offsets = torch.cat([torch.zeros(1, dtype=torch.long), counts.cumsum(0)])
+        for position, label in enumerate(labels.tolist()):
+            member = order[int(offsets[position]):int(offsets[position + 1])]
+            self.by_label[int(label)] = (
+                pool_host[member], pool_subj[member], pool_unit[member]
+            )
+
+
+_QUERY_SUPPORT_POOL_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_QUERY_SUPPORT_POOL_CACHE_SIZE = 8
+
+
+def query_support_pool(bank: dict, pool: torch.Tensor, unit_offset: int) -> QuerySupportPool:
+    """Return immutable host-side query groupings without copying the full pool every episode."""
+    key = (id(bank), pool.device.type, int(pool.data_ptr()), int(pool.numel()), unit_offset)
+    cached = _QUERY_SUPPORT_POOL_CACHE.get(key)
+    if cached is not None and cached[1].pool is pool:
+        _QUERY_SUPPORT_POOL_CACHE.move_to_end(key)
+        return cached[1]
+    grouped = QuerySupportPool(bank, pool, unit_offset)
+    _QUERY_SUPPORT_POOL_CACHE[key] = (bank, grouped)
+    while len(_QUERY_SUPPORT_POOL_CACHE) > _QUERY_SUPPORT_POOL_CACHE_SIZE:
+        _QUERY_SUPPORT_POOL_CACHE.popitem(last=False)
+    return grouped
+
+
 def active_support_units(bank: dict, index_rows: torch.Tensor) -> tuple[int, ActiveSupportUnits]:
     """Return ``(unit_offset, tables)`` for this active index, rebuilding only when it changes."""
     rows = index_rows.detach().cpu().long()
@@ -901,29 +947,15 @@ def prepare_support_feasible_query_pool(
     device = pool.device
     # Host-side index bookkeeping, memoized on the active index — see `active_support_units`.
     unit_offset, active_units = active_support_units(bank, index_rows)
-
-    # The pool side is also pure index bookkeeping, so it stays on the host for the same reason:
-    # every `.tolist()` on a CUDA tensor is a synchronization, and this loop does one per label.
-    # Only the two returned tensors are moved back to `device`.
-    pool_host = pool.detach().cpu().long()
-    window_y = torch.as_tensor(bank["y"], dtype=torch.long)
-    window_subj = torch.as_tensor(bank["subj"], dtype=torch.long)
-    window_event = torch.as_tensor(bank["event"], dtype=torch.long)
-    window_verified = torch.as_tensor(bank["event_verified"], dtype=torch.bool)
-    pool_unit = torch.where(
-        window_verified[pool_host], window_event[pool_host] + unit_offset, pool_host
-    )
-    pool_y = window_y[pool_host]
-    pool_subj = window_subj[pool_host]
+    grouped_pool = query_support_pool(bank, pool, unit_offset)
 
     feasible_labels = []
     query_parts = []
     for label in labels.tolist():
-        label_pool_mask = pool_y.eq(label)
-        label_pool = pool_host[label_pool_mask]
-        if not len(label_pool):
+        grouped = grouped_pool.by_label.get(int(label))
+        if grouped is None:
             continue
-        label_pool_subj = pool_subj[label_pool_mask]
+        label_pool, label_pool_subj, label_pool_units = grouped
         if episode_type == "cross_subject_few_support":
             viable_subjects = []
             for subject in torch.unique(label_pool_subj).tolist():
@@ -935,7 +967,6 @@ def prepare_support_feasible_query_pool(
             query_part = label_pool[label_pool_subj.eq(query_subject)]
         elif episode_type == "same_subject_enrollment":
             viable = []
-            label_pool_units = pool_unit[label_pool_mask]
             for subject in torch.unique(label_pool_subj).tolist():
                 subject_mask = label_pool_subj.eq(subject)
                 subject_pool = label_pool[subject_mask]
@@ -962,7 +993,7 @@ def prepare_support_feasible_query_pool(
                 rng.choice(units, size=support_count, replace=False),
                 dtype=torch.long,
             )
-            query_part = label_pool[~torch.isin(pool_unit[label_pool_mask], reserved)]
+            query_part = label_pool[~torch.isin(label_pool_units, reserved)]
         if len(query_part):
             feasible_labels.append(label)
             query_parts.append(query_part)
@@ -973,6 +1004,63 @@ def prepare_support_feasible_query_pool(
         torch.tensor(feasible_labels, device=device, dtype=torch.long),
         torch.cat(query_parts).to(device=device, dtype=pool.dtype),
     )
+
+
+def support_feasible_labels(
+    pool: torch.Tensor,
+    index_rows: torch.Tensor,
+    bank: dict,
+    labels: torch.Tensor,
+    *,
+    support_count: int,
+    episode_type: str,
+) -> torch.Tensor:
+    """Filter labels by whether at least one valid support/query split exists.
+
+    Unlike ``prepare_support_feasible_query_pool``, this predicate consumes no RNG and constructs no
+    episode query pool. Candidate selection uses it once; the randomized support reservation is then
+    performed exactly once for the selected candidates.
+    """
+    if support_count == 0:
+        return labels
+    unit_offset, active_units = active_support_units(bank, index_rows)
+    grouped_pool = query_support_pool(bank, pool, unit_offset)
+    feasible = []
+    for label in labels.detach().cpu().tolist():
+        grouped = grouped_pool.by_label.get(int(label))
+        if grouped is None:
+            continue
+        _rows, subjects, units = grouped
+        if episode_type == "cross_subject_few_support":
+            valid = any(
+                active_units.count_excluding_subject(label, subject) >= support_count
+                for subject in torch.unique(subjects).tolist()
+            )
+        elif episode_type == "same_subject_enrollment":
+            valid = False
+            for subject in torch.unique(subjects).tolist():
+                member = subjects.eq(subject)
+                support_units = active_units.for_label_subject(label, subject)
+                query_units = torch.unique(units[member]).numpy()
+                if len(support_units) >= support_count and (
+                    len(support_units) > support_count
+                    or bool(np.isin(query_units, support_units, invert=True).any())
+                ):
+                    valid = True
+                    break
+        else:
+            support_units = active_units.for_label(label)
+            query_units = torch.unique(units).numpy()
+            valid = (
+                len(support_units) >= support_count
+                and (
+                    len(support_units) > support_count
+                    or bool(np.isin(query_units, support_units, invert=True).any())
+                )
+            )
+        if valid:
+            feasible.append(int(label))
+    return torch.tensor(feasible, dtype=torch.long, device=labels.device)
 
 
 def physical_label_centroids(Z: torch.Tensor, y: torch.Tensor, n_vocab: int) -> torch.Tensor:
@@ -1187,6 +1275,8 @@ def prepare_adaptation_views(
     physical_view_mode: str = "augmented",
     reuse_stored_clean: bool = False,
     view_specs: tuple[list[PatchViewSpec], list[PatchViewSpec]] | None = None,
+    encoded_query: torch.Tensor | None = None,
+    encoded_support: torch.Tensor | None = None,
 ):
     """Create episode-specific query/support vectors and selector keys."""
     if live_source is None:
@@ -1203,8 +1293,12 @@ def prepare_adaptation_views(
     )
     if len(query_specs) != query.Z.shape[0] or len(support_specs) != len(view.support_rows):
         raise ValueError("precomputed physical-view specs do not align with query/support rows")
-    selector_query = live_source.reencode_query_views(
-        query, selector_encoder, query_specs, requires_grad=False
+    selector_query = (
+        live_source.reencode_query_views(
+            query, selector_encoder, query_specs, requires_grad=False
+        )
+        if encoded_query is None else
+        live_source.query_with_embeddings(query, encoded_query)
     )
     online_model = online_encoder if online_encoder is not None else selector_encoder
     online_query = live_source.reencode_query_views(
@@ -1216,8 +1310,11 @@ def prepare_adaptation_views(
     support_local = view.support_rows
     if len(support_local):
         support_global = index_rows.detach().cpu()[support_local.detach().cpu()]
-        support_selector = live_source.encode_patch_rows_with_views(
-            support_global, support_specs, selector_encoder, requires_grad=False
+        support_selector = (
+            live_source.encode_patch_rows_with_views(
+                support_global, support_specs, selector_encoder, requires_grad=False
+            )
+            if encoded_support is None else encoded_support
         )
         support_online = (
             live_source.encode_patch_rows_with_views(
@@ -1235,6 +1332,106 @@ def prepare_adaptation_views(
             0, support_local.to(memory_index.device), replacement_index
         )
     return selector_query, online_query, memory_online, selector_episode_index
+
+
+def encode_frozen_adaptation_views_batch(
+    episodes: list[tuple],
+    index_rows: torch.Tensor,
+    live_source: SourcePatchEncoder,
+    selector_encoder,
+) -> list[tuple[torch.Tensor, torch.Tensor] | None]:
+    """Encode every augmented frozen-tokenizer view in one stream-grouped pass.
+
+    Episode semantics remain independent. This only flattens the raw query/support occurrences
+    before ``SourcePatchEncoder`` groups them by acquisition stream, which turns dozens of tiny GPU
+    encoder launches into one useful batch per represented stream. Exact counterfactual-pair views
+    have identical ``(source window, PatchViewSpec)`` keys and are therefore encoded once.
+    """
+    flat_rows: list[torch.Tensor] = []
+    flat_specs: list[PatchViewSpec] = []
+    spans: dict[int, tuple[slice, slice]] = {}
+    cursor = 0
+    for episode_index, (query, view, view_specs, physical_view_mode) in enumerate(episodes):
+        if physical_view_mode == "clean":
+            continue
+        if view_specs is None:
+            raise ValueError("batched frozen views require precomputed physical-view specs")
+        query_specs, support_specs = view_specs
+        query_rows = query.row[query.mask].detach().cpu().long()
+        if bool((query_rows < 0).any()):
+            raise ValueError("external queries cannot be batched from the source bank")
+        query_occurrence_specs = live_source.query_occurrence_view_specs(query, query_specs)
+        query_slice = slice(cursor, cursor + len(query_rows))
+        cursor = query_slice.stop
+        flat_rows.append(query_rows)
+        flat_specs.extend(query_occurrence_specs)
+
+        support_local = view.support_rows.detach().cpu()
+        support_rows = index_rows.detach().cpu()[support_local].long()
+        support_slice = slice(cursor, cursor + len(support_rows))
+        cursor = support_slice.stop
+        if len(support_rows):
+            flat_rows.append(support_rows)
+            flat_specs.extend(support_specs)
+        spans[episode_index] = (query_slice, support_slice)
+
+    if not flat_rows:
+        return [None] * len(episodes)
+    rows = torch.cat(flat_rows)
+    if len(rows) != len(flat_specs):
+        raise RuntimeError("flattened Phase-B view rows and augmentation specs do not align")
+    encoded = live_source.encode_patch_rows_with_views(
+        rows, flat_specs, selector_encoder, requires_grad=False
+    )
+
+    result: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * len(episodes)
+    for episode_index in spans:
+        query_slice, support_slice = spans[episode_index]
+        result[episode_index] = (encoded[query_slice], encoded[support_slice])
+    return result
+
+
+def prepare_frozen_adaptation_views_batch(
+    episodes: list[tuple],
+    bank: dict,
+    index_rows: torch.Tensor,
+    selector_z: torch.Tensor,
+    memory_index: torch.Tensor,
+    retriever: PatchSubspaceRetriever,
+    live_source: SourcePatchEncoder,
+    selector_encoder,
+    *,
+    encoded_views: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
+) -> list[tuple | None]:
+    """Project one batched set of frozen view embeddings into episode-local memory views."""
+    if encoded_views is None:
+        encoded_views = encode_frozen_adaptation_views_batch(
+            episodes, index_rows, live_source, selector_encoder
+        )
+    if len(encoded_views) != len(episodes):
+        raise ValueError("encoded frozen views do not align with adaptation episodes")
+    result: list[tuple | None] = [None] * len(episodes)
+    for episode_index, (query, view, view_specs, physical_view_mode) in enumerate(episodes):
+        if physical_view_mode == "clean":
+            continue
+        encoded = encoded_views[episode_index]
+        if encoded is None:
+            raise ValueError("augmented episode is missing its frozen view embeddings")
+        encoded_query, encoded_support = encoded
+        result[episode_index] = prepare_adaptation_views(
+            query, view, bank, index_rows, selector_z, memory_index, retriever,
+            rng=np.random.default_rng(0),
+            live_source=live_source,
+            selector_encoder=selector_encoder,
+            online_encoder=None,
+            online_requires_grad=False,
+            physical_view_mode=physical_view_mode,
+            reuse_stored_clean=True,
+            view_specs=view_specs,
+            encoded_query=encoded_query,
+            encoded_support=encoded_support,
+        )
+    return result
 
 
 def decode_adaptation_episode(
@@ -1259,6 +1456,7 @@ def decode_adaptation_episode(
     evidence_budget: int | None = None,
     score_temperature: float | None = None,
     view_specs: tuple[list[PatchViewSpec], list[PatchViewSpec]] | None = None,
+    prepared_views: tuple | None = None,
     return_attention: bool = False,
     return_confidence_features: bool = False,
 ) -> tuple[torch.Tensor, dict]:
@@ -1274,6 +1472,7 @@ def decode_adaptation_episode(
             reuse_stored_clean=policy.tokenizer_mode == "frozen",
             view_specs=view_specs,
         )
+        if prepared_views is None else prepared_views
     )
     selector_query.Z = F.normalize(selector_query.Z, dim=-1)
     online_query.Z = F.normalize(online_query.Z, dim=-1)
@@ -1396,6 +1595,45 @@ def training_episode_telemetry(
     retrieval_score_gradient: torch.Tensor | None = None,
 ) -> tuple[dict, dict, dict]:
     """Detach one independent episode into scalar telemetry and curriculum categories."""
+    categories = {
+        "episode_type": spec.episode_type,
+        "label_mode": spec.label_mode,
+        "physical_view_mode": spec.physical_view_mode,
+        "enrollment_shape": spec.enrollment_shape,
+        "support_count": str(spec.support_count),
+        "enrolled_candidate_count": str(spec.enrolled_candidate_count),
+        "candidate_count": str(len(candidates)),
+        "counterfactual_role": spec.counterfactual_role or "independent",
+        "distractor_hard_fraction": str(spec.distractor_hard_fraction),
+        "target_position": target.detach().cpu().tolist(),
+        "synthetic_persona": composition["synthetic_persona"],
+    }
+    strata = {key: categories[key] for key in (
+        "episode_type", "label_mode", "physical_view_mode", "enrollment_shape",
+        "support_count", "candidate_count",
+    )}
+    if not detailed:
+        # Full evidence/attention telemetry is published on the minute cadence. In between, one
+        # compact transfer preserves continuous objective and curriculum health without copying
+        # several evidence tensors to the host eight times per optimizer step.
+        chance = 1.0 / len(candidates)
+        compact = torch.stack([
+            candidate_loss.detach(),
+            normalized_candidate_loss.detach(),
+            aux["hard_logits"].detach().argmax(1).eq(target).float().mean(),
+            aux["realized_true_support"].detach().float().mean(),
+        ]).cpu().tolist()
+        metrics = {
+            "candidate_loss": compact[0],
+            "loss_over_random": compact[1],
+            "loss_improvement_over_random": 1.0 - compact[1],
+            "train_accuracy": compact[2],
+            "chance_normalized_train_accuracy": (compact[2] - chance) / (1.0 - chance),
+            "episode_draw_attempts": float(draw_attempts),
+            "realized_true_support": compact[3],
+        }
+        return metrics, categories, strata
+
     with torch.no_grad():
         # Roughly twenty-five `float(...)` conversions follow, and on CUDA each one is a device
         # synchronization. Bring the tensors this function reads across once instead. Only the
@@ -1556,23 +1794,6 @@ def training_episode_telemetry(
             if overlap_values:
                 metrics["raw_subspace_topk_jaccard"] = float(np.mean(overlap_values))
 
-    categories = {
-        "episode_type": spec.episode_type,
-        "label_mode": spec.label_mode,
-        "physical_view_mode": spec.physical_view_mode,
-        "enrollment_shape": spec.enrollment_shape,
-        "support_count": str(spec.support_count),
-        "enrolled_candidate_count": str(spec.enrolled_candidate_count),
-        "candidate_count": str(len(candidates)),
-        "counterfactual_role": spec.counterfactual_role or "independent",
-        "distractor_hard_fraction": str(spec.distractor_hard_fraction),
-        "target_position": target.detach().cpu().tolist(),
-        "synthetic_persona": composition["synthetic_persona"],
-    }
-    strata = {key: categories[key] for key in (
-        "episode_type", "label_mode", "physical_view_mode", "enrollment_shape",
-        "support_count", "candidate_count",
-    )}
     return metrics, categories, strata
 
 
@@ -1824,14 +2045,13 @@ def main() -> None:
         capacity = support_capacity_by_label(bank["patch"], rows, n_vocab).to(device)
         required = spec.support_count + (0 if validation else 1)
         present = present[capacity[present] >= required]
-        present, _ = prepare_support_feasible_query_pool(
+        present = support_feasible_labels(
             pool,
             rows,
             bank,
             present,
             support_count=spec.support_count,
             episode_type=spec.episode_type,
-            rng=local_rng,
         )
         allowed_vocab = present if validation else present[
             ~torch.isin(present, heldout_labels)
@@ -2048,6 +2268,39 @@ def main() -> None:
         count=min(args.val_episodes, len(training_recipes)),
         validation=False, seed_offset=2,
     )
+    for canaries, rows in (
+        (val_specs, val_index_rows),
+        (train_canary_specs, train_canary_index_rows),
+    ):
+        for canary in canaries:
+            canary["view_specs"] = _episode_view_specs(
+                canary["query"], canary["view"], rows, bank["patch"],
+                np.random.default_rng(canary["seed"]),
+                physical_view_mode=canary["spec"].physical_view_mode,
+            )
+
+    val_encoded_views = train_canary_encoded_views = None
+    if policy.tokenizer_mode == "frozen" and live_source is not None:
+        val_encoded_views = encode_frozen_adaptation_views_batch(
+            [
+                (
+                    canary["query"], canary["view"], canary["view_specs"],
+                    canary["spec"].physical_view_mode,
+                )
+                for canary in val_specs
+            ],
+            val_index_rows, live_source, ema_encoder,
+        )
+        train_canary_encoded_views = encode_frozen_adaptation_views_batch(
+            [
+                (
+                    canary["query"], canary["view"], canary["view_specs"],
+                    canary["spec"].physical_view_mode,
+                )
+                for canary in train_canary_specs
+            ],
+            train_canary_index_rows, live_source, ema_encoder,
+        )
     current_canary_fp = structured_fingerprint({
         "validation_index_rows": val_index_rows,
         "validation_canaries": val_specs,
@@ -2093,9 +2346,25 @@ def main() -> None:
                 dim=-1,
             )
         val_memory_index = retriever.build_index(eval_selector_z)
-        for canary in val_specs:
+        val_prepared_views = None
+        if policy.tokenizer_mode == "frozen" and live_source is not None:
+            val_prepared_views = prepare_frozen_adaptation_views_batch(
+                [
+                    (
+                        canary["query"], canary["view"], canary["view_specs"],
+                        canary["spec"].physical_view_mode,
+                    )
+                    for canary in val_specs
+                ],
+                bank, val_index_rows, eval_selector_z, val_memory_index, retriever,
+                live_source, ema_encoder, encoded_views=val_encoded_views,
+            )
+        for canary_index, canary in enumerate(val_specs):
             spec = canary["spec"]
             qi, view = canary["qi"], canary["view"]
+            prepared_views = (
+                None if val_prepared_views is None else val_prepared_views[canary_index]
+            )
             logits, aux = decode_adaptation_episode(
                 dec, retriever, bank, val_index_rows, eval_selector_z, val_memory_index,
                 canary["query"], view, text, canary["candidate_text"],
@@ -2104,6 +2373,8 @@ def main() -> None:
                 live_source=live_source, selector_encoder=ema_encoder,
                 online_requires_grad=False,
                 physical_view_mode=spec.physical_view_mode,
+                view_specs=canary["view_specs"],
+                prepared_views=prepared_views,
             )
             true = y[qi]
             pred = view.candidate_ids[logits.argmax(1)]
@@ -2184,6 +2455,13 @@ def main() -> None:
                     live_source=live_source,
                     selector_encoder=ema_encoder, online_requires_grad=False,
                     physical_view_mode=spec.physical_view_mode,
+                    view_specs=(canary["view_specs"][0], []),
+                    prepared_views=(
+                        None if prepared_views is None else (
+                            prepared_views[0], prepared_views[1],
+                            eval_selector_z, val_memory_index,
+                        )
+                    ),
                 )
                 normal_probability = torch.softmax(aux["hard_logits"], dim=1)
                 removed_probability = torch.softmax(removed_logits, dim=1)
@@ -2212,6 +2490,8 @@ def main() -> None:
                     live_source=live_source,
                     selector_encoder=ema_encoder, online_requires_grad=False,
                     physical_view_mode=spec.physical_view_mode,
+                    view_specs=canary["view_specs"],
+                    prepared_views=prepared_views,
                 )
                 shuffled_probability = torch.softmax(shuffled_logits, dim=1)
                 shuffle_values = (
@@ -2235,6 +2515,8 @@ def main() -> None:
                         live_source=live_source,
                         selector_encoder=ema_encoder, online_requires_grad=False,
                         physical_view_mode=spec.physical_view_mode,
+                        view_specs=canary["view_specs"],
+                        prepared_views=prepared_views,
                     )
                     agreement_values = (
                         permuted_logits.argmax(1).eq(logits.argmax(1)).float().cpu().tolist()
@@ -2457,8 +2739,21 @@ def main() -> None:
                 dim=-1,
             )
         train_index = retriever.build_index(train_selector)
+        train_prepared_views = None
+        if policy.tokenizer_mode == "frozen" and live_source is not None:
+            train_prepared_views = prepare_frozen_adaptation_views_batch(
+                [
+                    (
+                        canary["query"], canary["view"], canary["view_specs"],
+                        canary["spec"].physical_view_mode,
+                    )
+                    for canary in train_canary_specs
+                ],
+                bank, train_canary_index_rows, train_selector, train_index, retriever,
+                live_source, ema_encoder, encoded_views=train_canary_encoded_views,
+            )
         train_records = []
-        for canary in train_canary_specs:
+        for canary_index, canary in enumerate(train_canary_specs):
             spec = canary["spec"]
             logits, aux = decode_adaptation_episode(
                 dec, retriever, bank, train_canary_index_rows, train_selector, train_index,
@@ -2468,6 +2763,11 @@ def main() -> None:
                 live_source=live_source, selector_encoder=ema_encoder,
                 online_requires_grad=False,
                 physical_view_mode=spec.physical_view_mode,
+                view_specs=canary["view_specs"],
+                prepared_views=(
+                    None if train_prepared_views is None
+                    else train_prepared_views[canary_index]
+                ),
             )
             true = y[canary["qi"]]
             target_position = label_index(
@@ -2838,6 +3138,7 @@ def main() -> None:
         telemetry_due = (
             telemetry.due() or step == start_step + 1
             or step % RETRIEVAL_DIAGNOSTIC_STEPS == 0
+            or step % args.val_every == 0
         )
         specs = curriculum.sample_batch(
             args.episodes_per_step, step=step, total_steps=args.steps
@@ -2941,6 +3242,21 @@ def main() -> None:
                 if spec.counterfactual_role == "support":
                     paired_query_specs[spec.counterfactual_pair_id] = item["view_specs"][0]
 
+        if live_source is not None and policy.tokenizer_mode == "frozen":
+            batched_views = prepare_frozen_adaptation_views_batch(
+                [
+                    (
+                        item["query"], item["view"], item.get("view_specs"),
+                        item["spec"].physical_view_mode,
+                    )
+                    for item in prepared
+                ],
+                bank, index_rows, selector_z, memory_index, retriever,
+                live_source, ema_encoder,
+            )
+            for item, prepared_views in zip(prepared, batched_views, strict=True):
+                item["prepared_views"] = prepared_views
+
         group_counts = torch.zeros(len(QUERY_LOSS_GROUPS), dtype=torch.long, device=device)
         for item in prepared:
             candidates = item["view"].candidate_ids
@@ -2979,6 +3295,7 @@ def main() -> None:
                 evidence_budget=training_evidence_budget,
                 score_temperature=training_score_temperature,
                 view_specs=item.get("view_specs"),
+                prepared_views=item.get("prepared_views"),
                 return_attention=telemetry_due,
             )
             per_query_loss = F.cross_entropy(logits, target, reduction="none")
@@ -3011,8 +3328,18 @@ def main() -> None:
             episode_objective.backward()
             step_loss += float(episode_objective.detach())
 
-            composition = describe_episode_composition(
-                bank["patch"], index_rows, query, view, simultaneous_pairs
+            composition = (
+                describe_episode_composition(
+                    bank["patch"], index_rows, query, view, simultaneous_pairs
+                )
+                if telemetry_due else {
+                    "synthetic_persona": {
+                        "same_subject_enrollment":
+                            "one persona shared by the query and its support",
+                        "cross_subject_few_support":
+                            "a different persona for the query and its support",
+                    }.get(view.episode_type, "none applied")
+                }
             )
             episode_metrics, categories, strata = training_episode_telemetry(
                 spec=spec,
@@ -3033,7 +3360,10 @@ def main() -> None:
                 "categories": categories,
                 "strata": strata,
                 "retrieval_topk": int(aux["retrieval_topk"]),
-                "evidence_count": float(aux["evidence_mask"].sum(1).float().mean()),
+                "evidence_count": (
+                    float(aux["evidence_mask"].sum(1).float().mean())
+                    if telemetry_due else None
+                ),
                 "evidence_budget": int(aux["evidence_budget"]),
                 "score_temperature": float(aux["score_temperature"]),
             })

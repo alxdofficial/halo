@@ -15,7 +15,8 @@ ACTIVE_WINDOWS_PER_LABEL = 16
 # ever made ~13% of the 248k-window reservoir reachable — the rest was encoded, stored and never
 # retrievable. At 5 that becomes ~71%. The cadence used to be pinned by cost: redrawing took ~300 ms
 # because the sampler rescanned every window once per label. That scan is now precomputed, so a
-# refresh costs ~88 ms and the whole cadence adds ~26 s to a ~40 min run.
+# refresh costs ~60-90 ms. At the five-step cadence it remains a small part of the optimized
+# roughly 19-minute RTX 4090 run while exposing most of the archive over 3,000 steps.
 ACTIVE_REFRESH_STEPS = 5
 RETRIEVAL_SUBSPACES = 4
 RETRIEVAL_SUBSPACE_DIM = 64
@@ -102,7 +103,7 @@ PHASE_B_TEST_DATASETS = ("inclusivehar", "usc_had", "tnda_har", "ut_complex")
 
 # Artifact guard for the complete predictor recipe. Bump this whenever a behavioral training path
 # changes even if the decoder parameter schema stays compatible.
-PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_v17_k0_credit_wider_reservoir"
+PHASE_B_TRAINING_REGIME = "episodic_memory_adaptation_v18_batched_frozen_views"
 
 # Evaluation artifacts are independently versioned from training artifacts. A training-only change
 # must not invalidate a held-out protocol, while a cohort/scoring/runtime-memory change must never

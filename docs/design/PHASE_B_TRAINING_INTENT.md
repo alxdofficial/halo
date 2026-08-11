@@ -348,7 +348,7 @@ The optional `ema_finetune` mode is a warm-started experiment, not joint trainin
 2. The raw query, provided support, and selected background windows are reloaded.
 3. Those bounded windows are re-forwarded through the online tokenizer with gradients.
 4. Candidate cross-entropy updates the online tokenizer, retriever, and decoder.
-5. The small active key view is fully refreshed on its normal 100-step cadence, and inference uses
+5. The small active key view is fully refreshed on its normal 5-step cadence, and inference uses
    the saved EMA tokenizer.
 
 This avoids retaining a graph for the full bank while still supporting end-to-end fine-tuning after

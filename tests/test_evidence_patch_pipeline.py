@@ -551,6 +551,19 @@ def test_subject_style_preserves_gravity_scale_shape_and_masked_slots():
     assert np.linalg.norm(styled[:, :3].mean(0) - before_mean) < 0.05
     assert np.count_nonzero(styled[:, 3:]) == 0
 
+    batch = np.stack([data, data.copy()])
+    style = SubjectStyle(1.08, 1.1, 0.9, 0.2)
+    batched = apply_subject_style(
+        batch, rate, [True, True, True, False, False, False], style,
+    )
+    serial = np.stack([
+        apply_subject_style(
+            window, rate, [True, True, True, False, False, False], style,
+        )
+        for window in batch
+    ])
+    assert np.allclose(batched, serial, atol=1e-6, rtol=1e-6)
+
 
 def test_runtime_enrollment_appends_equal_support_without_mutating_base_bank():
     bank = _bank()
@@ -810,8 +823,15 @@ def test_source_patch_encoder_recovers_rows_once_and_preserves_gradients(tmp_pat
     repeated = source.encode_patch_rows_with_views(
         rows, specs, encoder, requires_grad=True
     )
+    serial = torch.cat([
+        source.encode_patch_rows_with_views(
+            rows[i:i + 1], specs[i:i + 1], encoder, requires_grad=True
+        )
+        for i in range(len(rows))
+    ])
     assert torch.equal(augmented, repeated)
     assert torch.equal(augmented[0], augmented[2])
+    assert torch.allclose(augmented, serial, atol=1e-6, rtol=1e-6)
     augmented.square().mean().backward()
     assert encoder.scale.grad is not None and float(encoder.scale.grad.abs()) > 0
 

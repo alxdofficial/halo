@@ -17,6 +17,7 @@ from training.evidence.train_patch_decoder import (
     ActiveSupportUnits,
     active_support_units,
     prepare_support_feasible_query_pool,
+    support_feasible_labels,
 )
 
 
@@ -151,6 +152,28 @@ def test_optimised_sampler_matches_the_original_scan_exactly(episode_type, suppo
         )
         assert got_labels.tolist() == want_labels.tolist(), (episode_type, support_count, seed)
         assert got_pool.tolist() == want_pool.tolist(), (episode_type, support_count, seed)
+
+
+def test_feasibility_predicate_accepts_disjoint_validation_query_units():
+    """Held-out query units need not be members of the active support index."""
+    bank = {
+        "y": torch.tensor([0, 0, 0]),
+        "subj": torch.tensor([0, 0, 1]),
+        "event": torch.tensor([0, 1, 2]),
+        "event_verified": torch.zeros(3, dtype=torch.bool),
+        "patch": {
+            "y": torch.tensor([0, 0]),
+            "subj": torch.tensor([0, 0]),
+            "window": torch.tensor([0, 1]),
+            "event": torch.tensor([0, 1]),
+            "event_verified": torch.zeros(2, dtype=torch.bool),
+        },
+    }
+    got = support_feasible_labels(
+        torch.tensor([2]), torch.tensor([0, 1]), bank, torch.tensor([0]),
+        support_count=2, episode_type="ordinary_few_support",
+    )
+    assert got.tolist() == [0]
 
 
 def test_tables_reproduce_each_torch_unique_they_replaced():
