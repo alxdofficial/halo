@@ -161,12 +161,13 @@ same cohort.
 
 ## 4. Provenance
 
-- Step-0 artifacts: `training/evidence/outputs/stage1_step0_control/untrained_step0_seed*.pt`,
-  built from the step-1000 predictor's metadata so bank, vocabulary, fold and retrieval policy match
-  exactly.
+- Step-0 comparison outputs:
+  `training/evidence/outputs/diagnostics/phase_b_20260808/stage1_step0_control/`. The disposable
+  seed weights were removed after the matched tables were generated; the result JSON/CSV files and
+  logs remain.
 - Trained arm: `.../phase_b_20260808/clean_replay/predictors/step_1000.predictor.pt`, the external
   development peak.
-- Tables: `comparison.csv`, `comparison_by_cell.csv`, `comparison.json` in the same directory,
+- Tables: `comparison.csv`, `comparison_by_cell.csv`, `comparison.json` in that directory,
   covering both label presentations. Rebuild with:
 
   ```bash

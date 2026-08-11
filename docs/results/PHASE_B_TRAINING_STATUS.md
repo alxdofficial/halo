@@ -352,17 +352,17 @@ All paths below are relative to the repository root.
 - Parameter trajectory: `clean_replay/parameter_trajectory.csv`
 - Training-window telemetry summary: `clean_replay/training_windows.csv`
 - Raw telemetry: `clean_replay/telemetry/` and `clean_replay/telemetry_resume/`
-- Evaluator-ready checkpoints: `clean_replay/predictors/`
-- Full trainer states: `clean_replay/checkpoints/`
-- Step-1000 component ablations: `clean_replay/ablations/` and
-  `clean_replay/step1000_output_path_ablations.csv`
+- Retained externally best checkpoint:
+  `clean_replay/predictors/step_1000.predictor.pt`
+- Step-1000 component-ablation results: `clean_replay/external_ablations/` and
+  `clean_replay/step1000_output_path_ablations.csv` (redundant weights removed)
 - Current matched ConSE artifacts: `clean_replay/conse_current/`
 - Original interrupted-run forensic artifacts:
   `training/evidence/outputs/diagnostics/phase_b_20260808/`
 - Machine-readable provenance:
   `training/evidence/outputs/diagnostics/phase_b_20260808/MANIFEST.json`
 
-Key weight identities:
+Historical weight identities (only step 1000 and the ConSE head remain locally):
 
 | artifact | SHA-256 |
 |---|---|
