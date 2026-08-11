@@ -282,17 +282,47 @@ day of compute instead of a week.
 
 ---
 
-## Ledger — what exists
+## Ledger — build status as of 2026-08-11
 
-**Built:** filterbank + observability masks, signed DC, phase feature, dual-branch trunk with
+**Pre-existing:** filterbank + observability masks, signed DC, phase feature, dual-branch trunk with
 physical-time RoPE, gated text fusion, JEPA + VICReg, episodic construction, execution leakage units,
 canaries (support-removed / label-shuffled), prototype + ridge comparators, `live_encoder`, bank
 fingerprint guard.
 
-**New in this plan:** sensor-token folding + axis validity mask, MLP projections on descriptor and
-bias, augmentation split + shared config draw, sensor-mask and descriptor-mask JEPA strategies,
-`sensor_bias` computation, per-sensor bank rows, compatibility filter, admissibility gate,
-cross-sensor vote merge.
+**BUILT in this plan** (commits `9b7d75d`, `1ebaf0a`, `dad8ee9`; 475 tests pass):
 
-**Unmeasured and load-bearing:** whether conditioning does anything (parity), whether cross-config
-enrollment works at all, whether the bias term is physics or fingerprint.
+| piece | where |
+|---|---|
+| parity ablation + `--parity` arm | `training/tokenizer/eval_transfer.py` — **run, result above** |
+| augmentation NUISANCE/CONFIG split + `split_by_group()` | `data/scripts/augmentations.py` |
+| `sensor_text_dropout` disabled | `data/scripts/augmentations.py` |
+| `sensor_bias` computation + guard + artifact (163 sensors) | `data/scripts/curate/sensor_bias.py` |
+| `sensor_bias` loader for the data path | `training/tokenizer/pretrain_data.py` |
+| `SensorFold` + axis validity mask | `model/tokenizer/sensor_tokens.py` |
+| `ConditioningProjection` (learnable MLP over frozen artifact) | `model/tokenizer/sensor_tokens.py` |
+| `DescriptorHead` + retrieval-scored loss | `model/tokenizer/sensor_tokens.py` |
+| sensor-granularity encoder path (`token_granularity='sensor'`) | `model/tokenizer/encoder.py` |
+| sensor-mask + descriptor-mask JEPA planner | `training/tokenizer/losses_repr.py` |
+| Phase-B Stage 1 closed-form predictor | `training/evidence/admissible_retrieval.py` |
+| retrieval-provenance guard | `training/evidence/admissible_retrieval.py` |
+| 30 gate tests | `tests/test_sensor_granularity.py`, `tests/test_admissible_retrieval.py` |
+
+**NOT YET BUILT — the integration seam.** Every component above exists and is tested in isolation;
+what remains is wiring them into the two running loops:
+
+1. **`pretrain.py` trainer integration** — call `split_by_group()` and draw the config transform ONCE
+   per window per step across all three views (VICReg A, VICReg B, JEPA teacher); switch the mask
+   planner to `make_sensor_mask_plan`; add the descriptor-retrieval loss term; thread `sensor_bias`
+   and `descriptor_mask` into the forward. This is the largest remaining piece and the riskiest,
+   because the trainer is long and currently working.
+2. **`pretrain_data.py` batch emission** — emit `sensor_bias` and per-sensor placement ids per batch.
+3. **`build_memory.py` per-sensor rows** — emit `[feature, text_descriptor, sensor_bias]` per patch
+   per sensor (~7M rows) instead of per patch.
+4. **`resolvability` estimation** — the (source config, target config, candidate) table the
+   admissibility gate consumes. Stage 1 currently accepts it as an argument; nothing produces it yet.
+   The paired multi-stream recordings (sp_sw_har, xrf_v2, opportunity, realdisp, mmfit) are the
+   intended source.
+5. **Encoder dataset-ID probe** — the decisive fingerprint guard, since `sensor_bias` enters the trunk.
+
+**Unmeasured and load-bearing:** whether cross-config enrollment works at all; whether the bias term
+is physics or fingerprint; whether the redesign moves the parity number off +0.0086.

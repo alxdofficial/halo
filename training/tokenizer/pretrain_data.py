@@ -153,6 +153,51 @@ _CHANNEL_ROLE_TEXT = {
 }
 
 
+_SENSOR_BIAS_PATH = "data/scripts/curate/sensor_bias.json"
+_SENSOR_BIAS_CACHE: dict | None = None
+
+
+def load_sensor_bias() -> dict:
+    """Frozen per-sensor ``sensor_bias`` artifact, keyed ``(dataset, stream, modality)``.
+
+    Built offline by ``data.scripts.curate.sensor_bias`` over ALL of a sensor's recordings, using
+    activity-invariant channel physics only. Loaded once and cached: it is a fixed measurement, not
+    something that varies per batch, and the z-scoring statistics inside it are frozen so descriptors
+    stay comparable across streams (Phase-B compares them directly).
+    """
+    global _SENSOR_BIAS_CACHE
+    if _SENSOR_BIAS_CACHE is None:
+        import json
+        from pathlib import Path
+        path = Path(_SENSOR_BIAS_PATH)
+        if not path.exists():
+            raise FileNotFoundError(
+                f"{path} is missing — build it with "
+                "`python -m data.scripts.curate.sensor_bias --build`"
+            )
+        payload = json.loads(path.read_text())
+        _SENSOR_BIAS_CACHE = {
+            "fields": payload["fields"],
+            "by_sensor": {(r["dataset"], r["stream"], r["modality"]): r["z"]
+                          for r in payload["sensors"]},
+        }
+    return _SENSOR_BIAS_CACHE
+
+
+def stream_sensor_bias(dataset: str, stream: str, modalities: Sequence[str]) -> torch.Tensor:
+    """(N_sensors, F) bias rows for one stream, ordered to match ``stream_sensor_texts``.
+
+    A sensor with no entry gets a ZERO row — z-scored space puts zero at the corpus mean, i.e. "no
+    evidence either way", which is the honest default for a sensor we have not measured. It is NOT
+    the same claim as "average", and Phase B distinguishes the two via the artifact's `supported`
+    flags; here the zero simply keeps the tensor dense.
+    """
+    artifact = load_sensor_bias()
+    width = len(artifact["fields"])
+    rows = [artifact["by_sensor"].get((dataset, stream, m), [0.0] * width) for m in modalities]
+    return torch.tensor(rows, dtype=torch.float32)
+
+
 def stream_sensor_texts(
     dataset: str,
     stream: str,
