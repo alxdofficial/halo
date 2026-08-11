@@ -192,13 +192,26 @@ Measured (`training/diagnostics/outputs/current_protocol_table.md`, 7/7 datasets
 | model | mean macro-F1 | status |
 |---|---:|---|
 | harnet | **45.7** | current |
-| halo_evidence | 42.9 | **STALE — re-score required** |
 | crosshar | 42.8 | current |
 | unimts | 34.7 | current |
-| halo (ConSE) | 34.4 | **STALE — re-score required** |
 | limubert | 32.2 | current |
+| halo_evidence | **23.3** | **re-scored 2026-08-11 on `phase_a_headline/best.pt`** (was 42.9) |
+| halo (ConSE) | **21.8** | **re-scored 2026-08-11 on `phase_a_headline/best.pt`** (was 34.4) |
 | imagebind | 11.4 | current |
 | normwear | 5.1 | current |
+
+> **The re-score moved HALO from 2nd to 5th/6th, and this needs resolving before T1 ships.**
+> Both HALO rows were re-run against `training/tokenizer/outputs/phase_a_headline/best.pt`
+> (step 27,000, val_ba 0.288, git 9419635) — the checkpoint Phase B trains and evaluates against, so
+> the enrollment results above and these zero-shot numbers are now at least mutually consistent.
+> They are roughly 12-20 points below the previously recorded values.
+>
+> Before treating this as a regression in the method, check the checkpoint identity: there is a
+> known open issue that the headline results were produced by a different Phase-A checkpoint than
+> the evaluator's default path. If `phase_a_headline/best.pt` is not the encoder that produced 42.9,
+> then this is a provenance bug and not a result. Either way the fix in 3.1 — stamp a backbone
+> fingerprint into the eval artifact and reject a table that mixes fingerprints — is what makes the
+> question answerable, and it is still not done.
 
 ### 3.1 The two HALO rows are stale and the artifacts cannot say so
 
@@ -231,9 +244,9 @@ adapts well" is unattributable between the mechanism and the features.
 | HALO | memory, trained decoder | no | free from `eval_enrollment` |
 | HALO | memory, untrained step-0 | no | free |
 | HALO | prototype | no | free |
-| HALO | ridge | yes (head only) | free |
+| HALO | ridge | **no** — closed-form solve | free |
 | harnet | prototype | no | **build** |
-| harnet | ridge | yes (head only) | **build** |
+| harnet | ridge | **no** — closed-form solve | **build** |
 | harnet | memory / retrieval | no | **build** — the killer control |
 
 Every row also carries two canaries: **support-removed** and **shuffled-support-labels**. A row whose
@@ -412,6 +425,121 @@ quality screens to evaluation, which drops 34 flagged windows from `motionsense/
 a Phase-B development stream. The v20 dev numbers are therefore computed on a very slightly smaller
 query population than the 2026-08-11 prelim table. The difference is 0.75% of one stream and does not
 move any conclusion, but the two tables are not bit-comparable.
+
+## 5c. v20 results — measured 2026-08-11
+
+Run `20260811T021128Z-548724-4dc16c1d`, 3,000 steps, regime
+`episodic_memory_adaptation_v20_counterfactual_support_bootstrap`. Two arms scored on the identical
+dev cohort, sharing **the same step-1800 weights** and differing only in which prediction path reads
+the retrieved evidence, so the comparison is matched by construction.
+
+No learned checkpoint passed the three mechanism-eligibility checks, so the shipped artifact declares
+`closed_form_retrieval_vote`. The `trained` arm below is the best learned milestone by the
+predeclared `adaptation_selection_score` — scored anyway, because otherwise the trained weights would
+never appear in any table.
+
+![T3 label efficiency](figures/t3_label_efficiency.png)
+
+### 5c.1 The headline — cross-subject, full enrollment, query-weighted macro-F1
+
+| mechanism | k=0 | k=1 | k=2 | k=4 | k=8 |
+|---|---:|---:|---:|---:|---:|
+| HALO memory — **trained decoder** | 15.1 | 38.0 | 40.7 | 43.2 | **45.5** |
+| HALO memory — **closed-form retrieval vote** | 15.0 | 49.2 | 53.9 | 61.3 | **65.4** |
+| prototype (closed form) | n/a | 50.7 | 54.9 | 58.7 | 65.3 |
+| ridge head (closed-form solve) | n/a | 50.4 | 53.7 | 58.9 | 64.9 |
+| *canary:* support removed | 15.1 | 15.1 | 15.1 | 15.1 | 15.1 |
+| *canary:* labels shuffled | 15.1 | 10.1 | 10.2 | 10.3 | 10.5 |
+| *floor:* chance | 13.8 | 13.8 | 13.8 | 13.8 | 13.8 |
+
+17,837 queries per cross-subject cell, 3 dev datasets. Same-subject runs on a much smaller cohort
+(902 queries, 2 datasets) and is reported separately, never pooled: trained 25.8 → 66.4 at k=2,
+closed-form 23.0 → 78.8, prototype 81.0.
+
+### 5c.2 What v20 fixed
+
+**The decoder now reads its enrollment.** In v19 this row was flat at ~13.6 across the whole curve;
+it now climbs 15.1 → 45.5. During training, the two intervention metrics rose monotonically from
+exactly 0.0000 to 0.061 and 0.057.
+
+![v20 training diagnostic](figures/phase_b_v20_training.png)
+
+The canaries confirm it is not an artifact. Support-removed is pinned at exactly 15.1 — no support,
+no adaptation. And **labels-shuffled falls to 10.1, below the support-removed line**: giving the
+decoder wrong labels is worse than giving it none, which is only possible if it is genuinely
+trusting the label bindings.
+
+### 5c.3 What v20 did not fix
+
+**The trained decoder still loses to the closed-form vote over the same retrieved rows** — 45.5
+against 65.4 at k=8 — and to prototype and ridge at ~65. Training produces a decoder that adapts,
+but adapts worse than simply letting the retrieved neighbours vote. The eligibility gate refused it
+for exactly this reason and was right to.
+
+The gate metric plateaued rather than converging: decoder BA on the fixed k=1/2 canaries went
+0.128 → 0.221 by step 1800, then flattened at ~0.200 while the control held ~0.257. The last 1,200
+steps produced no further progress. An earlier note in this document projected the gap closing by
+step 3,000; that extrapolated a trend that had already begun to flatten and was wrong.
+
+### 5c.4 Real label names actively hurt the trained decoder
+
+The `--random-aliases` arm replaces every candidate name with an episode-local nonsense token, so
+label text carries no information and only the enrolled examples can help.
+
+| arm | k=1 | k=2 | k=4 | k=8 |
+|---|---:|---:|---:|---:|
+| closed-form, coherent names | 49.2 | 53.9 | 61.3 | 65.4 |
+| closed-form, random aliases | 49.2 | 53.8 | 61.1 | 65.3 |
+| trained decoder, coherent names | 38.0 | 40.7 | 43.2 | 45.5 |
+| **trained decoder, random aliases** | **46.4** | **49.3** | **53.6** | **56.5** |
+
+Two findings, and the second is the more important one:
+
+1. **The closed-form vote is pure example-based adaptation.** Destroying the label names costs it
+   0.1 macro-F1 at k=8. At k≥1 the names contribute essentially nothing; everything comes from the
+   enrolled examples.
+2. **The trained decoder scores 11 points HIGHER with meaningless names than with real ones.**
+   Real label text is a net liability to it. This is the residue of the v19 diagnosis — a decoder
+   that memorised training-vocabulary signatures — surviving into v20 in weaker form. The
+   counterfactual objective taught it to use support examples; it did not stop it from
+   mis-generalising the label text it was trained on. That gap is the concrete target for v21.
+
+### 5c.5 Partial enrollment crowds out the unenrolled candidates
+
+The protocol includes a `fixed_half_candidate_partial_enrollment` condition: half the candidates get
+examples, half get only their name. Prototype and ridge cannot run here at all — they need at least
+one example per output class, so they return nothing for *every* candidate, including the enrolled
+ones. HALO scores.
+
+But the split of that score is unflattering (trained arm, cross-subject, k=8):
+
+| dataset | enrolled candidates | unenrolled candidates |
+|---|---:|---:|
+| motionsense | 60.6 | 10.2 |
+| realworld | 58.3 | 0.9 |
+| shoaib | 63.2 | 14.3 |
+
+Against the same model's **15.1 at k=0**, where nothing is enrolled and every candidate has only its
+name. So enrolling half the candidates makes the model **worse on the remaining half than enrolling
+nothing at all**. Candidates backed by eight real examples soak up the probability mass; a name-only
+candidate cannot compete. Nothing in the current design calibrates evidence-backed against text-only
+candidates.
+
+**This bounds the deployment claim.** What survives is "you can enrol part of what you care about
+and still get useful predictions *on what you enrolled*, without the adapter refusing to run" — a
+coverage property. Not "unenrolled concepts keep working."
+
+### 5c.6 Correction to section 4 — ridge takes no gradient step
+
+The T2 table listed ridge as requiring a gradient step. It does not. `_few_shot_baselines` solves
+`w = Xᵀ(XXᵀ + λI)⁻¹Y` with λ=1 in the sample-space dual — one `torch.linalg.solve`, deterministic,
+no optimizer, no backprop. Both closed-form comparators fit a 256×C linear map from a few dozen
+pooled window embeddings; at k=8 on motionsense that is 48 support vectors and 1,536 parameters.
+Corrected in the table above.
+
+The consequence matters for positioning: **every mechanism in T2 is gradient-free at deployment.**
+"No gradient step" is not a HALO differentiator. Coverage of unenrolled and partially-enrolled
+candidates is — subject to 5c.5.
 
 ## 6. Pending decisions
 
