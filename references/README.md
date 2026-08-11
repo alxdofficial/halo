@@ -12,8 +12,8 @@ is incomplete until its publication or official protocol documentation is presen
 
 ## Current inventory
 
-There are 27 dataset entries and 9 baseline entries, with 36 parseable `citation.json` files, 24 PDFs,
-and 5 saved HTML documents.
+There are 36 dataset entries and 9 baseline entries, with 45 parseable `citation.json` files, 34 PDFs,
+and 5 saved HTML documents. Every dataset entry has a `citation.json` (counted 2026-08-11).
 
 Dataset entries:
 

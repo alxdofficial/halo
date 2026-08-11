@@ -1,0 +1,15 @@
+{
+  "name": "kneepad",
+  "category": "datasets",
+  "paper_title": "A Knee Rehabilitation Exercises Dataset for Postural Assessment using Wearable Devices",
+  "authors": "Panagiotis Kasnesis, Theodora Plavoukou, Anna Christina Syropoulou, Georgios Georgoudis, Lazaros Toumanidis",
+  "year": "2025",
+  "venue": "Scientific Data 12:610",
+  "doi": "10.1038/s41597-025-04963-4",
+  "paper_url": "https://www.nature.com/articles/s41597-025-04963-4",
+  "pdf_url": "https://www.nature.com/articles/s41597-025-04963-4.pdf",
+  "data_or_code_url": "https://zenodo.org/records/12112951",
+  "license": "Dataset: CC-BY (Zenodo 12112951). Paper: CC-BY (Scientific Data, open access).",
+  "bibtex": "@article{kasnesis2025kneepad,\n  title   = {A Knee Rehabilitation Exercises Dataset for Postural Assessment using Wearable Devices},\n  author  = {Kasnesis, Panagiotis and Plavoukou, Theodora and Syropoulou, Anna Christina and Georgoudis, Georgios and Toumanidis, Lazaros},\n  journal = {Scientific Data}, volume = {12}, pages = {610}, year = {2025},\n  doi     = {10.1038/s41597-025-04963-4}\n}",
+  "notes": "31 volunteers with a diagnosed knee pathology performed 3 rehabilitation exercises (squat, seated leg extension, walking), each in one correct and two clinically-defined incorrect variants, unsupervised in two physiotherapy centres. 8 Delsys Trigno Avanti EMG+IMU sensors on lower-limb muscle bellies; only the IMU is converted. CODE-VS-DOC: the release's metadata.txt gives IMU 148.148148 Hz, accelerometer unit G, gyroscope unit DEG/S, the 8-sensor muscle map (Table 3) and the 9 correct/incorrect label descriptions; all used verbatim. VERIFIED AT CONVERT TIME: imu.npy is (48, T) = 8 sensors x 6 channels with acc xyz then gyro xyz (accel rows sit near 1 g, gyro rows two orders higher); median |acc| 1.011 g, |gyro| p99.9 max 250.1 deg/s -> 4.37 rad/s. TWO LIMITATIONS, documented not engineered around: (1) muscle-belly placement is outside the phone/watch deployment envelope, so every stream is role='stress'; (2) MEASURED, and matching the paper's ~4.2 s mean trial: only 98 of 2,086 trials (4.7%) reach a 6 s window, so this source is not expected to produce a large grid. 2 zero-length trials."
+}

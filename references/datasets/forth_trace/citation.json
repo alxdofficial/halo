@@ -1,0 +1,15 @@
+{
+  "name": "forth_trace",
+  "category": "datasets",
+  "paper_title": "A benchmark study on feature selection for human activity recognition",
+  "authors": "Katerina Karagiannaki, Athanasia Panousopoulou, Panagiotis Tsakalides",
+  "year": "2016",
+  "venue": "UbiComp/ISWC '16 Adjunct: Proceedings of the 2016 ACM International Joint Conference on Pervasive and Ubiquitous Computing: Adjunct, 105-108",
+  "doi": "10.1145/2968219.2971421",
+  "paper_url": "https://dl.acm.org/doi/10.1145/2968219.2971421",
+  "pdf_url": "https://users.ics.forth.gr/~tsakalid/PAPERS/CNFRS/2016-UBICOMP.pdf",
+  "data_or_code_url": "https://github.com/spl-icsforth/FORTH_TRACE_DATASET",
+  "license": "Dataset: cite the UbiComp 2016 paper (per the repository README). Paper PDF from the authors' institutional page at ICS-FORTH.",
+  "bibtex": "@inproceedings{karagiannaki2016forthtrace,\n  title     = {A benchmark study on feature selection for human activity recognition},\n  author    = {Karagiannaki, Katerina and Panousopoulou, Athanasia and Tsakalides, Panagiotis},\n  booktitle = {Proceedings of the 2016 ACM International Joint Conference on Pervasive and Ubiquitous Computing: Adjunct (UbiComp '16)},\n  pages     = {105--108}, year = {2016}, publisher = {ACM},\n  doi       = {10.1145/2968219.2971421}\n}",
+  "notes": "15 participants x 5 Shimmer nodes (left wrist, right wrist, torso, right thigh, left ankle) x 16 activities (7 basic + 9 postural transitions). CODE-VS-DOC: the repository README documents the 12-column layout (device id, acc xyz, gyro xyz, mag xyz, timestamp, activity label) and 51.2 Hz; both verified. TWO THINGS THE README DOES NOT SAY, both measured: (1) the gyroscope is in DEG/S \u2014 walking p99 is ~130 and the dataset max p99.9 is 425.7 deg/s, so the converter converts to rad/s; (2) the millisecond timestamps ROUND to alternating 19/20 ms, so a median-of-diff rate estimate says 50 Hz while the true mean over a file is 51.198 Hz (the README's figure). The five node clocks are per-node uptime counters, not a shared wall clock, so alignment is on t - t0 per node. TWO PARTICIPANTS EXCLUDED: part4 and part8 score 0.16 and 0.13 node-to-node label agreement (13 of 15 score 0.89-0.98) and a +/-3 s lag search does not rescue either, so their five annotation tracks describe different takes and their placements are not simultaneous."
+}

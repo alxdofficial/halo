@@ -1,0 +1,20 @@
+{
+  "labels": [
+    "buttoning_a_shirt",
+    "combing_hair",
+    "drinking_from_a_cup",
+    "drinking_from_a_glass",
+    "eating_from_a_bowl",
+    "eating_from_a_plate",
+    "folding_a_towel",
+    "making_a_call_on_a_mobile_phone",
+    "opening_a_bottle",
+    "opening_a_door",
+    "switching_on_a_light_switch",
+    "typing_on_a_keyboard",
+    "walking_25_metres",
+    "wiping_a_table",
+    "writing_with_a_pen"
+  ],
+  "notes": "NOT restricted per stream, deliberately. Measured 2026-08-11: control streams observe 14 of these 15 labels, the patient affected-arm stream 8 and the patient unaffected-arm stream 9. That is which ADLs the hemiparetic cohort completed, not a declared protocol difference, and narrowing a patient's candidate set to the tasks they managed would leak the outcome into the task definition. Report the cohorts separately instead."
+}

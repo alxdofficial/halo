@@ -1,0 +1,14 @@
+{
+  "labels": [
+    "seated_leg_extension",
+    "seated_leg_extension_with_the_limb_lifted_from_the_chair",
+    "seated_leg_extension_without_full_range_of_motion",
+    "squat",
+    "squat_with_the_injured_leg_placed_in_front",
+    "squat_with_weight_transfer_onto_the_healthy_leg",
+    "walking",
+    "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted",
+    "walking_with_the_injured_knee_not_fully_extended"
+  ],
+  "notes": "NOT restricted per stream, deliberately. All eight streams observe the same 5 of these 9 labels, because only 98 of 2,086 trials (4.7%) reach a 6 s window and the four that vanish are the shortest exercise variants. That is a consequence of the analysis window, not of the acquisition protocol, so the candidate set stays at 9 and the missing classes are simply absent from the evaluated population.\nOPEN DESIGN QUESTION: six of the nine labels are `squat` / `squat_with_...` and `walking` / `walking_with_...` variants that differ only by a trailing clause. A language-conditioned scorer cannot separate those from text, so a flat 9-way number is not a clean measure of either exercise identity or execution quality. Intended reporting is 3-way exercise identity plus a separate correct-versus-incorrect cell. See docs/data/DATASET_EXPANSION_AUDIT_2026-08-11.md section 2.4."
+}

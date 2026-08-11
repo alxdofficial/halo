@@ -158,10 +158,22 @@ def iter_sessions(dataset: str, spec: StreamSpec,
         json.loads((ds_dir / "events.json").read_text())
         if (ds_dir / "events.json").exists() else {}
     )
+    # `labels.json` is the converter's declaration of what it emitted, so a session directory that
+    # is not in it is an ORPHAN from an earlier run of that converter — not data. Re-running a
+    # converter overwrites the sessions it still emits but does not delete the ones it no longer
+    # does, and this glob would otherwise happily ingest them. That is exactly the failure mode a
+    # data-quality fix creates: MM-Fit's gap fix dropped 61 sets, and without this guard all 61
+    # would have survived in the grid, defeating the fix. Verified 2026-08-11 that labels.json
+    # covers every session directory exactly for all 34 converted datasets.
+    orphans = 0
+
     # One session per subdir: sessions/<session_id>/data.parquet.
     for pq in sorted((ds_dir / "sessions").glob("*/data.parquet")):
         sid = pq.parent.name
         if keep_ids is not None and sid not in keep_ids:
+            continue
+        if labels_map and sid not in labels_map:
+            orphans += 1
             continue
         if spec.stream_id not in {s.stream_id for s in session_stream_specs(dataset, sid, role=spec.role)}:
             continue
@@ -177,6 +189,10 @@ def iter_sessions(dataset: str, spec: StreamSpec,
         # prefix (converters encode the subject in the id, e.g. "sub01_..." / "subject3_...").
         subject = frame["subject"].iloc[0] if "subject" in frame.columns else sid.split("_")[0]
         yield frame, native_rate, subject
+
+    if orphans:
+        print(f"  [{dataset}/{spec.stream_id}] skipped {orphans} session directories absent from "
+              f"labels.json (stale output of an earlier converter run)", flush=True)
 
 
 def _pre_windowed(dataset: str) -> bool:

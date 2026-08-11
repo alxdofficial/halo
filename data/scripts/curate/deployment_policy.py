@@ -114,6 +114,30 @@ _GENERIC_ACC = _xyz("acc_")
 _GENERIC_GYRO = _gyro("gyro_")
 
 
+def _multi_placement(
+    dataset: str,
+    placements: Mapping[str, Tuple[str, str]],
+    *,
+    role: str = "primary",
+    gravity_state: str = "present",
+    session_contains: Tuple[str, ...] = (),
+    note: str = "",
+) -> Tuple[StreamSpec, ...]:
+    """Streams for a converter that writes every placement into ONE frame with a column prefix.
+
+    `placements` maps the column prefix to `(device_profile, placement_text)`. Sharing one frame is
+    what makes the placements simultaneous downstream: `build_grids` gives every stream of a session
+    the same event id, so window ordinal *i* of one placement is the same instant as ordinal *i* of
+    the others.
+    """
+    return tuple(
+        StreamSpec(dataset, prefix, profile, placement,
+                   _xyz(f"{prefix}_acc_"), _gyro(f"{prefix}_gyro_"), gravity_state,
+                   role=role, session_contains=session_contains, note=note)
+        for prefix, (profile, placement) in placements.items()
+    )
+
+
 STREAM_SPECS: Tuple[StreamSpec, ...] = (
     # Training datasets.
     StreamSpec("uci_har", "phone_waist", "phone", "waist",
@@ -242,6 +266,44 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                note="Wrist-worn phone (smartwatch emulation); complex hand-gesture activities. Accel m/s^2 (gravity present)."),
 
+    # SPAR — consumer Apple Watch, 7 shoulder physiotherapy exercises, 20 subjects x both
+    # shoulders. A rehabilitation-framing EVALUATION source: its concepts are absent from the
+    # training vocabulary, so they score as genuinely unseen. Left and right are performed
+    # SEQUENTIALLY, so the two streams are a cross-placement axis, not a synchronous pair.
+    StreamSpec("spar", "watch_left_wrist", "watch", "the left wrist",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               session_contains=("_left_wrist",),
+               note="Apple Watch 2/3, 50 Hz, accel already g (gravity present) and gyro already "
+                    "rad/s -- no unit conversion. One session = one continuous 20-repetition bout "
+                    "(median 42 s), so enrollment from this source is within-session; see "
+                    "docs/data/DATASET_EXPANSION_2026-08.md section 9."),
+    StreamSpec("spar", "watch_right_wrist", "watch", "the right wrist",
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               session_contains=("_right_wrist",),
+               note="Right-shoulder counterpart of spar/watch_left_wrist; same device and units."),
+
+    # MONIPAR — weekly at-home Parkinson's monitoring on a consumer smartwatch. The corpus's only
+    # verified ACROSS-SESSION enrollment source: one converted session is one weekly visit, so two
+    # sessions of the same subject and exercise are a week apart rather than seconds apart.
+    # Accelerometer only.
+    # Placement text is "the wrist", not "the more-affected wrist". The cohort-specific wording was
+    # false for a third of this stream: subjects hc01-hc07 are healthy controls with no affected
+    # side, and they contribute 4,069 of 12,079 windows (33.7%). HALO conditions on this text, so a
+    # description that only fits the patient cohort mis-describes every control window. The clinical
+    # detail lives in the note below, where nothing conditions on it. Splitting monipar into
+    # cohort-specific streams would be the alternative, but the two cohorts wear the same device on
+    # the same limb — the difference is pathology, not acquisition configuration.
+    StreamSpec("monipar", "watch_wrist", "watch", "the wrist",
+               _GENERIC_ACC, {}, "present",
+               note="TicWatch S2 (Mobvoi) consumer smartwatch, accelerometer only (3-channel), "
+                    "m/s^2 with gravity. Per the paper patients wore the watch on the wrist with "
+                    "the greatest presence of motor symptoms, as judged by the attending "
+                    "physician, while healthy controls (hc01-hc07) wore it on the dominant hand; "
+                    "the stream therefore carries no single affected-side semantics. "
+                    "Source clock is 49.9-52.9 Hz depending on subgroup and is resampled to a true "
+                    "50 Hz in the converter, because the tremor bands this dataset exists to "
+                    "measure would otherwise sit 5.7% off."),
+
     # Deployment-plausible diagnostic views, never mixed into the primary score.
     StreamSpec("shoaib", "phone_left_pocket", "phone", "left trouser pocket",
                _xyz("left_pocket_acc_"), _gyro("left_pocket_gyro_"), "present", role="diagnostic"),
@@ -254,6 +316,134 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                _xyz("back_acc_"), {}, "present", role="stress"),
     StreamSpec("harth", "stress_thigh", "non_deployment", "thigh",
                _xyz("thigh_acc_"), {}, "present", role="stress"),
+)
+
+
+# --- Multi-placement rehabilitation / displacement sources (2026-08) ------------------------------
+# Each of these converters writes every placement of one recording into a single frame with a column
+# prefix, so the streams below are simultaneous by construction. None of them is in
+# PRIMARY_TRAIN_DATASETS: they are evaluation and placement-generalisation sources, and adding them
+# to training is a separate, explicit decision (docs/data/DATASET_EXPANSION_2026-08.md section 6).
+
+STREAM_SPECS += _multi_placement("realdisp", {
+    # Manual Table 4 order. The ideal / self / mutual placement regime is in the session id.
+    "rla": ("device", "the right forearm"),
+    "rua": ("device", "the right upper arm"),
+    "back": ("device", "the back"),
+    "lua": ("device", "the left upper arm"),
+    "lla": ("device", "the left forearm"),
+    "rc": ("device", "the right calf"),
+    "rt": ("device", "the right thigh"),
+    "lt": ("device", "the left thigh"),
+    "lc": ("device", "the left calf"),
+}, note="Xsens MTx, 50 Hz, m/s^2 with gravity, gyro rad/s. The same subject and exercise recur "
+        "under instructor-placed (ideal), subject-placed (self) and deliberately displaced "
+        "(mutual4..7) regimes — a real change-of-configuration pair, not a synthetic rotation.")
+
+STREAM_SPECS += _multi_placement("forth_trace", {
+    "left_wrist": ("watch", "the left wrist"),
+    "right_wrist": ("watch", "the right wrist"),
+    "torso": ("device", "the torso"),
+    "right_thigh": ("device", "the right thigh"),
+    "left_ankle": ("device", "the left ankle"),
+}, note="Shimmer nodes at 51.2 Hz; m/s^2 with gravity, gyro converted deg/s -> rad/s in the "
+        "converter. Carries a simultaneous bilateral wrist pair and 9 explicitly labelled postural "
+        "transitions. Participants part4 and part8 are excluded upstream: their five annotation "
+        "tracks disagree, so their placements are not simultaneous.")
+
+# Anatomy from Barshan & Yuksek section 3, NOT from UCI's block names: the units sit on the chest,
+# both wrists and the outer sides of both knees. UCI calls the blocks T/RA/LA/RL/LL, which would
+# have put a wrist sensor into the placement text as "the right arm".
+STREAM_SPECS += _multi_placement("dsads", {
+    "chest": ("device", "the chest"),
+    "right_wrist": ("watch", "the right wrist"),
+    "left_wrist": ("watch", "the left wrist"),
+    "right_knee": ("device", "the outer side of the right knee"),
+    "left_knee": ("device", "the outer side of the left knee"),
+}, role="stress",
+   note="Xsens MTx at 25 Hz; m/s^2 with gravity, gyro rad/s. role='stress' because dsads is in "
+        "EXCLUDED_PRIMARY_DATASETS on placement grounds -- torso and limb units are not a "
+        "phone-pocket or watch-wrist deployment. Build it with `build_grids --dataset dsads`, which "
+        "selects every role.")
+
+STREAM_SPECS += _multi_placement("opportunity", {
+    "back": ("device", "the back"),
+    "right_upper_arm": ("device", "the right upper arm"),
+    "right_lower_arm": ("device", "the right forearm"),
+    "left_upper_arm": ("device", "the left upper arm"),
+    "left_lower_arm": ("device", "the left forearm"),
+}, role="stress",
+   note="Xsens units at 30 Hz. The converter rescales the release's milli-g accelerometer and "
+        "milli-rad/s gyroscope to g and rad/s. Labels are the Locomotion track; the mid-level "
+        "gesture track is unsupported at a 6 s window (measured median instance 2.6 s). "
+        "role='stress' because opportunity is in EXCLUDED_PRIMARY_DATASETS on placement grounds.")
+
+STREAM_SPECS += _multi_placement("phytmo", {
+    "right_arm": ("device", "the right upper arm"),
+    "left_arm": ("device", "the left upper arm"),
+    "right_forearm": ("device", "the right forearm"),
+    "left_forearm": ("device", "the left forearm"),
+}, session_contains=("_upper_",),
+   note="Upper-limb trials: four magneto-inertial units at 100 Hz, g with gravity, gyro converted "
+        "deg/s -> rad/s. Labels distinguish correct from deliberately incorrect execution.")
+
+STREAM_SPECS += _multi_placement("phytmo", {
+    "right_thigh": ("device", "the right thigh"),
+    "left_thigh": ("device", "the left thigh"),
+    "right_shin": ("device", "the right shin"),
+    "left_shin": ("device", "the left shin"),
+}, session_contains=("_lower_",),
+   note="Lower-limb trials: the anterior surface of both thighs and both shins. Same device, rate "
+        "and units as the upper-limb set; a recording carries one set or the other, never both.")
+
+STREAM_SPECS += _multi_placement("mmfit", {
+    "left_wrist": ("watch", "the left wrist"),
+    "right_wrist": ("watch", "the right wrist"),
+    "right_pocket": ("phone", "the right trouser pocket"),
+    "left_ear": ("device", "an earbud in the left ear"),
+}, note="The corpus's cleanest cross-configuration source: one repetition captured on two "
+        "smartwatches, a pocketed phone and an earbud at once. The four devices log at 85-212 Hz on "
+        "a shared wall clock (measured skew 0.06 s) and are resampled onto one 100 Hz grid.")
+
+# KneE-PAD: muscle-belly sensors on the thigh and calf. Real knee-pathology patients performing
+# correct and clinically-defined incorrect exercise variants, but the placement is outside the
+# phone/watch deployment envelope AND only 4.7% of trials reach a 6 s window, so every stream is
+# role="stress" and never enters the primary score.
+STREAM_SPECS += _multi_placement("kneepad", {
+    "right_rectus_femoris": ("device", "the right rectus femoris"),
+    "right_hamstrings": ("device", "the right hamstrings"),
+    "right_tibialis_anterior": ("device", "the right tibialis anterior"),
+    "right_gastrocnemius": ("device", "the right gastrocnemius"),
+    "left_rectus_femoris": ("device", "the left rectus femoris"),
+    "left_hamstrings": ("device", "the left hamstrings"),
+    "left_tibialis_anterior": ("device", "the left tibialis anterior"),
+    "left_gastrocnemius": ("device", "the left gastrocnemius"),
+}, role="stress",
+   note="Delsys Trigno Avanti at 148.15 Hz, g with gravity, gyro converted deg/s -> rad/s. "
+        "device_profile is 'device', not 'non_deployment': deployment_streams() drops "
+        "non_deployment entirely, so those streams can never be gridded at all (which is why "
+        "harth's stress streams have no native grid). role='stress' is what keeps kneepad out of "
+        "every primary query, and it is the right knob for that.")
+
+# upper-limb-use: one wrist band per arm, so a session carries plain acc_/gyro_ columns and the arm
+# is routed from the session id. Controls are described by anatomical side; the released patient
+# CSVs do not record which side is affected, so those two are described by impairment.
+STREAM_SPECS += tuple(
+    StreamSpec("upper_limb_use", stream_id, "watch", placement,
+               _GENERIC_ACC, _GENERIC_GYRO, "present",
+               session_contains=contains, session_excludes=excludes,
+               note="Wrist band at 50 Hz, g with gravity, gyro rad/s. Labels are 15 functional "
+                    "ADLs annotated from video by therapists.")
+    for stream_id, placement, contains, excludes in (
+        ("control_left_wrist", "the left wrist", ("_left_wrist_",), ()),
+        ("control_right_wrist", "the right wrist", ("_right_wrist_",), ()),
+        # "_affected_wrist_" is a substring of "_unaffected_wrist_", so the affected stream has to
+        # exclude it explicitly or it would swallow both arms of every patient.
+        ("patient_affected_wrist", "the wrist of the more-affected arm",
+         ("_affected_wrist_",), ("_unaffected_wrist_",)),
+        ("patient_unaffected_wrist", "the wrist of the less-affected arm",
+         ("_unaffected_wrist_",), ()),
+    )
 )
 
 

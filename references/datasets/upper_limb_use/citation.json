@@ -1,0 +1,15 @@
+{
+  "name": "upper_limb_use",
+  "category": "datasets",
+  "paper_title": "A Framework for Sensor-Based Assessment of Upper-Limb Functioning in Hemiparesis",
+  "authors": "Tanya Subash, Ann David, StephenSukumaran ReetaJanetSurekha, Sankaralingam Gayathri, Selvaraj Samuelkamaleshkumar, Henry Prakash Magimairaj, Nebojsa Malesevic, Christian Antfolk, S. K. M. Varadhan, Alejandro Melendez-Calderon, Sivakumar Balasubramanian",
+  "year": "2021",
+  "venue": "Frontiers in Human Neuroscience 15:667509",
+  "doi": "10.3389/fnhum.2021.667509",
+  "paper_url": "https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2021.667509/full",
+  "pdf_url": "https://www.frontiersin.org/journals/human-neuroscience/articles/10.3389/fnhum.2021.667509/pdf",
+  "data_or_code_url": "https://github.com/biorehab/upper-limb-use-assessment",
+  "license": "Dataset/code: see the source repository. Paper: CC-BY (Frontiers, open access).",
+  "bibtex": "@article{subash2021upperlimb,\n  title   = {A Framework for Sensor-Based Assessment of Upper-Limb Functioning in Hemiparesis},\n  author  = {Subash, Tanya and David, Ann and ReetaJanetSurekha, StephenSukumaran and Gayathri, Sankaralingam and Samuelkamaleshkumar, Selvaraj and Magimairaj, Henry Prakash and Malesevic, Nebojsa and Antfolk, Christian and Varadhan, S. K. M. and Melendez-Calderon, Alejandro and Balasubramanian, Sivakumar},\n  journal = {Frontiers in Human Neuroscience}, volume = {15}, pages = {667509}, year = {2021},\n  doi     = {10.3389/fnhum.2021.667509}\n}",
+  "notes": "10 unimpaired controls and 5 hemiparetic stroke survivors performed 15 activities of daily living wearing a band on BOTH wrists; therapists annotated upper-limb functional use from video on the FAABOS scale. CODE-VS-DOC: the repository README documents the column layout (time, ax..az, gx..gz, pitch, yaw, mx..mz, subject, old_time, r1, r2, g1, g2, task, use_type, gnd) and 50 Hz; both verified (median clock step 20.000 ms). VERIFIED AT CONVERT TIME: acceleration is in g with gravity present (median |acc| 1.016 g) and angular rate in rad/s (p99.9 6.80). TWO CONVERTER DECISIONS: control and patient cohorts number their subjects from 1 independently, so ids are prefixed c/p to stop them colliding; and the released CSVs do NOT record which side is affected for each patient, so the patient streams are described by impairment (more-/less-affected arm) rather than by anatomical side. Rows with a blank `task` are unlabelled gaps between tasks and are dropped, not relabelled. 682 of 1,042 task runs are shorter than a 6 s window."
+}

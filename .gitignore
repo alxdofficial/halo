@@ -24,6 +24,13 @@ env/
 # Authored (tracked): convert.py, metadata.json, eval_labels.json.
 # Generated (ignored): sessions/, grids/, manifest.json, labels.json (session->activity map),
 # events.json (device-session -> shared physical-event map).
+#
+# recordings.json (session -> continuous capture) is a converter output too, but is deliberately
+# NOT ignored alongside its siblings. It defines the enrollment LEAKAGE UNIT: without it a stream's
+# execution ids silently fall back to one-per-label-block, which on opportunity overcounts
+# independent enrollment examples by 10.2x and turns a k-curve into adjacent-window binding. A
+# checkout that has grids restored from elsewhere but no local conversion would inherit that
+# silently. `data.scripts.curate.build_recording_maps --check` verifies it against the converters.
 data/datasets/*/downloads/
 data/datasets/*/download/
 data/datasets/*/raw/

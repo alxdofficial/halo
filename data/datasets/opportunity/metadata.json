@@ -1,0 +1,5 @@
+{
+  "dataset": "opportunity",
+  "sampling_rate_hz": 30.0,
+  "pre_windowed": false
+}

@@ -285,3 +285,102 @@ def test_load_gt_aligns_with_stream(monkeypatch=None):
     assert set(gt).issubset(set(eval_labels))
     # keep_idx indexes back into the full window set
     assert keep_idx.max() < s.n_windows
+
+
+# =============================================================================
+# Enrollment leakage unit: label blocks vs continuous recordings
+# =============================================================================
+
+def test_execution_ids_group_label_blocks_onto_their_recording():
+    """A converter emits one session per contiguous label block, so several sessions come out of
+    ONE continuous capture. Grouping them back is what stops a k-curve from measuring adjacency.
+
+    MM-Fit is the sharp case: its three sets of an exercise are cut from a single per-workout
+    recording, so the block ids report three "executions" per (workout, exercise) where there is
+    one capture. Measured 2026-08-11, before the fix: median 3, max 4.
+    """
+    s = eval_data.load_eval_stream("mmfit", "left_wrist", alignment="native")
+    assert s.execution_granularity == "recording"
+    assert s.block_ids is not None and len(s.block_ids) == s.n_windows
+
+    def per_subject_label(ids):
+        groups = {}
+        for subject, label, value in zip(s.subjects, s.gt, ids):
+            groups.setdefault((str(subject), str(label)), set()).add(value)
+        return sorted(len(v) for v in groups.values())
+
+    blocks, executions = per_subject_label(s.block_ids), per_subject_label(s.execution_ids)
+    assert max(blocks) > 1, "expected mmfit to carry several label blocks per (workout, exercise)"
+    assert set(executions) == {1}, "one workout is one capture, so k must collapse to 1"
+    # The grouping is a coarsening, never a re-partition: blocks nest inside recordings.
+    nesting = {}
+    for block, execution in zip(s.block_ids, s.execution_ids):
+        assert nesting.setdefault(block, execution) == execution
+
+
+def test_execution_ids_are_untouched_without_a_recording_map():
+    """monipar declares no recordings.json: one session already IS one weekly visit, so its seven
+    executions per (subject, exercise) are real and must survive unchanged."""
+    s = eval_data.load_eval_stream("monipar", "watch_wrist", alignment="native")
+    assert s.execution_granularity == "block"
+    assert list(s.execution_ids) == list(s.block_ids)
+
+
+# =============================================================================
+# Quality screen — training and evaluation must refuse the same windows
+# =============================================================================
+
+def test_quality_screen_drops_the_windows_training_refuses():
+    """`scan_duplicates`/`scan_implausible` were applied by the trainer and the memory-bank build
+    but not by the evaluator, so a window too corrupt to train on was still scored. motionsense is
+    a Phase-B development stream and carries 34 flagged byte-identical duplicates."""
+    from data.scripts.scan_duplicates import load as load_duplicates
+
+    flagged = load_duplicates("native", require=True).get("motionsense/phone_front_pocket", set())
+    assert flagged, "expected motionsense to carry cached duplicate windows"
+
+    screened = eval_data.load_eval_stream("motionsense", "phone_front_pocket", alignment="native")
+    raw = eval_data.load_eval_stream("motionsense", "phone_front_pocket", alignment="native",
+                                     apply_quality_screen=False)
+    assert screened.quality_screen == "applied"
+    assert raw.quality_screen == "not requested" and raw.n_quality_excluded == 0
+    assert screened.n_windows == raw.n_windows - screened.n_quality_excluded
+    assert screened.n_quality_excluded >= len(flagged)
+    # Every parallel array is filtered together, not just the signal.
+    for field in ("gt", "subjects", "event_ids", "execution_ids", "block_ids"):
+        assert len(getattr(screened, field)) == screened.n_windows
+
+
+def test_quality_screen_reports_when_the_cache_cannot_cover_the_alignment():
+    """The caches are built one alignment at a time. A silent empty screen is indistinguishable
+    from a clean stream, so an uncovered alignment has to say so rather than return nothing."""
+    s = eval_data.load_eval_stream("motionsense", "phone_front_pocket",
+                                   alignment="non_harmonised")
+    assert s.quality_screen.startswith("unavailable:")
+    assert s.n_quality_excluded == 0
+
+
+# =============================================================================
+# Per-stream candidate vocabulary
+# =============================================================================
+
+def test_candidate_vocabulary_follows_the_stream_protocol():
+    """PHYTMO records six upper-limb exercises on the arm units and fourteen lower-limb ones on the
+    shin/thigh units. Scoring an arm stream against the dataset-wide 20 charges it for labels its
+    acquisition configuration never records."""
+    dataset_wide = eval_data.load_eval_labels("phytmo")
+    arm = eval_data.load_eval_labels("phytmo", "left_arm")
+    shin = eval_data.load_eval_labels("phytmo", "left_shin")
+    assert len(dataset_wide) == 20 and len(arm) == 6 and len(shin) == 14
+    assert set(arm).isdisjoint(shin) and set(arm) | set(shin) == set(dataset_wide)
+    # The loader hands the stream its own vocabulary, and the ground truth stays inside it.
+    stream = eval_data.load_eval_stream("phytmo", "left_arm", alignment="native")
+    assert stream.eval_labels == arm
+    assert set(stream.gt).issubset(set(arm))
+
+
+def test_candidate_vocabulary_defaults_to_the_dataset_when_undeclared():
+    """kneepad deliberately declares no per-stream subset: its reduced coverage is a consequence of
+    the 6 s window, not of the protocol, so the window length must not redefine the task."""
+    assert eval_data.load_eval_labels("kneepad", "left_hamstrings") == \
+        eval_data.load_eval_labels("kneepad")

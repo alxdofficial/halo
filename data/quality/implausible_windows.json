@@ -1,6 +1,6 @@
 {
   "alignment": "native",
-  "grid_fingerprint": "f4e9f66e0a41b316023b14b8bcf06cf94411a4295ac0a89ad204cdf13242935e",
+  "grid_fingerprint": "ead883dab684eb7b84e8dbc09817e6c9b04221ee8334602c5ff3a2483bfaecdb",
   "gyro_rail_rad_s": 34.90658503988659,
   "accel_rail_g": 16.0,
   "windows": {
@@ -97,6 +97,9 @@
       8891,
       8892
     ],
+    "phytmo/left_shin": [
+      2011
+    ],
     "wisdm/phone_pocket": [
       6229,
       21228
@@ -113,6 +116,13 @@
       9324,
       91.72572326660156,
       7.220249176025391
+    ],
+    [
+      "phytmo/left_shin",
+      1,
+      4347,
+      18.417499542236328,
+      16.445100784301758
     ],
     [
       "wisdm/phone_pocket",

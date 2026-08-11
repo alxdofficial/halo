@@ -1,0 +1,33 @@
+MONIPAR DATABASE v1.0
+
+The data set collected during the experimental campaign consists of triaxial-acceleration data of 21 patients with PD and 7 healthy control subjects. Each participant performed the complete set of 8 exercises once a week, commonly on the same day and at a similar hour.
+Three Matlab files are provided containing the raw data of the experimental subgroups: (1) Supervised, (2) Remote, and (3) Healthy control.
+Each Matlab file (*.m) contains a Data structure in which each "cell" represents a "single trial". The rows represent a different subject and the columns represent a different week.
+Each single trial has 5 columns  representing the following data:
+Column 1: Time stamp in milliseconds
+Column 2: Accelerometer x-axis (unit m/s^2)
+Column 3: Accelerometer y-axis (unit m/s^2)
+Column 4: Accelerometer z-axis (unit m/s^2)
+Column 5: Monipar exercise Label. The values for these labels can be:
+LABEL : COMMENT
+0: Postural transition.
+1: Resting periods.
+2: Postural tremor of the hands.
+3: Movement of the hands to the chest.
+4: Finger Tapping of the thumb and index fingers.
+5: Rapid movements of the hands (open and close hand).
+6: Pronation and supination movements.
+7: Arising from a chair.
+8: Gait.
+
+Additionally, two Matlab files are provided containing the Tremor Labels for selected subject in the experimental subgroups: (1) Supervised, and (2) Remote. 
+Each (label) Matlab file (*.m) contains a Data structure in which each "cell" represents the labels for the corresponding "raw data single trial" (note that not all trials were labeled with tremor labels).
+The values for these labels can be:
+LABEL : COMMENT
+-1: No labeled signal
+0: No Tremor during resting (MDS-UPDRS 0: Normal)
+1: Slight Tremor (MDS-UPDRS 1: < 1 cm in maximal amplitude)
+2: Mild Tremor (MDS-UPDRS 2: ≥ 1 cm but < 3 cm in maximal amplitude.)
+
+A file "MONIPAR SUBJECTS DATA.xlsx" is provide with additional information of the participants (PD and health controls)
+A script named Fast_watch_signals.m is provide to show how to read the raw accelerometer data.

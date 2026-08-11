@@ -1,0 +1,15 @@
+{
+  "name": "phytmo",
+  "category": "datasets",
+  "paper_title": "A database of physical therapy exercises with variability of execution collected by wearable sensors",
+  "authors": "Sara Garcia-de-Villa, Ana Jimenez-Martin, Juan Jesus Garcia-Dominguez",
+  "year": "2022",
+  "venue": "Scientific Data 9:266",
+  "doi": "10.1038/s41597-022-01387-2",
+  "paper_url": "https://www.nature.com/articles/s41597-022-01387-2",
+  "pdf_url": "https://www.nature.com/articles/s41597-022-01387-2.pdf",
+  "data_or_code_url": "https://zenodo.org/records/6319979",
+  "license": "Dataset: CC-BY (Zenodo 6319979). Paper: CC-BY (Scientific Data, open access).",
+  "bibtex": "@article{garciadevilla2022phytmo,\n  title   = {A database of physical therapy exercises with variability of execution collected by wearable sensors},\n  author  = {Garc{\\'i}a-de-Villa, Sara and Jim{\\'e}nez-Mart{\\'i}n, Ana and Garc{\\'i}a-Dom{\\'i}nguez, Juan Jes{\\'u}s},\n  journal = {Scientific Data}, volume = {9}, pages = {266}, year = {2022},\n  doi     = {10.1038/s41597-022-01387-2}\n}",
+  "notes": "30 volunteers aged 20-69 in five 10-year age groups (A 20-29, B 30-39, C 40-49, D 50-59, E 60-69) performed 6 exercises and 3 gait variations, each in two correct and two deliberately incorrect series of at least 8 repetitions, with 4 magneto-inertial units plus optical motion capture. FILENAME CONVENTION taken from the paper, not guessed: GNNEEELP_S, where P = 0 correctly performed / 1 wrongly performed and S = series 1 or 2; *Calib files are calibration motions and are skipped. Exercise codes (paper): EFE elbow flex-extension, EAH extension of arms over head, SQZ squeezing, KFE knee flex-extension, SQT squat, HAA hip abduction, GAT natural gait, GIS infinity-symbol gait, GHT heel-tiptoe gait. GIS and GHT carry no 0/1 digit \u2014 they ARE the gait variations. Placements: shins + thighs (anterior surface) for lower-limb trials, arms + forearms (exterior lateral) for upper-limb. 100 Hz inertial (magnetometer 20 Hz, dropped). Units from the CSV header: accelerometer in g, gyroscope in DEG/S -> converted to rad/s. VERIFIED AT CONVERT TIME: median |acc| 1.008 g, |gyro| p99.9 max 883 deg/s, clock 100.89 Hz. 8 of 4,520 CSVs contain all-NaN dropped-packet rows, all from subject C02 on one exercise; isolated single-sample holes are interpolated and 4 trials whose left-shin unit is 40% missing are SKIPPED rather than interpolated. The correct/incorrect flag is carried into the label."
+}

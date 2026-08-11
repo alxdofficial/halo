@@ -1,15 +1,15 @@
 {
   "name": "dsads",
   "category": "datasets",
-  "paper_title": "Recognizing Daily and Sports Activities in Two Open Source Machine Learning Environments Using Body-Worn Sensor Units",
-  "authors": "Billur Barshan and Murat Cihan Yuksek",
+  "paper_title": "Recognizing daily and sports activities in two open source machine learning environments using body-worn sensor units",
+  "authors": "Billur Barshan, Murat Cihan Yuksek",
   "year": "2014",
-  "venue": "The Computer Journal, Vol. 57, No. 11, pp. 1649-1667 (Advance Access 30 July 2013)",
+  "venue": "The Computer Journal 57(11):1649-1667",
   "doi": "10.1093/comjnl/bxt075",
   "paper_url": "https://academic.oup.com/comjnl/article-abstract/57/11/1649/411286",
-  "pdf_url": "https://repository.bilkent.edu.tr/server/api/core/bitstreams/d5e242a2-32b2-4a38-98f4-a0b654501893/content",
+  "pdf_url": "",
   "data_or_code_url": "https://archive.ics.uci.edu/dataset/256/daily+and+sports+activities",
-  "license": "Dataset (UCI): CC BY 4.0. Paper: (c) The British Computer Society 2013, all rights reserved (open-access author copy via Bilkent institutional repository).",
-  "bibtex": "@article{barshan2014recognizing,\n  title={Recognizing Daily and Sports Activities in Two Open Source Machine Learning Environments Using Body-Worn Sensor Units},\n  author={Barshan, Billur and Y{\\\"u}ksek, Murat Cihan},\n  journal={The Computer Journal},\n  volume={57},\n  number={11},\n  pages={1649--1667},\n  year={2014},\n  publisher={Oxford University Press},\n  doi={10.1093/comjnl/bxt075}\n}",
-  "notes": "DSADS = Daily and Sports Activities Data Set. Canonical dataset paper (this 2014 Computer Journal article); the dataset was first introduced in Altun, Barshan & Tuncel 2010 (Pattern Recognition, doi:10.1016/j.patcog.2010.04.019). Sensor setup: 5 Xsens MTx units placed on torso/chest, right arm, left arm, right leg, left leg; each unit has tri-axial accelerometer + gyroscope + magnetometer (9 axes/unit => 45 sensor channels total). Sampling rate 25 Hz. 8 subjects (4 female, 4 male, ages 20-30). 19 activities, each performed 5 min per subject. Signals segmented into 5-second windows => 60 segments/subject/activity, 480 segments/activity total, 9120 segments overall. Dataset DOI: 10.24432/C5C59F. Download ZIP ~162.9 MB: https://data.uci.edu/static/public/256/daily+and+sports+activities.zip . PDF (19 pages, ~1.07 MB) obtained from Bilkent University institutional repository author copy."
+  "license": "Dataset: open (UCI Machine Learning Repository #256).",
+  "bibtex": "@article{barshan2014dsads,\n  title   = {Recognizing daily and sports activities in two open source machine learning environments using body-worn sensor units},\n  author  = {Barshan, Billur and Y{\\\"u}ksek, Murat Cihan},\n  journal = {The Computer Journal}, volume = {57}, number = {11}, pages = {1649--1667}, year = {2014},\n  doi     = {10.1093/comjnl/bxt075}\n}",
+  "notes": "19 activities x 8 subjects x 60 five-second segments = 9,120 files, 5 Xsens MTx units (torso, right arm, left arm, right leg, left leg) x 9 channels (acc/gyro/mag xyz) at 25 Hz. VERIFIED AT CONVERT TIME: median |acc| 9.731 m/s^2 (gravity present), |gyro| p99.9 max 21.06 rad/s. SEGMENT RE-JOIN, VERIFIED NOT ASSUMED: a 5 s segment cannot fill a 6 s analysis window, so the converter re-joins s01..s60 into the original 5-minute recording. UCI states the division is temporal; the converter CHECKS it by comparing the sample step across each join with the steps inside the segments. Measured over all 8,968 joins: median ratio 1.09 (an unrelated segment pair scores ~5x), so the ordering is temporal \u2014 but 8.1% of joins are genuine discontinuities, and the converter SPLITS the session at those rather than smoothing them, so no window straddles a gap. PLACEMENT CORRECTION (2026-08-09): UCI names the five column blocks T, RA, LA, RL, LL, which reads as torso/arms/legs. The paper is more precise and the converter follows it -- 'two of the +/-18g sensor units are placed on the sides of the knees (the right-hand side of the right knee and the left-hand side of the left knee), the remaining +/-18g unit is placed on the subject's chest, and the two +/-5g units on the wrists'. So the placements are chest, right wrist, left wrist, right knee, left knee. This matters because HALO conditions on the placement text: calling a wrist sensor 'the right arm' would mis-describe the only two watch-like placements this dataset has. The paper also confirms 25 Hz, 8 subjects (4F/4M, ages 20-30), 5-minute recordings divided into 5-second segments."
 }

@@ -1,0 +1,15 @@
+{
+  "name": "spar",
+  "category": "datasets",
+  "paper_title": "Shoulder physiotherapy exercise recognition: machine learning the inertial signals from a smartwatch",
+  "authors": "David M. Burns, Nathan Leung, Michael Hardisty, Cari M. Whyne, Patrick Henry, Stewart McLachlin",
+  "year": "2018",
+  "venue": "Physiological Measurement 39(7):075007",
+  "doi": "10.1088/1361-6579/aacfd9",
+  "paper_url": "https://iopscience.iop.org/article/10.1088/1361-6579/aacfd9",
+  "pdf_url": "https://arxiv.org/pdf/1802.01489v2",
+  "data_or_code_url": "https://github.com/dmbee/SPAR-dataset",
+  "license": "Dataset: GPL-3.0 (github.com/dmbee/SPAR-dataset). Paper: IOP Publishing; the arXiv preprint 1802.01489 is what is stored here.",
+  "bibtex": "@article{burns2018spar,\n  title   = {Shoulder physiotherapy exercise recognition: machine learning the inertial signals from a smartwatch},\n  author  = {Burns, David M. and Leung, Nathan and Hardisty, Michael and Whyne, Cari M. and Henry, Patrick and McLachlin, Stewart},\n  journal = {Physiological Measurement},\n  volume  = {39}, number = {7}, pages = {075007}, year = {2018},\n  doi     = {10.1088/1361-6579/aacfd9}\n}",
+  "notes": "20 healthy adults (40 shoulders) performed 7 exercises from an evidence-based rotator-cuff physiotherapy protocol, 20 repetitions per shoulder, wearing an Apple Watch 2/3 on the exercising wrist. 6-axis IMU at 50 Hz; the released CSVs are ax,ay,az (g, gravity present) and wx,wy,wz (rad/s), with NO timestamp column, so the converter synthesises time at the documented fixed 50 Hz. CODE-VS-PAPER: 280 files = 20 subjects x 7 exercises x 2 sides, confirmed. VERIFIED AT CONVERT TIME: the quiescent (lowest-gyro-decile) |acc| across all 280 files is 1.026 g, confirming g-with-gravity; whole-file medians run 0.99-2.47 g because the exercises are vigorous, which is why the guard uses the quiescent decile. ENROLLMENT CAVEAT (measured, load-bearing): one file is a single continuous ~42 s bout of 20 repetitions, so repetitions are ~2.3 s apart and are NOT independent sessions; SPAR supports no same-subject enrollment curve (ceiling k=0). See docs/data/DATASET_EXPANSION_2026-08.md section 9. LABEL WORDING: the paper's Methods abbreviates exercises 5 and 6 as 'trapezius extension (TRAP)' and 'upright row (ROW)', while the release's own README.rst is more specific -- '5. Lower trapezius row with resistance band (TRAP)' and '6. Bent over row with 3 lb dumbell (ROW)'. The converter uses the README wording, which matches the shipped files and names the equipment. README.rst also independently confirms 50 Hz, accelerometer in G and gyroscope in rad/s."
+}

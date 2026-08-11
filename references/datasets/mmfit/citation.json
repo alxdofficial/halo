@@ -1,0 +1,15 @@
+{
+  "name": "mmfit",
+  "category": "datasets",
+  "paper_title": "MM-Fit: Multimodal Deep Learning for Automatic Exercise Logging across Sensing Devices",
+  "authors": "David Stromback, Sangxia Huang, Valentin Radu",
+  "year": "2020",
+  "venue": "Proceedings of the ACM on Interactive, Mobile, Wearable and Ubiquitous Technologies (IMWUT) 4(4):168",
+  "doi": "10.1145/3432701",
+  "paper_url": "https://dl.acm.org/doi/10.1145/3432701",
+  "pdf_url": "https://vradu.uk/publications/UbiComp2020.pdf",
+  "data_or_code_url": "https://mmfit.github.io/",
+  "license": "Dataset: see mmfit.github.io. Paper PDF from the corresponding author's institutional page.",
+  "bibtex": "@article{stromback2020mmfit,\n  title   = {MM-Fit: Multimodal Deep Learning for Automatic Exercise Logging across Sensing Devices},\n  author  = {Str{\\\"o}mb{\\\"a}ck, David and Huang, Sangxia and Radu, Valentin},\n  journal = {Proceedings of the ACM on Interactive, Mobile, Wearable and Ubiquitous Technologies},\n  volume  = {4}, number = {4}, pages = {168}, year = {2020},\n  doi     = {10.1145/3432701}\n}",
+  "notes": "21 full workouts of 10 exercises, each captured SIMULTANEOUSLY on two smartwatches (both wrists), a smartphone in the right trouser pocket and an earbud, plus RGB-D video and 2D/3D pose (not converted). VERIFIED AT CONVERT TIME: every one of the 21 workouts has all four devices with both acc and gyr; accelerometer is m/s^2 with gravity (median |acc| 9.82-10.07 per device) and gyroscope is rad/s (p99.9 4-8). MEASURED, AND THE REASON RESAMPLING IS NOT OPTIONAL: the four devices log at genuinely different and non-uniform mean rates \u2014 103 Hz and 104 Hz for the watches, 212 Hz for the phone, 85 Hz for the earbud \u2014 on a shared wall clock whose worst start-time skew across all workouts is 0.06 s. The converter resamples all four onto one 100 Hz grid, which is what makes the placements simultaneous sample-for-sample. Labels are start_frame,end_frame,reps,exercise against the same frame counter as column 0 of every .npy, so label frames are mapped to wall clock through that column. CAVEAT: MM-Fit identifies workouts, not participants, and releases no workout-to-person map, so each workout is treated as its own subject and subject-disjoint splits over this source are only workout-disjoint."
+}

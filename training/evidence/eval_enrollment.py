@@ -863,6 +863,11 @@ def main() -> None:
             ),
             "subjects": np.asarray(stream.subjects, dtype=object),
             "executions": np.asarray(stream.execution_ids, dtype=object),
+            # "recording" means the converter told us which continuous capture each label block came
+            # from, so an execution is a real capture; "block" means one contiguous label run is the
+            # finest unit available. A k-curve read off "block" ids on a source that splits one bout
+            # into many blocks is adjacency, not enrollment, so the artifact has to say which.
+            "execution_granularity": stream.execution_granularity,
         }
         encoded_streams[cache_key] = value
         return value
@@ -922,6 +927,12 @@ def main() -> None:
                         "support_stream": support_spec.stream_id,
                         "configuration_relation": configuration_relation,
                         "subject_relation": mode,
+                        # Whether an "execution" here is a verified continuous capture or merely one
+                        # contiguous label block. A curve read off block ids on a source that cuts a
+                        # single bout into many blocks measures adjacency, not enrollment.
+                        "query_execution_granularity": query_source["execution_granularity"],
+                        "support_execution_granularity":
+                            support_source["execution_granularity"],
                     })
                     protocol_key = f"{relation_id}/{mode}"
                     protocol[protocol_key] = coverage

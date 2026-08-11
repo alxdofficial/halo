@@ -1,0 +1,23 @@
+{
+  "labels": [
+    "ascending_stairs",
+    "cycling_on_an_exercise_bike_in_horizontal_position",
+    "cycling_on_an_exercise_bike_in_vertical_position",
+    "descending_stairs",
+    "exercising_on_a_cross_trainer",
+    "exercising_on_a_stepper",
+    "jumping",
+    "lying_on_back",
+    "lying_on_right_side",
+    "moving_around_in_an_elevator",
+    "playing_basketball",
+    "rowing",
+    "running_on_a_treadmill",
+    "sitting",
+    "standing",
+    "standing_still_in_an_elevator",
+    "walking_in_a_parking_lot",
+    "walking_on_a_treadmill_in_flat_position",
+    "walking_on_a_treadmill_in_inclined_position"
+  ]
+}

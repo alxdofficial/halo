@@ -1,0 +1,15 @@
+{
+  "name": "realdisp",
+  "category": "datasets",
+  "paper_title": "A benchmark dataset to evaluate sensor displacement in activity recognition",
+  "authors": "Oresti Banos, Miguel Damas, Hector Pomares, Ignacio Rojas, Mate Attila Toth, Oliver Amft",
+  "year": "2012",
+  "venue": "Proceedings of the 2012 ACM Conference on Ubiquitous Computing (UbiComp '12), 1026-1035",
+  "doi": "10.1145/2370216.2370437",
+  "paper_url": "https://dl.acm.org/doi/10.1145/2370216.2370437",
+  "pdf_url": "",
+  "data_or_code_url": "https://archive.ics.uci.edu/dataset/305/realdisp+activity+recognition+dataset",
+  "license": "Dataset: open (UCI Machine Learning Repository #305). Paper: ACM, paywalled.",
+  "bibtex": "@inproceedings{banos2012realdisp,\n  title     = {A benchmark dataset to evaluate sensor displacement in activity recognition},\n  author    = {Banos, Oresti and Damas, Miguel and Pomares, Hector and Rojas, Ignacio and Toth, Mate Attila and Amft, Oliver},\n  booktitle = {Proceedings of the 2012 ACM Conference on Ubiquitous Computing (UbiComp '12)},\n  pages     = {1026--1035}, year = {2012}, publisher = {ACM},\n  doi       = {10.1145/2370216.2370437}\n}",
+  "notes": "NO paper.pdf here: the UbiComp'12 paper is behind the ACM paywall and no open-access version was found. `documentation.pdf` is the release's OWN Dataset Manual (Banos & Toth, 27 March 2014), shipped inside the UCI archive, and it is the document the converter was verified against. From it: 9 Xsens MTx units at 50 Hz, sensor order RLA RUA BACK LUA LLA RC RT LT LC (Table 4), modality order ACC xyz / GYR xyz / MAG xyz / QUAT 1-4 (Table 5), 120 columns with cols 0-1 timestamp s+us and col 119 the activity label 1..33 (Table 3), 33 activities (Table 2), three placement regimes ideal / self / mutual4..7. VERIFIED AT CONVERT TIME: median |acc| 9.860 m/s^2 (gravity present), |gyro| p99.9 max 25.6 rad/s, clock exactly 50.000 Hz. TWO CLOCK DEFECTS FOUND, neither documented: most logs contain exactly one BACKWARDS jump of 1300-2100 s (a master-clock reset), which makes a span-based rate estimator read 79-98 Hz; and 3 of 46 logs (subject6_self, subject13_self, subject15_mutual4) carry an IDENTICAL timestamp on every row. The reset does not affect the samples (the converter builds the timebase from the documented fixed rate), but the three constant-timestamp logs turned out to be worse than a clock defect: MEASURED 2026-08-09, all 117 sensor columns in subject6_self, subject13_self and subject15_mutual4 are identically 0.0 on every row, while their activity-label tracks are complete. They are released as placeholders. Converting them emitted ~400 windows of pure zeros into each of the nine streams (6.6% of the source) before the grid sweep caught it; the converter now skips any log whose sensor block is identically zero. Consequence: subject06 and subject13 have no `self` condition and subject15 no `mutual4`, so those three subjects cannot contribute an ideal-vs-self displacement pair."
+}

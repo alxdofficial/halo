@@ -17,7 +17,7 @@ sample is identical between them except for the channel layout. See docs/DATA_HE
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import gcd
+from fractions import Fraction
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -57,17 +57,31 @@ def canonicalize_units(curated: pd.DataFrame, dataset: str, channels: Sequence[s
     return arr
 
 
+#: Largest denominator allowed when expressing dst/src as an exact up/down ratio. `resample_poly`'s
+#: filter length grows with the ratio, so this bounds the cost of an awkward rate. 1000 is ample for
+#: everything in the corpus: 60/51.2 reduces to 75/64 exactly, and KneE-PAD's 60/148.148 lands
+#: within 1e-7 of its true value.
+MAX_RESAMPLE_DENOMINATOR = 1000
+
+
 def resample_signal(arr: np.ndarray, src_hz: float, dst_hz: float) -> np.ndarray:
     """Anti-aliased polyphase resample of a (T, C) signal from `src_hz` to `dst_hz`.
 
     Uses `scipy.signal.resample_poly` (unity-DC-gain FIR), so gravity-present accel keeps its ~1 g
     magnitude and downsampling introduces no aliasing. No-op when the rates match.
+
+    The up/down ratio comes from `Fraction.limit_denominator`, not `round`. Rounding was wrong for
+    every non-integer source rate in the corpus: FORTH-TRACE's 51.2 Hz became 51 and KneE-PAD's
+    148.148 Hz became 148, which time-stretches the output by 0.39% and 0.10% respectively. Measured
+    on the built grids, that turned FORTH-TRACE's 2,082 native windows into 2,083 harmonised ones —
+    one window of signal that does not exist. The physical consequence is small (a 2.00 Hz cadence
+    reads as 1.992 Hz, far inside any filterbank band) but there is no reason to accept it.
     """
     if src_hz == dst_hz:
         return np.asarray(arr, dtype=np.float32)
-    s, d = int(round(src_hz)), int(round(dst_hz))
-    g = gcd(s, d)
-    return resample_poly(arr, up=d // g, down=s // g, axis=0).astype(np.float32)
+    ratio = Fraction(dst_hz / src_hz).limit_denominator(MAX_RESAMPLE_DENOMINATOR)
+    return resample_poly(arr, up=ratio.numerator, down=ratio.denominator,
+                         axis=0).astype(np.float32)
 
 
 def resample_labels(labels, n_out: int):

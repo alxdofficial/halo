@@ -1,0 +1,123 @@
+{
+  "labels": [
+    "elbow_flexion_extension",
+    "elbow_flexion_extension_performed_incorrectly",
+    "extension_of_the_arms_over_the_head",
+    "extension_of_the_arms_over_the_head_performed_incorrectly",
+    "gait_along_an_infinity_shaped_path",
+    "heel_to_toe_gait",
+    "hip_abduction_of_the_left_limb",
+    "hip_abduction_of_the_left_limb_performed_incorrectly",
+    "hip_abduction_of_the_right_limb",
+    "hip_abduction_of_the_right_limb_performed_incorrectly",
+    "knee_flexion_extension_of_the_left_limb",
+    "knee_flexion_extension_of_the_left_limb_performed_incorrectly",
+    "knee_flexion_extension_of_the_right_limb",
+    "knee_flexion_extension_of_the_right_limb_performed_incorrectly",
+    "natural_gait",
+    "natural_gait_performed_incorrectly",
+    "squat",
+    "squat_performed_incorrectly",
+    "squeezing",
+    "squeezing_performed_incorrectly"
+  ],
+  "streams": {
+    "left_arm": [
+      "elbow_flexion_extension",
+      "elbow_flexion_extension_performed_incorrectly",
+      "extension_of_the_arms_over_the_head",
+      "extension_of_the_arms_over_the_head_performed_incorrectly",
+      "squeezing",
+      "squeezing_performed_incorrectly"
+    ],
+    "left_forearm": [
+      "elbow_flexion_extension",
+      "elbow_flexion_extension_performed_incorrectly",
+      "extension_of_the_arms_over_the_head",
+      "extension_of_the_arms_over_the_head_performed_incorrectly",
+      "squeezing",
+      "squeezing_performed_incorrectly"
+    ],
+    "left_shin": [
+      "gait_along_an_infinity_shaped_path",
+      "heel_to_toe_gait",
+      "hip_abduction_of_the_left_limb",
+      "hip_abduction_of_the_left_limb_performed_incorrectly",
+      "hip_abduction_of_the_right_limb",
+      "hip_abduction_of_the_right_limb_performed_incorrectly",
+      "knee_flexion_extension_of_the_left_limb",
+      "knee_flexion_extension_of_the_left_limb_performed_incorrectly",
+      "knee_flexion_extension_of_the_right_limb",
+      "knee_flexion_extension_of_the_right_limb_performed_incorrectly",
+      "natural_gait",
+      "natural_gait_performed_incorrectly",
+      "squat",
+      "squat_performed_incorrectly"
+    ],
+    "left_thigh": [
+      "gait_along_an_infinity_shaped_path",
+      "heel_to_toe_gait",
+      "hip_abduction_of_the_left_limb",
+      "hip_abduction_of_the_left_limb_performed_incorrectly",
+      "hip_abduction_of_the_right_limb",
+      "hip_abduction_of_the_right_limb_performed_incorrectly",
+      "knee_flexion_extension_of_the_left_limb",
+      "knee_flexion_extension_of_the_left_limb_performed_incorrectly",
+      "knee_flexion_extension_of_the_right_limb",
+      "knee_flexion_extension_of_the_right_limb_performed_incorrectly",
+      "natural_gait",
+      "natural_gait_performed_incorrectly",
+      "squat",
+      "squat_performed_incorrectly"
+    ],
+    "right_arm": [
+      "elbow_flexion_extension",
+      "elbow_flexion_extension_performed_incorrectly",
+      "extension_of_the_arms_over_the_head",
+      "extension_of_the_arms_over_the_head_performed_incorrectly",
+      "squeezing",
+      "squeezing_performed_incorrectly"
+    ],
+    "right_forearm": [
+      "elbow_flexion_extension",
+      "elbow_flexion_extension_performed_incorrectly",
+      "extension_of_the_arms_over_the_head",
+      "extension_of_the_arms_over_the_head_performed_incorrectly",
+      "squeezing",
+      "squeezing_performed_incorrectly"
+    ],
+    "right_shin": [
+      "gait_along_an_infinity_shaped_path",
+      "heel_to_toe_gait",
+      "hip_abduction_of_the_left_limb",
+      "hip_abduction_of_the_left_limb_performed_incorrectly",
+      "hip_abduction_of_the_right_limb",
+      "hip_abduction_of_the_right_limb_performed_incorrectly",
+      "knee_flexion_extension_of_the_left_limb",
+      "knee_flexion_extension_of_the_left_limb_performed_incorrectly",
+      "knee_flexion_extension_of_the_right_limb",
+      "knee_flexion_extension_of_the_right_limb_performed_incorrectly",
+      "natural_gait",
+      "natural_gait_performed_incorrectly",
+      "squat",
+      "squat_performed_incorrectly"
+    ],
+    "right_thigh": [
+      "gait_along_an_infinity_shaped_path",
+      "heel_to_toe_gait",
+      "hip_abduction_of_the_left_limb",
+      "hip_abduction_of_the_left_limb_performed_incorrectly",
+      "hip_abduction_of_the_right_limb",
+      "hip_abduction_of_the_right_limb_performed_incorrectly",
+      "knee_flexion_extension_of_the_left_limb",
+      "knee_flexion_extension_of_the_left_limb_performed_incorrectly",
+      "knee_flexion_extension_of_the_right_limb",
+      "knee_flexion_extension_of_the_right_limb_performed_incorrectly",
+      "natural_gait",
+      "natural_gait_performed_incorrectly",
+      "squat",
+      "squat_performed_incorrectly"
+    ]
+  },
+  "notes": "PROTOCOL SPLIT: PHYTMO records six upper-limb exercises on the arm and forearm units and fourteen lower-limb ones on the shin and thigh units; the converter records which group each session belongs to in its session id, and `streams` above is derived from that, not from what survived windowing. Scoring an arm stream against the dataset-wide 20 would charge it for 14 labels its acquisition configuration never records.\nOPEN DESIGN QUESTION, not yet resolved: ten of the twenty labels are exact `X` / `X_performed_incorrectly` pairs. Under a language-conditioned candidate scorer those pairs are near-indistinguishable BY CONSTRUCTION, independent of encoder quality, so a flat 20-way (or 14-way / 6-way) number understates the model on exercise identity and overstates the difficulty of nothing in particular. The intended reporting is exercise identity as one cell and correct-versus-incorrect execution as a separate binary cell; that needs a harness change and is deliberately NOT faked here by dropping the incorrect variants. See docs/data/DATASET_EXPANSION_AUDIT_2026-08-11.md section 2.4."
+}

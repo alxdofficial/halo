@@ -222,6 +222,12 @@ This is likely a general property of exercise datasets rather than a SPAR defect
 subject per exercise is the standard protocol, and "repetitions" are within-bout. PHYTMO's two
 correct series per exercise is the next-best structure and gives k = 1 across series.
 
+> **⚠ SUPERSEDED IN PART by [`DATASET_EXPANSION_AUDIT_2026-08-11.md`](DATASET_EXPANSION_AUDIT_2026-08-11.md).**
+> Section 10's window counts are pre-fix, and its `exec/(subj,label)` column counts contiguous label
+> blocks rather than independent recordings — an overcount of up to 10.2x (opportunity), which makes
+> the enrollment picture it paints wrong for four of the ten sources. Four converters were rewritten
+> and their grids rebuilt on 2026-08-11. Read the audit first.
+
 ## 10. Conversion + verification results (2026-08-09)
 
 All ten downloaded sources are **converted, gridded and verified**. Nothing is integrated into

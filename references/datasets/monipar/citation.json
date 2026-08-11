@@ -1,0 +1,15 @@
+{
+  "name": "monipar",
+  "category": "datasets",
+  "paper_title": "Monipar: movement data collection tool to monitor motor symptoms in Parkinson's disease using smartwatches and smartphones",
+  "authors": "Angela Vazquez-Rodriguez et al. (Monipar consortium)",
+  "year": "2023",
+  "venue": "Frontiers in Neurology 14:1326640",
+  "doi": "10.3389/fneur.2023.1326640",
+  "paper_url": "https://doi.org/10.3389/fneur.2023.1326640",
+  "pdf_url": "https://www.frontiersin.org/journals/neurology/articles/10.3389/fneur.2023.1326640/pdf",
+  "data_or_code_url": "https://zenodo.org/records/8104853",
+  "license": "Dataset: CC-BY 4.0 (Zenodo 8104853). Paper: CC-BY (Frontiers, open access).",
+  "bibtex": "@article{monipar2023,\n  title   = {Monipar: movement data collection tool to monitor motor symptoms in Parkinson's disease using smartwatches and smartphones},\n  journal = {Frontiers in Neurology},\n  volume  = {14}, pages = {1326640}, year = {2023},\n  doi     = {10.3389/fneur.2023.1326640}\n}",
+  "notes": "21 early-stage Parkinson's patients + 7 healthy controls performed the same 8-exercise protocol ONCE A WEEK on an off-the-shelf smartwatch. Dataset DOI 10.5281/zenodo.8104853. CODE-VS-DOC: Monipar_README.txt documents 5 columns (timestamp ms, acc x/y/z in m/s^2, exercise label 0-8) and 3 subgroup .mat files as [subject x week] cell arrays; verified \u2014 supervised 6x8 (46 filled), remote 15x8 (72), control 7x9 (56) = 174 trials, 28 subjects, 20.3 h. Accelerometer ONLY: no gyroscope, so this is a 3-channel stream. DISCREPANCY FOUND: the README states 50 Hz, but the real millisecond clock is BIMODAL \u2014 52.85 Hz for the supervised subgroup and 49.87-52.85 Hz across remote/control. The converter resamples every trial from its own measured rate to a true 50 Hz, because a 5.7% frequency shift matters for the tremor bands (rest 4-6 Hz vs postural 6-12 Hz) this dataset exists to measure. THE CORPUS'S ONLY VERIFIED ACROSS-SESSION ENROLLMENT SOURCE. PLACEMENT AND DEVICE, verified from the paper (not the README, which is silent on both): 'the SW was placed on the patient's wrist where the greatest presence of motor symptoms was identified according to the clinical indication of the physician... For HC subjects, the device was placed on their dominant hand.' The device is a TicWatch S2 (Mobvoi) with an Honor 9 Lite phone. The paper also states 'the accelerometer sampling rate was set at 50 Hz' -- which is what the protocol REQUESTED; the delivered clock is 49.87-52.85 Hz, which is why the converter resamples rather than trusting the documented figure."
+}

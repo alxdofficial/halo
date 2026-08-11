@@ -1,0 +1,14 @@
+{
+  "labels": [
+    "bicep_curls",
+    "dumbbell_rows",
+    "dumbbell_shoulder_press",
+    "jumping_jacks",
+    "lateral_shoulder_raises",
+    "lunges",
+    "pushups",
+    "situps",
+    "squats",
+    "tricep_extensions"
+  ]
+}

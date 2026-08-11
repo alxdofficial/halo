@@ -98,3 +98,37 @@ def test_load_require_rejects_a_cache_for_old_grid_content(tmp_path, monkeypatch
     assert sd.load("native", require=False) == {}
     with pytest.raises(ValueError, match="does not match"):
         sd.load("native", require=True)
+
+
+def test_orphan_session_directories_are_not_ingested(tmp_path, monkeypatch):
+    """A converter re-run that drops sessions leaves the old directories behind, and the grid
+    builder's glob would happily ingest them — defeating the very fix that dropped them. MM-Fit's
+    gap fix removed 61 labelled sets; without this guard all 61 would have survived in the grid.
+    `labels.json` is the converter's declaration of what it emitted, so it is the authority.
+    """
+    import json
+    import pandas as pd
+    from data.scripts import build_grids
+    from data.scripts.curate.deployment_policy import stream_specs
+
+    root = tmp_path / "data" / "datasets" / "mmfit"
+    (root / "sessions").mkdir(parents=True)
+    real = json.loads((build_grids.REPO / "data" / "datasets" / "mmfit" / "labels.json").read_text())
+    kept = sorted(real)[0]
+    for name in (kept, "w99_orphan_from_an_earlier_run_00"):
+        target = root / "sessions" / name
+        target.mkdir()
+        pd.DataFrame({
+            "timestamp_sec": [0.0, 0.01],
+            **{f"left_wrist_{axis}": [0.0, 0.0]
+               for axis in ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")},
+            "activity": ["squats"] * 2,
+            "subject": ["w00"] * 2,
+        }).to_parquet(target / "data.parquet", index=False)
+    (root / "labels.json").write_text(json.dumps({kept: ["squats"]}))
+    (root / "metadata.json").write_text(json.dumps({"sampling_rate_hz": 100.0}))
+    monkeypatch.setattr(build_grids, "REPO", tmp_path)
+
+    spec = next(s for s in stream_specs("mmfit", None) if s.stream_id == "left_wrist")
+    seen = [frame.attrs["halo_session_id"] for frame, _, _ in build_grids.iter_sessions("mmfit", spec)]
+    assert seen == [kept], f"orphan directory was ingested: {seen}"

@@ -1,0 +1,5 @@
+{
+  "dataset": "forth_trace",
+  "sampling_rate_hz": 51.2,
+  "pre_windowed": false
+}

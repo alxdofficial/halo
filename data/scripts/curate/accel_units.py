@@ -38,6 +38,16 @@ ACC_UNIT_G = frozenset({
     "xrf_v2",     # 5-pos IMU acc in g (verified still |acc|~0.9-1.0); AirPods total acc=grav+userAccel (g).
     "extrasensory",  # converter normalizes Android m/s^2, iPhone g (author split), and watch milli-g.
     "nhanes",        # CDC PAX80_G release is calibrated triaxial acceleration in g.
+    "spar",          # Apple Watch 2/3 export already in g, gravity present. Verified over all 280
+                     # files: the lowest-gyro decile of each file has median |acc| = 1.026 g. Whole-
+                     # file medians run 0.99-2.47 g because these are vigorous arm exercises, so the
+                     # quiescent decile is the honest gravity reference (see convert.py).
+    "phytmo",        # CSV header states "Accelerometer X (g)"; measured median |acc| 1.008 g.
+    "kneepad",       # release metadata.txt Table 2 states "Accelerometer (x,y,z) unit G";
+                     # measured median |acc| 1.011 g.
+    "upper_limb_use",  # wrist-band export in g; measured median |acc| 1.016 g.
+    "opportunity",   # source is milli-g (column_names.txt: round(original / 9.8 * 1000)); the
+                     # converter already divides by 1000, so it ARRIVES here in g (1.002 g).
 })
 
 # --- Accelerometer in m/s² → scale 1/9.80665 -------------------------------------------------------
@@ -52,6 +62,12 @@ ACC_UNIT_MS2 = frozenset({
     "tnda_har", "ut_complex", "unimib_shar",  # accelerometer in m/s^2 (gravity present) -> rescale to g.
     "harmes",  # WearOS right-wrist acc in m/s^2 (verified at-rest |acc|~9.81) -> rescale to g.
     "hmog",    # Samsung Galaxy S4 accelerometer in m/s^2; sitting-session |acc|~9.81, gravity present.
+    "monipar",     # Monipar_README.txt: "Accelerometer x-axis (unit m/s^2)"; measured 9.773.
+    "realdisp",    # Xsens MTx; measured median |acc| 9.860 over all 9 units and 46 logs.
+    "forth_trace",  # Shimmer nodes; measured median |acc| 9.924. (Gyro deg/s is converted in the
+                    # converter -- accel_units never touches the gyroscope.)
+    "dsads",       # Xsens MTx; measured median |acc| 9.731.
+    "mmfit",       # smartwatch/phone/earbud Android exports; measured median |acc| 9.887.
 })
 
 
