@@ -127,6 +127,107 @@ def make_mask_plan(
     return MaskPlan(token_mask=mask)
 
 
+@dataclass
+class SensorMaskPlan:
+    """Masks over the (B, T, S) SENSOR grid, plus the per-sensor descriptor mask.
+
+    ``token_mask``      (B,T,S) hide the sensor's signal features at these patches.
+    ``descriptor_mask`` (B,S)   hide the sensor's text descriptor for the whole window.
+    """
+
+    token_mask: torch.Tensor
+    descriptor_mask: torch.Tensor
+
+
+# Probability that a step masks a WHOLE sensor across all time (objective 1 of the design of
+# record). Predicting the wrist gyro from the wrist accel is rigid-body kinematics — well-posed.
+SENSOR_EVENT_P = 0.25
+# Probability that a step hides a sensor's DESCRIPTOR while leaving its signal visible (objective 2).
+# This is the term that makes the descriptor load-bearing; the parity ablation measured what happens
+# without it (+0.0086 kNN-BA, i.e. nothing).
+DESCRIPTOR_EVENT_P = 0.25
+
+
+def make_sensor_mask_plan(
+    B: int,
+    T: int,
+    S: int,
+    generator: Optional[torch.Generator] = None,
+    time_ratio: float = MASK_RATIO_TIME,
+    sensor_event_p: float = SENSOR_EVENT_P,
+    descriptor_event_p: float = DESCRIPTOR_EVENT_P,
+    device: torch.device = torch.device("cpu"),
+    valid_patches: Optional[torch.Tensor] = None,   # (B,T) True = real patch
+    sensor_present: Optional[torch.Tensor] = None,  # (B,S) True = sensor exists
+    sensor_placement: Optional[torch.Tensor] = None,  # (B,S) long placement group id
+) -> SensorMaskPlan:
+    """Mask plan at SENSOR granularity — the three strategies of the design of record.
+
+    1. **Time-mask** — a contiguous block of patches, all sensors (the existing temporal stream).
+    2. **Sensor-mask** — one whole sensor across all time, reconstructed from the others.
+       **Restricted to same-placement co-tenancy**: a sensor is only maskable when another sensor
+       sharing its placement remains visible. This is enforced here, structurally, rather than by
+       convention, because the unrestricted version is the cross-placement objective that was
+       deleted 2026-08-06 — predicting a wrist signal from an ankle one is ill-posed (carrying a bag
+       changes the wrist and not the ankle, so the map is not a function). Same-placement
+       cross-modality is rigid-body kinematics and is fine.
+    3. **Descriptor-mask** — hide the text descriptor, keep signal + bias, reconstruct the
+       descriptor. Never applied to a sensor whose signal is already fully hidden by (2): with both
+       gone there is nothing left to reconstruct it from, and the target would be unlearnable.
+    """
+    rnd = lambda *s: torch.rand(*s, generator=generator, device=device)  # noqa: E731
+    present = (sensor_present if sensor_present is not None
+               else torch.ones(B, S, dtype=torch.bool, device=device))
+    valid = (valid_patches if valid_patches is not None
+             else torch.ones(B, T, dtype=torch.bool, device=device))
+    mask = torch.zeros(B, T, S, dtype=torch.bool, device=device)
+    t_idx = torch.arange(T, device=device).unsqueeze(0)
+
+    # --- 1. temporal stream (same construction as the per-channel planner) ---
+    usable = valid.sum(dim=1).long()
+    keep_vis = torch.clamp(usable - 1, min=1)
+    keep_vis = torch.minimum(keep_vis, torch.full_like(keep_vis, MIN_VISIBLE_TIME))
+    max_block = torch.clamp(usable - keep_vis, min=0)
+    block = torch.minimum(torch.clamp(torch.round(time_ratio * usable.float()).long(), min=1),
+                          max_block)
+    start = (rnd(B) * (torch.clamp(usable - block, min=0) + 1).float()).long()
+    in_block = ((t_idx >= start.unsqueeze(1)) & (t_idx < (start + block).unsqueeze(1))
+                & (block.unsqueeze(1) > 0))
+    mask |= in_block.unsqueeze(2)
+
+    # --- 2. whole-sensor events, same-placement only ---
+    placement = (sensor_placement if sensor_placement is not None
+                 else torch.zeros(B, S, dtype=torch.long, device=device))
+    # A sensor is maskable iff some OTHER present sensor shares its placement.
+    same_place = (placement.unsqueeze(2) == placement.unsqueeze(1))            # (B,S,S)
+    co_tenant = (same_place & present.unsqueeze(1) & present.unsqueeze(2))
+    co_tenant = co_tenant & ~torch.eye(S, dtype=torch.bool, device=device).unsqueeze(0)
+    maskable = co_tenant.any(dim=2) & present                                  # (B,S)
+
+    event = (rnd(B) < sensor_event_p) & maskable.any(dim=1)
+    scores = rnd(B, S).masked_fill(~maskable, -1.0)
+    chosen = scores.argmax(dim=1)
+    rows = torch.nonzero(event).squeeze(1)
+    sensor_event = torch.zeros(B, S, dtype=torch.bool, device=device)
+    if rows.numel():
+        sensor_event[rows, chosen[rows]] = True
+    mask |= sensor_event.unsqueeze(1)
+
+    # --- 3. descriptor events, never on a sensor whose signal is fully hidden ---
+    fully_hidden = (mask | ~valid.unsqueeze(2)).all(dim=1)                     # (B,S)
+    d_eligible = present & ~fully_hidden
+    d_event = (rnd(B) < descriptor_event_p) & d_eligible.any(dim=1)
+    d_scores = rnd(B, S).masked_fill(~d_eligible, -1.0)
+    d_chosen = d_scores.argmax(dim=1)
+    d_rows = torch.nonzero(d_event).squeeze(1)
+    descriptor_mask = torch.zeros(B, S, dtype=torch.bool, device=device)
+    if d_rows.numel():
+        descriptor_mask[d_rows, d_chosen[d_rows]] = True
+
+    mask &= valid.unsqueeze(2) & present.unsqueeze(1)
+    return SensorMaskPlan(token_mask=mask, descriptor_mask=descriptor_mask)
+
+
 def make_per_resolution_mask_plan(
     resolution_ids: torch.Tensor,
     C: int,

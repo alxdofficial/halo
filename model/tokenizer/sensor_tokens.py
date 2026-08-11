@@ -1,0 +1,194 @@
+"""Sensor-level tokens — the (B,P,C,d) -> (B,P,S,d) fold, and the two conditioning projections.
+
+DESIGN OF RECORD (docs/design/DESIGN_OF_RECORD.md). A **sensor** is one modality triad at one
+placement (accel xyz, or gyro xyz); a 6-channel stream is two sensors. Three things change from the
+per-channel encoder:
+
+1. ``SensorFold`` folds a sensor's three axis tokens into ONE token. Sequence length drops 3x on
+   6-channel streams, and role text ("x"/"y"/"z") becomes unnecessary — axis order is fixed inside
+   the token, so position carries the axis identity that text used to.
+
+2. ``ConditioningProjection`` gives ``text_descriptor`` and ``sensor_bias`` each a LEARNABLE MLP over
+   a FROZEN artifact. That split is load-bearing: the projections adapt, the underlying SBERT vector
+   and closed-form statistics do not. If the statistics themselves were learned they would stop
+   being measurements, and the declared-vs-measured audit property would die with them.
+
+3. ``DescriptorHead`` reconstructs a masked ``text_descriptor`` from the sensor's context. Scored
+   RETRIEVALLY by the caller (is the true descriptor nearest among the batch's?) rather than by MSE,
+   because regression to the corpus-mean text is a trivial solution when the corpus holds ~20
+   distinct sensor descriptions.
+
+WHY FOLDING NEEDS AN AXIS VALIDITY MASK
+---------------------------------------
+Per-channel tokens let ``channel_mask`` drop a dead axis outright. Once three axes share a token,
+a dead axis (mhealth's degenerate gyro, or a channel-dropout event) would otherwise contribute its
+raw value to the concatenation and silently poison the sensor. The fold therefore zeroes invalid
+axes AND appends an explicit 3-dim validity indicator, so "this axis read zero" and "this axis is
+absent" stay distinguishable — the same present-vs-unobservable distinction the Nyquist mask draws
+in the frequency domain.
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+AXES_PER_SENSOR = 3
+
+
+class SensorFold(nn.Module):
+    """(B,P,C,d) per-channel tokens -> (B,P,S,d) per-sensor tokens.
+
+    ``sensor_id`` (B,C) maps each channel to its sensor index, and channels belonging to one sensor
+    are taken in their existing order — which is the fixed xyz order of ``CHANNELS``. That fixed
+    order is what makes a positional encoding over axes unnecessary.
+    """
+
+    def __init__(self, d_model: int, axes: int = AXES_PER_SENSOR, dropout: float = 0.1):
+        super().__init__()
+        self.axes = axes
+        self.d_model = d_model
+        # +axes for the validity indicator: the projection can tell an absent axis from a zero one.
+        self.proj = nn.Sequential(
+            nn.Linear(d_model * axes + axes, d_model * 2), nn.GELU(),
+            nn.Dropout(dropout), nn.Linear(d_model * 2, d_model),
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,                    # (B,P,C,d)
+        sensor_id: torch.Tensor,                 # (B,C) long
+        channel_mask: torch.Tensor | None = None,  # (B,C) True = channel exists
+        n_sensors: int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns ``(sensor_tokens (B,P,S,d), sensor_mask (B,S))``."""
+        B, P, C, d = tokens.shape
+        if sensor_id.shape != (B, C):
+            raise ValueError(f"sensor_id must be {(B, C)}, got {tuple(sensor_id.shape)}")
+        S = int(n_sensors if n_sensors is not None else (sensor_id.max().item() + 1))
+        if channel_mask is None:
+            channel_mask = tokens.new_ones(B, C, dtype=torch.bool)
+        channel_mask = channel_mask.bool()
+
+        # Axis ordinal WITHIN each sensor, counted over LIVE channels only.
+        #
+        # This must ignore dead channels, because `stream_sensor_texts` gives an accel-only stream
+        # sensor_id = [0,0,0,0,0,0] — absent-modality channels keep a *valid* index and rely on
+        # channel_mask to pool to nothing. That is fine for per-channel tokens and wrong here: naive
+        # counting would make sensor 0 own six channels. Counting live channels only, and routing
+        # dead ones to a trash slot that is sliced off, makes the fold agree with the existing
+        # sensor_id contract instead of demanding every caller change it.
+        live = channel_mask.to(torch.int64)                                  # (B,C)
+        member = F.one_hot(sensor_id, num_classes=S).to(torch.int64) * live.unsqueeze(-1)
+        ordinal = member.cumsum(dim=1) - member                              # (B,C,S)
+        axis_idx = (ordinal * member).sum(dim=2)                             # (B,C)
+        live_axis_max = int((axis_idx * live).max().item()) if C else 0
+        if live_axis_max >= self.axes:
+            raise ValueError(
+                f"a sensor owns more than {self.axes} live channels (got axis index "
+                f"{live_axis_max}); SensorFold assumes a fixed {self.axes}-axis triad"
+            )
+
+        trash = S * self.axes
+        slot = torch.where(channel_mask, sensor_id * self.axes + axis_idx,
+                           torch.full_like(sensor_id, trash))                # (B,C)
+        grid = tokens.new_zeros(B, P, trash + 1, d)
+        valid = tokens.new_zeros(B, trash + 1)
+        # Zero out absent channels BEFORE scatter so a dead axis contributes nothing to the concat.
+        masked_tokens = tokens * channel_mask.view(B, 1, C, 1).to(tokens.dtype)
+        grid.scatter_(2, slot.view(B, 1, C, 1).expand(B, P, C, d), masked_tokens)
+        valid.scatter_(1, slot, channel_mask.to(tokens.dtype))
+        grid, valid = grid[:, :, :trash], valid[:, :trash]
+
+        flat = grid.reshape(B, P, S, self.axes * d)
+        vflag = valid.reshape(B, S, self.axes).unsqueeze(1).expand(B, P, S, self.axes)
+        fused = self.proj(torch.cat([flat, vflag.to(flat.dtype)], dim=-1))
+        sensor_mask = valid.reshape(B, S, self.axes).any(dim=2)             # (B,S)
+        return self.norm(fused), sensor_mask
+
+
+class ConditioningProjection(nn.Module):
+    """Learnable MLP over a frozen conditioning artifact, injected as a GATED residual.
+
+    Gate bias inits negative so the conditioner is do-no-harm at initialisation and the model learns
+    how much to use it — and so setting the bias very negative is a clean on/off ablation. Same
+    contract as ``FactoredChannelTextFusion``'s gate, which this replaces at sensor granularity.
+    """
+
+    def __init__(self, in_dim: int, d_model: int, dropout: float = 0.1,
+                 gate_bias_init: float = -2.0):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, d_model), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(d_model, d_model),
+        )
+        self.norm = nn.LayerNorm(d_model)
+        self.gate = nn.Linear(d_model * 2, d_model)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.constant_(self.gate.bias, gate_bias_init)
+
+    def embed(self, artifact: torch.Tensor) -> torch.Tensor:
+        """(B,S,in_dim) frozen artifact -> (B,S,d) learnable embedding."""
+        return self.norm(self.mlp(artifact))
+
+    def forward(
+        self,
+        sensor_tokens: torch.Tensor,     # (B,P,S,d)
+        artifact: torch.Tensor,          # (B,S,in_dim) frozen
+        valid: torch.Tensor | None = None,   # (B,S) True = artifact present
+    ) -> torch.Tensor:
+        emb = self.embed(artifact)                                   # (B,S,d)
+        if valid is not None:
+            emb = emb * valid.unsqueeze(-1).to(emb.dtype)
+        B, P, S, d = sensor_tokens.shape
+        e = emb.unsqueeze(1).expand(B, P, S, d)
+        gate = torch.sigmoid(self.gate(torch.cat([sensor_tokens, e], dim=-1)))
+        return sensor_tokens + gate * e
+
+
+class DescriptorHead(nn.Module):
+    """Reconstruct a masked ``text_descriptor`` from the encoder's contextual sensor token.
+
+    Predicts into the FROZEN text space (384-d SBERT), L2-normalised, so the caller can score by
+    cosine against the batch's true descriptors. Predicting in text space rather than d_model is
+    what makes the retrieval scoring meaningful — the candidates are real descriptors, not learned
+    slots the head could co-adapt with.
+    """
+
+    def __init__(self, d_model: int, text_dim: int = 384, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, d_model * 2), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(d_model * 2, text_dim),
+        )
+
+    def forward(self, sensor_context: torch.Tensor) -> torch.Tensor:
+        """(B,S,d) -> (B,S,text_dim), L2-normalised."""
+        return F.normalize(self.net(sensor_context), dim=-1)
+
+
+def descriptor_retrieval_loss(
+    predicted: torch.Tensor,      # (N, text_dim) L2-normalised predictions
+    targets: torch.Tensor,        # (N, text_dim) L2-normalised true descriptors
+    temperature: float = 0.07,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """InfoNCE over the batch's DISTINCT descriptors. Returns ``(loss, top1_accuracy)``.
+
+    Scored retrievally rather than by MSE: with ~20 distinct sensor descriptions in the corpus, an
+    MSE head minimises by predicting the corpus mean, which looks like a falling loss while learning
+    nothing. Ranking the true descriptor against its true competitors cannot be gamed that way.
+
+    Duplicate descriptors within a batch are collapsed to unique rows first — otherwise two rows
+    carrying the same sensor text become each other's negatives, and the task becomes unsolvable in
+    exactly the cases where it should be easy.
+    """
+    if predicted.numel() == 0:
+        zero = predicted.new_zeros(())
+        return zero, zero
+    uniq, inverse = torch.unique(targets, dim=0, return_inverse=True)
+    logits = predicted @ uniq.t() / temperature                 # (N, U)
+    loss = F.cross_entropy(logits, inverse)
+    acc = (logits.argmax(dim=1) == inverse).float().mean()
+    return loss, acc
