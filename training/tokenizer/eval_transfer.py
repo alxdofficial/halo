@@ -128,6 +128,7 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
                             source_rate: float | None = None,
                             _require_patches: bool = True,
                             requires_grad: bool = False,
+                            neutral_text: bool = False,
                             batch_size: int = 256) -> dict[str, torch.Tensor]:
     """Encode windows and retain both pooled and valid per-patch representations.
 
@@ -171,6 +172,7 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
             gravity_removed=(None if gravity_state is None else gravity_state == "removed"),
             has_accel=bool(cmask[:3].any()),
             has_gyro=bool(cmask[3:].any()),
+            neutral=neutral_text,
         )
         sensor_id_t = torch.tensor(sensor_id_list, dtype=torch.long)
     embs = []
@@ -271,12 +273,14 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
 @torch.no_grad()
 def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
                    channel_mask=None, dataset=None, stream=None,
-                   source_rate: float | None = None) -> torch.Tensor:
+                   source_rate: float | None = None,
+                   neutral_text: bool = False) -> torch.Tensor:
     """Compatibility API: raw windows at native rate -> pooled embeddings only."""
     return encode_dataset_detailed(
         enc, data, texts, device, rate, gravity_state=gravity_state,
         channel_mask=channel_mask, dataset=dataset, stream=stream,
         source_rate=source_rate,
+        neutral_text=neutral_text,
         _require_patches=False,
     )["pooled"]
 
@@ -299,6 +303,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--checkpoint", type=Path, required=True)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--parity", action="store_true",
+                    help="Also score the PARITY arm (neutral text: modality+axis only, no "
+                         "placement/device/gravity) and report the gap. The gap IS the measured "
+                         "value of acquisition-config conditioning — BASELINE_FAIRNESS_POLICY.md §5.")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="Where to write the JSON (default: <checkpoint dir>/transfer_eval.json)")
     args = ap.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
@@ -308,39 +318,68 @@ def main() -> None:
           f"internal val_ba {ckpt['val_ba']:.3f}, git {ckpt['git']}", flush=True)
 
     refs = {(r.dataset, r.stream): r for r in discover_grids("native")}
-    rng = np.random.default_rng(SEED)
-    results = {}
-    for dataset, stream in EVAL_STREAMS:
-        ref = refs.get((dataset, stream))
-        if ref is None:
-            continue
-        data = ref.load_data()
-        labels = np.asarray(ref.labels)
-        subjects = np.asarray(ref.subjects)
-        texts = stream_channel_descriptions(dataset, stream)
-        z = encode_dataset(enc, data, texts, device, ref.rate_hz,
-                           _stream_gravity_state(dataset, stream),
-                           channel_mask=ref.mask, dataset=dataset, stream=stream)
+    arms = {"full": False, "parity": True} if args.parity else {"full": False}
+    arm_results: dict[str, dict] = {}
+    arm_means: dict[str, float] = {}
 
-        # subject-disjoint 50/50 split
-        subj = sorted(set(subjects.tolist()))
-        rng.shuffle(subj)
-        hold = set(subj[: max(1, len(subj) // 2)])
-        tr = [i for i in range(len(data)) if subjects[i] not in hold]
-        te = [i for i in range(len(data)) if subjects[i] in hold]
-        ba = knn_balanced_acc(z[tr], labels[tr].tolist(), z[te], labels[te].tolist())
-        n_lab = len(set(labels.tolist()))
-        results[dataset] = {"knn_ba": round(ba, 4), "windows": len(data),
-                            "labels": n_lab, "chance": round(1 / n_lab, 3)}
-        print(f"  {dataset:14s} kNN-BA={ba:.3f}  ({n_lab} labels, chance {1/n_lab:.3f}, "
-              f"{len(data)} windows)", flush=True)
+    for arm, neutral in arms.items():
+        # Reseed per arm so BOTH arms hold out the SAME subjects. Without this the parity gap
+        # would be confounded by a different train/test split, which on these cohort sizes is
+        # comfortably larger than the effect under test.
+        rng = np.random.default_rng(SEED)
+        results = {}
+        print(f"\n--- arm: {arm} ({'neutral text' if neutral else 'full conditioning'}) ---",
+              flush=True)
+        for dataset, stream in EVAL_STREAMS:
+            ref = refs.get((dataset, stream))
+            if ref is None:
+                continue
+            data = ref.load_data()
+            labels = np.asarray(ref.labels)
+            subjects = np.asarray(ref.subjects)
+            texts = stream_channel_descriptions(dataset, stream, neutral=neutral)
+            z = encode_dataset(enc, data, texts, device, ref.rate_hz,
+                               _stream_gravity_state(dataset, stream),
+                               channel_mask=ref.mask, dataset=dataset, stream=stream,
+                               neutral_text=neutral)
 
-    mean = float(np.mean([r["knn_ba"] for r in results.values()]))
+            # subject-disjoint 50/50 split
+            subj = sorted(set(subjects.tolist()))
+            rng.shuffle(subj)
+            hold = set(subj[: max(1, len(subj) // 2)])
+            tr = [i for i in range(len(data)) if subjects[i] not in hold]
+            te = [i for i in range(len(data)) if subjects[i] in hold]
+            ba = knn_balanced_acc(z[tr], labels[tr].tolist(), z[te], labels[te].tolist())
+            n_lab = len(set(labels.tolist()))
+            results[dataset] = {"knn_ba": round(ba, 4), "windows": len(data),
+                                "labels": n_lab, "chance": round(1 / n_lab, 3)}
+            print(f"  {dataset:14s} kNN-BA={ba:.3f}  ({n_lab} labels, chance {1/n_lab:.3f}, "
+                  f"{len(data)} windows)", flush=True)
+        arm_results[arm] = results
+        arm_means[arm] = float(np.mean([r["knn_ba"] for r in results.values()]))
+
+    results, mean = arm_results["full"], arm_means["full"]
     print(f"\nHELD-OUT-CONFIG TRANSFER: mean kNN-BA = {mean:.3f} across {len(results)} datasets")
-    out = args.checkpoint.parent / "transfer_eval.json"
-    out.write_text(json.dumps({"checkpoint": str(args.checkpoint), "step": ckpt["step"],
-                               "internal_val_ba": ckpt["val_ba"], "per_dataset": results,
-                               "mean_knn_ba": round(mean, 4)}, indent=2))
+    payload = {"checkpoint": str(args.checkpoint), "step": ckpt["step"],
+               "internal_val_ba": ckpt["val_ba"], "per_dataset": results,
+               "mean_knn_ba": round(mean, 4)}
+    if args.parity:
+        gap = mean - arm_means["parity"]
+        payload["parity"] = {
+            "per_dataset": arm_results["parity"],
+            "mean_knn_ba": round(arm_means["parity"], 4),
+            "conditioning_gain": round(gap, 4),
+            "per_dataset_gain": {d: round(results[d]["knn_ba"]
+                                          - arm_results["parity"][d]["knn_ba"], 4)
+                                 for d in results},
+        }
+        print(f"PARITY (neutral text):        mean kNN-BA = {arm_means['parity']:.3f}")
+        print(f"CONDITIONING GAIN (full - parity) = {gap:+.4f}")
+        print("  Interpretation: this gap is the measured value of acquisition-config "
+              "conditioning.\n  A gain of ~0 means the placement/device/gravity text is inert.")
+    out = args.out or (args.checkpoint.parent / "transfer_eval.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2))
     print(f"-> {out}")
 
 

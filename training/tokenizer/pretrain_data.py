@@ -103,7 +103,7 @@ _DEVICE_WORDS = {"phone": "phone", "watch": "watch", "watch_proxy": "phone",
                  "device": "wearable device"}
 
 
-def stream_channel_descriptions(dataset: str, stream: str) -> list[str]:
+def stream_channel_descriptions(dataset: str, stream: str, *, neutral: bool = False) -> list[str]:
     """Per-channel base text for a deployment stream — HALO's configuration-conditioning input.
 
     Uses the StreamSpec's curated `placement` + `device_profile` from the deployment policy (e.g.
@@ -129,6 +129,12 @@ def stream_channel_descriptions(dataset: str, stream: str) -> list[str]:
     # deployment_policy.channel_description() and lets the gravity-removal augmentation skip
     # streams that already contain user acceleration rather than trusting a magnitude heuristic.
     grav = "; gravity removed" if gravity_removed else "; includes gravity"
+    if neutral:
+        # PARITY ARM (BASELINE_FAIRNESS_POLICY.md §5): modality + axis only. Placement, device and
+        # gravity state — every acquisition-config fact — are stripped, leaving the identity text a
+        # fixed-layout baseline also has. The gap against the full arm IS the value of conditioning.
+        return ([f"accelerometer {a}-axis" for a in "xyz"]
+                + [f"gyroscope {a}-axis" for a in "xyz"])
     return ([f"accelerometer {a}-axis worn at {where}{grav}" for a in "xyz"]
             + [f"gyroscope {a}-axis worn at {where}" for a in "xyz"])
 
@@ -154,6 +160,7 @@ def stream_sensor_texts(
     gravity_removed: bool | None = None,
     has_accel: bool = True,
     has_gyro: bool = True,
+    neutral: bool = False,
 ) -> tuple[list[str], list[str], list[int]]:
     """Factored config text for a stream (docs/design/TEXT_CONDITIONING.md).
 
@@ -187,8 +194,14 @@ def stream_sensor_texts(
         stream_gravity_removed = False
     removed = stream_gravity_removed if gravity_removed is None else bool(gravity_removed)
     grav = "gravity removed" if removed else "includes gravity"
-    accel_sensor = f"a {device} accelerometer on {place}; {grav}"
-    gyro_sensor = f"a {device} gyroscope on {place}"
+    if neutral:
+        # PARITY ARM — see stream_channel_descriptions. Modality survives (it is sensor IDENTITY, and
+        # the masked-sensor objective needs it to know what it must reconstruct); device, placement
+        # and gravity state do not (they are acquisition CONFIG, the thing under test).
+        accel_sensor, gyro_sensor = "an accelerometer", "a gyroscope"
+    else:
+        accel_sensor = f"a {device} accelerometer on {place}; {grav}"
+        gyro_sensor = f"a {device} gyroscope on {place}"
     # Emit only the modalities actually present. Absent-modality channels are channel_mask-masked, so
     # their sensor_id just needs to stay a valid index into sensor_texts.
     sensor_texts: list[str] = []

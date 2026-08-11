@@ -233,22 +233,70 @@ class AugmentationConfig:
              "scale", "jitter", "channel_text_phrase", "channel_text_dropout",
              "sensor_text_dropout")
 
+    # ------------------------------------------------------------------------------------------
+    # NUISANCE vs CONFIG (docs/design/DESIGN_OF_RECORD.md)
+    #
+    # The grouping rule is "did the underlying ACQUISITION change", NOT "which field was touched".
+    #
+    #   * NUISANCE — same acquisition, different realization. Two views may draw INDEPENDENTLY and
+    #     VICReg's invariance MSE applies: the representation genuinely should not move.
+    #   * CONFIG   — the acquisition itself is different (orientation, sampling rate, units, gravity
+    #     convention, which sensors are present). ONE draw per window per step, applied identically
+    #     to EVERY view including the JEPA teacher's. Demanding invariance across these is demanding
+    #     the model discard exactly the axes it conditions on.
+    #
+    # Measured 2026-08-11: with the old undifferentiated stack, config conditioning contributed
+    # +0.0086 kNN-BA against a 0.0065 noise floor, with the sign flipping on 2 of 4 datasets — i.e.
+    # nothing (training/tokenizer/outputs/parity_ablation/parity.json). This split is the structural
+    # half of the fix; descriptor-mask JEPA is the other half.
+    #
+    # Text paraphrase is NUISANCE, deliberately: it rewords an IDENTICAL configuration. Keeping the
+    # invariance pressure on it is what forces the model off memorising ~20 fixed strings and onto
+    # text semantics — the only thing that can generalize to an unseen placement description.
+    # ------------------------------------------------------------------------------------------
+    NUISANCE_GROUP = ("window_crop", "scale", "jitter", "channel_text_phrase")
+    # sensor_text_dropout is listed here (rather than omitted) so the two groups partition ORDER: if
+    # anyone re-enables it, it lands in the config group by default rather than silently reacquiring
+    # VICReg invariance pressure — the failure this whole split exists to prevent.
+    CONFIG_GROUP = ("channel_dropout", "rotation_3d", "gravity", "rate", "channel_text_dropout",
+                    "sensor_text_dropout")
+
     @classmethod
     def phase_a(cls) -> "AugmentationConfig":
         cfg = cls()
         cfg.jitter.enabled = True
         cfg.scale.enabled = True
         cfg.gravity.enabled = True
-        # Full SO(3) rotation is the placement-invariance lever; principled now that
-        # the filterbank carries a signed DC/gravity feature.
+        # Full SO(3) rotation. NOTE it is no longer "the placement-invariance lever" — it is a CONFIG
+        # transform: shared across views, never a difference the model is asked to erase.
         cfg.rotation_3d.enabled = True
         cfg.rate.enabled = True
         cfg.channel_dropout.enabled = True
         cfg.window_crop.enabled = True    # variable observation length (session-length invariance)
         cfg.channel_text_phrase.enabled = True
         cfg.channel_text_dropout.enabled = True
-        cfg.sensor_text_dropout.enabled = True     # F7: teach graceful fallback on missing config text
+        # sensor_text_dropout DELIBERATELY OFF. Under VICReg it drove "with descriptor" and "without
+        # descriptor" to the same representation — the precise mechanism that makes conditioning
+        # inert, which the parity ablation then measured. Descriptor-mask JEPA supersedes it with a
+        # SUPERVISED version of the same robustness: reconstruct the descriptor rather than learn to
+        # not need it.
+        cfg.sensor_text_dropout.enabled = False
         return cfg
+
+    def split_by_group(self) -> tuple["AugmentationConfig", "AugmentationConfig"]:
+        """Return ``(nuisance_only, config_only)`` copies of this config.
+
+        The caller draws the config view ONCE per window per step and reuses it for every view
+        (VICReg A, VICReg B, JEPA teacher); the nuisance view is drawn per view. Splitting here
+        rather than at the call site keeps the group membership in one place.
+        """
+        import copy
+        nuisance, config = copy.deepcopy(self), copy.deepcopy(self)
+        for name in self.CONFIG_GROUP:
+            getattr(nuisance, name).enabled = False
+        for name in self.NUISANCE_GROUP:
+            getattr(config, name).enabled = False
+        return nuisance, config
 
     @classmethod
     def phase_b_generic(cls) -> "AugmentationConfig":

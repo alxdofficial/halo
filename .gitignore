@@ -79,3 +79,6 @@ training/evidence/outputs/telemetry/
 # (copyright). The provenance that MATTERS is versioned: SOURCE.txt / citation.json / VERIFIED.md.
 references/**/*.pdf
 references/**/webpage.html
+# Extracted full text of the same PDFs — same copyright status, same rule. The notes derived from
+# them (docs/design/LITERATURE_*.md) ARE versioned; the source text is not.
+references/**/paper.txt
