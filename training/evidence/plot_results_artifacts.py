@@ -68,32 +68,65 @@ def curve(cells: dict, field: str, *, subject_relation: str, shape: str = "full"
     return {k: num / den for k, (num, den) in sorted(totals.items()) if den}
 
 
+def method_lines(arms: dict[str, dict], *, subject_relation: str) -> tuple[list, dict]:
+    """The four real methods as one flat list, plus the canary envelope.
+
+    Only ONE thing differs between the two arms: which path reads the retrieved evidence. The
+    prototype and ridge comparators are fitted from the same support rows and are byte-identical
+    across arms, so drawing them once per arm was pure duplication. The canaries DO differ per arm
+    (they are scored through that arm's readout) but all of them sit far below every real method, so
+    they are drawn as one shaded band rather than four more lines nobody can tell apart.
+    """
+    trained, closed = arms.get("trained", {}), arms.get("closed_form", {})
+    lines = [
+        ("HALO memory — trained decoder", "#1f77b4",
+         curve(trained, "f1_macro", subject_relation=subject_relation)),
+        ("HALO memory — closed-form retrieval vote", "#d62728",
+         curve(closed, "f1_macro", subject_relation=subject_relation)
+         or curve(trained, "identity_f1_macro", subject_relation=subject_relation)),
+        ("prototype (closed form)", "#2ca02c",
+         curve(trained, "prototype_f1_macro", subject_relation=subject_relation)),
+        ("ridge head (closed-form solve)", "#ff7f0e",
+         curve(trained, "ridge_head_f1_macro", subject_relation=subject_relation)),
+    ]
+    canaries = []
+    for cells in (trained, closed):
+        for field in ("support_removed_f1_macro", "support_label_shuffled_f1_macro"):
+            points = curve(cells, field, subject_relation=subject_relation)
+            if points:
+                canaries.append(points)
+    return lines, canaries
+
+
+def _draw_canary_band(ax, canaries, ks) -> None:
+    if not canaries:
+        return
+    lo = [min(c.get(k, float("inf")) for c in canaries) for k in ks]
+    hi = [max(c.get(k, float("-inf")) for c in canaries) for k in ks]
+    ax.fill_between(ks, lo, hi, color="#9e9e9e", alpha=0.30, zorder=0,
+                    label="canary band — support removed / labels shuffled")
+
+
 def plot_t3(arms: dict[str, dict], out: Path) -> Path:
-    """T3 — label efficiency. x = k, y = macro-F1, one line per (encoder, mechanism)."""
-    fig, axes = plt.subplots(1, len(arms), figsize=(6.4 * len(arms), 5.0), sharey=True,
-                             squeeze=False)
-    for ax, (arm, cells) in zip(axes[0], arms.items()):
-        for field, label, colour, style, width in SERIES:
-            points = curve(cells, field, subject_relation="cross_subject")
-            if not points:
-                continue
-            # In the closed_form arm the readout IS the retrieval vote, so those two series
-            # coincide exactly. Draw the arm's own readout wider and semi-transparent underneath
-            # so the overlap reads as "identical by construction" rather than "line missing".
-            arm_readout = field == "f1_macro"
-            ax.plot(list(points), list(points.values()), style, color=colour,
-                    linewidth=width + 2.5 if arm_readout else width,
-                    alpha=0.45 if arm_readout else 1.0, zorder=1 if arm_readout else 2,
-                    marker="o" if style == "-" else None, markersize=4, label=label)
-        ax.set_title(f"{arm} — cross-subject enrollment", fontsize=11)
-        ax.set_xlabel("enrolled windows per candidate (k)")
-        ax.grid(alpha=0.25, linewidth=0.6)
-        ax.set_xticks(sorted({k for c in arms.values() for k in curve(c, "f1_macro",
-                                                                     subject_relation="cross_subject")}))
-    axes[0][0].set_ylabel("macro-F1")
-    axes[0][-1].legend(fontsize=8, loc="lower right", framealpha=0.95)
-    fig.suptitle("T3 — label efficiency: adaptation per enrolled example (dev roster, "
-                 "query-weighted)", fontsize=12)
+    """T3 — label efficiency. One panel: x = k, y = macro-F1, one line per mechanism."""
+    fig, ax = plt.subplots(figsize=(9.5, 6.0))
+    lines, canaries = method_lines(arms, subject_relation="cross_subject")
+    ks = sorted({k for _, _, points in lines for k in points})
+    for label, colour, points in lines:
+        if not points:
+            continue
+        ax.plot(list(points), list(points.values()), "-o", color=colour, linewidth=2.2,
+                markersize=5, label=label, zorder=3)
+    _draw_canary_band(ax, canaries, ks)
+    ax.axhline(13.8, color="black", linestyle=":", linewidth=1,
+               label="chance floor (100/C, query-weighted)")
+    ax.set_xticks(ks)
+    ax.set_xlabel("enrolled windows per candidate (k)")
+    ax.set_ylabel("macro-F1")
+    ax.set_title("T3 — label efficiency: how much one enrolled example buys\n"
+                 "cross-subject, dev roster, query-weighted", fontsize=12)
+    ax.grid(alpha=0.25, linewidth=0.6)
+    ax.legend(fontsize=9, loc="lower right", framealpha=0.95)
     fig.tight_layout()
     fig.savefig(out, dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -101,30 +134,32 @@ def plot_t3(arms: dict[str, dict], out: Path) -> Path:
 
 
 def plot_t2(arms: dict[str, dict], out: Path, *, at_k: int = 8) -> Path:
-    """T2 — mechanism comparison at one budget, each mechanism beside its canaries."""
-    labels, groups = [], []
-    for arm, cells in arms.items():
-        values = []
-        for field, label, *_ in SERIES:
-            points = curve(cells, field, subject_relation="cross_subject")
-            values.append(points.get(at_k, float("nan")))
-        groups.append(values)
-        labels.append(arm)
+    """T2 — one bar per mechanism at a single budget, against the canary band."""
+    lines, canaries = method_lines(arms, subject_relation="cross_subject")
+    names = [label for label, _, points in lines if points.get(at_k) is not None]
+    values = [points[at_k] for _, _, points in lines if points.get(at_k) is not None]
+    colours = [colour for _, colour, points in lines if points.get(at_k) is not None]
 
-    fig, ax = plt.subplots(figsize=(11, 5.2))
-    width = 0.8 / max(len(groups), 1)
-    x = np.arange(len(SERIES))
-    for index, (arm, values) in enumerate(zip(labels, groups)):
-        ax.bar(x + index * width, values, width, label=arm,
-               color=[s[2] for s in SERIES], alpha=0.55 + 0.45 * index,
-               edgecolor="black", linewidth=0.5)
-    ax.set_xticks(x + width * (len(groups) - 1) / 2)
-    ax.set_xticklabels([s[1].replace(" (", "\n(") for s in SERIES], fontsize=8)
+    fig, ax = plt.subplots(figsize=(10, 5.6))
+    bars = ax.bar(range(len(values)), values, 0.6, color=colours, edgecolor="black",
+                  linewidth=0.6, zorder=3)
+    for bar, value in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, value + 0.8, f"{value:.1f}",
+                ha="center", fontsize=10, fontweight="bold")
+    if canaries:
+        lo = min(c.get(at_k, float("inf")) for c in canaries)
+        hi = max(c.get(at_k, float("-inf")) for c in canaries)
+        ax.axhspan(lo, hi, color="#9e9e9e", alpha=0.30, zorder=0,
+                   label=f"canary band ({lo:.1f}-{hi:.1f}) — support removed / labels shuffled")
+    ax.axhline(13.8, color="black", linestyle=":", linewidth=1, label="chance floor")
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels([n.replace(" — ", "\n").replace(" (", "\n(") for n in names], fontsize=9)
     ax.set_ylabel("macro-F1")
-    ax.set_title(f"T2 — adaptation mechanisms at k={at_k}, cross-subject "
-                 f"(bars beyond the two grey canaries are reading their enrollment)", fontsize=11)
+    ax.set_title(f"T2 — adaptation mechanisms at k={at_k}, cross-subject\n"
+                 "all four are gradient-free at deployment; only the readout differs "
+                 "between the HALO bars", fontsize=12)
     ax.grid(axis="y", alpha=0.25, linewidth=0.6)
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=9, loc="upper right")
     fig.tight_layout()
     fig.savefig(out, dpi=180, bbox_inches="tight")
     plt.close(fig)
