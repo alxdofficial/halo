@@ -230,7 +230,10 @@ class AugmentationConfig:
     # rotation_3d runs BEFORE gravity so a gravity-carrying accel is rotated with its gravity DC
     # intact (teaching gravity-direction augmentation) before gravity may be removed; rate runs
     # after gravity/rotation.
-    ORDER = ("window_crop", "channel_dropout", "rotation_3d", "gravity", "rate",
+    # Configuration transforms run before independent nuisance transforms. This order is
+    # load-bearing: if window_crop runs first, two independently cropped views can make `rate` pass
+    # its minimum-length guard in one view and skip in the other despite sharing the same RNG seed.
+    ORDER = ("channel_dropout", "rotation_3d", "gravity", "rate", "window_crop",
              "scale", "jitter", "channel_text_phrase", "channel_text_dropout",
              "sensor_text_dropout")
 
@@ -397,6 +400,30 @@ def _mark_gravity_removed(desc: str) -> str:
     if "gravity removed" not in d.lower():
         d = f"{d} (gravity removed)"
     return d
+
+
+def _mark_partner_presence(desc: str, *, modality: str, partner_present: bool) -> str:
+    """Keep factored sensor text truthful after modality-level channel dropout."""
+    import re
+
+    if modality == "accel":
+        clause = (
+            "recorded alongside a gyroscope" if partner_present
+            else "recorded without a gyroscope"
+        )
+        partner = r"(?:a\s+)?gyroscope"
+    elif modality == "gyro":
+        clause = (
+            "recorded alongside an accelerometer" if partner_present
+            else "recorded without an accelerometer"
+        )
+        partner = r"(?:an?\s+)?accelerometer"
+    else:
+        return desc
+    pattern = rf"recorded\s+(?:alongside|without)\s+{partner}"
+    if re.search(pattern, desc, flags=re.I):
+        return re.sub(pattern, clause, desc, flags=re.I)
+    return f"{desc.rstrip().rstrip(';')}; {clause}"
 
 
 @contextmanager
@@ -660,6 +687,21 @@ class IMUAugmenter:
                 remap = {old: new for new, old in enumerate(used)}
                 s.sensor_descriptions = [s.sensor_descriptions[sid] for sid in used]
                 s.sensor_id = [remap[sid] for sid in kept_ids]
+                # The descriptor records whether the encoder saw the partner modality. Once dropout
+                # removes a modality, leaving "recorded alongside ..." would condition the signal on
+                # a sensor that is no longer present. Recompute the clause from surviving channels.
+                has_accel = any(name.startswith("acc") for name in kept_names)
+                has_gyro = any(name.startswith("gyro") for name in kept_names)
+                rewritten = []
+                for sid, description in enumerate(s.sensor_descriptions):
+                    owned = [name for name, owner in zip(kept_names, s.sensor_id) if owner == sid]
+                    modality = "accel" if any(name.startswith("acc") for name in owned) else "gyro"
+                    rewritten.append(_mark_partner_presence(
+                        description,
+                        modality=modality,
+                        partner_present=has_gyro if modality == "accel" else has_accel,
+                    ))
+                s.sensor_descriptions = rewritten
             else:
                 s.sensor_id = kept_ids
         s.applied_augmentations.append("channel_dropout")

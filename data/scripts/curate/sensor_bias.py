@@ -17,8 +17,9 @@ a leakage trap of exactly the shape as hapt==uci_har. Every field below is there
 the acquisition CHANNEL, estimated on quiescent windows or from the signal's quantisation/range
 structure, never from motion content.
 
-``scan_fingerprint_risk`` is the falsifiable guard: a descriptor that predicts dataset identity
-better than placement alone does has failed, and must be pruned before use.
+``scan_fingerprint_risk`` is a monitor for dataset fingerprinting. Dataset and hardware are confounded
+in the current corpus, so this offline check is explicitly inconclusive; the decisive checks are the
+encoder dataset-ID probe and Phase-B retrieval-provenance analysis.
 
 WHY EVERY FIELD IS A NORM OR AN AGGREGATE
 -----------------------------------------
@@ -71,14 +72,12 @@ GYRO_SLICE = slice(3, 6)
 # Field order is the vector layout. Keep it stable: the bank stores these by position.
 FIELDS = (
     "gravity_magnitude",     # median ||acc|| on quiescent windows      (accel only)
-    "gravity_presence",      # median |per-channel mean| = |DC|         (accel only)
+    "gravity_presence",      # median norm of per-window DC vector       (accel only)
     "noise_floor",           # rms energy above MOTION_BAND_HZ, quiescent
     "quantization_step",     # smallest positive gap between adjacent distinct values
     "clip_fraction",         # fraction of samples at an observed rail
-    "rate_fidelity",         # measured/declared effective bandwidth ratio
-    "dropout_fraction",      # fraction of masked/absent samples
+    "rate_fidelity",         # native acquisition rate / stored array rate
     "rest_bias",             # median ||signal|| on quiescent windows   (gyro: rest offset)
-    "dynamic_range",         # p99.9 - p0.1 of magnitude
 )
 
 
@@ -171,41 +170,24 @@ def _clip_fraction(values: np.ndarray) -> float:
     return float(at_rail.mean())
 
 
-def _rate_fidelity(data: np.ndarray, rate_hz: float) -> float:
-    """Fraction of spectral energy below the declared Nyquist that is genuinely occupied.
+def _rate_fidelity(rate_hz: float, source_rate_hz: float | None) -> float:
+    """Fraction of the stored sampling clock backed by native acquisition bandwidth.
 
-    A stream declared at 100 Hz but actually upsampled from 20 Hz has near-zero energy above 10 Hz.
-    That is a *declared-vs-real* rate discrepancy, and it is invisible to the metadata.
+    Inferring this from high-frequency motion energy made the descriptor depend on which activities a
+    study happened to record. Converter provenance is the authoritative, activity-independent source.
     """
-    if data.size == 0 or rate_hz <= 0:
+    if rate_hz <= 0:
         return float("nan")
-    n = data.shape[1]
-    spec = np.abs(np.fft.rfft(data - data.mean(axis=1, keepdims=True), axis=1)) ** 2
-    total = spec.sum(axis=1)
-    freqs = np.fft.rfftfreq(n, d=1.0 / rate_hz)
-    # Energy in the upper half of the declared band. A faithfully-sampled stream has some; an
-    # upsampled one has essentially none.
-    upper = freqs > (rate_hz / 4.0)
-    if not upper.any():
-        return float("nan")
-    with np.errstate(divide="ignore", invalid="ignore"):
-        frac = np.where(total > 0, spec[:, upper, :].sum(axis=1) / total, np.nan)
-    return float(np.nanmedian(frac))
-
-
-def _dropout_fraction(data: np.ndarray) -> float:
-    """Fraction of non-finite or exactly-zero-run samples — transmission character."""
-    flat = data.reshape(-1)
-    if flat.size == 0:
-        return float("nan")
-    return float((~np.isfinite(flat)).mean())
+    source = float(rate_hz if source_rate_hz is None else source_rate_hz)
+    return float(np.clip(source / rate_hz, 0.0, 1.0))
 
 
 # ----------------------------------------------------------------------------------------------
 # Per-sensor assembly
 # ----------------------------------------------------------------------------------------------
 
-def compute_sensor_bias(data: np.ndarray, rate_hz: float, modality: str) -> tuple[float, ...]:
+def compute_sensor_bias(data: np.ndarray, rate_hz: float, modality: str,
+                        source_rate_hz: float | None = None) -> tuple[float, ...]:
     """Descriptor for one modality's 3 channels of one stream.
 
     ``data`` is (N, T, 3) for this modality only. Fields that cannot be estimated for this modality
@@ -215,21 +197,16 @@ def compute_sensor_bias(data: np.ndarray, rate_hz: float, modality: str) -> tupl
         raise ValueError(f"expected (N, T, 3) for one sensor, got {data.shape}")
     quiet = _quiescent_index(data)
     q = data[quiet]
-    magnitude = np.linalg.norm(data, axis=2)                      # (N, T)
     q_magnitude = np.linalg.norm(q, axis=2)
 
     # Gravity fields are accelerometer-only: a gyroscope has no gravity component, so reporting a
     # number there would be a fabrication rather than a measurement.
     if modality == "accel":
         gravity_magnitude = float(np.nanmedian(q_magnitude))
-        gravity_presence = float(np.nanmedian(np.abs(q.mean(axis=1))))
+        gravity_presence = float(np.nanmedian(np.linalg.norm(q.mean(axis=1), axis=1)))
     else:
         gravity_magnitude = float("nan")
         gravity_presence = float("nan")
-
-    finite_mag = magnitude[np.isfinite(magnitude)]
-    dynamic_range = (float(np.percentile(finite_mag, 99.9) - np.percentile(finite_mag, 0.1))
-                     if finite_mag.size else float("nan"))
 
     return (
         gravity_magnitude,
@@ -237,30 +214,60 @@ def compute_sensor_bias(data: np.ndarray, rate_hz: float, modality: str) -> tupl
         _high_band_rms(q, rate_hz),
         _quantization_step(data),
         _clip_fraction(data),
-        _rate_fidelity(data, rate_hz),
-        _dropout_fraction(data),
+        _rate_fidelity(rate_hz, source_rate_hz),
         float(np.nanmedian(q_magnitude)),
-        dynamic_range,
     )
 
 
-def build(limit_streams: int | None = None) -> list[SensorBias]:
-    """Scan the native grids and emit one descriptor per (stream, present modality)."""
+def build(limit_streams: int | None = None, *, datasets: tuple[str, ...] | None = None,
+          data_seed: int | None = None) -> list[SensorBias]:
+    """Scan Phase-A TRAIN subjects and emit one descriptor per present stream modality."""
+    from training.tokenizer.pretrain_data import (
+        SEED, STREAM_SOURCE_RATE_HZ, TRAIN_DATASETS, validation_subjects_for_refs,
+    )
+    datasets = tuple(TRAIN_DATASETS if datasets is None else datasets)
+    data_seed = int(SEED if data_seed is None else data_seed)
     out: list[SensorBias] = []
-    refs = sorted(discover_grids("native"), key=lambda r: (r.dataset, r.stream))
+    refs = sorted(
+        (ref for ref in discover_grids("native") if ref.dataset in set(datasets)),
+        key=lambda r: (r.dataset, r.stream),
+    )
+    missing = sorted(set(datasets) - {ref.dataset for ref in refs})
+    if missing:
+        raise FileNotFoundError(f"requested Phase-A datasets have no native grids: {missing}")
+    val_subjects = validation_subjects_for_refs(refs, seed=data_seed)
+    from data.scripts.scan_duplicates import load as load_duplicates
+    from data.scripts.scan_implausible import load as load_implausible
+    duplicate_rows = load_duplicates("native", require=True)
+    implausible_rows = load_implausible("native", require=True)
+    excluded = {
+        key: duplicate_rows.get(key, set()) | implausible_rows.get(key, set())
+        for key in {ref.key for ref in refs}
+    }
     if limit_streams:
         refs = refs[:limit_streams]
     for ref in refs:
-        data = ref.load_data()
-        if data.shape[0] > MAX_WINDOWS_PER_STREAM:
-            step = data.shape[0] // MAX_WINDOWS_PER_STREAM
-            data = data[::step][:MAX_WINDOWS_PER_STREAM]
+        train_rows = np.fromiter(
+            ((ref.dataset, subject) not in val_subjects for subject in ref.subjects),
+            dtype=bool, count=ref.n_windows,
+        )
+        indices = np.flatnonzero(train_rows)
+        if excluded.get(ref.key):
+            bad = np.fromiter(sorted(excluded[ref.key]), dtype=np.int64)
+            indices = indices[~np.isin(indices, bad)]
+        if indices.size > MAX_WINDOWS_PER_STREAM:
+            positions = np.linspace(0, indices.size - 1, MAX_WINDOWS_PER_STREAM, dtype=np.int64)
+            indices = indices[positions]
+        data = np.asarray(ref.load_data()[indices])
         mask = np.asarray(ref.mask, dtype=bool)
+        source_rate = STREAM_SOURCE_RATE_HZ.get(ref.key, float(ref.rate_hz))
         for modality, sl in (("accel", ACCEL_SLICE), ("gyro", GYRO_SLICE)):
             if not mask[sl].any():
                 continue                                  # modality genuinely absent (capture24)
-            values = compute_sensor_bias(data[:, :, sl].astype(np.float64),
-                                         float(ref.rate_hz), modality)
+            values = compute_sensor_bias(
+                data[:, :, sl].astype(np.float64), float(ref.rate_hz), modality,
+                source_rate_hz=source_rate,
+            )
             out.append(SensorBias(dataset=ref.dataset, stream=ref.stream, modality=modality,
                                   n_windows=int(data.shape[0]), values=values))
             print(f"  {ref.dataset}/{ref.stream} [{modality}]: "
@@ -315,7 +322,11 @@ def scan_fingerprint_risk(payload: dict) -> dict:
     clustering is physics, not leakage. The excess is the risk.
     """
     rows = payload["sensors"]
-    z = np.array([r["z"] for r in rows], dtype=np.float64)
+    # Score the exact vector consumed by the encoder, including support bits. Unsupported-vs-mean
+    # is information and can fingerprint a source just as readily as a standardized value can.
+    z = np.array([
+        [*r["z"], *(float(value) for value in r["supported"])] for r in rows
+    ], dtype=np.float64)
     datasets = [r["dataset"] for r in rows]
     modality = [r["modality"] for r in rows]
     if len(rows) < 3:
@@ -356,16 +367,11 @@ def scan_fingerprint_risk(payload: dict) -> dict:
     n_datasets = len(set(datasets))
     chance = 1.0 / max(n_datasets, 1)
 
-    # MEASURED 2026-08-11: cross-placement purity came back IDENTICAL to raw (0.5337, all 163
-    # sensors scored), because the exclusion removes nothing — every stream in this corpus carries
-    # its own placement, so "different placement, same dataset" is still "same hardware, same
-    # processing pipeline". Dataset identity and acquisition hardware are CONFOUNDED by
-    # construction: 34 datasets, one device model each.
-    #
-    # So this guard cannot separate "descriptor captures channel physics" (intended) from
+    # This guard cannot separate "descriptor captures channel physics" (intended) from
     # "descriptor is a dataset ID" (leakage) on this corpus, and reporting a pass would be
-    # false assurance. It stays as a monitor — a sharp INCREASE across corpus revisions is still
-    # informative — but the decisive guards are downstream, where the confound does not apply:
+    # false assurance: acquisition hardware and processing are generally dataset-specific, with no
+    # independent study using the same hardware as a control. It stays as a monitor — including the
+    # different-placement comparison — but the decisive guards are downstream:
     #
     #   1. Encoder probe: linear probe from the trunk's `feature` output to dataset ID must sit at
     #      chance. `sensor_bias` enters the trunk, so this is what tests whether the representation
@@ -382,12 +388,12 @@ def scan_fingerprint_risk(payload: dict) -> dict:
         "nn_dataset_purity_cross_placement": round(xplace, 4) if xplace is not None else None,
         "n_scored_cross_placement": n_xplace,
         "verdict": "INCONCLUSIVE — dataset and hardware are confounded in this corpus",
-        "note": ("Placement exclusion removed no candidates, so the two purities are identical: "
-                 "each stream has a unique placement and each dataset a single device model. "
+        "note": ("Placement exclusion produced the same purity, so it did not isolate provenance. "
                  "Decisive guards are the encoder dataset-ID probe and the Phase-B "
                  "retrieval-provenance check; see module docstring."
                  if confounded else
-                 "Placement exclusion was informative; compare the two purities."),
+                 "Placement exclusion changed the statistic, but hardware and dataset remain "
+                 "confounded. Use this as a monitor, not a pass/fail guard."),
     }
 
 
@@ -396,12 +402,38 @@ def main() -> None:
     ap.add_argument("--build", action="store_true", help="scan grids and write the artifact")
     ap.add_argument("--check", action="store_true", help="run the fingerprint-risk guard")
     ap.add_argument("--limit-streams", type=int, default=None)
+    ap.add_argument("--datasets", nargs="+", default=None,
+                    help="artifact corpus (default: canonical Phase-A training datasets)")
+    ap.add_argument("--data-seed", type=int, default=None,
+                    help="subject split seed (default: canonical Phase-A data seed)")
     ap.add_argument("--out", type=Path, default=OUT_PATH)
     args = ap.parse_args()
 
     if args.build:
-        rows = build(args.limit_streams)
+        import hashlib
+        from training.tokenizer.pretrain_data import (
+            SEED, TRAIN_DATASETS, validation_subjects_for_refs,
+        )
+        datasets = tuple(args.datasets or TRAIN_DATASETS)
+        data_seed = int(SEED if args.data_seed is None else args.data_seed)
+        rows = build(args.limit_streams, datasets=datasets, data_seed=data_seed)
         payload = standardize(rows)
+        refs = [ref for ref in discover_grids("native") if ref.dataset in set(datasets)]
+        val_subjects = validation_subjects_for_refs(refs, seed=data_seed)
+        subject_payload = "\n".join(
+            f"{dataset}\t{subject}" for dataset, subject in sorted(val_subjects)
+        )
+        payload["provenance"] = {
+            "alignment": "native",
+            "datasets": list(datasets),
+            "data_seed": data_seed,
+            "subjects": "train_only",
+            "validation_subject_count": len(val_subjects),
+            "validation_subjects_sha256": hashlib.sha256(
+                subject_payload.encode("utf-8")
+            ).hexdigest(),
+            "max_windows_per_stream": MAX_WINDOWS_PER_STREAM,
+        }
         payload["guard"] = scan_fingerprint_risk(payload)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(payload, indent=2))

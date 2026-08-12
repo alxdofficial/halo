@@ -16,17 +16,19 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from training.tokenizer.losses_repr import make_per_resolution_mask_plan
+from training.tokenizer.losses_repr import make_sensor_mask_plan
 from training.tokenizer.pretrain_data import (
     CorpusIndex,
     MultiResolutionCollate,
     PretrainDataset,
+    SEED,
     TemperatureSampler,
     _seed_worker,
+    modalities_present,
+    validate_sensor_bias_training_corpus,
 )
 
 OUT = Path(__file__).resolve().parent / "outputs" / "objective_health"
-GYRO = [3, 4, 5]
 N_BATCHES = 20
 BATCH_SIZE = 256
 
@@ -49,8 +51,12 @@ def main() -> None:
     torch.manual_seed(0)
     np.random.seed(0)
     random.seed(0)
-    index = CorpusIndex(seed=0)
+    index = CorpusIndex(seed=SEED)
+    validate_sensor_bias_training_corpus(index.refs, index.datasets, index.seed)
     dataset = PretrainDataset(index, index.train, augment=True, two_view=True)
+    sensor_batch_groups = [
+        len(modalities_present(index.refs[key.stream_i].mask)) for key in index.train
+    ]
     sampler = TemperatureSampler(
         index.train,
         index.stream_datasets,
@@ -61,6 +67,7 @@ def main() -> None:
         subject_ids=index.train_subject_ids,
         subject_alpha=0.5,
         max_dataset_share=0.25,
+        batch_group_ids=sensor_batch_groups,
     )
     loader = DataLoader(
         dataset,
@@ -80,20 +87,31 @@ def main() -> None:
     per_resolution: dict[int, list[float]] = {0: [], 1: []}
     temporal_by_source: dict[str, list[int]] = {}
     copyable_long, masked_long = 0, 0
+    descriptor_events = 0
+    config_pair_mismatches = 0
+    descriptor_target_pair_mismatches = 0
+    paraphrased_descriptor_rows = 0
+    descriptor_rows = 0
 
     for batch in loader:
-        _, _, _, channels = batch["patches"].shape
+        batch_size, _, _, _ = batch["patches"].shape
         valid = batch["patch_padding_mask"]
-        channel_mask = batch["channel_mask"]
         rids = batch["resolution_ids"]
-        plan = make_per_resolution_mask_plan(
-            rids, channels, GYRO, valid_patches=valid, channel_mask=channel_mask,
+        n_sensors = batch["sensor_bias"].shape[1]
+        present = torch.tensor([
+            [sensor < len(texts) for sensor in range(n_sensors)]
+            for texts in batch["sensor_texts"]
+        ], dtype=torch.bool)
+        plan = make_sensor_mask_plan(
+            batch_size, valid.shape[1], n_sensors, valid_patches=valid,
+            sensor_present=present, sensor_placement=batch["sensor_placement"],
         )
-        temporal_plan = make_per_resolution_mask_plan(
-            rids, channels, GYRO, channel_event_p=0.0,
-            valid_patches=valid, channel_mask=channel_mask,
+        temporal_plan = make_sensor_mask_plan(
+            batch_size, valid.shape[1], n_sensors, sensor_event_p=0.0,
+            descriptor_event_p=0.0, valid_patches=valid,
+            sensor_present=present, sensor_placement=batch["sensor_placement"],
         )
-        real = valid.unsqueeze(2) & channel_mask.unsqueeze(1)
+        real = valid.unsqueeze(2) & present.unsqueeze(1)
         supervised = plan.token_mask & real
         counts = supervised.flatten(1).sum(1)
         totals = real.flatten(1).sum(1).clamp(min=1)
@@ -101,9 +119,10 @@ def main() -> None:
         masked_fractions.extend((counts / totals).tolist())
         dead_windows += int(counts.eq(0).sum())
 
-        # Realised fraction PER GRID. 'per_resolution' counts the block in tokens, so this should
-        # track mask_ratio_time directly instead of the shared-interval scheme's (L+p)/W inflation.
+        # Project the one physically ordered temporal block onto each resolution so scale-specific
+        # coverage remains visible. The sensor planner deliberately does not draw separate blocks.
         token_masked = temporal_plan.token_mask.any(dim=2)
+        descriptor_events += int((plan.descriptor_mask & present).sum())
         for group in (0, 1):
             sel = valid & rids.eq(group)
             n = sel.sum(dim=1)
@@ -136,13 +155,28 @@ def main() -> None:
         missing = required_view_b - set(batch)
         if missing:
             raise RuntimeError(f"VICReg view is missing collate fields {sorted(missing)}")
+        config_pair_mismatches += int(not (
+            torch.equal(batch["channel_mask"], batch["channel_mask_b"])
+            and torch.equal(batch["sensor_bias"], batch["sensor_bias_b"])
+            and torch.equal(batch["sensor_placement"], batch["sensor_placement_b"])
+            and torch.allclose(batch["rates"], batch["rates_b"])
+            and torch.allclose(batch["source_rates"], batch["source_rates_b"])
+        ))
+        descriptor_target_pair_mismatches += int(
+            batch["sensor_target_texts"] != batch["sensor_target_texts_b"]
+        )
+        for visible, target in zip(batch["sensor_texts"], batch["sensor_target_texts"]):
+            if len(visible) != len(target):
+                raise RuntimeError("visible and target sensor descriptors do not align")
+            descriptor_rows += len(target)
+            paraphrased_descriptor_rows += sum(a != b for a, b in zip(visible, target))
 
     windows = N_BATCHES * BATCH_SIZE
     report = {
         "batches": N_BATCHES,
         "windows": windows,
         "jepa": {
-            "mask_mode": "per_resolution",
+            "mask_mode": "sensor_granularity",
             "supervised_tokens_per_window": distribution(supervised_tokens),
             "masked_fraction_of_real_tokens": distribution(masked_fractions),
             "zero_supervision_windows": dead_windows,
@@ -154,6 +188,8 @@ def main() -> None:
             "masked_long_tokens_with_all_short_visible": round(
                 copyable_long / max(masked_long, 1), 4
             ),
+            "descriptor_events": descriptor_events,
+            "descriptor_events_per_window": round(descriptor_events / windows, 4),
             "mean_temporally_masked_tokens_by_source": {
                 source: round(float(np.mean(values)), 2)
                 for source, values in sorted(temporal_by_source.items())
@@ -161,6 +197,14 @@ def main() -> None:
         },
         "vicreg": {
             "augmentation_pairs_per_batch": BATCH_SIZE,
+            "batches_with_config_mismatch_between_views": config_pair_mismatches,
+        },
+        "descriptor_target": {
+            "batches_with_target_mismatch_between_views": descriptor_target_pair_mismatches,
+            "visible_rows_using_a_paraphrase_fraction": round(
+                paraphrased_descriptor_rows / max(descriptor_rows, 1), 4
+            ),
+            "target_stage": "post_configuration_pre_paraphrase",
         },
         "sampled_source_share": {
             source: round(count / windows, 4) for source, count in sorted(source_counts.items())

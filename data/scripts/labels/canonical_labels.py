@@ -1,4 +1,4 @@
-"""Unified (canonical) activity-label vocabulary for the HARMONISED training corpus.
+"""Unified activity-label vocabulary for every canonical training view.
 
 When we harmonise, we also unify how activities are NAMED. Different training datasets describe the
 same activity in different words — uci_har "laying" vs "lying"; pamap2 "ascending_stairs" vs
@@ -47,6 +47,26 @@ SYNONYMS = {
     "stand_to_lie": "lying_down_from_standing",     # == unimib "lying_down_from_standing"
     "lie_to_sit": "sitting_up_from_lying",         # hapt-only; named to match the scheme
     "sit_to_lie": "lying_down_from_sitting",       # hapt-only; named to match the scheme
+
+    # Forth-TRACE uses sentence-like transition names for the same endpoints. Talking variants are
+    # intentionally not merged because they are compound activities rather than plain transitions.
+    "transition_from_sitting_to_standing": "standing_up_from_sitting",
+    "transition_from_standing_to_sitting": "sitting_down",
+
+    # --- exercise spelling/number ---
+    # MM-Fit uses plural concatenated names; KU-HAR/PHYTMO use singular underscore forms. The source
+    # protocols describe the same exercise, so keeping two classes would make checkpoint selection
+    # reward dataset identity rather than activity structure.
+    "pushups": "push_up",
+    "situps": "sit_up",
+    "squats": "squat",
+
+    # --- equivalent source wording ---
+    "jump_front_and_back": "jump_front_back",      # REALDISP vs MHEALTH
+    "jump_rope": "rope_jumping",                  # REALDISP vs PAMAP2
+    "arms_frontal_elevation": "frontal_elevation_arms",  # REALDISP vs MHEALTH
+    "knees_bending_crouching": "knees_bending",   # REALDISP vs MHEALTH label description
+    "talking_sitting": "sitting_and_talking",     # KU-HAR vs Forth-TRACE
 }
 
 # Reserved data-plumbing markers are not activity concepts and must never enter

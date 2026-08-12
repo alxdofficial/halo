@@ -100,6 +100,31 @@ def test_load_require_rejects_a_cache_for_old_grid_content(tmp_path, monkeypatch
         sd.load("native", require=True)
 
 
+def test_duplicate_cache_paths_do_not_overwrite_alignments(tmp_path, monkeypatch):
+    from data.scripts import scan_duplicates as sd
+    monkeypatch.setattr(sd, "OUT", tmp_path / "duplicate_windows.json")
+    assert sd.cache_path("native").name == "duplicate_windows.json"
+    assert sd.cache_path("non_harmonised").name == "duplicate_windows_non_harmonised.json"
+
+
+def test_duplicate_cache_allows_absent_optional_cached_streams(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from data.scripts import scan_duplicates as sd
+    from data.scripts.eda import grid_io
+    cache = tmp_path / "duplicate_windows.json"
+    cache.write_text(json.dumps({
+        "alignment": "native",
+        "stream_fingerprints": {"required/stream": "ok", "optional/stream": "extra"},
+        "windows": {},
+    }))
+    monkeypatch.setattr(sd, "OUT", cache)
+    monkeypatch.setattr(grid_io, "discover_grids",
+                        lambda alignment: [SimpleNamespace(key="required/stream")])
+    monkeypatch.setattr(grid_io, "grid_corpus_fingerprint",
+                        lambda alignment, refs=None: "ok")
+    assert sd.load("native", require=True) == {}
+
+
 def test_orphan_session_directories_are_not_ingested(tmp_path, monkeypatch):
     """A converter re-run that drops sessions leaves the old directories behind, and the grid
     builder's glob would happily ingest them — defeating the very fix that dropped them. MM-Fit's

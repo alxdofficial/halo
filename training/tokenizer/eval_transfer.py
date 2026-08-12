@@ -19,6 +19,7 @@ Run:  /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.ev
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -27,39 +28,59 @@ import torch
 
 from data.scripts.eda.grid_io import discover_grids
 from model.tokenizer.encoder import SetTokenizerEncoder
-from training.tokenizer.pretrain_data import (DFT_SIZE, stream_channel_descriptions,
-                                              stream_sensor_texts, _stream_gravity_state,
+from training.tokenizer.pretrain_data import (DFT_SIZE, modalities_present,
+                                              stream_channel_descriptions,
+                                              stream_sensor_bias, stream_sensor_texts,
+                                              _stream_gravity_state,
                                               MultiResolutionCollate, MultiScaleCollate,
                                               STREAM_SOURCE_RATE_HZ, VAL_RESOLUTION_PAIR)
+from data.scripts.curate.deployment_policy import PHASE_A_TRANSFER_DATASETS, stream_specs
 
-# Held-out eval datasets (never in TRAIN_DATASETS). tnda_har/ut_complex excluded
-# (degenerate subject ids -> can't do subject-disjoint kNN).
-EVAL_STREAMS = (
-    ("motionsense", "phone_front_pocket"),
-    ("realworld", "phone_waist"),
-    ("shoaib", "phone_right_pocket"),
-    ("inclusivehar", "phone_waist"),
+# Held-out eval streams are derived from the deployment policy, not maintained as a second manual
+# roster. Multi-stream datasets retain one cell per placement and are aggregated dataset-first below.
+EVAL_STREAMS = tuple(
+    (dataset, spec.stream_id)
+    for dataset in PHASE_A_TRANSFER_DATASETS
+    for spec in stream_specs(dataset, "primary")
 )
 PATCH_SECONDS = 1.0
 KNN_K = 5
 SEED = 20260718
 
 
+def subject_holdout(subjects: np.ndarray, dataset: str) -> set:
+    """Deterministic 50% holdout, shared by every stream of the same cohort."""
+    unique = sorted(set(subjects.tolist()))
+    dataset_seed = SEED + int(hashlib.sha256(dataset.encode()).hexdigest()[:8], 16) % 1_000_000
+    rng = np.random.default_rng(dataset_seed)
+    rng.shuffle(unique)
+    return set(unique[:max(1, len(unique) // 2)])
+
+
 def build_encoder(ckpt: dict, device, *, training: bool = False) -> SetTokenizerEncoder:
     c = ckpt["config"]
     frontend = c.get("frontend", "fixed")
+    sensor_bias_dim = c.get("sensor_bias_dim")
+    if sensor_bias_dim is None:
+        # Compatibility for the short-lived sensor checkpoints written before the dimension was
+        # serialized. Infer the exact historical input width instead of guessing and failing load.
+        bias_weight = ckpt.get("encoder", {}).get("bias_proj.mlp.0.weight")
+        sensor_bias_dim = int(bias_weight.shape[1]) if bias_weight is not None else 14
     kw = dict(
         d_model=c["d_model"], num_layers=c["num_layers"], num_heads=c["num_heads"],
         dim_feedforward=c["dim_feedforward"],
         dropout=float(c.get("dropout", 0.1)) if training else 0.0,
         dft_size=DFT_SIZE,
         frontend=frontend,                                  # reconstruct the ACTUAL arm (was: always filterbank)
-        use_duration_embedding=c.get("multiresolution", False),
+        use_duration_embedding=(c.get("multiresolution", False)
+                                and c.get("token_granularity", "channel") == "channel"),
         duration_min_seconds=min(c.get("short_patch_choices", (0.4,))),
         duration_max_seconds=max(c.get("long_patch_choices", (1.5,))),
         duration_gate_init=c.get("duration_gate_init", 0.1),
         rope_min_period=0.4 if c.get("multiresolution", False) else 0.5,
         text_conditioning=c.get("text_conditioning", "per_channel"),  # reconstruct the ACTUAL arm
+        token_granularity=c.get("token_granularity", "channel"),
+        sensor_bias_dim=int(sensor_bias_dim),
         gate_bias_init=c.get("gate_bias_init", -2.0),
     )
     kw.update(                                              # fixed / learnable filterbank hyperparams
@@ -74,6 +95,7 @@ def build_encoder(ckpt: dict, device, *, training: bool = False) -> SetTokenizer
     enc.load_state_dict(ckpt["encoder"])
     enc.eval_resolution_pair = tuple(c.get("val_resolution_pair", VAL_RESOLUTION_PAIR))
     enc.min_resolution_ratio = float(c.get("min_resolution_ratio", 1.75))
+    enc.multiresolution = bool(c.get("multiresolution", False))
     enc = enc.to(device)
     return enc.train() if training else enc.eval()
 
@@ -123,6 +145,30 @@ def patch_embedding_fingerprint(enc, device) -> torch.Tensor:
     return torch.cat(pieces)
 
 
+@torch.no_grad()
+def sensor_embedding_fingerprint(enc, device) -> torch.Tensor:
+    """Deterministic fingerprint of the per-(patch, sensor) export used by schema-4 banks."""
+    if getattr(enc, "token_granularity", "channel") != "sensor":
+        raise ValueError("sensor embedding fingerprint requires a sensor-granularity encoder")
+    g = torch.Generator().manual_seed(20260724)
+    data = torch.randn(_PROBE["n"], _PROBE["samples"], 6, generator=g).numpy()
+    texts = [f"probe channel {i}" for i in range(6)]
+    encoded = encode_dataset_detailed(
+        enc, data, texts, device, _PROBE["rate"], gravity_state="present",
+        channel_mask=[True] * 6, dataset=_PROBE["dataset"], stream=_PROBE["stream"],
+        export_sensor_rows=True,
+    )
+    pieces = [
+        encoded["sensor_Z"].float().flatten().cpu(),
+        encoded["sensor_window"].float().cpu(),
+        encoded["sensor_slot"].float().cpu(),
+        encoded["sensor_time"].float().cpu(),
+        encoded["sensor_duration"].float().cpu(),
+        encoded["sensor_resolution"].float().cpu(),
+    ]
+    return torch.cat(pieces)
+
+
 def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state=None,
                             channel_mask=None, dataset=None, stream=None,
                             source_rate: float | None = None,
@@ -151,7 +197,7 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
     collate = (
         MultiResolutionCollate(fixed_patch_seconds=enc.eval_resolution_pair,
                                min_resolution_ratio=enc.min_resolution_ratio)
-        if enc.use_duration_embedding else
+        if getattr(enc, "multiresolution", enc.use_duration_embedding) else
         MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS)
     )
     if source_rate is None:
@@ -170,15 +216,20 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
         if dataset is None or stream is None:
             raise ValueError("a factored encoder needs dataset+stream to build the factored "
                              "(role/sensor) text conditioning; pass them to encode_dataset()")
+        # One presence rule for both the sensor TEXT (which fixes N and sensor_id) and the sensor
+        # BIAS (which must supply exactly N rows). Deriving them from separate expressions is how
+        # they drift apart.
+        modalities = modalities_present(cmask.tolist())
         role_texts, sensor_texts, sensor_id_list = stream_sensor_texts(
             dataset,
             stream,
             gravity_removed=(None if gravity_state is None else gravity_state == "removed"),
-            has_accel=bool(cmask[:3].any()),
-            has_gyro=bool(cmask[3:].any()),
+            has_accel="accel" in modalities,
+            has_gyro="gyro" in modalities,
             neutral=neutral_text,
         )
         sensor_id_t = torch.tensor(sensor_id_list, dtype=torch.long)
+        sensor_bias = stream_sensor_bias(dataset, stream, modalities)
     embs = []
     sensor_z_parts, sensor_window_parts, sensor_slot_parts = [], [], []
     sensor_time_parts, sensor_duration_parts, sensor_resolution_parts = [], [], []
@@ -202,6 +253,7 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
                     item["role_texts"] = role_texts
                     item["sensor_texts"] = sensor_texts
                     item["sensor_id"] = sensor_id_t
+                    item["sensor_bias"] = sensor_bias
                 items.append(item)
             batch = collate(items)
             plen = batch["patch_len"]
@@ -219,6 +271,8 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
                 sensor_texts=(batch["sensor_texts"] if factored else None),
                 sensor_id=(batch["sensor_id"].to(device) if factored else None),
                 source_rate_hz=batch["source_rates"].to(device),
+                sensor_bias=(batch["sensor_bias"].to(device)
+                             if getattr(enc, "token_granularity", "channel") == "sensor" else None),
             )
             embs.append(out["pooled"] if requires_grad else out["pooled"].cpu())
             if "per_patch" not in out:
@@ -372,14 +426,11 @@ def main() -> None:
     refs = {(r.dataset, r.stream): r for r in discover_grids("native")}
     arms = {"full": False, "parity": True} if args.parity else {"full": False}
     arm_results: dict[str, dict] = {}
+    arm_stream_results: dict[str, dict] = {}
     arm_means: dict[str, float] = {}
 
     for arm, neutral in arms.items():
-        # Reseed per arm so BOTH arms hold out the SAME subjects. Without this the parity gap
-        # would be confounded by a different train/test split, which on these cohort sizes is
-        # comfortably larger than the effect under test.
-        rng = np.random.default_rng(SEED)
-        results = {}
+        stream_results = {}
         print(f"\n--- arm: {arm} ({'neutral text' if neutral else 'full conditioning'}) ---",
               flush=True)
         for dataset, stream in EVAL_STREAMS:
@@ -396,29 +447,48 @@ def main() -> None:
                                neutral_text=neutral)
 
             # subject-disjoint 50/50 split
-            subj = sorted(set(subjects.tolist()))
-            rng.shuffle(subj)
-            hold = set(subj[: max(1, len(subj) // 2)])
+            hold = subject_holdout(subjects, dataset)
             tr = [i for i in range(len(data)) if subjects[i] not in hold]
             te = [i for i in range(len(data)) if subjects[i] in hold]
             ba = knn_balanced_acc(z[tr], labels[tr].tolist(), z[te], labels[te].tolist())
             n_lab = len(set(labels.tolist()))
-            results[dataset] = {"knn_ba": round(ba, 4), "windows": len(data),
-                                "labels": n_lab, "chance": round(1 / n_lab, 3)}
-            print(f"  {dataset:14s} kNN-BA={ba:.3f}  ({n_lab} labels, chance {1/n_lab:.3f}, "
+            cell = f"{dataset}/{stream}"
+            stream_results[cell] = {
+                "dataset": dataset,
+                "stream": stream,
+                "knn_ba": round(ba, 4),
+                "windows": len(data),
+                "labels": n_lab,
+                "chance": round(1 / n_lab, 3),
+            }
+            print(f"  {cell:42s} kNN-BA={ba:.3f}  ({n_lab} labels, chance {1/n_lab:.3f}, "
                   f"{len(data)} windows)", flush=True)
+        results = {}
+        for dataset in PHASE_A_TRANSFER_DATASETS:
+            cells = [row for row in stream_results.values() if row["dataset"] == dataset]
+            if not cells:
+                continue
+            results[dataset] = {
+                "knn_ba": round(float(np.mean([row["knn_ba"] for row in cells])), 4),
+                "streams": len(cells),
+                "windows": sum(row["windows"] for row in cells),
+                "per_stream": {row["stream"]: row["knn_ba"] for row in cells},
+            }
         arm_results[arm] = results
+        arm_stream_results[arm] = stream_results
         arm_means[arm] = float(np.mean([r["knn_ba"] for r in results.values()]))
 
     results, mean = arm_results["full"], arm_means["full"]
     print(f"\nHELD-OUT-CONFIG TRANSFER: mean kNN-BA = {mean:.3f} across {len(results)} datasets")
     payload = {"checkpoint": str(args.checkpoint), "step": ckpt["step"],
                "internal_val_ba": ckpt["val_ba"], "per_dataset": results,
+               "per_stream": arm_stream_results["full"],
                "mean_knn_ba": round(mean, 4)}
     if args.parity:
         gap = mean - arm_means["parity"]
         payload["parity"] = {
             "per_dataset": arm_results["parity"],
+            "per_stream": arm_stream_results["parity"],
             "mean_knn_ba": round(arm_means["parity"], 4),
             "conditioning_gain": round(gap, 4),
             "per_dataset_gain": {d: round(results[d]["knn_ba"]

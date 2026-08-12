@@ -34,6 +34,16 @@ def test_specific_synonym_merges():
     assert canonicalize("sit_to_stand") == "standing_up_from_sitting"
     assert canonicalize("lie_to_stand") == "standing_up_from_lying"
     assert canonicalize("standing_up_from_laying") == "standing_up_from_lying"
+    assert canonicalize("pushups") == "push_up"
+    assert canonicalize("situps") == "sit_up"
+    assert canonicalize("squats") == "squat"
+    assert canonicalize("jump_front_and_back") == "jump_front_back"
+    assert canonicalize("jump_rope") == "rope_jumping"
+    assert canonicalize("arms_frontal_elevation") == "frontal_elevation_arms"
+    assert canonicalize("knees_bending_crouching") == "knees_bending"
+    assert canonicalize("transition_from_sitting_to_standing") == "standing_up_from_sitting"
+    assert canonicalize("transition_from_standing_to_sitting") == "sitting_down"
+    assert canonicalize("talking_sitting") == "sitting_and_talking"
 
 
 def test_near_but_distinct_activities_are_kept():

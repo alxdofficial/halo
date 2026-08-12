@@ -47,7 +47,8 @@ def test_accel_only_stream_advertises_one_sensor_with_gravity_state():
         gravity_removed=True,
     )
     assert len(sensor) == 1                            # no phantom gyroscope sensor
-    assert "accelerometer" in sensor[0] and "gyroscope" not in sensor[0]
+    assert "accelerometer" in sensor[0]
+    assert "recorded without a gyroscope" in sensor[0]
     assert "gravity removed" in sensor[0]
     assert sensor_id == [0, 0, 0, 0, 0, 0]             # every slot -> the single accel sensor
 
@@ -79,7 +80,8 @@ def test_eval_encoding_builds_factored_text_from_actual_channel_mask():
         stream="watch_wrist",
     )
     text = enc.sensor_texts[0][0]
-    assert "accelerometer" in text and "gyroscope" not in text
+    assert "accelerometer" in text
+    assert "recorded without a gyroscope" in text
     assert "gravity removed" in text
     assert len(enc.sensor_texts[0]) == 1               # acc-only mask -> one advertised sensor
 

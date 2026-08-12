@@ -116,7 +116,7 @@ def main():
 
     # ---------- 1. discriminability + 4. missing-channel + 5. learned-vs-handcrafted ----
     from training.tokenizer.probe_robustness import FAMILIES
-    disc = {}
+    disc_stream = {}
     for dataset, stream in EVAL_STREAMS:
         ref = refs.get((dataset, stream))
         if ref is None:
@@ -142,14 +142,25 @@ def main():
         hand = torch.where(torch.isfinite(hand), hand, hand.nan_to_num())
         hand = (hand - hand.mean(0)) / (hand.std(0) + 1e-6)
         knn_hand = knn_balanced_acc(hand[tr], y_tr, hand[te], y_te)
-        disc[dataset] = {"knn_ba": round(knn, 3), "linear_f1": round(lin, 3),
-                         "knn_accel_only": round(knn_ao, 3),
-                         "knn_handcrafted": round(knn_hand, 3),
-                         "eff_rank": round(effective_rank(z), 1),
-                         "labels": len(set(labels.tolist()))}
-        print(f"  {dataset:13s} kNN {knn:.3f} | linF1 {lin:.3f} | accel-only {knn_ao:.3f} "
+        cell = f"{dataset}/{stream}"
+        disc_stream[cell] = {"dataset": dataset, "stream": stream,
+                             "knn_ba": round(knn, 3), "linear_f1": round(lin, 3),
+                             "knn_accel_only": round(knn_ao, 3),
+                             "knn_handcrafted": round(knn_hand, 3),
+                             "eff_rank": round(effective_rank(z), 1),
+                             "labels": len(set(labels.tolist()))}
+        print(f"  {cell:42s} kNN {knn:.3f} | linF1 {lin:.3f} | accel-only {knn_ao:.3f} "
               f"| handcrafted {knn_hand:.3f} | rank {effective_rank(z):.0f}", flush=True)
+    metric_names = ("knn_ba", "linear_f1", "knn_accel_only", "knn_handcrafted", "eff_rank")
+    disc = {}
+    for dataset in sorted({row["dataset"] for row in disc_stream.values()}):
+        rows = [row for row in disc_stream.values() if row["dataset"] == dataset]
+        disc[dataset] = {name: round(float(np.mean([row[name] for row in rows])), 3)
+                         for name in metric_names}
+        disc[dataset]["streams"] = len(rows)
+        disc[dataset]["per_stream"] = {row["stream"]: row["knn_ba"] for row in rows}
     report["discriminability"] = disc
+    report["discriminability_per_stream"] = disc_stream
 
     # ---------- 2. invariance (drift + kNN-under-transform) ----------
     inv = {}

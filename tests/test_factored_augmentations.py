@@ -53,7 +53,8 @@ def test_gyro_dropout_drops_the_gyro_sensor():
     # sensor entirely (no phantom "accelerometer only" phrase on a shared description).
     assert len(out.sensor_descriptions) == 1
     assert "accelerometer" in out.sensor_descriptions[0].lower()
-    assert "gyroscope" not in out.sensor_descriptions[0].lower()
+    assert "recorded without a gyroscope" in out.sensor_descriptions[0].lower()
+    assert "alongside a gyroscope" not in out.sensor_descriptions[0].lower()
     assert out.applied_augmentations == ["channel_dropout"]
 
 
@@ -118,6 +119,31 @@ def test_sensor_text_dropout_decision_is_shared_across_relation_views():
     assert asymmetric == 0, f"{asymmetric}/60 pairs had config in one view only"
 
 
+def test_shared_configuration_is_applied_before_independent_crop():
+    """A nuisance crop must not make a shared rate transform fire in only one positive view."""
+    cfg = AugmentationConfig.none()
+    cfg.rate.enabled = True
+    cfg.rate.p = 1.0
+    cfg.rate.min_hz = cfg.rate.max_hz = 30.0
+    cfg.window_crop.enabled = True
+    cfg.window_crop.p = 1.0
+    aug = IMUAugmenter(cfg)
+
+    def short_sample():
+        sample = _sample()
+        sample.data = sample.data[:70].clone()  # rate passes before crop; some crops would make it skip
+        return sample
+
+    for seed in range(40):
+        random.seed(seed)
+        np.random.seed(seed)
+        shared = random.randrange(2**31)
+        a = aug(short_sample(), shared_config_seed=shared)
+        b = aug(short_sample(), shared_config_seed=shared)
+        assert a.sampling_rate == b.sampling_rate == 30.0
+        assert "rate" in a.applied_augmentations and "rate" in b.applied_augmentations
+
+
 def test_padding_only_accelerometer_is_not_treated_as_physical_gravity():
     cfg = AugmentationConfig.none()
     cfg.gravity.enabled = True
@@ -139,5 +165,7 @@ def test_padding_only_accelerometer_is_not_treated_as_physical_gravity():
     out = IMUAugmenter(cfg)(sample)
     assert out.gravity_state is None
     # has_accel=False -> only a gyroscope sensor is advertised; no phantom accelerometer sensor.
-    assert not any("accelerometer" in s.lower() for s in out.sensor_descriptions)
+    assert len(out.sensor_descriptions) == 1
+    assert "gyroscope" in out.sensor_descriptions[0].lower()
+    assert "recorded without an accelerometer" in out.sensor_descriptions[0].lower()
     assert any("gyroscope" in s.lower() for s in out.sensor_descriptions)

@@ -83,7 +83,8 @@ def render(log_path: Path, out_path: Path):
     S, V = load(log_path)
     fig, ax = plt.subplots(4, 3, figsize=(18, 15))
 
-    loss_keys = (("total", "total"), ("loss_weighted/jepa", "JEPA weighted"),
+    loss_keys = (("total", "total"), ("loss_weighted/jepa", "JEPA family"),
+                 ("loss_weighted/descriptor", "descriptor part"),
                  ("loss_weighted/vicreg", "VICReg weighted"))
     for key, label in loss_keys:
         fallback = {"loss_weighted/jepa": "jepa", "loss_weighted/vicreg": "vicreg"}.get(key)
@@ -95,14 +96,19 @@ def render(log_path: Path, out_path: Path):
         _line(ax[0, 1], S, key, label, smooth=True, lw=1.0)
     ax[0, 1].set_title("VICReg components"); _legend(ax[0, 1], fontsize=7)
 
-    for key, label in (("jepa/margin", "JEPA"), ("vicreg/margin", "VICReg")):
+    for key, label in (("jepa/margin", "JEPA margin"), ("vicreg/margin", "VICReg margin"),
+                       ("descriptor/top1", "descriptor top-1"),
+                       ("descriptor/chance_top1", "descriptor chance")):
         _line(ax[0, 2], S, key, label, smooth=True, lw=1.1)
-    ax[0, 2].axhline(0.0, color="black", lw=0.6); ax[0, 2].set_title("positive - random margin")
+    ax[0, 2].axhline(0.0, color="black", lw=0.6)
+    ax[0, 2].set_title("pair margins and descriptor retrieval")
     _legend(ax[0, 2], fontsize=7)
 
     for key, label in (("grad/total_preclip", "total"), ("grad/encoder", "encoder"),
                        ("grad/jepa_predictor", "JEPA head"),
-                       ("grad/vicreg_projector", "VICReg head")):
+                       ("grad/vicreg_projector", "VICReg head"),
+                       ("grad/descriptor_head", "descriptor head"),
+                       ("grad/bias_projection", "bias projection")):
         _line(ax[1, 0], S, key, label, lw=0.9)
     ax[1, 0].set_yscale("log"); ax[1, 0].set_title("gradient norms (pre-clip)")
     _legend(ax[1, 0], fontsize=7)
@@ -200,6 +206,9 @@ def render(log_path: Path, out_path: Path):
            f"steps/s       : {latest.get('perf/steps_per_s', float('nan')):.2f}\n"
            f"ETA minutes   : {latest.get('perf/eta_minutes', float('nan')):.1f}\n"
            f"zero targets  : {latest.get('jepa_zero_target_frac_window', float('nan')):.2%}\n"
+           f"descriptor tgt: {latest.get('descriptor/target_window_fraction', float('nan')):.2%}\n"
+           f"descriptor top: {latest.get('descriptor/top1', float('nan')):.2%}\n"
+           f"descriptor rnd: {latest.get('descriptor/chance_top1', float('nan')):.2%}\n"
            f"input finite  : {latest.get('data/input_finite_fraction', float('nan')):.6f}\n"
            f"input abs max : {latest.get('data/input_abs_max', float('nan')):.2f}\n"
            f"AMP skips     : {latest.get('amp/skipped_updates_total', 0)}\n"

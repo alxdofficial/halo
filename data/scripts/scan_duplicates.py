@@ -20,7 +20,8 @@ Duplicates are only ever matched WITHIN one stream. Simultaneous multi-placement
 
 Like ``scan_implausible``, results are cached to a small JSON so ``CorpusIndex`` stays lazy.
 
-Run:  python -m data.scripts.scan_duplicates          # writes data/quality/duplicate_windows.json
+Run:  python -m data.scripts.scan_duplicates
+      python -m data.scripts.scan_duplicates --alignment non_harmonised
 """
 
 from __future__ import annotations
@@ -33,6 +34,13 @@ import numpy as np
 
 
 OUT = Path(__file__).resolve().parents[2] / "data" / "quality" / "duplicate_windows.json"
+
+
+def cache_path(alignment: str) -> Path:
+    """One cache per alignment; native keeps the historical filename."""
+    if alignment == "native":
+        return OUT
+    return OUT.with_name(f"{OUT.stem}_{alignment}{OUT.suffix}")
 
 #: Windows are hashed in blocks so a 4 GB grid is never fully resident.
 BLOCK = 4096
@@ -76,6 +84,9 @@ def scan(alignment: str = "native") -> dict:
             bad[ref.key] = drop
             stats.append((ref.key, len(drop), ref.n_windows, n_groups, n_conflict))
     return {"alignment": alignment, "grid_fingerprint": grid_corpus_fingerprint(alignment, refs),
+            "stream_fingerprints": {
+                ref.key: grid_corpus_fingerprint(alignment, [ref]) for ref in refs
+            },
             "windows": bad, "summary": stats}
 
 
@@ -87,44 +98,62 @@ def load(alignment: str = "native", *, require: bool = False) -> dict[str, set[i
     without ``data/quality/duplicate_windows.json`` training would silently readmit every stale
     ExtraSensory buffer. Callers that depend on the screen should pass require=True.
     """
-    if not OUT.exists():
+    path = cache_path(alignment)
+    if not path.exists():
         if require:
             raise FileNotFoundError(
-                f"{OUT} is missing — run `python -m data.scripts.scan_duplicates`. Training "
+                f"{path} is missing — run `python -m data.scripts.scan_duplicates "
+                f"--alignment {alignment}`. Training "
                 "without it silently readmits byte-identical stale-buffer windows."
             )
         return {}
-    blob = json.loads(OUT.read_text())
+    blob = json.loads(path.read_text())
     if blob.get("alignment") != alignment:
         if require:
             raise ValueError(
-                f"{OUT} was built for alignment {blob.get('alignment')!r}, not {alignment!r}; "
+                f"{path} was built for alignment {blob.get('alignment')!r}, not {alignment!r}; "
                 "re-run data.scripts.scan_duplicates for this alignment."
             )
         return {}
-    from data.scripts.eda.grid_io import grid_corpus_fingerprint
-    current = grid_corpus_fingerprint(alignment)
-    if blob.get("grid_fingerprint") != current:
+    from data.scripts.eda.grid_io import discover_grids, grid_corpus_fingerprint
+    stream_fingerprints = blob.get("stream_fingerprints")
+    if stream_fingerprints:
+        stale = [
+            ref.key for ref in discover_grids(alignment)
+            if stream_fingerprints.get(ref.key) != grid_corpus_fingerprint(alignment, [ref])
+        ]
+        current_matches = not stale
+    else:  # backwards-compatible validation for pre-per-stream cache fixtures/artifacts
+        current_matches = blob.get("grid_fingerprint") == grid_corpus_fingerprint(alignment)
+        stale = []
+    if not current_matches:
         if require:
             raise ValueError(
-                f"{OUT} does not match the current {alignment} grids; re-run "
-                "`python -m data.scripts.scan_duplicates` after every grid rebuild."
+                f"{path} does not match the current {alignment} grids; re-run "
+                "`python -m data.scripts.scan_duplicates` after every grid rebuild"
+                + (f" (stale/missing streams: {stale[:5]})" if stale else ".")
             )
         return {}
     return {k: set(v) for k, v in blob.get("windows", {}).items()}
 
 
 def main() -> None:
+    import argparse
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    blob = scan()
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(blob, indent=2) + "\n")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--alignment", default="native",
+                        choices=("native", "harmonised", "non_harmonised"))
+    args = parser.parse_args()
+    blob = scan(args.alignment)
+    path = cache_path(args.alignment)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(blob, indent=2) + "\n")
     total = sum(len(v) for v in blob["windows"].values())
     for key, n, tot, groups, conflict in blob["summary"]:
         print(f"  {key:28s} {n:6d}/{tot:7d} windows dropped "
               f"({n / tot:5.1%}) · {groups} groups, {conflict} label-conflicted")
-    print(f"-> {total} duplicate windows cached for exclusion in {OUT}")
+    print(f"-> {total} duplicate windows cached for exclusion in {path}")
 
 
 if __name__ == "__main__":

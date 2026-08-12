@@ -33,15 +33,18 @@ within-bout repetitions of SPAR.
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.signal import resample_poly
 
 HERE = Path(__file__).resolve().parent
 RAW = HERE / "downloads" / "x" / "mm-fit"
-# One grid for all four devices. 100 Hz is at or below every device's own mean rate except the
-# phone's 212 Hz, so only the phone is decimated and nothing is upsampled beyond its native content.
+# One grid for all four devices. The watches are near 100 Hz, the phone is ~212 Hz, and the earbud
+# is ~85 Hz. The phone is anti-alias decimated and the earbud is interpolated to the common clock;
+# the model separately receives the earbud's acquisition-rate ceiling.
 NATIVE_RATE = 100.0
 
 DEVICES = {
@@ -67,10 +70,11 @@ MAX_CLOCK_SKEW_SEC = 5.0         # device start times must agree to within this
 #     sw_r watch    5,142,870       27,535            1             7.83 s
 #     sw_l watch    5,087,619       20,945            1            74.47 s
 #
-# The earbud's duplicate timestamps are packetised delivery (several samples share one packet
-# stamp), which is benign for interpolation; the gaps are not. Sets that overlap a gap on ANY device
-# are dropped rather than emitted, because the four placements are only useful here if they describe
-# the same moment on all four. See docs/data/DATASET_EXPANSION_AUDIT_2026-08-11.md section 1.2.
+# The earbud's duplicate timestamps are packetised delivery: several DISTINCT samples share one
+# packet stamp. They are not valid interpolation coordinates. Each continuous block is therefore
+# reconstructed from row order, polyphase-resampled, and only then aligned to the shared wall clock.
+# Sets that overlap a gap on ANY device are dropped rather than emitted, because the four placements
+# are only useful here if they describe the same moment on all four.
 MAX_GAP_SEC = 0.5
 
 # Paper section 3.1: "Ten subjects participated in the data collection; two participants carried out
@@ -162,6 +166,73 @@ def _load_device(workout: Path, workout_id: str, device: str):
     return parts
 
 
+def _resample_modality(table: np.ndarray, grid_ms: np.ndarray) -> tuple[np.ndarray, np.ndarray,
+                                                                        list[float], list[float]]:
+    """Preserve ordered packet samples, anti-alias, then align one modality to ``grid_ms``.
+
+    MM-Fit's timestamp is a packet/delivery clock: duplicate values frequently carry different
+    sensor readings. Passing it directly to ``np.interp`` silently discards those readings because
+    interpolation coordinates must be strictly increasing. The release's own loader instead keeps
+    the row sequence and resamples complete sequential windows. We do the equivalent per continuous
+    clock block while retaining the wall-clock alignment needed to fuse devices.
+
+    Returns ``(values, observed, source_rates, gaps_sec)``. Grid points outside a continuous block
+    remain unobserved, allowing the caller to reject labelled sets that cross a dropout.
+    """
+    if table.ndim != 2 or table.shape[1] != 5 or len(table) < 2:
+        raise ValueError(f"expected an (N, 5) modality with N>=2, got {table.shape}")
+    clock = np.asarray(table[:, 1], dtype=np.float64)
+    values = np.asarray(table[:, 2:5], dtype=np.float64)
+    if not np.isfinite(clock).all() or not np.isfinite(values).all():
+        raise ValueError("MM-Fit modality contains non-finite values")
+    steps = np.diff(clock)
+    if (steps < 0).any():
+        raise ValueError("MM-Fit packet clock moves backwards")
+
+    gap_rows = np.flatnonzero(steps > MAX_GAP_SEC * 1000.0)
+    starts = np.r_[0, gap_rows + 1]
+    stops = np.r_[gap_rows + 1, len(table)]
+    output = np.zeros((len(grid_ms), 3), dtype=np.float32)
+    observed = np.zeros(len(grid_ms), dtype=bool)
+    source_rates: list[float] = []
+
+    for start, stop in zip(starts, stops):
+        count = int(stop - start)
+        if count < 2:
+            continue
+        begin, end = float(clock[start]), float(clock[stop - 1])
+        duration_sec = (end - begin) / 1000.0
+        if duration_sec <= 0:
+            # A handful of 2-3-row earbud packet fragments sit between two acquisition gaps and
+            # carry only one delivery timestamp. Their physical interval is unknowable, so leave
+            # that region unobserved; any labelled set touching it is rejected by the caller.
+            continue
+
+        # Row order is the acquisition order. A uniform clock over each gap-free block gives every
+        # packet member an honest position while preserving the block's measured average rate.
+        source_rate = (count - 1) / duration_sec
+        # Tiny packet fragments next to a gap have unstable span-derived rates and are irrelevant to
+        # the acquisition-rate diagnostic. Record only blocks long enough to characterize hardware.
+        if duration_sec >= 10.0:
+            source_rates.append(source_rate)
+        ratio = Fraction(NATIVE_RATE / source_rate).limit_denominator(2000)
+        block = resample_poly(
+            values[start:stop], up=ratio.numerator, down=ratio.denominator, axis=0,
+        )
+        block_clock = np.linspace(begin, end, len(block), dtype=np.float64)
+        use = (grid_ms >= begin) & (grid_ms <= end)
+        if not use.any():
+            continue
+        for axis in range(3):
+            output[use, axis] = np.interp(
+                grid_ms[use], block_clock, block[:, axis],
+            ).astype(np.float32)
+        observed[use] = True
+
+    gaps_sec = [float(steps[row]) / 1000.0 for row in gap_rows]
+    return output, observed, source_rates, gaps_sec
+
+
 def main() -> None:
     if not RAW.is_dir():
         raise SystemExit(f"raw mm-fit tree not found at {RAW}")
@@ -173,6 +244,7 @@ def main() -> None:
     gyro_peaks: list[float] = []
     skews: list[float] = []
     gap_seconds: list[float] = []
+    source_rates: dict[str, list[float]] = {device: [] for device in DEVICES}
     short_sets = 0
     fabricated_samples = 0
     dropped_gap_sets = 0
@@ -216,14 +288,17 @@ def main() -> None:
             block = np.empty((len(grid), 6), dtype=np.float32)
             for offset, key in ((0, "acc"), (3, "gyro")):
                 table = parts[key]
-                for axis in range(3):
-                    block[:, offset + axis] = np.interp(grid, table[:, 1], table[:, 2 + axis])
-                clock = table[:, 1]
-                holes = np.flatnonzero(np.diff(clock) > MAX_GAP_SEC * 1000.0)
-                for hole in holes:
-                    start, stop = np.searchsorted(grid, [clock[hole], clock[hole + 1]])
-                    fabricated[start:stop] = True
-                    gap_seconds.append(float(clock[hole + 1] - clock[hole]) / 1000.0)
+                values, observed, _rates, gaps = _resample_modality(table, grid)
+                block[:, offset:offset + 3] = values
+                fabricated |= ~observed
+                # Report one effective acquisition rate per complete workout/modality. An
+                # unweighted median over gap-split blocks over-emphasises short earbud fragments
+                # (75 Hz) even though the duration-weighted/full-recording rate is about 85 Hz and
+                # the published nominal rate is 90 Hz.
+                duration_sec = (float(table[-1, 1]) - float(table[0, 1])) / 1000.0
+                if duration_sec > 0:
+                    source_rates[device].append((len(table) - 1) / duration_sec)
+                gap_seconds.extend(gaps)
             magnitudes.append(float(np.median(np.linalg.norm(block[:, :3], axis=1))))
             gyro_peaks.append(float(np.percentile(np.abs(block[:, 3:]), 99.9)))
             signals[DEVICES[device]] = block
@@ -297,6 +372,10 @@ def main() -> None:
           f"{fabricated_samples / NATIVE_RATE:.1f}s of grid marked unobserved; "
           f"{dropped_gap_sets} labelled sets dropped for overlapping one "
           f"({dropped_gap_seconds:.1f}s of that was fabricated)", flush=True)
+    print("[mmfit] full-recording effective acquisition rates: " + ", ".join(
+        f"{device} median {np.median(values):.2f} Hz"
+        for device, values in source_rates.items() if values
+    ), flush=True)
     print(f"[mmfit] {len(labels)} set sessions from {len(workouts)} workouts, {n_rows:,} samples "
           f"per placement, {hours:.2f} h, {len(ordered)} exercises; {short_sets} sets shorter than "
           f"{MIN_SET_SECONDS:g}s will yield no grid rows -> {sessions_dir}", flush=True)

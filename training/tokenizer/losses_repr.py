@@ -207,10 +207,8 @@ def make_sensor_mask_plan(
     event = (rnd(B) < sensor_event_p) & maskable.any(dim=1)
     scores = rnd(B, S).masked_fill(~maskable, -1.0)
     chosen = scores.argmax(dim=1)
-    rows = torch.nonzero(event).squeeze(1)
     sensor_event = torch.zeros(B, S, dtype=torch.bool, device=device)
-    if rows.numel():
-        sensor_event[rows, chosen[rows]] = True
+    sensor_event.scatter_(1, chosen.unsqueeze(1), event.unsqueeze(1))
     mask |= sensor_event.unsqueeze(1)
 
     # --- 3. descriptor events, never on a sensor whose signal is fully hidden ---
@@ -219,10 +217,8 @@ def make_sensor_mask_plan(
     d_event = (rnd(B) < descriptor_event_p) & d_eligible.any(dim=1)
     d_scores = rnd(B, S).masked_fill(~d_eligible, -1.0)
     d_chosen = d_scores.argmax(dim=1)
-    d_rows = torch.nonzero(d_event).squeeze(1)
     descriptor_mask = torch.zeros(B, S, dtype=torch.bool, device=device)
-    if d_rows.numel():
-        descriptor_mask[d_rows, d_chosen[d_rows]] = True
+    descriptor_mask.scatter_(1, d_chosen.unsqueeze(1), d_event.unsqueeze(1))
 
     mask &= valid.unsqueeze(2) & present.unsqueeze(1)
     return SensorMaskPlan(token_mask=mask, descriptor_mask=descriptor_mask)

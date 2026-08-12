@@ -63,8 +63,12 @@ from training.tokenizer.pretrain_data import (
     MultiResolutionCollate,
     MultiScaleCollate,
     PretrainDataset,
+    SENSOR_BIAS_DIM,
+    CORPUS_MATCHED_TRAIN_DATASETS,
     TRAIN_DATASETS,
     TemperatureSampler,
+    modalities_present,
+    validate_sensor_bias_training_corpus,
     _seed_worker,
 )
 
@@ -86,10 +90,10 @@ class PretrainConfig:
     # per-sensor IDENTITY text. Default MUST stay 'per_channel' (do-no-harm). asdict(cfg) serializes
     # both into the checkpoint config, so eval/reconstruction picks up the arm automatically.
     text_conditioning: str = "per_channel"
-    # Design of record: 'sensor' folds each modality triad into ONE token, retires role text, and
-    # enables the sensor-mask + descriptor-mask JEPA strategies. Default stays 'channel'
-    # (do-no-harm); asdict(cfg) serializes it so eval reconstructs the right arm.
+    # Direct constructors retain the legacy channel path for explicit tests/ablations. The Phase-A
+    # CLI sets the design-of-record sensor path below.
     token_granularity: str = "channel"
+    sensor_bias_dim: int = SENSOR_BIAS_DIM
     descriptor_weight: float = 0.5        # weight on the descriptor-retrieval term
     gate_bias_init: float = -2.0          # factored fusion identity-gate bias at init (sigma~=0.12)
     # NB: the `pretrain` CLI defaults multiresolution=True (the diagnostic-confirmed winner); this
@@ -108,8 +112,8 @@ class PretrainConfig:
     long_patch_choices: tuple[float, ...] = LONG_PATCH_SECONDS_CHOICES
     min_resolution_ratio: float = MIN_RESOLUTION_RATIO
     val_resolution_pair: tuple[float, float] = VAL_RESOLUTION_PAIR
-    steps: int = 30_000                   # ~5 corpus passes at the live batch of 256 (6,025
-                                          # steps/pass on the 1.54M-window corpus). The previous
+    steps: int = 30_000                   # ~4.6 aggregate corpus passes at batch 256 (6,507
+                                          # steps/pass on the 1.666M-window expanded corpus). The previous
                                           # '~10 passes at batch 512' note was written when
                                           # batch_size was 512 and was not updated by fd3ae4d.
     # Batch 256 uses the original 3e-4 reference LR. The stale 4.2e-4 default was the sqrt-scaled
@@ -163,15 +167,16 @@ class PretrainConfig:
     sampler_alpha: float = 0.25
     sampler_max_dataset_share: float = 0.25
     sampler_subject_alpha: float = 0.5
-    batch_size: int = 256                 # measured peak: 12.0 GiB on a 24 GB RTX 4090
+    homogeneous_sensor_batches: bool = True
+    batch_size: int = 256                 # measured peak: 5.0 GiB on a 24 GB RTX 4090
     calib_batches: int = 50               # frontend norm calibration pass
     val_every: int = 1_000
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
     knn_k: int = 5
     # Compile only the dual-branch transformer, leaving ragged text conditioning eager. Compiling
     # encoder.encode specialized on each batch's changing unique-text cardinality and was 2.1x slower;
-    # transformer-only dynamic compilation handled P=12..22 with one ~73 s startup and measured
-    # 120.4 vs 145-151 ms/step in the production-shaped profiler on the RTX 4090.
+    # transformer-only dynamic compilation handles P=12..22 and is checkpoint-neutral. The initial
+    # shapes take ~80 s to compile; the current production path then sustains ~15.6 step/s.
     compile_encoder: bool = False
     num_workers: int = 12                 # re-profiled 2026-08-07 on the production two-view loader:
                                           # steady wait 38.8 ms (nw=8) -> 24.1 ms (nw=12), and the
@@ -181,7 +186,9 @@ class PretrainConfig:
     # the metric harness — sees the SAME subject-disjoint split (audit 2026-07-23 #1: the eval used the
     # default split regardless of --seed, so seed!=default leaked ~19 train subjects into metric-val).
     data_seed: int = 20260718
-    train_datasets: tuple | None = None   # None = full TRAIN_DATASETS; set for the ablation subset
+    # Serialized explicitly into every checkpoint. Never leave this as an implicit reference to a
+    # mutable module-level default: changing the roster after training must not change bank rebuilds.
+    train_datasets: tuple | None = None
     max_per_stream: int | None = None     # None = use all windows; temperature sampling controls sources
     device: str = "cpu"
 
@@ -223,9 +230,13 @@ class PipelineAModel(nn.Module):
             dim_feedforward=cfg.dim_feedforward, dropout=cfg.dropout, dft_size=DFT_SIZE,
             frontend=cfg.frontend,                # 'fixed' (default) | 'learnable'
             text_conditioning=cfg.text_conditioning,  # 'per_channel' (default) | 'factored'
-            token_granularity=cfg.token_granularity,  # 'channel' (default) | 'sensor'
+            token_granularity=cfg.token_granularity,
+            sensor_bias_dim=cfg.sensor_bias_dim,
             gate_bias_init=cfg.gate_bias_init,
-            use_duration_embedding=cfg.multiresolution,
+            # Sensor granularity deliberately retires the separate duration embedding. Patch
+            # durations still reach pooling and JEPA weighting; physical-time RoPE and the
+            # filterbank resolution mask carry temporal scale inside the encoder.
+            use_duration_embedding=cfg.multiresolution and cfg.token_granularity == "channel",
             duration_min_seconds=min(cfg.short_patch_choices),
             duration_max_seconds=max(cfg.long_patch_choices),
             duration_gate_init=cfg.duration_gate_init,
@@ -237,6 +248,7 @@ class PipelineAModel(nn.Module):
             filter_shape_max=cfg.filter_shape_max,
             adaptive_gate_init=cfg.adaptive_gate_init,
         )
+        self.encoder.multiresolution = cfg.multiresolution
         self.jepa_predictor = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
             nn.Linear(cfg.d_model, cfg.d_model),
@@ -262,7 +274,11 @@ class PipelineAModel(nn.Module):
 
 @torch.no_grad()
 def update_ema_encoder(student: nn.Module, teacher: nn.Module, decay: float) -> None:
-    """Update teacher parameters by EMA and copy non-parameter state exactly.
+    """Update teacher parameters by EMA with one foreach launch per arithmetic operation.
+
+    The teacher is deep-copied after filterbank calibration. Its non-parameter state consists only
+    of frozen calibration statistics and RoPE frequencies, so copying those immutable buffers on
+    every optimizer update is unnecessary.
 
     ``decay == 1.0`` (a frozen teacher) is accepted because the BYOL cosine ramp reaches exactly
     1.0 on its final step; rejecting it crashed every cosine run at ``step == cfg.steps``, after
@@ -271,12 +287,17 @@ def update_ema_encoder(student: nn.Module, teacher: nn.Module, decay: float) -> 
     """
     if not 0.0 <= float(decay) <= 1.0:
         raise ValueError("EMA decay must be in [0, 1]")
-    student_params = dict(student.named_parameters())
-    for name, target in teacher.named_parameters():
-        target.mul_(float(decay)).add_(student_params[name], alpha=1.0 - float(decay))
-    student_buffers = dict(student.named_buffers())
-    for name, target in teacher.named_buffers():
-        target.copy_(student_buffers[name])
+    cache = getattr(teacher, "_ema_update_cache", None)
+    if cache is None or cache[0] != id(student):
+        student_named = dict(student.named_parameters())
+        teacher_named = dict(teacher.named_parameters())
+        if student_named.keys() != teacher_named.keys():
+            raise ValueError("EMA student and teacher parameter structures differ")
+        cache = (id(student), tuple(student_named.values()), tuple(teacher_named.values()))
+        object.__setattr__(teacher, "_ema_update_cache", cache)
+    _, student_params, teacher_params = cache
+    torch._foreach_mul_(teacher_params, float(decay))
+    torch._foreach_add_(teacher_params, student_params, alpha=1.0 - float(decay))
 
 
 @torch.no_grad()
@@ -482,10 +503,17 @@ def recommend_objective_weights(
     }
 
 
-_OUTPUT_PREFIX = "training/tokenizer/outputs/"
 _SOURCE_SUFFIXES = {
     ".py", ".md", ".toml", ".yaml", ".yml", ".json", ".txt", ".sh", ".ini", ".cfg",
 }
+# Source and configuration that can affect a Phase-A trajectory. Scoping the snapshot prevents an
+# unrelated Phase-B edit in the shared repository from invalidating a Phase-A resume, while the
+# corpus fingerprint below independently covers the realised grid contents.
+_PHASE_A_SOURCE_ROOTS = (
+    "training/tokenizer", "model/tokenizer", "data/datasets", "data/scripts",
+    "data/labels", "data/quality/duplicate_windows.json",
+    "data/quality/implausible_windows.json", "pyproject.toml",
+)
 _RUN_ARTIFACT_NAMES = {
     "log.jsonl", "run_config.json", "objective_calibration.json",
     "source.patch", "source_provenance.json", "runtime_provenance.json",
@@ -507,8 +535,11 @@ def capture_source_provenance(out: Path, *, write: bool = True) -> dict:
     """Persist a reconstructable patch for tracked and untracked source files."""
     head = _git(["rev-parse", "HEAD"]).stdout.decode().strip()
     tracked = _git([
-        "diff", "HEAD", "--binary", "--", ".",
-        ":(exclude)training/tokenizer/outputs/**",
+        "diff", "HEAD", "--binary", "--", *_PHASE_A_SOURCE_ROOTS,
+        # Results from Phase A, Phase B, and diagnostics are runtime artifacts, not source. Including
+        # another job's changing JSON here made an otherwise faithful Phase-A resume fail its source
+        # fingerprint check and inflated the snapshot by several megabytes in a shared worktree.
+        ":(exclude,glob)**/outputs/**",
     ]).stdout
     untracked_raw = _git(["ls-files", "--others", "--exclude-standard", "-z"]).stdout
     untracked = []
@@ -518,7 +549,12 @@ def capture_source_provenance(out: Path, *, write: bool = True) -> dict:
             continue
         rel = raw.decode("utf-8")
         path = _repo_root() / rel
-        if rel.startswith(_OUTPUT_PREFIX) or path.suffix.lower() not in _SOURCE_SUFFIXES:
+        in_phase_a_source = any(
+            rel == root or rel.startswith(root.rstrip("/") + "/")
+            for root in _PHASE_A_SOURCE_ROOTS
+        )
+        if (not in_phase_a_source or "outputs" in Path(rel).parts
+                or path.suffix.lower() not in _SOURCE_SUFFIXES):
             continue
         # Source/config files should be small. Fail rather than silently omit a file required to
         # reconstruct this worktree.
@@ -566,6 +602,8 @@ def capture_runtime_provenance(device: torch.device) -> dict[str, object]:
         "cuda_runtime": torch.version.cuda,
         "cudnn": torch.backends.cudnn.version(),
         "device": str(device),
+        "mixed_precision": "fp16" if device.type == "cuda" else "fp32",
+        "dynamic_loss_scaling": device.type == "cuda",
     }
     if device.type == "cuda":
         props = torch.cuda.get_device_properties(device)
@@ -793,28 +831,61 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
             pending[l] += 1
             take.append(j)
         if take:
-            # factored: channel_texts carries ROLE text and the sensor identity is passed alongside;
-            # per_channel (default): unchanged (sensor_texts/sensor_id stay None -> forward defaults).
-            factored = model.encoder.text_conditioning == "factored"
+            # Match the training precision policy: spectral analysis remains FP32, while the neural
+            # projection/conditioning/transformer path uses FP16 autocast on CUDA. Probe embeddings
+            # are converted back to FP32 before the CPU kNN/ridge calculations below.
+            sensor_granularity = model.encoder.token_granularity == "sensor"
+            factored = model.encoder.text_conditioning == "factored" or sensor_granularity
             texts = batch["role_texts"] if factored else batch["texts"]
-            plen = batch["patch_len"]
-            out = model.encoder(
-                batch["patches"].to(device, non_blocking=True),
-                batch["rates"].to(device, non_blocking=True),
-                plen.to(device, non_blocking=True), texts,
-                batch["positions"].to(device, non_blocking=True),
-                patch_durations=(batch["patch_durations"].to(device, non_blocking=True)
-                                 if "patch_durations" in batch else None),
-                resolution_ids=(batch["resolution_ids"].to(device, non_blocking=True)
-                                if "resolution_ids" in batch else None),
-                channel_mask=batch["channel_mask"].to(device, non_blocking=True),
-                patch_padding_mask=batch["patch_padding_mask"].to(device, non_blocking=True),
-                sensor_texts=(batch["sensor_texts"] if factored else None),
-                sensor_id=(batch["sensor_id"].to(device, non_blocking=True) if factored else None),
-                source_rate_hz=batch.get("source_rates", batch["rates"]).to(
-                    device, non_blocking=True),
+            patches = batch["patches"].to(device, non_blocking=True).float()
+            rates = batch["rates"].to(device, non_blocking=True)
+            plen = batch["patch_len"].to(device, non_blocking=True)
+            source_rates = batch.get("source_rates", batch["rates"]).to(
+                device, non_blocking=True,
             )
-            pooled = out["pooled"].cpu()
+            with torch.amp.autocast(
+                device.type, enabled=device.type == "cuda", dtype=torch.float16,
+            ):
+                sensor_tokens = model.encoder.tokenize(
+                    patches, rates, plen, source_rate_hz=source_rates,
+                )
+            sensor_descriptors = sensor_text_embs = sensor_text_masks = None
+            role_text_ids = sensor_text_ids = None
+            if sensor_granularity:
+                sensor_descriptors, sensor_text_ids = \
+                    model.encoder.encode_sensor_descriptors_unique(batch["sensor_texts"], device)
+                text_embs = text_masks = None
+            elif factored:
+                (text_embs, text_masks, role_text_ids,
+                 sensor_text_embs, sensor_text_masks, sensor_text_ids) = \
+                    model.encoder.encode_texts_factored_unique(
+                        texts, batch["sensor_texts"], device,
+                    )
+            else:
+                text_embs, text_masks = model.encoder.encode_texts(texts, device)
+            with torch.amp.autocast(
+                device.type, enabled=device.type == "cuda", dtype=torch.float16,
+            ):
+                out = model.encoder.encode(
+                    sensor_tokens, text_embs, text_masks,
+                    batch["positions"].to(device, non_blocking=True),
+                    patch_durations=(batch["patch_durations"].to(device, non_blocking=True)
+                                     if "patch_durations" in batch else None),
+                    resolution_ids=(batch["resolution_ids"].to(device, non_blocking=True)
+                                    if "resolution_ids" in batch else None),
+                    channel_mask=batch["channel_mask"].to(device, non_blocking=True),
+                    patch_padding_mask=batch["patch_padding_mask"].to(device, non_blocking=True),
+                    sensor_text_embs=sensor_text_embs,
+                    sensor_text_masks=sensor_text_masks,
+                    sensor_descriptors=sensor_descriptors,
+                    sensor_id=(batch["sensor_id"].to(device, non_blocking=True)
+                               if factored else None),
+                    role_text_ids=role_text_ids,
+                    sensor_text_ids=sensor_text_ids,
+                    sensor_bias=(batch["sensor_bias"].to(device, non_blocking=True)
+                                 if sensor_granularity else None),
+                )
+            pooled = out["pooled"].float().cpu()
             zs.append(pooled[take])
             ys.append(lab[take])
             srcs.extend(batch["sources"][j] for j in take)      # per-window source (telemetry)
@@ -841,8 +912,15 @@ def module_grad_norms(model) -> dict:
                   for p in params if p.grad is not None]
         return float(torch.stack(pieces).sum().sqrt()) if pieces else 0.0
 
-    mods = (("encoder", model.encoder), ("jepa_predictor", model.jepa_predictor),
-            ("vicreg_projector", model.vicreg_projector))
+    mods = [("encoder", model.encoder), ("jepa_predictor", model.jepa_predictor),
+            ("vicreg_projector", model.vicreg_projector)]
+    if model.encoder.token_granularity == "sensor":
+        mods.extend((
+            ("sensor_fold", model.encoder.sensor_fold),
+            ("descriptor_projection", model.encoder.descriptor_proj),
+            ("bias_projection", model.encoder.bias_proj),
+            ("descriptor_head", model.encoder.descriptor_head),
+        ))
     return {f"grad/{name}": _gn(mod.parameters()) for name, mod in mods}
 
 
@@ -943,11 +1021,18 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=None,
                         help="training DataLoader workers (default 12, profiled for a Ryzen 7900X + "
                              "RTX 4090; use 0 for in-process loading)")
+    parser.add_argument("--mixed-sensor-batches", dest="homogeneous_sensor_batches",
+                        action="store_false", default=None,
+                        help="mix one- and two-sensor windows in each batch (slower compatibility arm)")
     parser.add_argument("--subset", action="store_true",
                         help="train on the tokenizer-ablation 3-rate-core subset (5 datasets, xrf_v2 "
                              "held out) instead of the full corpus. See ablation_subset.py.")
+    parser.add_argument("--corpus", choices=("expanded", "matched"), default="expanded",
+                        help="named Phase-A recipe: expanded=18 sources (default); matched=the "
+                             "original 12-source corpus for technique-only baseline comparisons")
     parser.add_argument("--datasets", nargs="+", default=None,
-                        help="explicit train dataset list (overrides --subset and the full corpus).")
+                        help="explicit train dataset list (overrides --corpus; incompatible with "
+                             "--subset).")
     parser.add_argument("--max-per-stream", type=int, default=None,
                         help="per-stream window cap (default: None=all; --subset defaults to the "
                              "ablation DEFAULT_CAP so train and metric-eval share one corpus).")
@@ -955,7 +1040,9 @@ def main() -> None:
                         help="MODEL seed (init/augmentation/batch order). Vary this across replicates.")
     parser.add_argument("--compile", dest="compile_encoder", action="store_true", default=None,
                         help="torch.compile only the transformer core (not ragged text conditioning). "
-                             "Default OFF; on RTX 4090 this costs ~73 s once and then saves ~20%%/step.")
+                             "Enabled by default for CUDA Phase-A runs.")
+    parser.add_argument("--no-compile", dest="compile_encoder", action="store_false",
+                        help="disable the default CUDA transformer compilation")
     parser.add_argument("--data-seed", type=int, default=None,
                         help="DATA seed = the subject train/val split. Keep FIXED across all arms and "
                              "replicates so the split (and the metric harness) stays identical (#1).")
@@ -964,6 +1051,7 @@ def main() -> None:
     cfg = PretrainConfig(
         device=args.device,
         frontend=args.frontend,
+        token_granularity="sensor",
         multiresolution=True,          # new Phase-A default: multiresolution ON (diagnostic-confirmed
                                        # winner, 0.835 held-out transfer); --no-multiresolution to ablate
         text_conditioning="factored",  # PAPER default (F8): factored role+sensor conditioning is the
@@ -971,6 +1059,9 @@ def main() -> None:
                                        # (The dataclass default stays per_channel for direct/test ctors.)
         objective_calibration_at=2_000,
         objective_calibration_mode="apply",
+        compile_encoder=args.device.startswith("cuda") and not args.smoke,
+        train_datasets=(TRAIN_DATASETS if args.corpus == "expanded"
+                        else CORPUS_MATCHED_TRAIN_DATASETS),
     )
     if args.text_conditioning is not None:
         cfg.text_conditioning = args.text_conditioning
@@ -1012,12 +1103,16 @@ def main() -> None:
         cfg.batch_size = args.batch
     if args.num_workers is not None:
         cfg.num_workers = args.num_workers
+    if args.homogeneous_sensor_batches is not None:
+        cfg.homogeneous_sensor_batches = args.homogeneous_sensor_batches
     if args.seed is not None:
         cfg.seed = args.seed
     if args.compile_encoder is not None:
         cfg.compile_encoder = args.compile_encoder
     if args.data_seed is not None:
         cfg.data_seed = args.data_seed
+    if args.datasets is not None and args.subset:
+        parser.error("--datasets and --subset are mutually exclusive")
     if args.datasets is not None:
         cfg.train_datasets = tuple(args.datasets)
     elif args.subset:
@@ -1087,7 +1182,7 @@ def main() -> None:
         parser.error("--sampler-max-dataset-share must be in (0,1]")
     if not 0 <= cfg.sampler_subject_alpha <= 1:
         parser.error("--sampler-subject-alpha must be in [0,1]")
-    for field in ("jepa_weight", "frontend_reg_weight"):
+    for field in ("jepa_weight", "frontend_reg_weight", "descriptor_weight"):
         if float(getattr(cfg, field)) < 0:
             parser.error(f"--{field.replace('_', '-')} must be nonnegative")
     if cfg.vicreg_weight <= 0:
@@ -1124,18 +1219,19 @@ def main() -> None:
         parser.error("--target-jepa-gradient-share must be in (0,1)")
     device = torch.device(cfg.device)
     if device.type == "cuda":
-        # TF32 for the fp32 regions autocast doesn't cover (filterbank einsum/proj, val ridge
-        # solve). Free + zero-risk on Ampere+; the transformer already runs fp16 under autocast.
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        torch.set_float32_matmul_precision("high")
+        # TF32 for CUDA matrix products inside the FP32 filterbank/diagnostic islands. The
+        # transformer already runs FP16 under autocast; validation kNN/ridge stays CPU FP32.
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        torch.backends.cudnn.conv.fp32_precision = "tf32"
     torch.manual_seed(cfg.seed)
     prepare_output_dir(
         args.out, force=args.force, smoke=args.smoke, resume=args.resume is not None,
     )
     source_provenance = capture_source_provenance(args.out, write=False)
     runtime_provenance = capture_runtime_provenance(device)
-    print(f"frontend={cfg.frontend} multiresolution={cfg.multiresolution}", flush=True)
+    precision = "fp16-mixed" if device.type == "cuda" else "fp32"
+    print(f"frontend={cfg.frontend} multiresolution={cfg.multiresolution} "
+          f"precision={precision}", flush=True)
     # NB: run_config.json is written AFTER resume validation (below), so a rejected --resume can't
     # overwrite the metadata with the bad attempted config (audit 2026-07-23 #6).
 
@@ -1144,9 +1240,15 @@ def main() -> None:
     # and reconstructable by the metric harness (#1).
     index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.data_seed,
                         datasets=cfg.train_datasets or TRAIN_DATASETS)
+    corpus_fp = corpus_fingerprint(index)
+    if cfg.token_granularity == "sensor":
+        validate_sensor_bias_training_corpus(
+            index.refs, cfg.train_datasets or TRAIN_DATASETS, cfg.data_seed,
+        )
     print(f"corpus: {index.summary()}  (datasets={sorted(cfg.train_datasets or TRAIN_DATASETS)})",
           flush=True)
     train_ds = PretrainDataset(index, index.train, augment=True, two_view=True)
+    calibration_ds = PretrainDataset(index, index.train, augment=True, two_view=False)
     # Preselecting keeps evaluation cheap. The helper covers every label/stream cell before filling
     # additional slots, preventing a large source from monopolizing a common label's cap.
     val_keys = stratified_eval_subset(index.val, cfg.val_per_label, cfg.data_seed)
@@ -1157,9 +1259,18 @@ def main() -> None:
         two_view=True,
     ) if cfg.multiresolution
                      else MultiScaleCollate(seed=cfg.seed, two_view=True))
+    calibration_collate = (MultiResolutionCollate(
+        short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
+        min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
+        two_view=False,
+    ) if cfg.multiresolution else MultiScaleCollate(seed=cfg.seed, two_view=False))
     loader_kwargs = dict(
         collate_fn=train_collate, num_workers=cfg.num_workers, worker_init_fn=_seed_worker,
         persistent_workers=cfg.num_workers > 0, pin_memory=device.type == "cuda")
+    sensor_batch_groups = (
+        [len(modalities_present(index.refs[key.stream_i].mask)) for key in index.train]
+        if cfg.homogeneous_sensor_batches else None
+    )
     temperature_sampler = TemperatureSampler(
         index.train, index.stream_datasets,
         num_samples=cfg.steps * cfg.batch_size,
@@ -1168,6 +1279,17 @@ def main() -> None:
         subject_ids=index.train_subject_ids,
         subject_alpha=cfg.sampler_subject_alpha,
         max_dataset_share=cfg.sampler_max_dataset_share,
+        batch_group_ids=sensor_batch_groups,
+    )
+    calibration_sampler = TemperatureSampler(
+        index.train, index.stream_datasets,
+        num_samples=cfg.calib_batches * cfg.batch_size,
+        alpha=cfg.sampler_alpha, seed=cfg.seed - 1,
+        batch_size=cfg.batch_size,
+        subject_ids=index.train_subject_ids,
+        subject_alpha=cfg.sampler_subject_alpha,
+        max_dataset_share=cfg.sampler_max_dataset_share,
+        batch_group_ids=sensor_batch_groups,
     )
     shares = ", ".join(
         f"{dataset}={share:.1%}"
@@ -1185,6 +1307,13 @@ def main() -> None:
     train_loader = DataLoader(
         train_ds, sampler=temperature_sampler,
         batch_size=cfg.batch_size, drop_last=True, **loader_kwargs)
+    calibration_loader = DataLoader(
+        calibration_ds, sampler=calibration_sampler,
+        batch_size=cfg.batch_size, drop_last=True,
+        collate_fn=calibration_collate, num_workers=cfg.num_workers,
+        worker_init_fn=_seed_worker, persistent_workers=cfg.num_workers > 0,
+        pin_memory=device.type == "cuda",
+    )
     # Validation uses deterministic fixed patch durations and no augmentation.
     val_workers = min(6, cfg.num_workers)
     val_collate = (
@@ -1221,25 +1350,21 @@ def main() -> None:
         pin_memory=device.type == "cuda", worker_init_fn=_seed_worker,
     )
 
-    def _cycle(loader):
-        while True:
-            yield from loader
-
     # ------------------------------------------------------------------ model
     model = PipelineAModel(cfg).to(device)
     # Calibrate the encoder frontend's per-band and signed-DC normalization.
     fe = model.encoder.filterbank
     print(f"calibrating filterbank norm on {cfg.calib_batches} batches ...", flush=True)
     fe.reset_norm_accumulator()
-    fe_iter = _cycle(train_loader)
-    for _ in range(cfg.calib_batches):
-        b = next(fe_iter)
+    for b in calibration_loader:
         fe.accumulate_norm_stats(
             b["patches"].to(device), b["rates"].to(device), b["patch_len"].to(device),
             patch_mask=b["patch_padding_mask"].to(device),
             channel_mask=b["channel_mask"].to(device),
             source_rate_hz=b.get("source_rates", b["rates"]).to(device))
     fe.finalize_norm_stats()
+    # Drop the one-view calibration iterator and its mmap handles before training workers start.
+    del calibration_loader, calibration_sampler, calibration_ds
 
     jepa_teacher = None
     if cfg.jepa_weight > 0:
@@ -1277,7 +1402,12 @@ def main() -> None:
         opt, lambda s: min((s + 1) / max(cfg.warmup_steps, 1), 1.0)
         * 0.5 * (1 + np.cos(np.pi * min(s / cfg.steps, 1.0))),
     )
-    scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
+    # The 1k-step RTX 4090 pilot settled at 2^14 after two harmless startup overflows from PyTorch's
+    # 2^16 default. Start there to avoid throwing away those first optimizer updates while retaining
+    # dynamic growth/backoff for any later change in gradient range.
+    scaler = torch.amp.GradScaler(
+        enabled=device.type == "cuda", init_scale=16_384.0,
+    )
     def ema_decay_at(step: int) -> float:
         """BYOL cosine ramp from cfg.jepa_ema_decay to 1.0, or the fixed value.
 
@@ -1313,7 +1443,7 @@ def main() -> None:
             "source_provenance": source_provenance,
             "runtime_provenance": runtime_provenance,
             "corpus": index.summary(),
-            "corpus_fingerprint": corpus_fingerprint(index),   # which corpus produced this (F5)
+            "corpus_fingerprint": corpus_fp,   # which corpus produced this (F5)
             # Full restart state so a killed run resumes without silently diverging (F5).
             "optimizer": opt.state_dict(),
             "scheduler": sched.state_dict(),
@@ -1381,10 +1511,10 @@ def main() -> None:
                     f"resume configuration mismatch for {key}: checkpoint={saved!r}, requested={cur!r} "
                     f"— a resume must reproduce the run; only {sorted(_RESUME_RUNTIME_ONLY)} may differ.")
         saved_fp = rk.get("corpus_fingerprint")
-        if saved_fp is not None and saved_fp != corpus_fingerprint(index):
+        if saved_fp is not None and saved_fp != corpus_fp:
             raise ValueError(
                 f"resume corpus fingerprint mismatch: checkpoint={saved_fp}, "
-                f"current={corpus_fingerprint(index)} — the corpus/cap/seed changed since the run started.")
+                f"current={corpus_fp} — the corpus/cap/seed changed since the run started.")
         saved_source = rk.get("source_provenance")
         if saved_source is not None:
             if saved_source.get("patch_sha256") != source_provenance.get("patch_sha256"):
@@ -1444,8 +1574,8 @@ def main() -> None:
 
     def encode_clean_view_b(batch: dict) -> dict:
         """Encode the SECOND augmentation-positive view (the collate's ``*_b`` keys), clean/no mask.
-        Only ['pooled'] is consumed by the VICReg projector. Tokenization runs fp32 (autocast
-        off) like view A; the transformer runs under whatever autocast the caller is in. The
+        Only ['pooled'] is consumed by the VICReg projector. Filterbank analysis runs FP32 like
+        view A; its projection and transformer run under the caller's FP16 autocast. The
         conditioning path MATCHES view A (per_channel vs factored), so the encoder sees the same
         text mode — factored view B carries its OWN independently-augmented role/sensor text."""
         p_b = batch["patches_b"].to(device, non_blocking=True).float()
@@ -1458,11 +1588,17 @@ def main() -> None:
                   if "resolution_ids_b" in batch else None)
         cmask_b = batch["channel_mask_b"].to(device, non_blocking=True)
         ppad_b = batch["patch_padding_mask_b"].to(device, non_blocking=True)
-        with torch.amp.autocast(device.type, enabled=False):
-            tokens_b = model.encoder.tokenize(
-                p_b, r_b, pl_b,
-                source_rate_hz=batch.get("source_rates_b", r_b).to(device, non_blocking=True))
-        if cfg.text_conditioning == "factored":
+        tokens_b = model.encoder.tokenize(
+            p_b, r_b, pl_b,
+            source_rate_hz=batch.get("source_rates_b", r_b).to(device, non_blocking=True))
+        sensor_granularity = cfg.token_granularity == "sensor"
+        sensor_descriptors_b = None
+        if sensor_granularity:
+            sensor_descriptors_b, sensor_text_ids_b = \
+                model.encoder.encode_sensor_descriptors_unique(batch["sensor_texts_b"], device)
+            te_b = tm_b = role_ids_b = ste_b = stm_b = None
+            sid_b = batch["sensor_id_b"].to(device, non_blocking=True)
+        elif cfg.text_conditioning == "factored":
             te_b, tm_b, role_ids_b, ste_b, stm_b, sensor_text_ids_b = \
                 model.encoder.encode_texts_factored_unique(
                     batch["role_texts_b"], batch["sensor_texts_b"], device)
@@ -1474,28 +1610,42 @@ def main() -> None:
                                     patch_durations=pdur_b, resolution_ids=rids_b,
                                     channel_mask=cmask_b, patch_padding_mask=ppad_b,
                                     sensor_text_embs=ste_b, sensor_text_masks=stm_b,
+                                    sensor_descriptors=sensor_descriptors_b,
                                     sensor_id=sid_b, role_text_ids=role_ids_b,
-                                    sensor_text_ids=sensor_text_ids_b)
+                                    sensor_text_ids=sensor_text_ids_b,
+                                    **({"sensor_bias": batch["sensor_bias_b"].to(
+                                        device, non_blocking=True)}
+                                       if sensor_granularity else {}))
 
-    # Keep the ragged text/fusion path eager: its unique sensor-text cardinality changes every batch
-    # and made whole-encode compilation 2.1x slower. Compile only the transformer core, whose dynamic
-    # token axis is bounded (P=12..22). Install a runtime callable rather than wrapping the module so
-    # checkpoint state_dict keys remain identical between eager and compiled runs.
+    # Keep conditioning/folding eager and compile the stable transformer core. Install runtime
+    # callables rather than wrapping modules so state_dict keys remain identical.
     encode_fn = model.encoder.encode
     if cfg.compile_encoder and device.type == "cuda":
         # Objective gradient telemetry re-walks the graph with retain_graph=True; disable Inductor's
         # donated-buffer optimization so the diagnostic backward remains valid.
-        torch._functorch.config.donated_buffer = False
+        import torch._functorch.config as functorch_config
+        functorch_config.donated_buffer = False
+        # Backward executes after leaving autocast below. This explicit setting follows PyTorch's
+        # compiled-AMP contract instead of relying on its "same_as_forward" default assumption.
+        functorch_config.backward_pass_autocast = "off"
         model.encoder._compiled_transformer_forward = torch.compile(
             model.encoder.transformer.forward, dynamic=True)
         if jepa_teacher is not None:
             jepa_teacher._compiled_transformer_forward = torch.compile(
                 jepa_teacher.transformer.forward, dynamic=True)
-        print("torch.compile: student + EMA transformer cores (dynamic, checkpoint-neutral) "
-              "— step 1 pays the compile", flush=True)
+        compiled_models = "student + EMA" if jepa_teacher is not None else "student"
+        print(f"torch.compile: {compiled_models} transformer core(s) "
+              "(dynamic, checkpoint-neutral) — step 1 pays the compile", flush=True)
 
-    print(f"jepa mask: independent contiguous block per resolution, "
-          f"ratio={cfg.mask_ratio_time:g}", flush=True)
+    mask_description = (
+        "contiguous time + same-placement whole-sensor + descriptor"
+        if cfg.token_granularity == "sensor" else
+        "independent contiguous block per resolution"
+    )
+    if cfg.jepa_weight > 0:
+        print(f"jepa mask: {mask_description}, ratio={cfg.mask_ratio_time:g}", flush=True)
+    else:
+        print("jepa: disabled (VICReg-only control)", flush=True)
 
     # Rolling CPU-side data telemetry. These counters cover every batch between scalar log records,
     # rather than sampling only the batch that happens to land on a logging step.
@@ -1516,6 +1666,8 @@ def main() -> None:
     amp_consecutive_skips = 0
     zero_target_count = torch.zeros((), device=device)
     zero_target_examples = 0
+    descriptor_target_count = torch.zeros((), device=device)
+    descriptor_target_windows = torch.zeros((), device=device)
 
     model.train()
     for step, batch in enumerate(train_loader, start=start_step + 1):
@@ -1581,6 +1733,10 @@ def main() -> None:
                     valid_patches=patch_pad, sensor_present=present,
                     sensor_placement=sensor_placement)
                 descriptor_mask = plan.descriptor_mask
+                descriptor_target_count = descriptor_target_count + descriptor_mask.sum()
+                descriptor_target_windows = (
+                    descriptor_target_windows + descriptor_mask.any(dim=1).sum()
+                )
             elif cfg.multiresolution:
                 plan = make_per_resolution_mask_plan(
                     resolution_ids, C, GYRO_IDX, channel_mask=channel_mask,
@@ -1590,9 +1746,12 @@ def main() -> None:
                                       time_ratio=cfg.mask_ratio_time,
                                       valid_patches=patch_pad, channel_mask=channel_mask)
 
-        with torch.amp.autocast(device.type, enabled=device.type == "cuda"):
-            # The filterbank DSP (rDFT + constant-Q einsum) runs in fp32 — fp16 has too little headroom
-            # for the band-energy magnitudes. Sensor tokens retain gradients.
+        with torch.amp.autocast(
+            device.type, enabled=device.type == "cuda", dtype=torch.float16,
+        ):
+            # The neural projection/transformer path uses FP16. The filterbank DSP (rDFT +
+            # constant-Q reduction) stays FP32 because FP16 has too little range for raw spectral
+            # energy; this is a narrow numerical island and sensor tokens retain gradients.
             with torch.amp.autocast(device.type, enabled=False):
                 # Split analysis from projection so the EMA teacher can reuse the DSP. On the
                 # fixed arm `analyze` is parameter-free, so the teacher's analysis would be
@@ -1603,20 +1762,34 @@ def main() -> None:
                 if cfg.frontend == "fixed":
                     shared_analysis = model.encoder.analyze(
                         patches.float(), rates, patch_len, source_rate_hz=_src_rate)
-                    sensor_tokens = model.encoder.project_tokens(shared_analysis)
                 else:
                     shared_analysis = None
-                    sensor_tokens = model.encoder.tokenize(
-                        patches.float(), rates, patch_len, source_rate_hz=_src_rate)
+                student_analysis = (shared_analysis if shared_analysis is not None else
+                                    model.encoder.analyze(
+                                        patches.float(), rates, patch_len,
+                                        source_rate_hz=_src_rate,
+                                    ))
                 enc_channel_mask = channel_mask
                 enc_texts = batch["texts"]
+            sensor_tokens = model.encoder.project_tokens(student_analysis)
             # Config-text conditioning, built ONCE and reused by the clean and masked encode passes.
             # per_channel (default): per-channel descriptions -> (B,C,S,384); UNCHANGED from before.
             # factored: ROLE text -> text_embs/text_masks; the per-sensor IDENTITY carried separately
             # (sensor_text_embs/masks/id), summed inside the fusion (docs/design/TEXT_CONDITIONING.md).
-            if cfg.text_conditioning == "factored" or sensor_granularity:
-                # Sensor granularity needs the SENSOR half of the factored text (role text is
-                # retired once xyz folds into one token), so it always takes this branch.
+            sensor_descriptors = None
+            descriptor_target_descriptors = descriptor_target_ids = None
+            if sensor_granularity:
+                sensor_descriptors, sensor_text_ids = \
+                    model.encoder.encode_sensor_descriptors_unique(batch["sensor_texts"], device)
+                if cfg.jepa_weight > 0:
+                    descriptor_target_descriptors, descriptor_target_ids = \
+                        model.encoder.encode_sensor_descriptors_unique(
+                            batch["sensor_target_texts"], device,
+                        )
+                text_embs = text_masks = role_text_ids = None
+                sensor_text_embs = sensor_text_masks = None
+                enc_sensor_id = batch["sensor_id"].to(device, non_blocking=True)
+            elif cfg.text_conditioning == "factored":
                 (text_embs, text_masks, role_text_ids,
                  sensor_text_embs, sensor_text_masks, sensor_text_ids) = \
                     model.encoder.encode_texts_factored_unique(
@@ -1628,30 +1801,32 @@ def main() -> None:
                 role_text_ids = sensor_text_ids = None
             granularity_kw = ({"sensor_bias": sensor_bias} if sensor_granularity else {})
             clean = encode_fn(sensor_tokens, text_embs, text_masks, positions,
-                                         patch_durations=patch_durations,
-                                         resolution_ids=resolution_ids,
-                                         channel_mask=enc_channel_mask,
-                                         patch_padding_mask=patch_pad,
-                                         sensor_text_embs=sensor_text_embs,
-                                         sensor_text_masks=sensor_text_masks,
-                                         sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
-                                         sensor_text_ids=sensor_text_ids,
-                                         **granularity_kw)
+                              patch_durations=patch_durations,
+                              resolution_ids=resolution_ids,
+                              channel_mask=enc_channel_mask,
+                              patch_padding_mask=patch_pad,
+                              sensor_text_embs=sensor_text_embs,
+                              sensor_text_masks=sensor_text_masks,
+                              sensor_descriptors=sensor_descriptors,
+                              sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
+                              sensor_text_ids=sensor_text_ids,
+                              **granularity_kw)
             z = model.vicreg_projector(clean["pooled"])
             if cfg.jepa_weight > 0:
                 masked = encode_fn(sensor_tokens, text_embs, text_masks, positions,
-                                              patch_durations=patch_durations,
-                                              resolution_ids=resolution_ids,
-                                              token_mask=plan.token_mask,
-                                              channel_mask=enc_channel_mask,
-                                              patch_padding_mask=patch_pad,
-                                              sensor_text_embs=sensor_text_embs,
-                                              sensor_text_masks=sensor_text_masks,
-                                              sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
-                                              sensor_text_ids=sensor_text_ids,
-                                              **granularity_kw,
-                                              **({"descriptor_mask": descriptor_mask}
-                                                 if sensor_granularity else {}))
+                                   patch_durations=patch_durations,
+                                   resolution_ids=resolution_ids,
+                                   token_mask=plan.token_mask,
+                                   channel_mask=enc_channel_mask,
+                                   patch_padding_mask=patch_pad,
+                                   sensor_text_embs=sensor_text_embs,
+                                   sensor_text_masks=sensor_text_masks,
+                                   sensor_descriptors=sensor_descriptors,
+                                   sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
+                                   sensor_text_ids=sensor_text_ids,
+                                   **granularity_kw,
+                                   **({"descriptor_mask": descriptor_mask}
+                                      if sensor_granularity else {}))
                 if sensor_granularity:
                     # The authoritative presence mask comes from the fold, not the pre-encoder
                     # guess used to plan the mask.
@@ -1675,19 +1850,18 @@ def main() -> None:
                 # The teacher sees the clean view and never receives gradients. Reuse frozen text-LM
                 # outputs, but run the teacher's own frontend/fusion/transformer weights.
                 with torch.no_grad():
-                    with torch.amp.autocast(device.type, enabled=False):
-                        if shared_analysis is not None:
-                            # Fixed arm: reuse the student's parameter-free analysis, then apply
-                            # the TEACHER's own (EMA-lagged) projection. Detached — the teacher
-                            # never receives gradient.
-                            teacher_sensor_tokens = jepa_teacher.project_tokens(
-                                shared_analysis.detach())
-                        else:
-                            teacher_sensor_tokens = jepa_teacher.tokenize(
+                    if shared_analysis is not None:
+                        # Fixed arm: reuse the student's parameter-free analysis, then apply the
+                        # TEACHER's own (EMA-lagged) projection under the outer FP16 autocast.
+                        teacher_analysis = shared_analysis.detach()
+                    else:
+                        with torch.amp.autocast(device.type, enabled=False):
+                            teacher_analysis = jepa_teacher.analyze(
                                 patches.float(), rates, patch_len,
                                 source_rate_hz=batch.get("source_rates", rates).to(
                                     device, non_blocking=True),
                             )
+                    teacher_sensor_tokens = jepa_teacher.project_tokens(teacher_analysis)
                     teacher_clean = jepa_teacher.encode(
                         teacher_sensor_tokens, text_embs, text_masks, positions,
                         patch_durations=patch_durations,
@@ -1696,6 +1870,7 @@ def main() -> None:
                         patch_padding_mask=patch_pad,
                         sensor_text_embs=sensor_text_embs,
                         sensor_text_masks=sensor_text_masks,
+                        sensor_descriptors=sensor_descriptors,
                         sensor_id=enc_sensor_id,
                         role_text_ids=role_text_ids,
                         sensor_text_ids=sensor_text_ids,
@@ -1747,26 +1922,33 @@ def main() -> None:
                 target_std=cfg.vicreg_target_std,
             )
 
-            out = phase_a_loss(
-                jepa_loss, vicreg_result.total,
-                jepa_weight=cfg.jepa_weight,
-                vicreg_weight=cfg.vicreg_weight,
-            )
             # Descriptor-mask objective (design of record). Only the sensors whose descriptor was
             # actually hidden are scored — an unmasked sensor's descriptor was fed to the encoder,
             # so "reconstructing" it is a copy, not a prediction, and including those rows would
             # report a high accuracy that means nothing.
-            descriptor_loss = out.total.new_zeros(())
-            descriptor_acc = 0.0
-            if sensor_granularity and descriptor_mask is not None and bool(descriptor_mask.any()):
+            descriptor_loss = jepa_loss.new_zeros(())
+            descriptor_acc = jepa_loss.new_zeros(())
+            if sensor_granularity and descriptor_mask is not None:
                 score_rows = descriptor_mask & masked["sensor_present"]
-                if bool(score_rows.any()):
-                    descriptor_loss, acc = descriptor_retrieval_loss(
-                        masked["descriptor_pred"][score_rows],
-                        masked["descriptor"][score_rows].detach(),
-                    )
-                    descriptor_acc = float(acc)
-                    out.total = out.total + cfg.descriptor_weight * descriptor_loss
+                target_descriptor = descriptor_target_descriptors.index_select(
+                    0, descriptor_target_ids.clamp_min(0).reshape(-1),
+                ).reshape(*descriptor_target_ids.shape, -1)
+                descriptor_loss, descriptor_acc = descriptor_retrieval_loss(
+                    masked["descriptor_pred"],
+                    target_descriptor,
+                    target_ids=descriptor_target_ids,
+                    candidate_descriptors=descriptor_target_descriptors,
+                    row_mask=score_rows,
+                )
+            # Descriptor reconstruction is a JEPA mask strategy, not an independent objective. It is
+            # folded into the JEPA family before top-level scalarization so objective calibration and
+            # gradient telemetry measure the loss that is actually optimized.
+            jepa_objective = jepa_loss + cfg.descriptor_weight * descriptor_loss
+            out = phase_a_loss(
+                jepa_objective, vicreg_result.total,
+                jepa_weight=cfg.jepa_weight,
+                vicreg_weight=cfg.vicreg_weight,
+            )
             frontend_reg = model.encoder.filterbank.adaptation_regularization()
             out.total = out.total + cfg.frontend_reg_weight * frontend_reg
             # Converting a CUDA scalar to float synchronizes the whole stream. These values are
@@ -1785,7 +1967,18 @@ def main() -> None:
                         (cfg.frontend_reg_weight * frontend_reg).detach()),
                     **jepa_parts,
                     "descriptor/loss": float(descriptor_loss.detach()),
-                    "descriptor/top1": descriptor_acc,
+                    "descriptor/loss_weighted": float(
+                        (cfg.jepa_weight * cfg.descriptor_weight * descriptor_loss).detach()),
+                    "descriptor/top1": float(descriptor_acc.detach()),
+                    "descriptor/candidates": int(
+                        descriptor_target_descriptors.shape[0]
+                        if descriptor_target_descriptors is not None else 0
+                    ),
+                    "descriptor/chance_top1": (
+                        1.0 / int(descriptor_target_descriptors.shape[0])
+                        if descriptor_target_descriptors is not None
+                        and descriptor_target_descriptors.shape[0] > 0 else 0.0
+                    ),
                 }
                 parts.update({f"vicreg/{key}": value
                               for key, value in pair_contrast(z, z_b).items()})
@@ -1812,7 +2005,7 @@ def main() -> None:
         if calibrating:
             # Unit-weight geometry. VICReg retains its published internal 25/25/1 coefficients.
             unit_geometry = objective_encoder_grad_geometry({
-                "jepa": jepa_loss,
+                "jepa": jepa_objective,
                 "vicreg": vicreg_result.total,
             }, model.encoder)
             calibration_samples.append(unit_geometry)
@@ -1858,12 +2051,16 @@ def main() -> None:
                     "config": asdict(cfg),
                     "git": source_provenance["git"],
                     "source_provenance": source_provenance,
-                    "corpus_fingerprint": corpus_fingerprint(index),
+                    "corpus_fingerprint": corpus_fp,
                     "samples": calibration_samples,
                 })
-        if not bool(torch.isfinite(out.total)):
+        if device.type == "cuda":
+            # Keep the safety check on device; converting it to bool stalls the CPU every update.
+            torch._assert_async(torch.isfinite(out.total), "non-finite Phase-A loss")
+        elif not bool(torch.isfinite(out.total)):
             failure_parts = {
                 "jepa": float(jepa_loss.detach()),
+                "descriptor": float(descriptor_loss.detach()),
                 "vicreg": float(vicreg_result.total.detach()),
                 "frontend_reg": float(frontend_reg.detach()),
             }
@@ -1906,6 +2103,10 @@ def main() -> None:
                    "total": round(float(out.total.detach()), 4), **parts, **gnorms}
             rec.update({
                 "loss_weighted/jepa": float(out.terms["jepa"].detach()),
+                "loss_weighted/jepa_latent": float(
+                    (cfg.jepa_weight * jepa_loss).detach()),
+                "loss_weighted/descriptor": float(
+                    (cfg.jepa_weight * cfg.descriptor_weight * descriptor_loss).detach()),
                 "loss_weighted/vicreg": float(out.terms["vicreg"].detach()),
                 "objective_weight/jepa": float(cfg.jepa_weight),
                 "objective_weight/vicreg": float(cfg.vicreg_weight),
@@ -1913,6 +2114,7 @@ def main() -> None:
                 "perf/examples_per_s": steps_per_second * cfg.batch_size,
                 "perf/eta_minutes": max(run_until_step - step, 0) / steps_per_second / 60.0,
                 "amp/scale": float(scaler.get_scale()),
+                "amp/dtype": "float16" if device.type == "cuda" else "float32",
                 "amp/skipped_updates_window": int(amp_skipped_since_log),
                 "amp/skipped_updates_total": int(amp_skipped_total),
                 "amp/consecutive_skips": int(amp_consecutive_skips),
@@ -1952,6 +2154,11 @@ def main() -> None:
                 "jepa_zero_target_frac_window": (
                     float(zero_target_count) / max(zero_target_examples, 1)
                     if cfg.jepa_weight > 0 else 0.0
+                ),
+                "descriptor/targets_window": int(descriptor_target_count),
+                "descriptor/target_window_fraction": (
+                    float(descriptor_target_windows) / max(zero_target_examples, 1)
+                    if sensor_granularity and cfg.jepa_weight > 0 else 0.0
                 ),
             })
             input_values = patches.detach().float()
@@ -2010,6 +2217,8 @@ def main() -> None:
             amp_skipped_since_log = 0
             zero_target_count.zero_()
             zero_target_examples = 0
+            descriptor_target_count.zero_()
+            descriptor_target_windows.zero_()
             last_log_wall = log_wall
             last_log_step = step
 
@@ -2047,15 +2256,24 @@ def main() -> None:
             step % cfg.val_every == 0 or step == run_until_step
         ):
             # Query/support cover every available label/stream cell up to the fixed per-label cap.
-            val_z, val_y, val_src, val_stream = embed_stratified(
-                model, val_loader, device, cfg.val_per_label,
-                label_totals=val_label_totals,
-            )
-            train_eval_gen.manual_seed(cfg.data_seed)   # same support bank at every val + across arms (#4)
-            train_z, train_y, _, _ = embed_stratified(
-                model, train_eval_loader, device, cfg.val_per_label,
-                target_labels=set(val_y.tolist()), label_totals=train_label_totals,
-            )
+            # These small fixed subsets take ~1.8 s eagerly. Sending their different batch shapes
+            # through the training compiler costs ~35 s once and does not amortize over one run.
+            # Temporarily bypass only the runtime compile hook; parameters and calculations match.
+            compiled_transformer = model.encoder._compiled_transformer_forward
+            model.encoder._compiled_transformer_forward = None
+            try:
+                val_z, val_y, val_src, val_stream = embed_stratified(
+                    model, val_loader, device, cfg.val_per_label,
+                    label_totals=val_label_totals,
+                )
+                # Same support bank at every validation and across comparison arms.
+                train_eval_gen.manual_seed(cfg.data_seed)
+                train_z, train_y, _, _ = embed_stratified(
+                    model, train_eval_loader, device, cfg.val_per_label,
+                    target_labels=set(val_y.tolist()), label_totals=train_label_totals,
+                )
+            finally:
+                model.encoder._compiled_transformer_forward = compiled_transformer
             knn_pred = knn_predict(train_z, train_y, val_z, cfg.knn_k)
             ba = balanced_acc(knn_pred, val_y)
             hetero_ba = label_group_balanced_acc(knn_pred, val_y, val_stream)

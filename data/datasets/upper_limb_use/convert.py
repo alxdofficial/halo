@@ -73,7 +73,7 @@ def create_manifest() -> dict:
     return {
         "dataset_name": "upper-limb-use-assessment",
         "description": (
-            "Bilateral wrist-worn inertial recordings of 15 activities of daily living performed by "
+            "Bilateral custom wrist-worn IMU recordings of 15 activities of daily living performed by "
             "10 unimpaired controls and 5 hemiparetic stroke survivors, with therapist video "
             "annotations of upper-limb functional use (FAABOS). 6-axis IMU on both wrists at 50 Hz. "
             "Source: github.com/biorehab/upper-limb-use-assessment."
@@ -91,11 +91,12 @@ def create_manifest() -> dict:
         "subjects": 15,
         "activities": sorted(TASKS.values()),
         "placements": ["left wrist", "right wrist", "affected wrist", "unaffected wrist"],
-        "device_profile": "watch",
+        "device_profile": "device",
         "gravity_state": "present",
         "license": "see the source repository",
-        "citation": ("Balasubramanian S et al. Biorehab upper-limb-use-assessment. "
-                     "github.com/biorehab/upper-limb-use-assessment"),
+        "citation": ("David A et al. Quantification of the relative arm use in patients with "
+                     "hemiparesis using inertial measurement units. Journal of Rehabilitation and "
+                     "Assistive Technologies Engineering 8, 2021. doi:10.1177/20556683211019694"),
         "cohort_note": (
             "Control subject ids are prefixed c, patient ids p; the two cohorts number their "
             "subjects from 1 independently and would otherwise collide."

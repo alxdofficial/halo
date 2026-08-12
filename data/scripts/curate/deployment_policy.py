@@ -19,10 +19,14 @@ STANDARD_CHANNEL_ORDER = (
     "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
 )
 
-# The 12 primary training datasets. This MUST stay in sync with the trainer's source of truth,
-# training.tokenizer.pretrain_data.TRAIN_DATASETS (test_deployment_channel_policy enforces the match).
+# The original 12-source corpus-matched recipe. Keep this tuple stable: it is the arm used when a
+# baseline is retrained on exactly the corpus available before the 2026-08 expansion.
 # hapt was REMOVED (F11): it is a near-exact duplicate of uci_har (same 30 subjects, NCC 0.98) and was
 # never in the trained corpus — listing it here double-counted the roster (13 vs the real 12).
+# The datasets whose raw source frames are curated to the 6-slot acc/gyro layout by `curate_frame`
+# (`EXPECTED_PRIMARY_CHANNELS`, the channel-policy tests). This is a NARROWER set than the Phase-A
+# training corpus: the direct-converted multi-placement sources below train too but never touch this
+# curation path, so they are NOT primary. See `DIRECT_CONVERTED_TRAIN_DATASETS`.
 PRIMARY_TRAIN_DATASETS = (
     "uci_har",
     "hhar",
@@ -38,17 +42,44 @@ PRIMARY_TRAIN_DATASETS = (
     "xrf_v2",
 )
 
-# Optional scale sources are fully specified and buildable, but are not silently
-# mixed into the paper's frozen 12-source corpus. They must be requested
-# explicitly in build_grids and with pretrain.py --datasets so an expanded-data
-# experiment remains attributable.
+CORPUS_MATCHED_TRAIN_DATASETS = PRIMARY_TRAIN_DATASETS
+
+# 2026-08-12: Phase-A training datasets built by their OWN converters straight to native grids, not
+# through the deployment channel-policy curation. They carry StreamSpecs (placement/device text) but
+# no `curate_frame` source frame, so they are training-but-not-primary. Together with
+# PRIMARY_TRAIN_DATASETS these are exactly TRAIN_DATASETS (F11 guard). monipar, spar and
+# upper_limb_use are the three held-out for eval and are intentionally absent.
+DIRECT_CONVERTED_TRAIN_DATASETS = (
+    "dsads",
+    "forth_trace",
+    "opportunity",
+    "realdisp",
+    "mmfit",
+    "phytmo",
+)
+
+# Design-of-record Phase-A corpus. The matched recipe remains available above; adding a dataset to
+# this expanded recipe is an experimental-protocol change and must be accompanied by its StreamSpec,
+# converter, grids, quality caches, and corpus-matched baseline disclosure.
+EXPANDED_PHASE_A_TRAIN_DATASETS = (
+    CORPUS_MATCHED_TRAIN_DATASETS + DIRECT_CONVERTED_TRAIN_DATASETS
+)
+
+# Optional scale sources are fully specified and buildable, but are not silently mixed into either
+# named paper recipe. They must be requested explicitly in build_grids and with pretrain.py
+# --datasets so an additional data-scaling experiment remains attributable.
 OPTIONAL_PHASE_A_DATASETS = (
     "extrasensory",
     "nhanes",
     "hmog",
+    # Real rehabilitation data, but only 4.7% of trials reach Phase-A's six-second window and all
+    # placements are muscle-belly sensors. Keep it explicitly available as a short/stress study.
+    "kneepad",
 )
 
-PRIMARY_EVAL_DATASETS = (
+# Established zero-shot datasets plus the three 2026-08 held-out datasets. These are the single
+# source of truth used by baseline table construction and by Phase-B's dev/test partition.
+ESTABLISHED_EVAL_DATASETS = (
     "motionsense",
     "realworld",
     "shoaib",
@@ -57,6 +88,24 @@ PRIMARY_EVAL_DATASETS = (
     "tnda_har",
     "ut_complex",
 )
+
+NEW_HELDOUT_EVAL_DATASETS = (
+    "monipar",
+    "spar",
+    "upper_limb_use",
+)
+
+PRIMARY_EVAL_DATASETS = ESTABLISHED_EVAL_DATASETS + NEW_HELDOUT_EVAL_DATASETS
+
+# Subject-disjoint kNN transfer needs at least three usable subject identities. TNDA-HAR and
+# UT-Complex deliberately remain in the model-agnostic/Phase-B protocol but are unsuitable for this
+# particular probe. USC-HAD remains in the external test set rather than the frequently-run probe.
+PHASE_A_TRANSFER_DATASETS = (
+    "motionsense",
+    "realworld",
+    "shoaib",
+    "inclusivehar",
+) + NEW_HELDOUT_EVAL_DATASETS
 
 EXCLUDED_PRIMARY_DATASETS = {
     "dsads": "torso/limb IMUs do not match the phone-pocket/waist or watch-wrist deployment",
@@ -258,7 +307,8 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                note="Total acceleration is reconstructed from iOS userAcceleration + gravity; attitude is QA-only."),
     StreamSpec("usc_had", "phone_hip", "phone", "front-right hip",
                _GENERIC_ACC, _GENERIC_GYRO, "present",
-               note="MotionNode IMU on the hip; accelerometer native in g, gyroscope in dps. UniMTS eval suite."),
+               note="MotionNode IMU on the hip; accelerometer native in g, gyroscope converted "
+                    "from deg/s to rad/s in the converter. UniMTS eval suite."),
     StreamSpec("tnda_har", "watch_wrist", "watch", "right wrist",
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                note="Right-wrist IMU from the UniMTS TNDA-HAR bundle (cols 12:18); accel m/s^2 (gravity present), gyro rad/s."),
@@ -321,9 +371,11 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
 
 # --- Multi-placement rehabilitation / displacement sources (2026-08) ------------------------------
 # Each of these converters writes every placement of one recording into a single frame with a column
-# prefix, so the streams below are simultaneous by construction. None of them is in
-# PRIMARY_TRAIN_DATASETS: they are evaluation and placement-generalisation sources, and adding them
-# to training is a separate, explicit decision (docs/data/DATASET_EXPANSION_2026-08.md section 6).
+# prefix, so the streams below are simultaneous by construction. As of 2026-08-12, six of the ten
+# (see DIRECT_CONVERTED_TRAIN_DATASETS) train — their placement diversity is the point, and
+# opportunity/realdisp/mmfit populate the resolvability paired contrast, which measures on training
+# subjects. They are NOT in PRIMARY_TRAIN_DATASETS (they skip the curate_frame path). monipar, spar
+# and upper_limb_use remain held-out eval-only (monipar is the sole across-session enrollment testbed).
 
 STREAM_SPECS += _multi_placement("realdisp", {
     # Manual Table 4 order. The ideal / self / mutual placement regime is in the session id.
@@ -348,8 +400,8 @@ STREAM_SPECS += _multi_placement("forth_trace", {
     "left_ankle": ("device", "the left ankle"),
 }, note="Shimmer nodes at 51.2 Hz; m/s^2 with gravity, gyro converted deg/s -> rad/s in the "
         "converter. Carries a simultaneous bilateral wrist pair and 9 explicitly labelled postural "
-        "transitions. Participants part4 and part8 are excluded upstream: their five annotation "
-        "tracks disagree, so their placements are not simultaneous.")
+        "transitions. Participant part4 is excluded upstream because its five annotation tracks "
+        "describe different takes; part8 is retained after its 1,828 s clock gap is split.")
 
 # Anatomy from Barshan & Yuksek section 3, NOT from UCI's block names: the units sit on the chest,
 # both wrists and the outer sides of both knees. UCI calls the blocks T/RA/LA/RL/LL, which would
@@ -407,8 +459,8 @@ STREAM_SPECS += _multi_placement("mmfit", {
 
 # KneE-PAD: muscle-belly sensors on the thigh and calf. Real knee-pathology patients performing
 # correct and clinically-defined incorrect exercise variants, but the placement is outside the
-# phone/watch deployment envelope AND only 4.7% of trials reach a 6 s window, so every stream is
-# role="stress" and never enters the primary score.
+# phone/watch deployment envelope AND only 4.7% of trials reach a 6 s window. It is an explicit
+# opt-in short/stress study rather than part of the default Phase-A corpus.
 STREAM_SPECS += _multi_placement("kneepad", {
     "right_rectus_femoris": ("device", "the right rectus femoris"),
     "right_hamstrings": ("device", "the right hamstrings"),
@@ -429,11 +481,11 @@ STREAM_SPECS += _multi_placement("kneepad", {
 # is routed from the session id. Controls are described by anatomical side; the released patient
 # CSVs do not record which side is affected, so those two are described by impairment.
 STREAM_SPECS += tuple(
-    StreamSpec("upper_limb_use", stream_id, "watch", placement,
+    StreamSpec("upper_limb_use", stream_id, "device", placement,
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                session_contains=contains, session_excludes=excludes,
-               note="Wrist band at 50 Hz, g with gravity, gyro rad/s. Labels are 15 functional "
-                    "ADLs annotated from video by therapists.")
+               note="Custom wrist-worn IMU at 50 Hz, g with gravity, gyro rad/s. Labels are 15 "
+                    "functional ADLs annotated from video by therapists.")
     for stream_id, placement, contains, excludes in (
         ("control_left_wrist", "the left wrist", ("_left_wrist_",), ()),
         ("control_right_wrist", "the right wrist", ("_right_wrist_",), ()),

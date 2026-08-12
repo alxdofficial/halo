@@ -1,7 +1,8 @@
 """Pipeline A Phase-1 data pipeline (pretraining corpus + sampler + collate).
 
 Design decisions carried in from the gates:
-  * Corpus = the 12 TRAIN datasets' **native** grids (eval sets never touched): native sampling
+  * Corpus = the expanded 18-dataset TRAIN recipe's **native** grids by default (eval sets never
+    touched); the original 12-dataset matched recipe remains an explicit comparison arm. Native sampling
     RATE (no 60 Hz resample) + canonical labels + 6-ch pad+mask. The filterbank tokenizer is
     rate-invariant, so HALO trains on the corpus's REAL native rates (20/50/100 Hz) instead of a
     homogenized 60 Hz base — the 60 Hz "harmonised" grids are the layout-locked baselines' crutch,
@@ -33,7 +34,12 @@ import torch
 from torch.utils.data import Dataset, Sampler
 
 from data.scripts.augmentations import AugmentationConfig, IMUAugmenter, IMUSample
+from data.scripts.curate.deployment_policy import (
+    CORPUS_MATCHED_TRAIN_DATASETS,
+    EXPANDED_PHASE_A_TRAIN_DATASETS,
+)
 from data.scripts.eda.grid_io import GridRef, discover_grids
+from data.scripts.labels.canonical_labels import canonicalize
 
 # ----------------------------------------------------------------------------------------------
 # Corpus configuration
@@ -41,13 +47,12 @@ from data.scripts.eda.grid_io import GridRef, discover_grids
 # hapt DROPPED: the sweep confirmed it is the UCI-HAR re-release — same 30 subjects /
 # recordings (per-window NCC 0.98 vs uci_har), so keeping both leaks near-duplicate val
 # windows into train across the pair. uci_har is the canonical windowed release; keep it.
-TRAIN_DATASETS = (
-    "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar",
-    "mhealth", "capture24", "sp_sw_har", "nfi_fared", "harmes", "xrf_v2",
-)
+# Expanded is the design-of-record default. CORPUS_MATCHED_TRAIN_DATASETS remains a named launch
+# recipe for technique-only comparisons against baselines trained on the original twelve sources.
+TRAIN_DATASETS = EXPANDED_PHASE_A_TRAIN_DATASETS
 # Fully wired scale sources, opt-in through pretrain.py --datasets. NHANES is intentionally absent
 # from label probes and Phase B because it has no activity annotations.
-OPTIONAL_PHASE_A_DATASETS = ("extrasensory", "nhanes", "hmog")
+OPTIONAL_PHASE_A_DATASETS = ("extrasensory", "nhanes", "hmog", "kneepad")
 PHASE_A_ONLY_DATASETS = frozenset({"nhanes"})
 UNLABELED_LABEL = "__unlabeled__"
 WINDOW_SECONDS = 6.0
@@ -69,10 +74,11 @@ MIN_TAIL_FRACTION = 0.25          # F7: drop a resolution's tail patch if it cov
 VAL_RESOLUTION_PAIR = (0.5, 1.5)
 # Hard ceiling on the per-batch TOKEN count (batch x patches). Peak VRAM tracks tokens, not
 # windows, and patch_seconds is drawn PER BATCH — so without this, memory is a random variable:
-# measured P swings 12->22 at fixed batch, and batch 64 ran 60 steps before an unlucky 0.4 s
-# draw OOMed it. 6144 admits every draw at batch 256 (worst case 22 patches -> 5,632) while
-# forcing batch 512 onto the coarser pairs it can actually afford. Set 0 to disable.
-MAX_BATCH_TOKENS = 6144
+# measured P swings 12->22 at fixed batch. The current sensor-granularity encoder was profiled at
+# 7.46 GiB for batch 384 and 10.06 GiB for batch 512 with every resolution pair enabled on a 24 GiB
+# RTX 4090. 12,288 therefore admits every draw through batch 512 (worst case 11,264 tokens) without
+# silently changing the augmentation distribution. Set 0 to disable.
+MAX_BATCH_TOKENS = 12_288
 DFT_SIZE = 256                   # must cover max NATIVE rate (100 Hz) x max patch (1.5 s) = 150;
                                  # the rate aug caps at 100 Hz too, so 256 keeps ample headroom
 # Streams whose SOURCE (acquisition) rate differs from the rate the grid is stored at, because a
@@ -88,6 +94,9 @@ STREAM_SOURCE_RATE_HZ = {
     # floor, so bands above 15 Hz are never claimed as physically observable.
     "extrasensory/phone_pocket": 30.0,
     "extrasensory/phone_hand": 30.0,
+    # MM-Fit's packet-aware converter stores every device on a shared 100 Hz grid. The earbud is
+    # acquired at ~85 Hz, so interpolation cannot make bands above its native Nyquist observable.
+    "mmfit/left_ear": 85.0,
 }
 CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
 SEED = 20260718
@@ -155,13 +164,18 @@ _CHANNEL_ROLE_TEXT = {
 
 _SENSOR_BIAS_PATH = "data/scripts/curate/sensor_bias.json"
 _SENSOR_BIAS_CACHE: dict | None = None
+SENSOR_BIAS_FIELDS = (
+    "gravity_magnitude", "gravity_presence", "noise_floor", "quantization_step",
+    "clip_fraction", "rate_fidelity", "rest_bias",
+)
+SENSOR_BIAS_DIM = 2 * len(SENSOR_BIAS_FIELDS)  # z-scored values + explicit support bits
 
 
 def load_sensor_bias() -> dict:
     """Frozen per-sensor ``sensor_bias`` artifact, keyed ``(dataset, stream, modality)``.
 
-    Built offline by ``data.scripts.curate.sensor_bias`` over ALL of a sensor's recordings, using
-    activity-invariant channel physics only. Loaded once and cached: it is a fixed measurement, not
+    Built offline by ``data.scripts.curate.sensor_bias`` over the Phase-A *training subjects* only,
+    using activity-invariant channel physics. Loaded once and cached: it is a fixed measurement, not
     something that varies per batch, and the z-scoring statistics inside it are frozen so descriptors
     stay comparable across streams (Phase-B compares them directly).
     """
@@ -176,12 +190,87 @@ def load_sensor_bias() -> dict:
                 "`python -m data.scripts.curate.sensor_bias --build`"
             )
         payload = json.loads(path.read_text())
+        if tuple(payload.get("fields", ())) != SENSOR_BIAS_FIELDS:
+            raise ValueError(
+                f"{path} has stale sensor-bias fields {payload.get('fields')}; rebuild it with "
+                "`python -m data.scripts.curate.sensor_bias --build`"
+            )
         _SENSOR_BIAS_CACHE = {
             "fields": payload["fields"],
-            "by_sensor": {(r["dataset"], r["stream"], r["modality"]): r["z"]
-                          for r in payload["sensors"]},
+            "provenance": payload.get("provenance", {}),
+            "by_sensor": {
+                (r["dataset"], r["stream"], r["modality"]):
+                    [*r["z"], *(float(value) for value in r["supported"])]
+                for r in payload["sensors"]
+            },
         }
     return _SENSOR_BIAS_CACHE
+
+
+def validate_sensor_bias_training_corpus(
+    refs: Sequence[GridRef], datasets: Sequence[str], data_seed: int,
+) -> None:
+    """Fail closed when the frozen bias artifact does not match this Phase-A training split.
+
+    Evaluation may honestly use an unknown (all-zero, unsupported) descriptor for a held-out sensor.
+    Training may not: silently missing a requested stream or normalising with different datasets or
+    validation subjects changes the conditioning function and invalidates the run.
+    """
+    artifact = load_sensor_bias()
+    provenance = artifact.get("provenance", {})
+    expected_datasets = tuple(datasets)
+    actual_datasets = tuple(provenance.get("datasets", ()))
+    if actual_datasets != expected_datasets:
+        raise ValueError(
+            "sensor_bias.json was built for datasets "
+            f"{actual_datasets}, but this run requests {expected_datasets}; rebuild it with "
+            "`python -m data.scripts.curate.sensor_bias --build --datasets ...`"
+        )
+    if int(provenance.get("data_seed", -1)) != int(data_seed):
+        raise ValueError(
+            f"sensor_bias.json uses data_seed={provenance.get('data_seed')}, but the run uses "
+            f"{data_seed}; rebuild the artifact for the same subject split"
+        )
+    if provenance.get("subjects") != "train_only":
+        raise ValueError("sensor_bias.json must be built from Phase-A training subjects only")
+
+    val_subjects = validation_subjects_for_refs(refs, seed=data_seed)
+    subject_payload = "\n".join(f"{dataset}\t{subject}" for dataset, subject in sorted(val_subjects))
+    split_hash = hashlib.sha256(subject_payload.encode("utf-8")).hexdigest()
+    if provenance.get("validation_subjects_sha256") != split_hash:
+        raise ValueError(
+            "sensor_bias.json does not match the current validation-subject split; rebuild it"
+        )
+
+    expected_keys = set()
+    for ref in refs:
+        mask = np.asarray(ref.mask, dtype=bool)
+        if mask[:3].any():
+            expected_keys.add((ref.dataset, ref.stream, "accel"))
+        if mask[3:6].any():
+            expected_keys.add((ref.dataset, ref.stream, "gyro"))
+    missing = sorted(expected_keys - set(artifact["by_sensor"]))
+    if missing:
+        raise ValueError(f"sensor_bias.json is missing training sensors: {missing}")
+
+
+def modalities_present(channel_mask: Sequence[bool]) -> list[str]:
+    """Modalities carried by a 6-slot channel mask, in ``stream_sensor_texts`` order.
+
+    ONE rule, shared by every caller that has to line sensors up. ``stream_sensor_texts`` fixes the
+    sensor count N and the ``sensor_id`` map from these same flags, and ``stream_sensor_bias`` must
+    return exactly N rows — so a caller that decides presence with ``.all()`` while the text path
+    uses ``.any()`` turns a partial triad (some but not all axes live) into a sensor that has a
+    description and no bias row, which the encoder's shape check rejects.
+
+    A modality counts as present when ANY of its axes is live: the axis-validity indicator inside
+    ``SensorFold`` is what handles a dead axis, so a two-axis accelerometer is still an
+    accelerometer rather than an absent sensor.
+    """
+    mask = [bool(value) for value in channel_mask]
+    if len(mask) != len(CHANNELS):
+        raise ValueError(f"channel_mask must have {len(CHANNELS)} slots, got {len(mask)}")
+    return [name for name, axes in (("accel", mask[:3]), ("gyro", mask[3:6])) if any(axes)]
 
 
 def stream_sensor_bias(dataset: str, stream: str, modalities: Sequence[str]) -> torch.Tensor:
@@ -193,7 +282,7 @@ def stream_sensor_bias(dataset: str, stream: str, modalities: Sequence[str]) -> 
     flags; here the zero simply keeps the tensor dense.
     """
     artifact = load_sensor_bias()
-    width = len(artifact["fields"])
+    width = 2 * len(artifact["fields"])
     rows = [artifact["by_sensor"].get((dataset, stream, m), [0.0] * width) for m in modalities]
     return torch.tensor(rows, dtype=torch.float32)
 
@@ -266,8 +355,14 @@ def stream_sensor_texts(
         # and gravity state do not (they are acquisition CONFIG, the thing under test).
         accel_sensor, gyro_sensor = "an accelerometer", "a gyroscope"
     else:
-        accel_sensor = f"a {device} accelerometer on {place}; {grav}"
-        gyro_sensor = f"a {device} gyroscope on {place}"
+        accel_context = (
+            "recorded alongside a gyroscope" if has_gyro else "recorded without a gyroscope"
+        )
+        gyro_context = (
+            "recorded alongside an accelerometer" if has_accel else "recorded without an accelerometer"
+        )
+        accel_sensor = f"a {device} accelerometer on {place}; {grav}; {accel_context}"
+        gyro_sensor = f"a {device} gyroscope on {place}; {gyro_context}"
     # Emit only the modalities actually present. Absent-modality channels are channel_mask-masked, so
     # their sensor_id just needs to stay a valid index into sensor_texts.
     sensor_texts: list[str] = []
@@ -308,6 +403,65 @@ class WindowKey:
     stream_i: int
     window_i: int
     label_id: int
+
+
+def validation_subjects_for_refs(
+    refs: Sequence[GridRef],
+    *,
+    seed: int = SEED,
+    phase_a_only_datasets: frozenset[str] = PHASE_A_ONLY_DATASETS,
+    rng: np.random.Generator | None = None,
+) -> set[tuple[str, str]]:
+    """Return the exact subject-disjoint validation split used by Phase A.
+
+    This is shared with offline artifacts derived from the training corpus. Keeping the split in one
+    function prevents filterbank/bias calibration from silently seeing validation subjects while the
+    optimizer does not.
+    """
+    rng = rng if rng is not None else np.random.default_rng(seed)
+    selected: set[tuple[str, str]] = set()
+    by_dataset: dict[str, set[str]] = {}
+    subj_labels: dict[tuple[str, str], set[str]] = {}
+    for ref in refs:
+        by_dataset.setdefault(ref.dataset, set()).update(ref.subjects)
+        for subject, label in zip(ref.subjects, ref.labels):
+            subj_labels.setdefault((ref.dataset, subject), set()).add(canonicalize(label))
+    for dataset, subjects in sorted(by_dataset.items()):
+        if dataset in phase_a_only_datasets:
+            continue
+        ordered = sorted(subjects)
+        rng.shuffle(ordered)
+        n_val = max(1, int(round(len(ordered) * VAL_SUBJECT_FRACTION)))
+        # MM-Fit releases workout ids, not the person mapping. A generic workout-disjoint split is
+        # therefore not person-disjoint. The paper identifies these five workouts collectively as
+        # its previously-unseen-participant test set; holding out the complete set is the only split
+        # the public metadata can prove is person-disjoint.
+        if dataset == "mmfit":
+            guaranteed = {"w00", "w05", "w12", "w13", "w20"}
+            missing = guaranteed - set(ordered)
+            if missing:
+                raise ValueError(f"MM-Fit is missing published cross-subject workouts: {sorted(missing)}")
+            selected.update((dataset, subject) for subject in sorted(guaranteed))
+            continue
+        need = set().union(*(subj_labels.get((dataset, s), set()) for s in ordered))
+        picked: list[str] = []
+        while len(picked) < n_val and need:
+            best = max(
+                (s for s in ordered if s not in picked),
+                key=lambda s: (len(subj_labels.get((dataset, s), set()) & need), s),
+                default=None,
+            )
+            if best is None or not (subj_labels.get((dataset, best), set()) & need):
+                break
+            picked.append(best)
+            need -= subj_labels.get((dataset, best), set())
+        for subject in ordered:
+            if len(picked) >= n_val:
+                break
+            if subject not in picked:
+                picked.append(subject)
+        selected.update((dataset, subject) for subject in picked)
+    return selected
 
 
 class CorpusIndex:
@@ -359,38 +513,9 @@ class CorpusIndex:
         # Subject-disjoint split per dataset, chosen to COVER AS MANY LABELS as the budget allows.
         # A purely random 10% draw left whole labels with zero val windows (e.g. `sleeping`: 15,100
         # train / 0 val; `table_tennis`: 216/0), so val_knn_ba / val_conse_ba / best.pt selection
-        # silently scored 91 of 93 labels while the code claimed all of them. Greedy set-cover over
+        # silently omitted whole labels while the code claimed all of them. Greedy set-cover over
         # subjects fixes that without touching disjointness (a subject is still wholly train or val).
-        val_subjects: set[tuple[str, str]] = set()
-        by_dataset: dict[str, set[str]] = {}
-        subj_labels: dict[tuple[str, str], set[str]] = {}
-        for ref in self.refs:
-            by_dataset.setdefault(ref.dataset, set()).update(ref.subjects)
-            for w in range(ref.n_windows):
-                subj_labels.setdefault((ref.dataset, ref.subjects[w]), set()).add(ref.labels[w])
-        for dataset, subjects in sorted(by_dataset.items()):
-            if dataset in PHASE_A_ONLY_DATASETS:
-                continue
-            ordered = sorted(subjects)
-            rng.shuffle(ordered)
-            n_val = max(1, int(round(len(ordered) * VAL_SUBJECT_FRACTION)))
-            need = set().union(*(subj_labels.get((dataset, s), set()) for s in ordered))
-            picked: list[str] = []
-            # greedy: repeatedly take the subject covering the most still-uncovered labels
-            while len(picked) < n_val and need:
-                best = max((s for s in ordered if s not in picked),
-                           key=lambda s: (len(subj_labels.get((dataset, s), set()) & need), s),
-                           default=None)
-                if best is None or not (subj_labels.get((dataset, best), set()) & need):
-                    break
-                picked.append(best)
-                need -= subj_labels.get((dataset, best), set())
-            for s in ordered:                       # fill any remaining budget in shuffled order
-                if len(picked) >= n_val:
-                    break
-                if s not in picked:
-                    picked.append(s)
-            val_subjects.update((dataset, s) for s in picked)
+        val_subjects = validation_subjects_for_refs(self.refs, seed=seed, rng=rng)
 
         # balanced selection + label map (train labels only)
         label_ids: dict[str, int] = {}
@@ -411,7 +536,10 @@ class CorpusIndex:
                 if int(w) in dup:                    # stale re-emitted buffer, not an observation
                     self.n_duplicate_dropped += 1
                     continue
-                label = ref.labels[int(w)]
+                # Canonicalize again at the consumption boundary. New synonym decisions therefore
+                # take effect immediately on an existing grid, while clean grid rebuilds still write
+                # the same canonical labels at source.
+                label = canonicalize(ref.labels[int(w)])
                 if label not in label_ids:
                     label_ids[label] = len(label_ids)
                 key = WindowKey(stream_i, int(w), label_ids[label])
@@ -486,7 +614,9 @@ class PretrainDataset(Dataset):
         cfg = AugmentationConfig.phase_a() if augment else AugmentationConfig.none()
         if augment:
             cfg.gravity.p = GRAVITY_AUG_P     # audit: 0.5 killed gravity on half the corpus
-        self.augmenter = IMUAugmenter(cfg)
+        nuisance_cfg, config_cfg = cfg.split_by_group()
+        self.config_augmenter = IMUAugmenter(config_cfg)
+        self.nuisance_augmenter = IMUAugmenter(nuisance_cfg)
         self._data_cache: dict[int, np.ndarray] = {}
 
     def __len__(self) -> int:
@@ -497,11 +627,25 @@ class PretrainDataset(Dataset):
             self._data_cache[stream_i] = self.index.refs[stream_i].load_data()
         return self._data_cache[stream_i]
 
-    def _augment_to_slots(self, ref, key: WindowKey, base_texts: list[str], slot: dict,
-                          shared_config_seed: int | None = None) -> dict:
-        """Load a FRESH copy of the raw window, run one augmentation pass, and scatter the
-        survivors back into the canonical 6-slot layout. Each call draws independently from the
-        RNG, so two calls on the same key give two independent positive views."""
+    @staticmethod
+    def _clone_sample(sample: IMUSample) -> IMUSample:
+        """Clone mutable signal/metadata before drawing one independent nuisance view."""
+        return IMUSample(
+            data=sample.data.clone(),
+            channel_names=list(sample.channel_names),
+            sampling_rate=float(sample.sampling_rate),
+            channel_descriptions=list(sample.channel_descriptions),
+            channel_mask=(list(sample.channel_mask) if sample.channel_mask is not None else None),
+            role_descriptions=(list(sample.role_descriptions)
+                               if sample.role_descriptions is not None else None),
+            sensor_descriptions=(list(sample.sensor_descriptions)
+                                 if sample.sensor_descriptions is not None else None),
+            sensor_id=(list(sample.sensor_id) if sample.sensor_id is not None else None),
+            gravity_state=sample.gravity_state,
+            applied_augmentations=list(sample.applied_augmentations),
+        )
+
+    def _raw_sample(self, ref, key: WindowKey, base_texts: list[str]) -> IMUSample:
         window = torch.tensor(
             np.asarray(self._grid(key.stream_i)[key.window_i], dtype=np.float32)
         )
@@ -509,7 +653,7 @@ class PretrainDataset(Dataset):
             ref.dataset, ref.stream,
             has_accel=bool(any(ref.mask[:3])), has_gyro=bool(any(ref.mask[3:])),
         )
-        sample = IMUSample(
+        return IMUSample(
             data=window,
             channel_names=list(CHANNELS),
             sampling_rate=ref.rate_hz,
@@ -520,7 +664,10 @@ class PretrainDataset(Dataset):
             sensor_id=sensor_id,
             gravity_state=_stream_gravity_state(ref.dataset, ref.stream),
         )
-        sample = self.augmenter(sample, shared_config_seed=shared_config_seed)
+
+    def _sample_to_slots(self, ref, base_texts: list[str], slot: dict,
+                         sample: IMUSample) -> dict:
+        """Scatter one already-augmented view back into the canonical six-slot layout."""
 
         # channel_dropout REMOVES channels from the tensor (e.g. gyro drop -> (T',3)).
         # Scatter survivors back into the canonical 6-slot layout and mask the rest —
@@ -558,6 +705,9 @@ class PretrainDataset(Dataset):
         # interpolation artifacts are measurable signal.
         hardware_rate = STREAM_SOURCE_RATE_HZ.get(f"{ref.dataset}/{ref.stream}", float(ref.rate_hz))
         source_rate = min(float(hardware_rate), float(sample.sampling_rate))
+        sensor_texts_out = list(sample.sensor_descriptions or ())
+        if not sensor_texts_out:
+            raise ValueError("an augmented Phase-A sample has no sensor description")
         return {
             "data": data6,                                # (T', 6) canonical slots
             "rate": float(sample.sampling_rate),
@@ -567,20 +717,23 @@ class PretrainDataset(Dataset):
             # second view gets its OWN independently-augmented role/sensor text. label_id is
             # view-independent and lives in __getitem__ below.
             "role_texts": role_texts6,
-            "sensor_texts": list(sample.sensor_descriptions or sensor_texts),
+            "sensor_texts": sensor_texts_out,
             "sensor_id": sensor_id6,
             # Third conditioning vector (design of record). Rows follow the SAME order as
             # sensor_texts, which is [accel?, gyro?] — so the modality list is derived from which
             # modalities the stream actually carries, not assumed.
+            # `mask6` is POST-augmentation: channel_dropout removes a modality's sensor outright
+            # and compacts `sensor_descriptions`, so deriving this from the stream's static
+            # `ref.mask` would emit two bias rows against one sensor text.
             "sensor_bias": stream_sensor_bias(
                 ref.dataset, ref.stream,
-                [m for m, present in (("accel", bool(any(ref.mask[:3]))),
-                                      ("gyro", bool(any(ref.mask[3:])))) if present] or ["accel"],
+                modalities_present(mask6) or ["accel"],
             ),
             # Placement group id per sensor. The sensor-mask JEPA objective uses this to refuse
             # cross-placement prediction; within one stream every sensor shares a placement, so
             # this is constant here and becomes meaningful when paired streams are fused.
-            "sensor_placement": torch.zeros(len(sensor_texts), dtype=torch.long),
+            "sensor_placement": torch.zeros(
+                len(sensor_texts_out), dtype=torch.long),
             "channel_mask": mask6,
             "gravity_state": sample.gravity_state,
             "augmentations": tuple(sample.applied_augmentations),
@@ -591,13 +744,23 @@ class PretrainDataset(Dataset):
         ref = self.index.refs[key.stream_i]
         base_texts = stream_channel_descriptions(ref.dataset, ref.stream)
         slot = {c: k for k, c in enumerate(CHANNELS)}
-        # One CONFIG-text-dropout decision per window, shared by both positive views. The signal
-        # augmentations still draw independently (that is what makes the pair a positive), but the
-        # views never disagree on WHETHER the acquisition config was described — otherwise the
-        # VICReg loss would train embed(config) == embed(no config), i.e. to ignore that text,
-        # the opposite of the config-conditional thesis. See SensorTextDropoutCfg.shared_across_views.
-        cfg_seed = stdlib_random.randrange(2 ** 31)
-        view = self._augment_to_slots(ref, key, base_texts, slot, shared_config_seed=cfg_seed)
+        # Draw acquisition CONFIG once. Both VICReg views then independently draw only nuisance
+        # variation from clones of that configured sample. This is both the intended semantics and
+        # substantially cheaper than replaying every CONFIG transform under saved global RNG state.
+        configured = self.config_augmenter(self._raw_sample(ref, key, base_texts))
+        # Descriptor-mask prediction must target acquisition SEMANTICS, not the random surface form
+        # drawn later by the nuisance paraphrase augmentation. Otherwise two equivalent phrasings of
+        # the same sensor become false negatives and the hidden signal cannot determine which wording
+        # happened to be sampled. Capture the stable target after configuration-changing transforms
+        # (gravity/channel set) and before independently paraphrasing each positive view.
+        sensor_target_texts = list(configured.sensor_descriptions or ())
+        if not sensor_target_texts:
+            raise ValueError("a configured Phase-A sample has no descriptor target")
+        view = self._sample_to_slots(
+            ref, base_texts, slot,
+            self.nuisance_augmenter(self._clone_sample(configured)),
+        )
+        view["sensor_target_texts"] = sensor_target_texts
         item = {
             **view,                                       # data/rate/texts/role_texts/sensor_texts/sensor_id/channel_mask/gravity_state
             "label_id": key.label_id,
@@ -607,9 +770,14 @@ class PretrainDataset(Dataset):
             "subject": f"{ref.dataset}:{ref.subjects[key.window_i]}",
         }
         if self.two_view:
-            # Second view: signal augmentation INDEPENDENT, config-text dropout SHARED (same seed).
+            # Second view: independent nuisance realization over the exact same acquisition config.
+            view_b = self._sample_to_slots(
+                ref, base_texts, slot,
+                self.nuisance_augmenter(self._clone_sample(configured)),
+            )
+            view_b["sensor_target_texts"] = list(sensor_target_texts)
             item["view_b"] = {
-                **self._augment_to_slots(ref, key, base_texts, slot, shared_config_seed=cfg_seed),
+                **view_b,
                 "label_id": key.label_id,
                 "source": ref.dataset,
             }
@@ -669,7 +837,8 @@ class TemperatureSampler(Sampler[int]):
                  batch_size: int, alpha: float = 0.5, seed: int = SEED,
                  subject_ids: Sequence[int] | None = None,
                  subject_alpha: float = 1.0,
-                 max_dataset_share: float | None = None):
+                 max_dataset_share: float | None = None,
+                 batch_group_ids: Sequence[int] | None = None):
         from collections import Counter
         datasets = [stream_datasets[k.stream_i] for k in keys]
         counts = Counter(datasets)
@@ -679,6 +848,8 @@ class TemperatureSampler(Sampler[int]):
             raise ValueError("subject_alpha must be in [0, 1]")
         if subject_ids is not None and len(subject_ids) != len(keys):
             raise ValueError("subject_ids must align 1:1 with keys")
+        if batch_group_ids is not None and len(batch_group_ids) != len(keys):
+            raise ValueError("batch_group_ids must align 1:1 with keys")
         self.dataset_probabilities = _capped_probabilities(
             {dataset: count ** float(alpha) for dataset, count in counts.items()},
             max_dataset_share,
@@ -705,6 +876,8 @@ class TemperatureSampler(Sampler[int]):
                 )
                 row_weights.append(self.dataset_probabilities[dataset] * within_dataset)
         self.weights = torch.tensor(row_weights, dtype=torch.double)
+        self.batch_group_ids = (torch.as_tensor(batch_group_ids, dtype=torch.long)
+                                if batch_group_ids is not None else None)
         self.num_samples = int(num_samples)
         self.seed = int(seed)
         self.batch_size = int(batch_size)
@@ -716,6 +889,48 @@ class TemperatureSampler(Sampler[int]):
             raise ValueError("num_samples must be divisible by batch_size")
         self.epoch = 0
 
+    @staticmethod
+    def _draw_unique_batches(
+        weights: torch.Tensor,
+        n_batches: int,
+        batch_size: int,
+        generator: torch.Generator,
+    ) -> torch.Tensor:
+        """Weighted rows with replacement across batches and without replacement within one."""
+        n_samples = n_batches * batch_size
+        extra = max(batch_size * 4, n_samples // 500)
+        draws = torch.multinomial(
+            weights, n_samples + extra, replacement=True, generator=generator,
+        )
+        batches = draws[:n_samples].clone().view(-1, batch_size)
+        ordered = batches.sort(dim=1).values
+        duplicate_rows = (
+            ordered[:, 1:] == ordered[:, :-1]
+        ).any(dim=1).nonzero().flatten().tolist()
+        extras = draws[n_samples:].tolist()
+        extra_pos = 0
+        for row_index in duplicate_rows:
+            row = batches[row_index].tolist()
+            seen: set[int] = set()
+            for position, value in enumerate(row):
+                if value not in seen:
+                    seen.add(value)
+                    continue
+                while True:
+                    if extra_pos >= len(extras):
+                        extras.extend(torch.multinomial(
+                            weights, max(batch_size * 4, 4096), replacement=True,
+                            generator=generator,
+                        ).tolist())
+                    replacement = extras[extra_pos]
+                    extra_pos += 1
+                    if replacement not in seen:
+                        row[position] = replacement
+                        seen.add(replacement)
+                        break
+            batches[row_index] = torch.tensor(row, dtype=batches.dtype)
+        return batches
+
     def __len__(self) -> int:
         return self.num_samples
 
@@ -725,14 +940,30 @@ class TemperatureSampler(Sampler[int]):
         gen = torch.Generator().manual_seed(self.seed + self.epoch)
         self.epoch += 1
         bs = self.batch_size
-        # Each batch is drawn without replacement so exact duplicates do not reduce VICReg's
-        # variance/covariance sample diversity; sampling remains with replacement across batches.
-        for _ in range(self.num_samples // bs):
-            take = torch.multinomial(
-                self.weights, bs, replacement=False, generator=gen
-            ).tolist()
-            order = torch.randperm(bs, generator=gen).tolist()
-            yield from [take[i] for i in order]
+        n_batches = self.num_samples // bs
+        if self.batch_group_ids is None:
+            batches = self._draw_unique_batches(self.weights, n_batches, bs, gen)
+        else:
+            groups = torch.unique(self.batch_group_ids, sorted=True)
+            rows_by_group = [torch.nonzero(self.batch_group_ids == group).flatten()
+                             for group in groups]
+            if any(len(rows) < bs for rows in rows_by_group):
+                raise ValueError("every batch group must contain at least batch_size distinct rows")
+            mass = torch.stack([self.weights.index_select(0, rows).sum()
+                                for rows in rows_by_group])
+            batch_groups = torch.multinomial(mass, n_batches, replacement=True, generator=gen)
+            batches = torch.empty(n_batches, bs, dtype=torch.long)
+            for group_index, rows in enumerate(rows_by_group):
+                destinations = torch.nonzero(batch_groups == group_index).flatten()
+                if not len(destinations):
+                    continue
+                local = self._draw_unique_batches(
+                    self.weights.index_select(0, rows), len(destinations), bs, gen,
+                )
+                selected = rows.index_select(0, local.reshape(-1)).view_as(local)
+                batches.index_copy_(0, destinations, selected)
+        for batch in batches:
+            yield from batch.tolist()
 
 
 # ----------------------------------------------------------------------------------------------
@@ -795,7 +1026,7 @@ class MultiScaleCollate:
             # Second positive view uses the same patch duration; JEPA uses only view A.
             out_b = self._collate_impl([item["view_b"] for item in batch], ps)
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "texts",
-                      "role_texts", "sensor_texts", "sensor_id",
+                      "role_texts", "sensor_texts", "sensor_target_texts", "sensor_id",
                       "sensor_bias", "sensor_placement",
                       "channel_mask", "patch_padding_mask", "augmentations"):
                 out[f"{k}_b"] = out_b[k]
@@ -856,6 +1087,9 @@ class MultiScaleCollate:
             # legacy per_channel path where these are unused (None), so the default is unaffected.
             "role_texts": [item.get("role_texts") for item in batch],
             "sensor_texts": [item.get("sensor_texts") for item in batch],
+            "sensor_target_texts": [
+                item.get("sensor_target_texts", item.get("sensor_texts")) for item in batch
+            ],
             "sensor_id": (torch.stack([item["sensor_id"] for item in batch])
                           if "sensor_id" in batch[0] else None),
             # Sensor-granularity conditioning (design of record). Ragged in the sensor axis.
@@ -945,7 +1179,8 @@ class MultiResolutionCollate:
             # Second positive view uses the same resolution pair; JEPA uses only view A.
             out_b = self._collate_impl([item["view_b"] for item in batch], pair)
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "patch_durations",
-                      "resolution_ids", "texts", "role_texts", "sensor_texts", "sensor_id",
+                      "resolution_ids", "texts", "role_texts", "sensor_texts",
+                      "sensor_target_texts", "sensor_id",
                       "sensor_bias", "sensor_placement",
                       "channel_mask", "patch_padding_mask", "augmentations"):
                 out[f"{k}_b"] = out_b[k]
@@ -1032,6 +1267,9 @@ class MultiResolutionCollate:
             # legacy per_channel path where these are unused (None), so the default is unaffected.
             "role_texts": [item.get("role_texts") for item in batch],
             "sensor_texts": [item.get("sensor_texts") for item in batch],
+            "sensor_target_texts": [
+                item.get("sensor_target_texts", item.get("sensor_texts")) for item in batch
+            ],
             "sensor_id": (torch.stack([item["sensor_id"] for item in batch])
                           if "sensor_id" in batch[0] else None),
             # Sensor-granularity conditioning (design of record). Ragged in the sensor axis.

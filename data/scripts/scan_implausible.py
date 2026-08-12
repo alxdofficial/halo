@@ -10,7 +10,8 @@ We DROP such windows rather than clip them — clipping fabricates a plausible v
 is wrong. The scan is cached to a small JSON so ``CorpusIndex`` stays lazy (it must not read every
 grid at construction time).
 
-Run:  python -m data.scripts.scan_implausible          # writes data/quality/implausible_windows.json
+Run:  python -m data.scripts.scan_implausible
+      python -m data.scripts.scan_implausible --alignment non_harmonised
 """
 
 from __future__ import annotations
@@ -31,6 +32,13 @@ GYRO_RAIL_RAD_S = float(np.radians(2000.0))          # 34.907 rad/s
 ACCEL_RAIL_G = 16.0
 
 OUT = Path(__file__).resolve().parents[2] / "data" / "quality" / "implausible_windows.json"
+
+
+def cache_path(alignment: str) -> Path:
+    """One cache per alignment; native keeps the historical filename."""
+    if alignment == "native":
+        return OUT
+    return OUT.with_name(f"{OUT.stem}_{alignment}{OUT.suffix}")
 
 
 def scan(alignment: str = "native") -> dict:
@@ -61,50 +69,71 @@ def scan(alignment: str = "native") -> dict:
             bad[ref.key] = sorted(int(i) for i in idx)
             stats.append((ref.key, int(idx.size), ref.n_windows, gyro_peak, accel_peak))
     return {"alignment": alignment, "grid_fingerprint": grid_corpus_fingerprint(alignment, refs),
+            "stream_fingerprints": {
+                ref.key: grid_corpus_fingerprint(alignment, [ref]) for ref in refs
+            },
             "gyro_rail_rad_s": GYRO_RAIL_RAD_S,
             "accel_rail_g": ACCEL_RAIL_G, "windows": bad, "summary": stats}
 
 
 def load(alignment: str = "native", *, require: bool = False) -> dict[str, set[int]]:
     """Load exclusions, optionally requiring a cache for the exact current grid corpus."""
-    if not OUT.exists():
+    path = cache_path(alignment)
+    if not path.exists():
         if require:
             raise FileNotFoundError(
-                f"{OUT} is missing — run `python -m data.scripts.scan_implausible`."
+                f"{path} is missing — run `python -m data.scripts.scan_implausible "
+                f"--alignment {alignment}`."
             )
         return {}
-    blob = json.loads(OUT.read_text())
+    blob = json.loads(path.read_text())
     if blob.get("alignment") != alignment:
         if require:
             raise ValueError(
-                f"{OUT} was built for alignment {blob.get('alignment')!r}, not {alignment!r}; "
+                f"{path} was built for alignment {blob.get('alignment')!r}, not {alignment!r}; "
                 "re-run data.scripts.scan_implausible for this alignment."
             )
         return {}
-    from data.scripts.eda.grid_io import grid_corpus_fingerprint
-    current = grid_corpus_fingerprint(alignment)
-    if blob.get("grid_fingerprint") != current:
+    from data.scripts.eda.grid_io import discover_grids, grid_corpus_fingerprint
+    stream_fingerprints = blob.get("stream_fingerprints")
+    if stream_fingerprints:
+        stale = [
+            ref.key for ref in discover_grids(alignment)
+            if stream_fingerprints.get(ref.key) != grid_corpus_fingerprint(alignment, [ref])
+        ]
+        current_matches = not stale
+    else:  # backwards-compatible validation for pre-per-stream cache fixtures/artifacts
+        current_matches = blob.get("grid_fingerprint") == grid_corpus_fingerprint(alignment)
+        stale = []
+    if not current_matches:
         if require:
             raise ValueError(
-                f"{OUT} does not match the current {alignment} grids; re-run "
-                "`python -m data.scripts.scan_implausible` after every grid rebuild."
+                f"{path} does not match the current {alignment} grids; re-run "
+                "`python -m data.scripts.scan_implausible` after every grid rebuild"
+                + (f" (stale/missing streams: {stale[:5]})" if stale else ".")
             )
         return {}
     return {k: set(v) for k, v in blob.get("windows", {}).items()}
 
 
 def main() -> None:
+    import argparse
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    blob = scan()
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(blob, indent=2) + "\n")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--alignment", default="native",
+                        choices=("native", "harmonised", "non_harmonised"))
+    args = parser.parse_args()
+    blob = scan(args.alignment)
+    path = cache_path(args.alignment)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(blob, indent=2) + "\n")
     total = sum(len(v) for v in blob["windows"].values())
     print(f"gyro rail = {GYRO_RAIL_RAD_S:.3f} rad/s (2000 dps) · accel rail = {ACCEL_RAIL_G} g")
     for key, n, tot, gyro_peak, accel_peak in blob["summary"]:
         print(f"  {key:28s} {n:5d}/{tot:6d} windows exceed a rail "
               f"(peak gyro {gyro_peak:.2f} rad/s, peak |accel| {accel_peak:.2f} g)")
-    print(f"-> {total} windows cached for exclusion in {OUT}")
+    print(f"-> {total} windows cached for exclusion in {path}")
 
 
 if __name__ == "__main__":

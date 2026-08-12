@@ -1,7 +1,8 @@
-"""Activation and gradient-flow diagnostic for the live Phase-A model.
+"""Activation and gradient-flow diagnostic for the canonical Phase-A sensor model.
 
-Runs one real CPU batch through JEPA and augmentation VICReg. It checks fusion scale,
-per-module gradients, frozen text parameters, and dead trainable parameters.
+Runs one real CPU batch through sensor-granularity JEPA (including descriptor masking) and
+augmentation VICReg. It checks conditioning scale, per-module gradients, frozen text parameters,
+and dead trainable parameters.
 
 Run: /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.grad_check
 """
@@ -17,16 +18,19 @@ import torch
 import torch.nn as nn
 
 from training.tokenizer.losses_repr import (
-    make_mask_plan,
+    make_sensor_mask_plan,
     masked_ema_latent_loss,
     phase_a_loss,
     vicreg,
 )
+from model.tokenizer.sensor_tokens import descriptor_retrieval_loss
 from training.tokenizer.pretrain import PipelineAModel, PretrainConfig
-from training.tokenizer.pretrain_data import CorpusIndex, MultiScaleCollate, PretrainDataset
+from training.tokenizer.pretrain_data import (
+    SENSOR_BIAS_DIM, SEED, CorpusIndex, MultiResolutionCollate, PretrainDataset,
+    validate_sensor_bias_training_corpus,
+)
 
 OUT = Path(__file__).resolve().parent / "outputs" / "grad_check"
-GYRO = [3, 4, 5]
 
 
 def rms(value: torch.Tensor) -> float:
@@ -48,12 +52,22 @@ def main() -> None:
     device = torch.device("cpu")
     cfg = PretrainConfig(
         d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
-        device=str(device), text_conditioning="factored",
+        device=str(device), text_conditioning="factored", token_granularity="sensor",
+        sensor_bias_dim=SENSOR_BIAS_DIM, multiresolution=True,
     )
-    index = CorpusIndex(max_per_stream=200, seed=1)
-    dataset = PretrainDataset(index, index.train, augment=True, two_view=True)
-    collate = MultiScaleCollate(fixed_patch_seconds=1.0, seed=1, two_view=True)
-    batch = collate([dataset[i] for i in range(64)])
+    index = CorpusIndex(max_per_stream=200, seed=SEED)
+    validate_sensor_bias_training_corpus(index.refs, index.datasets, index.seed)
+    # CorpusIndex is stream-ordered. Taking rows 0..63 would inspect Capture-24 accelerometer only,
+    # making cross-sensor attention and descriptor retrieval structurally inactive. Stratify across
+    # the whole index so every canonical module receives a meaningful opportunity for gradient.
+    diagnostic_keys = [index.train[i] for i in np.linspace(
+        0, len(index.train) - 1, 64, dtype=np.int64,
+    )]
+    dataset = PretrainDataset(index, diagnostic_keys, augment=True, two_view=True)
+    collate = MultiResolutionCollate(
+        fixed_patch_seconds=(0.5, 1.5), seed=SEED, two_view=True,
+    )
+    batch = collate([dataset[i] for i in range(len(diagnostic_keys))])
 
     model = PipelineAModel(cfg).to(device)
     frontend = model.encoder.filterbank
@@ -67,71 +81,105 @@ def main() -> None:
     )
     frontend.finalize_norm_stats()
 
-    def encode(suffix: str = "", token_mask=None):
+    def encode(suffix: str = "", token_mask=None, descriptor_mask=None):
         patches = batch[f"patches{suffix}"].to(device)
         rates = batch[f"rates{suffix}"].to(device)
         lengths = batch[f"patch_len{suffix}"].to(device)
         positions = batch[f"positions{suffix}"].to(device)
         channel_mask = batch[f"channel_mask{suffix}"].to(device)
         patch_mask = batch[f"patch_padding_mask{suffix}"].to(device)
+        patch_durations = batch[f"patch_durations{suffix}"].to(device)
+        resolution_ids = batch[f"resolution_ids{suffix}"].to(device)
         tokens = model.encoder.tokenize(
             patches, rates, lengths,
             source_rate_hz=batch[f"source_rates{suffix}"].to(device),
         )
-        text, text_mask, sensor_text, sensor_text_mask = model.encoder.encode_texts_factored(
-            batch[f"role_texts{suffix}"], batch[f"sensor_texts{suffix}"], device,
+        sensor_descriptors, sensor_text_ids = model.encoder.encode_sensor_descriptors_unique(
+            batch[f"sensor_texts{suffix}"], device,
         )
+        text = text_mask = role_ids = sensor_text = sensor_text_mask = None
         sensor_id = batch[f"sensor_id{suffix}"].to(device)
+        sensor_bias = batch[f"sensor_bias{suffix}"].to(device)
         output = model.encoder.encode(
-            tokens, text, text_mask, positions, token_mask=token_mask,
+            tokens, text, text_mask, positions,
+            patch_durations=patch_durations, resolution_ids=resolution_ids,
+            token_mask=token_mask,
             channel_mask=channel_mask, patch_padding_mask=patch_mask,
             sensor_text_embs=sensor_text, sensor_text_masks=sensor_text_mask,
-            sensor_id=sensor_id,
+            sensor_descriptors=sensor_descriptors,
+            sensor_id=sensor_id, role_text_ids=role_ids, sensor_text_ids=sensor_text_ids,
+            sensor_bias=sensor_bias, descriptor_mask=descriptor_mask,
         )
-        return tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id, output
+        return (tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id,
+                sensor_text_ids, sensor_bias, output)
 
-    tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id, clean = encode()
-    batch_size, patches, channels = clean["tokens"].shape[:3]
-    plan = make_mask_plan(
-        batch_size, patches, channels, GYRO, device=device,
+    (tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id,
+     sensor_text_ids, sensor_bias, clean) = encode()
+    batch_size, patches, sensors = clean["tokens"].shape[:3]
+    plan = make_sensor_mask_plan(
+        batch_size, patches, sensors, device=device,
         valid_patches=batch["patch_padding_mask"].to(device),
-        channel_mask=batch["channel_mask"].to(device),
+        sensor_present=clean["sensor_present"],
+        sensor_placement=batch["sensor_placement"].to(device),
     )
-    *_, masked = encode(token_mask=plan.token_mask)
+    *_, masked = encode(token_mask=plan.token_mask, descriptor_mask=plan.descriptor_mask)
     *_, view_b = encode("_b")
     jepa_prediction = model.jepa_predictor(masked["tokens"])
+    jepa_mask = (plan.token_mask & masked["sensor_present"].unsqueeze(1)
+                 & batch["patch_padding_mask"].to(device).unsqueeze(2))
     jepa = masked_ema_latent_loss(
-        jepa_prediction, clean["tokens"].detach(), plan.token_mask,
+        jepa_prediction, clean["tokens"].detach(), jepa_mask,
+        token_groups=batch["resolution_ids"].to(device),
+        token_durations=batch["patch_durations"].to(device),
     )
+    descriptor_rows = plan.descriptor_mask & masked["sensor_present"]
+    target_descriptors, target_ids = model.encoder.encode_sensor_descriptors_unique(
+        batch["sensor_target_texts"], device,
+    )
+    target_dense = target_descriptors.index_select(
+        0, target_ids.clamp_min(0).reshape(-1),
+    ).reshape(*target_ids.shape, -1)
+    descriptor, _ = descriptor_retrieval_loss(
+        masked["descriptor_pred"], target_dense,
+        target_ids=target_ids, candidate_descriptors=target_descriptors,
+        row_mask=descriptor_rows,
+    )
+    jepa_objective = jepa + cfg.descriptor_weight * descriptor
     z_a = model.vicreg_projector(clean["pooled"])
     z_b = model.vicreg_projector(view_b["pooled"])
     vicreg_result = vicreg(z_a, z_b)
-    loss = phase_a_loss(jepa, vicreg_result.total)
+    loss = phase_a_loss(jepa_objective, vicreg_result.total)
 
     model.zero_grad(set_to_none=True)
     loss.total.backward()
 
     encoder = model.encoder
-    projected_text = encoder.fusion.pool.text_proj(
-        text.reshape(batch_size * channels, text.shape[2], -1)
+    folded, present = encoder.sensor_fold(
+        tokens, sensor_id, batch["channel_mask"].to(device), n_sensors=sensors,
     )
-    fused = encoder.fusion(
-        tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id,
-    )
+    descriptor_conditioned = encoder.descriptor_proj(folded, clean["descriptor"], present)
+    conditioned = encoder.bias_proj(descriptor_conditioned, sensor_bias, present)
     magnitudes = {
-        "sensor_tokens": rms(tokens),
-        "text_embeddings": rms(text),
-        "projected_text": rms(projected_text),
-        "fused_tokens": rms(fused),
-        "fusion_delta": rms(fused - tokens),
+        "channel_tokens": rms(tokens),
+        "sensor_tokens": rms(folded),
+        "text_descriptors": rms(clean["descriptor"]),
+        "descriptor_conditioned": rms(descriptor_conditioned),
+        "fully_conditioned": rms(conditioned),
+        "conditioning_delta": rms(conditioned - folded),
         "pooled": rms(clean["pooled"]),
         "vicreg_projection": rms(z_a),
     }
-    fusion_ratio = magnitudes["fusion_delta"] / max(magnitudes["sensor_tokens"], 1e-9)
+    conditioning_ratio = magnitudes["conditioning_delta"] / max(
+        magnitudes["sensor_tokens"], 1e-9,
+    )
     gradients = {
         "encoder": module_grad_norm(encoder),
         "jepa_predictor": module_grad_norm(model.jepa_predictor),
         "vicreg_projector": module_grad_norm(model.vicreg_projector),
+        "sensor_fold": module_grad_norm(encoder.sensor_fold),
+        "descriptor_projection": module_grad_norm(encoder.descriptor_proj),
+        "bias_projection": module_grad_norm(encoder.bias_proj),
+        "descriptor_head": module_grad_norm(encoder.descriptor_head),
         "transformer_layers": [module_grad_norm(layer) for layer in encoder.transformer.layers],
     }
     dead = [name for name, parameter in model.named_parameters()
@@ -142,17 +190,19 @@ def main() -> None:
         ),
         "no_dead_trainable_parameters": not dead,
         # Factored conditioning intentionally starts as a light residual (gate bias -2).
-        "fusion_scale_reasonable": 0.03 < fusion_ratio < 10.0,
+        "conditioning_scale_reasonable": 0.03 < conditioning_ratio < 10.0,
         "finite_activations": all(value == value and abs(value) < 1e4
                                   for value in magnitudes.values()),
         "finite_loss": bool(torch.isfinite(loss.total)),
     }
     report = {
         "device": str(device),
-        "batch": [batch_size, patches, channels],
-        "loss": {"jepa": float(jepa.detach()), "vicreg": float(vicreg_result.total.detach())},
+        "batch": [batch_size, patches, sensors],
+        "loss": {"jepa": float(jepa.detach()), "descriptor": float(descriptor.detach()),
+                 "jepa_family": float(jepa_objective.detach()),
+                 "vicreg": float(vicreg_result.total.detach())},
         "activation_rms": {key: round(value, 5) for key, value in magnitudes.items()},
-        "fusion_delta_ratio": round(fusion_ratio, 5),
+        "conditioning_delta_ratio": round(conditioning_ratio, 5),
         "gradient_norms": gradients,
         "dead_parameters": dead,
         "checks": checks,

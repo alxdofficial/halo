@@ -21,6 +21,7 @@ from model.tokenizer.sensor_tokens import (
     ConditioningProjection, DescriptorHead, SensorFold, descriptor_retrieval_loss,
 )
 from training.tokenizer.losses_repr import make_sensor_mask_plan
+from training.tokenizer.pretrain_data import SENSOR_BIAS_DIM
 
 
 D = 32
@@ -123,6 +124,42 @@ def test_descriptor_loss_collapses_duplicate_descriptions():
     assert float(loss) == 0.0 and float(acc) == 1.0
 
 
+def test_descriptor_loss_integer_ids_match_float_deduplication():
+    """The optimized ID path must preserve the original descriptor-retrieval objective exactly."""
+    torch.manual_seed(SEED)
+    candidates = torch.nn.functional.normalize(torch.randn(3, 384), dim=-1)
+    ids = torch.tensor([2, 0, 2, 1, 0])
+    targets = candidates.index_select(0, ids)
+    predicted = torch.nn.functional.normalize(torch.randn(5, 384), dim=-1)
+    reference = descriptor_retrieval_loss(predicted, targets)
+    optimized = descriptor_retrieval_loss(
+        predicted, targets, target_ids=ids, candidate_descriptors=candidates,
+    )
+    assert torch.allclose(reference[0], optimized[0])
+    assert torch.equal(reference[1], optimized[1])
+
+
+def test_descriptor_loss_fixed_shape_mask_matches_compact_all_candidate_scoring():
+    torch.manual_seed(SEED)
+    candidates = torch.nn.functional.normalize(torch.randn(4, 384), dim=-1)
+    ids = torch.tensor([[0, 1], [2, 3], [1, -1]])
+    predicted = torch.nn.functional.normalize(torch.randn(3, 2, 384), dim=-1)
+    selected = torch.tensor([[True, False], [False, True], [True, False]])
+
+    loss, acc = descriptor_retrieval_loss(
+        predicted, candidates[ids.clamp_min(0)], target_ids=ids,
+        candidate_descriptors=candidates, row_mask=selected,
+    )
+    rows = predicted[selected]
+    targets = ids[selected]
+    logits = rows @ candidates.t() / 0.07
+    expected_loss = torch.nn.functional.cross_entropy(logits, targets)
+    expected_acc = logits.argmax(dim=1).eq(targets).float().mean()
+
+    torch.testing.assert_close(loss, expected_loss)
+    torch.testing.assert_close(acc, expected_acc)
+
+
 def test_descriptor_head_emits_unit_vectors_in_frozen_text_space():
     head = DescriptorHead(D).eval()
     with torch.no_grad():
@@ -179,7 +216,8 @@ def test_sensor_encoder_forward_shapes_and_masking():
 
     B, P, C, S_PAD, N_TRUE = 2, 5, 6, 256, 64
     enc = SetTokenizerEncoder(d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
-                              dropout=0.0, token_granularity="sensor", sensor_bias_dim=9).eval()
+                              dropout=0.0, token_granularity="sensor",
+                              sensor_bias_dim=SENSOR_BIAS_DIM).eval()
     patches = torch.zeros(B, P, S_PAD, C)
     patches[:, :, :N_TRUE] = torch.randn(B, P, N_TRUE, C)
     sensor_texts = [["a phone accelerometer on the front pocket; includes gravity",
@@ -188,7 +226,7 @@ def test_sensor_encoder_forward_shapes_and_masking():
     sid = torch.tensor([[0, 0, 0, 1, 1, 1]] * B)
     pos = torch.arange(P).float().unsqueeze(0).expand(B, P).contiguous()
     cm = torch.ones(B, C, dtype=torch.bool)
-    bias = torch.randn(B, 2, 9)
+    bias = torch.randn(B, 2, SENSOR_BIAS_DIM)
 
     with torch.no_grad():
         out = enc(patches, 50.0, N_TRUE, role, pos, channel_mask=cm, sensor_texts=sensor_texts,
@@ -214,7 +252,8 @@ def test_per_sensor_row_export_doubles_six_channel_streams():
     from training.tokenizer.eval_transfer import encode_dataset_detailed
 
     enc = SetTokenizerEncoder(d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
-                              dropout=0.0, token_granularity="sensor", sensor_bias_dim=9).eval()
+                              dropout=0.0, token_granularity="sensor",
+                              sensor_bias_dim=SENSOR_BIAS_DIM).eval()
     g = torch.Generator().manual_seed(SEED)
     data = torch.randn(6, 300, 6, generator=g).numpy()
     texts = [f"c{i}" for i in range(6)]
@@ -262,7 +301,8 @@ def test_sensor_encoder_handles_accel_only_streams():
 
     B, P, C, S_PAD, N_TRUE = 2, 5, 6, 256, 64
     enc = SetTokenizerEncoder(d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
-                              dropout=0.0, token_granularity="sensor", sensor_bias_dim=9).eval()
+                              dropout=0.0, token_granularity="sensor",
+                              sensor_bias_dim=SENSOR_BIAS_DIM).eval()
     patches = torch.zeros(B, P, S_PAD, C)
     patches[:, :, :N_TRUE] = torch.randn(B, P, N_TRUE, C)
     cm = torch.ones(B, C, dtype=torch.bool)
@@ -273,6 +313,126 @@ def test_sensor_encoder_handles_accel_only_streams():
                   channel_mask=cm,
                   sensor_texts=[["a watch accelerometer on the wrist; includes gravity"]] * B,
                   sensor_id=torch.zeros(B, C, dtype=torch.long),
-                  sensor_bias=torch.randn(B, 1, 9))
+                  sensor_bias=torch.randn(B, 1, SENSOR_BIAS_DIM))
     assert out["tokens"].shape == (B, P, 1, 64)
     assert out["sensor_present"].all()
+
+
+def test_multiresolution_sensor_pooling_is_duration_weighted():
+    """A short tail patch must contribute in proportion to physical time, not as a full patch."""
+    from model.tokenizer.encoder import SetTokenizerEncoder
+
+    B, P, C, S_PAD, N_TRUE = 1, 4, 6, 256, 64
+    enc = SetTokenizerEncoder(d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
+                              dropout=0.0, token_granularity="sensor",
+                              sensor_bias_dim=SENSOR_BIAS_DIM).eval()
+    patches = torch.zeros(B, P, S_PAD, C)
+    patches[:, :, :N_TRUE] = torch.randn(B, P, N_TRUE, C)
+    positions = torch.tensor([[0.25, 0.6, 0.5, 1.1]])
+    durations = torch.tensor([[0.5, 0.2, 1.0, 0.2]])
+    resolution_ids = torch.tensor([[0, 0, 1, 1]])
+    with torch.no_grad():
+        out = enc(
+            patches, 50.0, N_TRUE, [["x", "y", "z", "x", "y", "z"]], positions,
+            patch_durations=durations, resolution_ids=resolution_ids,
+            channel_mask=torch.ones(B, C, dtype=torch.bool),
+            patch_padding_mask=torch.ones(B, P, dtype=torch.bool),
+            sensor_texts=[["accelerometer at wrist", "gyroscope at wrist"]],
+            sensor_id=torch.tensor([[0, 0, 0, 1, 1, 1]]),
+            sensor_bias=torch.randn(B, 2, SENSOR_BIAS_DIM),
+        )
+    per_patch = out["per_patch"]
+    short = (per_patch[:, :2] * durations[:, :2, None]).sum(1) / durations[:, :2].sum(1, keepdim=True)
+    long = (per_patch[:, 2:] * durations[:, 2:, None]).sum(1) / durations[:, 2:].sum(1, keepdim=True)
+    expected = (short + long) / 2
+    assert torch.allclose(out["pooled"], expected, atol=1e-5, rtol=1e-5)
+    tokens = out["tokens"]
+    short_sensor = (tokens[:, :2] * durations[:, :2, None, None]).sum(1) \
+        / durations[:, :2].sum(1).view(B, 1, 1)
+    long_sensor = (tokens[:, 2:] * durations[:, 2:, None, None]).sum(1) \
+        / durations[:, 2:].sum(1).view(B, 1, 1)
+    assert torch.allclose(out["sensor_context"], (short_sensor + long_sensor) / 2,
+                          atol=1e-5, rtol=1e-5)
+
+
+def test_checkpoint_reconstruction_preserves_sensor_design():
+    from dataclasses import asdict
+
+    from training.tokenizer.eval_transfer import build_encoder, encode_dataset_detailed
+    from training.tokenizer.pretrain import PipelineAModel, PretrainConfig
+
+    cfg = PretrainConfig(
+        d_model=64, num_layers=2, num_heads=4, dim_feedforward=128, dropout=0.0,
+        token_granularity="sensor", text_conditioning="factored", multiresolution=True,
+        sensor_bias_dim=SENSOR_BIAS_DIM,
+    )
+    original = PipelineAModel(cfg).encoder.eval()
+    restored = build_encoder(
+        {"config": asdict(cfg), "encoder": original.state_dict()}, torch.device("cpu"),
+    )
+    assert restored.token_granularity == "sensor"
+    assert restored.sensor_bias_dim == SENSOR_BIAS_DIM
+    assert restored.multiresolution is True
+    assert restored.use_duration_embedding is False
+    assert restored.fusion is None
+
+    data = torch.randn(2, 300, 6).numpy()
+    out = encode_dataset_detailed(
+        restored, data, [f"channel {i}" for i in range(6)], torch.device("cpu"), 50.0,
+        gravity_state="present", channel_mask=[True] * 6,
+        dataset="wisdm", stream="phone_pocket",
+    )
+    assert out["pooled"].shape == (2, 64)
+    assert torch.isfinite(out["pooled"]).all()
+
+
+# ---------------------------------------------------------------- one presence rule, two callers
+# `stream_sensor_texts` fixes the sensor count N and the `sensor_id` map; `stream_sensor_bias` must
+# return exactly N rows. These lived as two separate expressions, and eval_transfer's used `.all()`
+# while the text path used `.any()` — so a PARTIAL TRIAD (some but not all axes live) produced a
+# sensor with a description and no bias row. No native grid carries one today, which is exactly why
+# the divergence went unnoticed; `modalities_present` is now the single rule both callers derive from.
+def test_modalities_present_counts_a_partial_triad_as_present():
+    from training.tokenizer.pretrain_data import modalities_present
+
+    # Two accel axes live, third dead — still an accelerometer. SensorFold's axis-validity
+    # indicator is what handles the dead axis; dropping the sensor entirely would lose the other two.
+    assert modalities_present([True, True, False, False, False, False]) == ["accel"]
+    assert modalities_present([False] * 3 + [False, True, True]) == ["gyro"]
+    assert modalities_present([True, False, False, False, False, True]) == ["accel", "gyro"]
+    assert modalities_present([False] * 6) == []
+
+
+def test_modalities_present_rejects_a_wrong_width_mask():
+    from training.tokenizer.pretrain_data import modalities_present
+
+    for bad in ([True] * 3, [True] * 7, []):
+        try:
+            modalities_present(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"a {len(bad)}-slot mask must be rejected, not silently reinterpreted")
+
+
+def test_bias_rows_match_sensor_texts_for_every_mask_pattern():
+    """The invariant the encoder's shape check enforces, over all 64 masks including partial triads."""
+    from itertools import product
+
+    from training.tokenizer.pretrain_data import (modalities_present, stream_sensor_bias,
+                                                  stream_sensor_texts)
+
+    checked = 0
+    for bits in product([False, True], repeat=6):
+        modalities = modalities_present(list(bits))
+        if not modalities:
+            continue                                   # no live channel: no sensor, nothing to align
+        _, sensor_texts, sensor_id = stream_sensor_texts(
+            "wisdm", "phone_pocket",
+            has_accel="accel" in modalities, has_gyro="gyro" in modalities,
+        )
+        bias = stream_sensor_bias("wisdm", "phone_pocket", modalities)
+        assert bias.shape[0] == len(sensor_texts), (bits, bias.shape, sensor_texts)
+        assert bias.shape[1] == SENSOR_BIAS_DIM
+        assert int(max(sensor_id)) < len(sensor_texts), (bits, sensor_id)
+        checked += 1
+    assert checked == 63                               # every mask but the all-dead one

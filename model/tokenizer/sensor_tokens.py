@@ -84,12 +84,16 @@ class SensorFold(nn.Module):
         member = F.one_hot(sensor_id, num_classes=S).to(torch.int64) * live.unsqueeze(-1)
         ordinal = member.cumsum(dim=1) - member                              # (B,C,S)
         axis_idx = (ordinal * member).sum(dim=2)                             # (B,C)
-        live_axis_max = int((axis_idx * live).max().item()) if C else 0
-        if live_axis_max >= self.axes:
-            raise ValueError(
-                f"a sensor owns more than {self.axes} live channels (got axis index "
-                f"{live_axis_max}); SensorFold assumes a fixed {self.axes}-axis triad"
-            )
+        axes_valid = ((axis_idx * live) < self.axes).all()
+        if tokens.device.type == "cpu":
+            if not bool(axes_valid):
+                raise ValueError(
+                    f"a sensor owns more than {self.axes} live channels; "
+                    f"SensorFold assumes a fixed {self.axes}-axis triad"
+                )
+        else:
+            # Avoid a device-wide synchronization in each of the four encoder passes per step.
+            torch._assert_async(axes_valid, f"a sensor owns more than {self.axes} live channels")
 
         trash = S * self.axes
         slot = torch.where(channel_mask, sensor_id * self.axes + axis_idx,
@@ -170,9 +174,12 @@ class DescriptorHead(nn.Module):
 
 
 def descriptor_retrieval_loss(
-    predicted: torch.Tensor,      # (N, text_dim) L2-normalised predictions
-    targets: torch.Tensor,        # (N, text_dim) L2-normalised true descriptors
+    predicted: torch.Tensor,      # (..., text_dim) L2-normalised predictions
+    targets: torch.Tensor,        # (..., text_dim) L2-normalised true descriptors
     temperature: float = 0.07,
+    target_ids: torch.Tensor | None = None,
+    candidate_descriptors: torch.Tensor | None = None,
+    row_mask: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """InfoNCE over the batch's DISTINCT descriptors. Returns ``(loss, top1_accuracy)``.
 
@@ -187,8 +194,36 @@ def descriptor_retrieval_loss(
     if predicted.numel() == 0:
         zero = predicted.new_zeros(())
         return zero, zero
-    uniq, inverse = torch.unique(targets, dim=0, return_inverse=True)
+    if target_ids is not None:
+        if candidate_descriptors is None:
+            raise ValueError("candidate_descriptors are required with target_ids")
+        if predicted.shape[:-1] != target_ids.shape:
+            raise ValueError("target_ids must match predicted except for its descriptor dimension")
+        # The caller's candidate table is already unique and target_ids index it directly. Scoring
+        # every table row supplies true in-batch distractors and avoids a dynamic torch.unique.
+        uniq = candidate_descriptors
+        inverse = target_ids.reshape(-1)
+        predicted = predicted.reshape(-1, predicted.shape[-1])
+        valid = inverse.ge(0)
+        if row_mask is not None:
+            if row_mask.shape != target_ids.shape:
+                raise ValueError("row_mask must have the same shape as target_ids")
+            valid = valid & row_mask.reshape(-1)
+        inverse = inverse.clamp_min(0)
+    else:
+        if row_mask is not None:
+            raise ValueError("row_mask requires target_ids")
+        uniq, inverse = torch.unique(targets, dim=0, return_inverse=True)
     logits = predicted @ uniq.t() / temperature                 # (N, U)
-    loss = F.cross_entropy(logits, inverse)
-    acc = (logits.argmax(dim=1) == inverse).float().mean()
+    if target_ids is None:
+        loss = F.cross_entropy(logits, inverse)
+        acc = (logits.argmax(dim=1) == inverse).float().mean()
+        return loss, acc
+    weights = valid.to(logits.dtype)
+    denominator = weights.sum()
+    active = denominator.gt(0).to(logits.dtype)
+    per_row = F.cross_entropy(logits, inverse, reduction="none")
+    loss = (per_row * weights).sum() / denominator.clamp(min=1.0) * active
+    correct = logits.argmax(dim=1).eq(inverse).to(logits.dtype)
+    acc = (correct * weights).sum() / denominator.clamp(min=1.0) * active
     return loss, acc

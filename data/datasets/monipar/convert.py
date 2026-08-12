@@ -117,7 +117,9 @@ def create_manifest() -> dict:
         ],
         "subjects": 28,
         "activities": sorted(EXERCISES.values()),
-        "placements": ["the more-affected wrist"],
+        # Patients used the more-affected wrist; controls used their dominant wrist. The shared
+        # acquisition configuration therefore has no single impairment-side description.
+        "placements": ["the wrist"],
         "device_profile": "watch",
         "gravity_state": "present",
         "license": "see the Zenodo record (8104853)",

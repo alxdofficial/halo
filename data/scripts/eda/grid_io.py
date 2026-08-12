@@ -113,8 +113,9 @@ def grid_corpus_fingerprint(
     """Fingerprint the grids consumed by corpus-wide quality scans.
 
     Labels and subjects are hashed in full. Signal content is sampled deterministically and paired
-    with file size/mtime, so a rebuilt or edited grid invalidates exclusion indices without forcing
-    every training process to hash tens of gigabytes.
+    with file size, so an edited grid invalidates exclusion indices without forcing every training
+    process to hash tens of gigabytes. File modification time is deliberately excluded: a
+    byte-identical clean rebuild on another machine must accept the same reviewed cache.
     """
     selected = list(refs) if refs is not None else discover_grids(alignment)
     digest = hashlib.sha256()
@@ -135,8 +136,7 @@ def grid_corpus_fingerprint(
             add(values_digest.hexdigest())
 
         data_path = ref.grid_dir / "data.npy"
-        stat = data_path.stat()
-        add((stat.st_size, stat.st_mtime_ns))
+        add(data_path.stat().st_size)
         sampled = np.ascontiguousarray(ref.load_data()[::97, ::13, :], dtype=np.float32)
         add(hashlib.sha256(sampled.tobytes()).hexdigest())
 

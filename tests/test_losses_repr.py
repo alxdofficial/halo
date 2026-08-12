@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 import torch
 
@@ -270,6 +272,22 @@ def test_ema_accepts_a_fully_frozen_teacher():
     assert torch.equal(teacher.weight, torch.zeros_like(teacher.weight))
     with pytest.raises(ValueError):
         update_ema_encoder(student, teacher, decay=1.0 + 1e-6)
+
+
+def test_foreach_ema_reuses_a_validated_parameter_mapping():
+    student = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.Linear(4, 2))
+    teacher = copy.deepcopy(student)
+    with torch.no_grad():
+        for parameter in student.parameters():
+            parameter.add_(1.0)
+    before = [parameter.clone() for parameter in teacher.parameters()]
+    update_ema_encoder(student, teacher, decay=0.25)
+    cache = teacher._ema_update_cache
+    update_ema_encoder(student, teacher, decay=0.25)
+    assert teacher._ema_update_cache is cache
+    for initial, source, target in zip(before, student.parameters(), teacher.parameters()):
+        expected = (0.25 ** 2) * initial + (1.0 - 0.25 ** 2) * source
+        assert torch.allclose(target, expected)
 
 
 def test_default_expander_is_the_historical_control_architecture():

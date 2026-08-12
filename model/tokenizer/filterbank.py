@@ -307,11 +307,20 @@ class PhysicalFilterbankTokenizer(nn.Module):
                     )
         # Guardrail: native samples must fit the DFT window, else the zero-pad
         # silently becomes a truncation that destroys low-frequency resolution.
-        n_max = int(N.max())
-        if n_max > self.S:
-            raise ValueError(
-                f"patch_len_samples max {n_max} exceeds dft_size S={self.S}; raise "
-                f"dft_size so that r*D <= S for every sample."
+        length_valid = N.max() <= self.S
+        if N.device.type == "cpu":
+            if not bool(length_valid):
+                n_max = int(N.max())
+                raise ValueError(
+                    f"patch_len_samples max {n_max} exceeds dft_size S={self.S}; raise "
+                    f"dft_size so that r*D <= S for every sample."
+                )
+        else:
+            # This invariant is checked on every tokenizer pass. Keep the CUDA hot path
+            # asynchronous; a Python int conversion here serialized the entire stream.
+            torch._assert_async(
+                length_valid,
+                f"patch_len_samples exceeds dft_size S={self.S}",
             )
         return r, N
 

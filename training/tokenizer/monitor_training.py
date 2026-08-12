@@ -92,6 +92,8 @@ def assess(run_dir: Path, stale_seconds: float = 120.0) -> dict:
 
     critical_numeric = (
         "total", "jepa", "vicreg", "grad/total_preclip", "grad/encoder",
+        "descriptor/loss", "grad/sensor_fold", "grad/descriptor_projection",
+        "grad/bias_projection", "grad/descriptor_head",
         "repr_encoder/effective_rank", "repr_projector/effective_rank",
     )
     for row in train[-12:]:
@@ -104,6 +106,29 @@ def assess(run_dir: Path, stale_seconds: float = 120.0) -> dict:
     if latest.get("jepa_zero_target_frac_window", 0.0) > 0:
         alert("critical", "jepa_zero_targets",
               f"{latest['jepa_zero_target_frac_window']:.2%} of recent windows had no JEPA target.")
+    if (config.get("token_granularity") == "sensor" and latest_step > warmup_steps
+            and float(latest.get("descriptor/target_window_fraction", 0.0)) <= 0.0):
+        alert("critical", "descriptor_no_targets",
+              "No descriptor-mask target was produced in the latest telemetry window.")
+    if config.get("token_granularity") == "sensor" and latest_step > warmup_steps + 500:
+        descriptor_rows = [
+            row for row in train[-12:]
+            if _finite(row.get("descriptor/top1")) and _finite(row.get("descriptor/chance_top1"))
+            and float(row["descriptor/chance_top1"]) > 0
+        ]
+        if len(descriptor_rows) >= 4:
+            descriptor_top1 = statistics.median(
+                float(row["descriptor/top1"]) for row in descriptor_rows
+            )
+            descriptor_chance = statistics.median(
+                float(row["descriptor/chance_top1"]) for row in descriptor_rows
+            )
+            if descriptor_top1 <= 1.25 * descriptor_chance:
+                alert(
+                    "warning", "descriptor_not_learning",
+                    f"Descriptor retrieval top-1 ({descriptor_top1:.1%}) is near its "
+                    f"candidate-set chance level ({descriptor_chance:.1%}).",
+                )
     if latest.get("data/input_finite_fraction", 1.0) < 1.0:
         alert("critical", "nonfinite_input",
               f"Recent input finite fraction is {latest['data/input_finite_fraction']:.6f}.")
@@ -190,6 +215,10 @@ def assess(run_dir: Path, stale_seconds: float = 120.0) -> dict:
             "total": latest.get("total"),
             "jepa_weighted": latest.get("loss_weighted/jepa"),
             "vicreg_weighted": latest.get("loss_weighted/vicreg"),
+            "descriptor_weighted": latest.get("loss_weighted/descriptor"),
+            "descriptor_top1": latest.get("descriptor/top1"),
+            "descriptor_candidates": latest.get("descriptor/candidates"),
+            "descriptor_chance_top1": latest.get("descriptor/chance_top1"),
             "jepa_margin": latest.get("jepa/margin"),
             "vicreg_margin": latest.get("vicreg/margin"),
             "vicreg_min_std": latest.get("vicreg/min_std"),
@@ -201,6 +230,10 @@ def assess(run_dir: Path, stale_seconds: float = 120.0) -> dict:
             "objective_cosine": latest.get("grad_cosine/jepa_vs_vicreg"),
             "amp_scale": latest.get("amp/scale"),
             "amp_skipped_total": latest.get("amp/skipped_updates_total"),
+            "sensor_fold": latest.get("grad/sensor_fold"),
+            "descriptor_projection": latest.get("grad/descriptor_projection"),
+            "bias_projection": latest.get("grad/bias_projection"),
+            "descriptor_head": latest.get("grad/descriptor_head"),
         },
         "representation": {
             "encoder_effective_rank": latest.get("repr_encoder/effective_rank"),
@@ -219,6 +252,8 @@ def assess(run_dir: Path, stale_seconds: float = 120.0) -> dict:
             "patch_pair_share": latest.get("data/patch_pair_share_window", {}),
             "augmentation_rate": latest.get("data/augmentation_rate_window", {}),
             "zero_target_fraction": latest.get("jepa_zero_target_frac_window"),
+            "descriptor_target_window_fraction": latest.get(
+                "descriptor/target_window_fraction"),
             "input_finite_fraction": latest.get("data/input_finite_fraction"),
             "input_abs_max": latest.get("data/input_abs_max"),
             "input_rms": latest.get("data/input_rms"),

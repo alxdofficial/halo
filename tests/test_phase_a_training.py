@@ -1,10 +1,14 @@
 """Focused tests for Phase-A evaluation and resume control paths."""
 
+import subprocess
+
 import pytest
 import torch
 
+import training.tokenizer.pretrain as pretrain_module
 from training.tokenizer.pretrain import (
     PretrainConfig,
+    capture_source_provenance,
     hydrate_calibrated_objective_weights,
     label_group_balanced_acc,
     prepare_output_dir,
@@ -86,3 +90,35 @@ def test_force_removes_all_known_run_artifacts_but_preserves_unknown_files(tmp_p
     prepare_output_dir(tmp_path, force=True, smoke=False, resume=False)
 
     assert sorted(path.name for path in tmp_path.iterdir()) == ["notes.txt"]
+
+
+def test_source_provenance_excludes_every_modules_runtime_outputs(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    tracked = tmp_path / "model" / "tokenizer" / "tracked.py"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("VALUE = 1\n")
+    subprocess.run(["git", "add", "model/tokenizer/tracked.py"], cwd=tmp_path, check=True)
+    subprocess.run([
+        "git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+        "commit", "-qm", "initial",
+    ], cwd=tmp_path, check=True)
+
+    tracked.write_text("VALUE = 2\n")
+    output = tmp_path / "training" / "evidence" / "outputs" / "run"
+    output.mkdir(parents=True)
+    (output / "result.json").write_text('{"metric": 1}\n')
+    source = tmp_path / "training" / "tokenizer" / "new_module.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("READY = True\n")
+    unrelated = tmp_path / "training" / "evidence" / "unrelated.py"
+    unrelated.parent.mkdir(parents=True, exist_ok=True)
+    unrelated.write_text("CHANGING = True\n")
+    monkeypatch.setattr(pretrain_module, "_repo_root", lambda: tmp_path)
+
+    provenance = capture_source_provenance(tmp_path / "unused", write=False)
+    patch = provenance["_patch"].decode("utf-8")
+    assert "tracked.py" in patch
+    assert "new_module.py" in patch
+    assert "result.json" not in patch
+    assert "unrelated.py" not in patch
+    assert provenance["untracked_source_files"] == ["training/tokenizer/new_module.py"]

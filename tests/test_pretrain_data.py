@@ -23,7 +23,11 @@ from training.tokenizer.pretrain_data import (  # noqa: E402
     TemperatureSampler,
     WindowKey,
     stream_channel_descriptions,
+    SENSOR_BIAS_DIM,
+    SENSOR_BIAS_FIELDS,
+    stream_sensor_bias,
 )
+from data.scripts.labels.canonical_labels import canonicalize  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -40,10 +44,38 @@ def test_corpus_index_is_subject_disjoint(index):
     assert index.train and index.val
 
 
+def test_mmfit_validation_uses_published_cross_subject_partition(index):
+    train_subjects = set()
+    val_subjects = set()
+    for keys, target in ((index.train, train_subjects), (index.val, val_subjects)):
+        for key in keys:
+            ref = index.refs[key.stream_i]
+            if ref.dataset == "mmfit":
+                target.add(ref.subjects[key.window_i])
+    assert val_subjects == {"w00", "w05", "w12", "w13", "w20"}
+    assert train_subjects.isdisjoint(val_subjects)
+
+
+def test_corpus_index_uses_canonical_labels(index):
+    """Existing grids may predate a synonym decision; the loader boundary must still merge it."""
+    assert all(canonicalize(label) == label for label in index.label_ids)
+    assert "pushups" not in index.label_ids
+
+
+def test_checked_in_global_vocabulary_matches_expanded_grids():
+    import json
+    from data.scripts.labels.build_global_label_mapping import global_label_vocabulary
+    from training.tokenizer.pretrain_data import TRAIN_DATASETS
+    expected, _ = global_label_vocabulary(list(TRAIN_DATASETS), "native")
+    artifact = json.load(open("data/labels/global_labels.json"))
+    assert artifact["labels"] == expected
+    assert artifact["train_datasets"] == sorted(TRAIN_DATASETS)
+
+
 def test_corpus_excludes_eval_datasets(index):
     datasets = {r.dataset for r in index.refs}
     for banned in ("motionsense", "realworld", "shoaib", "inclusivehar",
-                   "tnda_har", "ut_complex"):
+                   "tnda_har", "ut_complex", "monipar", "spar", "upper_limb_use"):
         assert banned not in datasets, f"eval dataset {banned} leaked into pretraining"
 
 
@@ -65,6 +97,79 @@ def test_item_canonical_slots_and_mask(index):
             if not item["channel_mask"][c]:
                 assert torch.allclose(item["data"][:, c],
                                       torch.zeros_like(item["data"][:, c]))
+
+
+def test_channel_dropout_prunes_all_sensor_metadata_atomically(index):
+    """Dropping gyro must not leave a stale gyro descriptor, placement row, or bias row."""
+    from data.scripts.augmentations import AugmentationConfig, IMUAugmenter
+
+    key = next(key for key in index.train if all(index.refs[key.stream_i].mask))
+    ds = PretrainDataset(index, [key], augment=False)
+    cfg = AugmentationConfig.none()
+    cfg.channel_dropout.enabled = True
+    cfg.channel_dropout.p = 1.0
+    ds.config_augmenter = IMUAugmenter(cfg)
+    item = ds[0]
+    assert item["channel_mask"].tolist() == [True, True, True, False, False, False]
+    assert len(item["sensor_texts"]) == 1
+    assert item["sensor_bias"].shape == (1, SENSOR_BIAS_DIM)
+    assert item["sensor_placement"].shape == (1,)
+
+
+def test_natively_accel_only_stream_has_no_phantom_gyro_metadata(index):
+    key = next(key for key in index.train if not any(index.refs[key.stream_i].mask[3:]))
+    item = PretrainDataset(index, [key], augment=False)[0]
+    assert len(item["sensor_texts"]) == 1
+    assert item["sensor_bias"].shape == (1, SENSOR_BIAS_DIM)
+    assert item["sensor_placement"].shape == (1,)
+
+
+def test_sensor_bias_retains_observation_support_bits():
+    bias = stream_sensor_bias("wisdm", "phone_pocket", ["accel", "gyro"])
+    support = bias[:, len(SENSOR_BIAS_FIELDS):]
+    assert bias.shape == (2, SENSOR_BIAS_DIM)
+    assert set(support.unique().tolist()) <= {0.0, 1.0}
+    # Gravity fields are measured for accelerometers and unsupported for gyroscopes. WISDM's
+    # 20-Hz clock cannot support a >20-Hz noise-floor estimate for either modality.
+    assert support[0, :2].tolist() == [1.0, 1.0]
+    assert support[1, :2].tolist() == [0.0, 0.0]
+    assert support[:, 2].tolist() == [0.0, 0.0]
+
+
+def test_two_views_share_every_acquisition_configuration(index):
+    ds = PretrainDataset(index, index.train[:96], augment=True, two_view=True)
+    for i in range(96):
+        item = ds[i]
+        other = item["view_b"]
+        assert item["rate"] == other["rate"]
+        assert item["source_rate"] == other["source_rate"]
+        assert torch.equal(item["channel_mask"], other["channel_mask"])
+        assert torch.equal(item["sensor_bias"], other["sensor_bias"])
+        assert torch.equal(item["sensor_placement"], other["sensor_placement"])
+        assert item["sensor_target_texts"] == other["sensor_target_texts"]
+
+
+def test_descriptor_target_is_stable_across_random_surface_paraphrases(index):
+    """Equivalent wording variants must not become different descriptor-retrieval classes."""
+    from data.scripts.augmentations import AugmentationConfig, IMUAugmenter
+
+    key = next(key for key in index.train if all(index.refs[key.stream_i].mask))
+    ds = PretrainDataset(index, [key], augment=False, two_view=True)
+    cfg = AugmentationConfig.none()
+    cfg.channel_text_phrase.enabled = True
+    cfg.channel_text_phrase.p = 1.0
+    ds.nuisance_augmenter = IMUAugmenter(cfg)
+
+    visible_forms = set()
+    target_forms = set()
+    for _ in range(24):
+        item = ds[0]
+        visible_forms.add(tuple(item["sensor_texts"]))
+        visible_forms.add(tuple(item["view_b"]["sensor_texts"]))
+        target_forms.add(tuple(item["sensor_target_texts"]))
+        target_forms.add(tuple(item["view_b"]["sensor_target_texts"]))
+    assert len(visible_forms) > 1, "test did not exercise sensor-text paraphrase variation"
+    assert len(target_forms) == 1, "surface paraphrases fragmented the semantic target"
 
 
 @pytest.mark.parametrize("ps", PATCH_SECONDS_CHOICES)
@@ -193,6 +298,22 @@ def test_temperature_sampler_caps_datasets_and_tempers_subjects():
     subject0 = sampler.weights[d0_rows[:90]].sum() / d0_weight
     expected = 90**0.5 / (90**0.5 + 10**0.5)
     assert float(subject0) == pytest.approx(expected)
+
+
+def test_temperature_sampler_can_batch_by_sensor_count_without_changing_marginals():
+    keys = [WindowKey(0, i, 0) for i in range(400)]
+    groups = [1] * 160 + [2] * 240
+    sampler = TemperatureSampler(
+        keys, ["source"], num_samples=100 * 20, batch_size=20,
+        alpha=0.0, seed=9, batch_group_ids=groups,
+    )
+    draws = list(sampler)
+    for start in range(0, len(draws), 20):
+        batch_groups = {groups[index] for index in draws[start:start + 20]}
+        assert len(batch_groups) == 1
+        assert len(set(draws[start:start + 20])) == 20
+    observed_group_one = sum(groups[index] == 1 for index in draws) / len(draws)
+    assert observed_group_one == pytest.approx(0.4, abs=0.08)
 
 
 def test_no_hapt_uci_leak(index):

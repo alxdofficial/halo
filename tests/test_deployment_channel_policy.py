@@ -8,13 +8,27 @@ from training.tokenizer.pretrain_data import TRAIN_DATASETS
 
 
 def test_primary_train_datasets_matches_trainer_roster():
-    """F11: the deployment-policy roster and the trainer's TRAIN_DATASETS are ONE manifest —
-    they must not drift (hapt was in one and not the other, double-counting 13 vs 12)."""
-    from data.scripts.curate.deployment_policy import PRIMARY_TRAIN_DATASETS as _ptd
-    assert set(_ptd) == set(TRAIN_DATASETS), (
-        f"roster drift: deployment_policy has {sorted(set(_ptd) - set(TRAIN_DATASETS))} extra, "
-        f"missing {sorted(set(TRAIN_DATASETS) - set(_ptd))}")
-    assert len(_ptd) == len(TRAIN_DATASETS) == 12
+    """F11: the deployment-policy rosters and the trainer's TRAIN_DATASETS are ONE manifest — they
+    must not drift (hapt was in one and not the other, double-counting 13 vs 12).
+
+    Since 2026-08-12 TRAIN_DATASETS is the union of two disjoint kinds: PRIMARY_TRAIN_DATASETS (raw
+    frames curated by `curate_frame`) and DIRECT_CONVERTED_TRAIN_DATASETS (built straight to native
+    grids, no curation path). Every training dataset must be declared in exactly one, so a new one
+    cannot be added to the trainer without also declaring how its channels are produced."""
+    from data.scripts.curate.deployment_policy import (
+        CORPUS_MATCHED_TRAIN_DATASETS as _matched,
+        DIRECT_CONVERTED_TRAIN_DATASETS as _direct,
+        EXPANDED_PHASE_A_TRAIN_DATASETS as _expanded,
+        PRIMARY_TRAIN_DATASETS as _ptd,
+    )
+    assert set(_ptd).isdisjoint(_direct), "a dataset cannot be both curated and direct-converted"
+    union = set(_ptd) | set(_direct)
+    assert union == set(TRAIN_DATASETS), (
+        f"roster drift: policy declares {sorted(union - set(TRAIN_DATASETS))} extra, "
+        f"missing {sorted(set(TRAIN_DATASETS) - union)}")
+    assert len(_ptd) + len(_direct) == len(TRAIN_DATASETS) == 18
+    assert _matched == _ptd
+    assert _expanded == TRAIN_DATASETS
 
 from data.scripts.curate.deployment_policy import (
     EXCLUDED_PRIMARY_DATASETS,
@@ -53,6 +67,9 @@ EXPECTED_PRIMARY_CHANNELS = {
     "usc_had": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "tnda_har": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
     "ut_complex": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+    "monipar": ("acc_x", "acc_y", "acc_z"),
+    "spar": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+    "upper_limb_use": ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
 }
 
 
@@ -145,6 +162,21 @@ def test_non_deployment_datasets_are_not_primary():
     assert stream_specs("dsads", "primary") == ()
     assert stream_specs("harth", "primary") == ()
     assert {"dsads", "harth"}.issubset(EXCLUDED_PRIMARY_DATASETS)
+
+
+def test_new_heldout_datasets_are_default_eval_only():
+    heldout = {"monipar", "spar", "upper_limb_use"}
+    assert heldout <= set(PRIMARY_EVAL_DATASETS)
+    assert heldout.isdisjoint(TRAIN_DATASETS)
+    assert all(stream_specs(dataset, "primary") for dataset in heldout)
+
+
+def test_default_grid_build_covers_expanded_training_roster():
+    from data.scripts.build_grids import build_stream_specs
+    built = {spec.dataset for spec in build_stream_specs()}
+    assert built == set(TRAIN_DATASETS) | set(PRIMARY_EVAL_DATASETS)
+    assert {"dsads", "opportunity", "mmfit"} <= built
+    assert {"extrasensory", "nhanes", "hmog", "kneepad"}.isdisjoint(built)
 
 
 def test_channel_text_names_device_placement_axis_and_gravity_state():

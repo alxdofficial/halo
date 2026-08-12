@@ -78,6 +78,24 @@ def test_monitor_detects_a_stale_incomplete_run(tmp_path):
     assert any(item["code"] == "stale_heartbeat" for item in report["alerts"])
 
 
+def test_monitor_flags_descriptor_retrieval_stuck_at_chance(tmp_path):
+    rows = []
+    for step in range(600, 1_201, 50):
+        row = _healthy(step=step)
+        row.update({
+            "descriptor/top1": 0.021,
+            "descriptor/chance_top1": 0.02,
+            "descriptor/target_window_fraction": 0.25,
+        })
+        rows.append(row)
+    _write_run(tmp_path, rows, steps=2_000)
+    config = json.loads((tmp_path / "run_config.json").read_text())
+    config["token_granularity"] = "sensor"
+    (tmp_path / "run_config.json").write_text(json.dumps(config))
+    report = assess(tmp_path)
+    assert any(item["code"] == "descriptor_not_learning" for item in report["alerts"])
+
+
 def test_monitor_writes_machine_and_human_snapshots_and_plot(tmp_path):
     _write_run(tmp_path, [_healthy()])
     report = write_report(tmp_path, stale_seconds=120, render=True)

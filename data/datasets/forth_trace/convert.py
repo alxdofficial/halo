@@ -111,12 +111,10 @@ GAP_TOLERANCE_SEC = 1.0
 MAX_CLOCK_LEAD_SEC = 5.0
 
 # All five nodes carry the same annotation track, so their labels must agree once the clocks are
-# aligned. Measured per participant on the zeroed clock: 13 of 15 land at 0.89-0.98 (the residual is
-# boundary slop -- 28 label changes x ~1 s of node-to-node skew over ~1040 s is ~2.5%). Two do NOT:
-# part4 at 0.16 and part8 at 0.13, and a +/-3 s lag search does not rescue either, so their nodes are
-# annotated against different takes rather than merely offset. Emitting them as one frame would
-# assert a simultaneity the data does not support, so they are excluded from the merged conversion
-# and named in the manifest. See docs/data/DATASET_EXPANSION_2026-08.md section 8b.
+# aligned. Gap-aware alignment retains 14 of 15 participants at >=0.84 agreement. Part8's earlier
+# 0.13 score was caused by interpolating across a 1,828 s dropout; splitting that gap restores 0.974.
+# Only part4 remains invalid at 0.147, indicating annotation tracks from different takes. Emitting it
+# as one frame would assert a simultaneity the data does not support, so it is named in the manifest.
 MIN_NODE_AGREEMENT = 0.80
 
 

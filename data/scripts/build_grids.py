@@ -38,8 +38,15 @@ import pandas as pd
 
 from data.scripts.assembly import baseline_view
 from data.scripts.assembly.assemble import Grid, assemble, resample_signal
-from data.scripts.curate.deployment_policy import (STANDARD_CHANNEL_ORDER, StreamSpec,
-                                                   deployment_streams, session_stream_specs)
+from data.scripts.curate.deployment_policy import (
+    DIRECT_CONVERTED_TRAIN_DATASETS,
+    EXPANDED_PHASE_A_TRAIN_DATASETS,
+    PRIMARY_EVAL_DATASETS,
+    STANDARD_CHANNEL_ORDER,
+    StreamSpec,
+    deployment_streams,
+    session_stream_specs,
+)
 from data.scripts.labels.canonical_labels import canonicalize
 
 REPO = Path(__file__).resolve().parents[2]
@@ -478,13 +485,12 @@ def build(out_root: Optional[Path] = None, datasets: Optional[Sequence[str]] = N
     out_root = out_root or (REPO / "data" / "datasets")
     want = set(datasets) if datasets else None
     regimes = [a for a in _ALIGNMENTS if alignments is None or a[0] in set(alignments)]
-    # Optional scale streams are considered only when explicitly named. A plain
-    # all-primary build must not make the frozen paper corpus depend on whether a
-    # researcher happened to download a multi-hundred-GB optional source.
-    specs = deployment_streams(
-        placement_strict=False,
-        role=None if want else "primary",
-    )
+    # Optional scale streams are considered only when explicitly named. The default includes every
+    # primary train/eval stream plus all direct-converted Phase-A streams, including the three whose
+    # non-phone/watch placements intentionally carry role="stress". This makes a clean default build
+    # reproduce the trainer's 18-source roster instead of depending on grids left by an explicit
+    # one-off build.
+    specs = build_stream_specs(datasets)
     for spec in specs:
         if want and spec.dataset not in want:
             continue
@@ -524,6 +530,37 @@ def build(out_root: Optional[Path] = None, datasets: Optional[Sequence[str]] = N
                 _save(out_root, spec, grid, subjects)
 
 
+def build_stream_specs(datasets: Optional[Sequence[str]] = None) -> Tuple[StreamSpec, ...]:
+    """Resolve the exact stream manifest a grid build will materialize.
+
+    Kept separate from disk I/O so tests can prove that a default clean rebuild contains every
+    expanded Phase-A source, including direct-converted stress streams.
+    """
+    want = set(datasets) if datasets else None
+    if want:
+        return tuple(
+            spec for spec in deployment_streams(placement_strict=False, role=None)
+            if spec.dataset in want
+        )
+    default_datasets = set(EXPANDED_PHASE_A_TRAIN_DATASETS) | set(PRIMARY_EVAL_DATASETS)
+    primary = tuple(
+        spec for spec in deployment_streams(placement_strict=False, role="primary")
+        if spec.dataset in default_datasets
+    )
+    direct = tuple(
+        spec for spec in deployment_streams(placement_strict=False, role=None)
+        if spec.dataset in DIRECT_CONVERTED_TRAIN_DATASETS
+    )
+    seen: set[tuple[str, str]] = set()
+    merged = []
+    for spec in primary + direct:
+        key = (spec.dataset, spec.stream_id)
+        if key not in seen:
+            merged.append(spec)
+            seen.add(key)
+    return tuple(merged)
+
+
 def _save(out_root: Path, spec: StreamSpec, grid: Grid, subjects: List) -> None:
     d = out_root / spec.dataset / "grids" / grid.alignment / spec.stream_id
     d.mkdir(parents=True, exist_ok=True)
@@ -541,7 +578,8 @@ def _save(out_root: Path, spec: StreamSpec, grid: Grid, subjects: List) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dataset", nargs="*", default=None,
-                   help="Build only these datasets (default: all primary phone+watch streams).")
+                   help="Build only these datasets (default: all primary train/eval streams plus "
+                        "the expanded Phase-A direct-converted roster).")
     p.add_argument("--alignment", nargs="*", default=None,
                    choices=[a[0] for a in _ALIGNMENTS],
                    help="Build only these grid regimes (default: all three).")

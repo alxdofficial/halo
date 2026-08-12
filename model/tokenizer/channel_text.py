@@ -38,6 +38,10 @@ class TokenTextEncoder(nn.Module):
 
         # Cache for repeated strings (frozen embeddings)
         self._cache: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+        # Sensor-granularity Phase A consumes only the frozen mean-pooled descriptor.  Keeping that
+        # artifact separately avoids rebuilding ragged token batches and pooling the same text in
+        # every clean/masked/teacher forward.
+        self._pooled_cache: Dict[str, torch.Tensor] = {}
 
     def _init_model(self):
         """Lazy load the transformer model."""
@@ -123,6 +127,30 @@ class TokenTextEncoder(nn.Module):
         embs = pad_sequence(cached_embs, batch_first=True, padding_value=0.0)
         masks = pad_sequence(cached_masks, batch_first=True, padding_value=0).bool()
         return embs, masks
+
+    def encode_pooled(
+        self,
+        texts: List[str],
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
+        """Return frozen, L2-normalized mean-pooled descriptors for ``texts``.
+
+        Token-level outputs remain available through :meth:`encode` for the channel-granularity
+        conditioner.  Sensor granularity has no learnable text pooler, so caching its final frozen
+        artifact is exact and removes ragged padding from the training hot path.
+        """
+        self._init_model()
+        if device is None:
+            device = next(self._model.parameters()).device
+        missing = list(dict.fromkeys(text for text in texts if text not in self._pooled_cache))
+        if missing:
+            token_embeddings, attention_mask = self.encode(missing, device=device)
+            weights = attention_mask.to(token_embeddings.dtype).unsqueeze(-1)
+            pooled = (token_embeddings * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+            pooled = torch.nn.functional.normalize(pooled, dim=-1)
+            for text, descriptor in zip(missing, pooled):
+                self._pooled_cache[text] = descriptor.detach()
+        return torch.stack([self._pooled_cache[text].to(device) for text in texts], dim=0)
 
 class _TextPooler(nn.Module):
     """Frozen-LM token embeddings (N, S, text_dim) + mask (N, S) -> one vector per item (N, d).
