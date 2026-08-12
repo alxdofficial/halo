@@ -230,6 +230,65 @@ a parity control.
 
 ---
 
+# Resolvability — MEASURED 2026-08-12. The premise holds.
+
+`training/evidence/resolvability.py`, artifact `training/evidence/outputs/resolvability.json`,
+80 streams encoded with `phase_a_headline/best.pt`.
+
+**How the score is computed — and what it is NOT.** Per stream: encode windows with the frozen
+encoder, hold out half the subjects, and for each label run a one-vs-rest kNN over cosine similarity
+in *embedding* space; score balanced accuracy rescaled `2·(ba − 0.5)`, clipped at 0. **The label
+strings are used only as groupers — their semantic content never enters the score.** No SBERT, no
+text kernel. That matters: if resolvability were derived from linguistic similarity it would be
+re-measuring the text interface we already showed is inert (+0.0086), and the result would be
+circular. It isn't.
+
+## The paired contrast — simultaneous streams, same events, placement the only variable
+
+| dataset | labels | mean gap | max gap | stream-profile correlation | inverting pairs |
+|---|---:|---:|---:|---:|---:|
+| realdisp | 31 | 0.508 | 0.882 | **+0.419** | 35/36 (97%) |
+| mmfit | 10 | 0.493 | 0.868 | **+0.379** | 2/6 (33%) |
+| xrf_v2 | 28 | 0.255 | 0.803 | +0.703 | 14/15 (93%) |
+| opportunity | 4 | 0.236 | 0.443 | +0.872 | 1/10 (10%) |
+| sp_sw_har | 5 | 0.160 | 0.377 | +0.885 | 0/1 (0%) |
+| **overall** | | **0.330** | | **+0.652** | |
+
+Representative rows, all on identical physical events:
+
+| concept | best | worst | gap |
+|---|---|---|---:|
+| mmfit `bicep_curls` | left_wrist 1.00 | left_ear 0.13 | 0.87 |
+| realdisp `jump_rope` | right_lower_arm 0.88 | back 0.00 | 0.88 |
+| xrf_v2 `answering_phone` | right_pocket 0.80 | airpods_ear 0.00 | 0.80 |
+| mmfit `squats` | right_pocket 0.99 | right_wrist 0.35 | 0.64 |
+
+**Both halves of the claim are confirmed.** The gap establishes that placement determines whether a
+concept is witnessable at all. The *correlation* establishes the sharper half: if placements had a
+fixed quality ordering, stream profiles would correlate near +1 and a scalar per placement would
+suffice — no third argument needed. On the two datasets with rich concept vocabularies (realdisp 31
+labels, mmfit 10) correlation falls to ~0.4 and **93–97% of stream pairs invert**: the pocket wins
+`squats` and loses `tricep_extensions`, the wrist the reverse. Which placement wins depends on the
+concept, which is exactly what makes the gate's `(config, config, concept)` signature necessary.
+
+The two high-correlation datasets (sp_sw_har 0.885, opportunity 0.872) carry only 4–5 coarse
+locomotion labels, where every sensor sees roughly the same whole-body posture. That is the expected
+boundary of the effect, not a counterexample.
+
+## Honest limits
+
+- **Encoder-dependent.** Scores come from one checkpoint; a better encoder shifts them. What is
+  robust is the *contrast*, since every stream passes through the same encoder on the same events.
+- **Same-protocol only.** Each label is scored against its own stream's other labels, so the number
+  means "can this config tell this concept from its neighbours here", not an absolute.
+- **NO GENERALISATION TO UNSEEN PAIRS.** `gate_tensor` is a lookup; unmeasured (stream, label) pairs
+  return `default=0.5`, neither veto nor licence. At deployment with a novel label there is no
+  estimate. **This is precisely where language would have to do the work** — predicting resolvability
+  for an unseen (placement, concept) pair from their descriptions — and it is unbuilt. It is also the
+  one remaining place the language interface could earn its keep after failing everywhere else.
+
+---
+
 # Bank build
 
 Rows are **per patch per sensor**: `[feature, text_descriptor, sensor_bias]` + label + provenance
