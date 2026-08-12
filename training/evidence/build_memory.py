@@ -54,7 +54,7 @@ from training.tokenizer.eval_transfer import (
     patch_embedding_fingerprint,
 )
 from training.tokenizer.pretrain_data import (TRAIN_DATASETS, _stream_gravity_state,
-                                              stream_channel_descriptions)
+                                              stream_channel_descriptions, stream_sensor_bias)
 from training.evidence.policy import ARCHIVE_BUDGET_WINDOWS
 from training.evidence.device import resolve_device
 
@@ -235,6 +235,11 @@ def main() -> None:
     ap.add_argument("--archive-budget-windows", type=int, default=ARCHIVE_BUDGET_WINDOWS,
                     help="one balanced archive-size budget; rare labels are retained first")
     ap.add_argument("--out", type=Path, default=_DEFAULT_OUT)
+    ap.add_argument("--sensor-rows", action="store_true",
+                    help="emit one row per (patch, SENSOR) instead of per patch (design of record "
+                         "bank layout). Requires a sensor-granularity encoder; roughly doubles the "
+                         "row count on 6-channel streams and lets an accel-only query match accel "
+                         "rows exactly instead of against a channel-set-mismatched embedding.")
     args = ap.parse_args()
     device = resolve_device(args.device)
     if args.archive_budget_windows < 1:
@@ -249,6 +254,14 @@ def main() -> None:
             "at the frozen Phase-A run (default: phase_a_headline/best.pt).")
     ckpt = torch.load(str(args.checkpoint), map_location="cpu", weights_only=False)
     enc = build_encoder(ckpt, device)
+    sensor_rows = bool(args.sensor_rows)
+    if sensor_rows and getattr(enc, "token_granularity", "channel") != "sensor":
+        # Fail loud. Silently falling back to patch rows would produce a bank that LOOKS
+        # per-sensor to every downstream consumer and is not — the class of defect this repo has
+        # been bitten by before (stale fingerprints, inert fixes).
+        raise ValueError(
+            "--sensor-rows requires a checkpoint trained with token_granularity='sensor'; "
+            f"this one is '{getattr(enc, 'token_granularity', 'channel')}'")
     for p in enc.parameters():
         p.requires_grad_(False)
     d_model = int(ckpt["config"]["d_model"])
@@ -270,6 +283,10 @@ def main() -> None:
     source_row_parts = []
     patch_Z_parts, patch_y_parts, patch_subj_parts = [], [], []
     patch_cfg_parts, patch_sensor_parts = [], []
+    sensor_Z_parts, sensor_window_parts, sensor_slot_parts = [], [], []
+    sensor_time_parts, sensor_duration_parts, sensor_resolution_parts = [], [], []
+    sensor_y_parts, sensor_subj_parts, sensor_cfg_parts, sensor_event_parts = [], [], [], []
+    sensor_modality_parts, sensor_bias_parts = [], []
     patch_window_parts, patch_event_parts, patch_event_verified_parts = [], [], []
     patch_time_parts, patch_duration_parts, patch_resolution_parts, patch_ordinal_parts = [], [], [], []
     subj_names: dict[str, int] = {}
@@ -317,6 +334,7 @@ def main() -> None:
         encoded = encode_dataset_detailed(
             enc, data, texts, device, float(ref.rate_hz), gs,
             channel_mask=ref.mask, dataset=ref.dataset, stream=ref.stream,
+            export_sensor_rows=sensor_rows,
         )
         z = encoded["pooled"]   # (n, d) cpu; unchanged pooled compatibility path
         cfg_id = cfg_names.setdefault(ref.key, len(cfg_names))
@@ -340,6 +358,29 @@ def main() -> None:
         # VRAM stream by stream (~1.9 GB at the current corpus size) and torch.save writes CUDA
         # tensors into the bank, which every consumer then has to map back.
         patch_Z_parts.append(encoded["patch_Z"].to(torch.float16).cpu())
+        if sensor_rows:
+            local_sensor_window = encoded["sensor_window"].long().cpu()
+            slot = encoded["sensor_slot"].long().cpu()
+            sensor_Z_parts.append(encoded["sensor_Z"].to(torch.float16).cpu())
+            sensor_window_parts.append(local_sensor_window + next_window)
+            sensor_slot_parts.append(slot)
+            sensor_time_parts.append(encoded["sensor_time"].float().cpu())
+            sensor_duration_parts.append(encoded["sensor_duration"].float().cpu())
+            sensor_resolution_parts.append(encoded["sensor_resolution"].long().cpu())
+            sensor_y_parts.append(torch.from_numpy(gl[keep].astype(np.int64))[local_sensor_window])
+            sensor_subj_parts.append(torch.from_numpy(s_ids)[local_sensor_window])
+            sensor_cfg_parts.append(
+                torch.full((len(local_sensor_window),), cfg_id, dtype=torch.int64))
+            sensor_event_parts.append(torch.from_numpy(e_ids)[local_sensor_window])
+            # Modality and bias per row, indexed by the SAME slot ordering stream_sensor_texts and
+            # stream_sensor_bias use (accel first when present, then gyro). Deriving both from one
+            # `modalities` list is what keeps slot -> (modality, bias, descriptor) consistent.
+            modalities = [m for m, present in (("accel", bool(any(ref.mask[:3]))),
+                                               ("gyro", bool(any(ref.mask[3:])))) if present]
+            slot_modality = torch.tensor([0 if m == "accel" else 1 for m in modalities],
+                                         dtype=torch.int64)
+            sensor_modality_parts.append(slot_modality[slot])
+            sensor_bias_parts.append(stream_sensor_bias(ref.dataset, ref.stream, modalities)[slot])
         patch_y_parts.append(torch.from_numpy(gl[keep].astype(np.int64))[local_patch_window])
         patch_subj_parts.append(torch.from_numpy(s_ids)[local_patch_window])
         patch_cfg_parts.append(
@@ -427,13 +468,39 @@ def main() -> None:
         **{f"patch_{name}": value for name, value in patch.items() if name != "Z"},
     })
     represented_refs = [ref for ref in refs if ref.key in bank_streams]
+    # Per-sensor table (design of record). Absent unless --sensor-rows, so every existing consumer
+    # sees exactly the schema-3 contract it already reads.
+    sensor_table = None
+    if sensor_rows:
+        sensor_table = {
+            "Z": torch.cat(sensor_Z_parts),
+            "window": torch.cat(sensor_window_parts),
+            "slot": torch.cat(sensor_slot_parts),
+            "time": torch.cat(sensor_time_parts),
+            "duration": torch.cat(sensor_duration_parts),
+            "resolution": torch.cat(sensor_resolution_parts),
+            "y": torch.cat(sensor_y_parts),
+            "subj": torch.cat(sensor_subj_parts),
+            "cfg": torch.cat(sensor_cfg_parts),
+            "event": torch.cat(sensor_event_parts),
+            "modality": torch.cat(sensor_modality_parts),
+            "bias": torch.cat(sensor_bias_parts),
+        }
+        widths = {k: len(v) for k, v in sensor_table.items()}
+        if len(set(widths.values())) != 1:
+            raise ValueError(f"per-sensor table columns disagree in length: {widths}")
+        print(f"[memory] sensor table: {len(sensor_table['Z'])} rows "
+              f"({len(sensor_table['Z']) / max(len(patch['Z']), 1):.2f}x the patch table) · "
+              f"{sensor_table['Z'].numel() * 2 / 1e6:.0f} MB (fp16)", flush=True)
+
     payload = {
-        "schema_version": 3,
+        "schema_version": 4 if sensor_rows else 3,
         "Z": Z, "y": y, "subj": subj, "cfg": cfg, "event": event,
         "event_verified": event_verified, "source_row": source_row,
         # Versioned patch evidence. The legacy pooled keys above intentionally remain unchanged so
         # official pooled controls and old adapters keep their exact data contract.
         "patch": patch,
+        **({"sensor": sensor_table} if sensor_table is not None else {}),
         "vocab": vocab, "vocab_fp": vocab_fingerprint(vocab), "label_text": label_text,
         "subj_names": {v: k for k, v in subj_names.items()},
         "cfg_names": {v: k for k, v in cfg_names.items()},

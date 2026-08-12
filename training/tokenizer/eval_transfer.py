@@ -129,6 +129,7 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
                             _require_patches: bool = True,
                             requires_grad: bool = False,
                             neutral_text: bool = False,
+                            export_sensor_rows: bool = False,
                             batch_size: int = 256) -> dict[str, torch.Tensor]:
     """Encode windows and retain both pooled and valid per-patch representations.
 
@@ -161,7 +162,10 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
              else torch.as_tensor(channel_mask, dtype=torch.bool))
     if cmask.shape != (6,):
         raise ValueError(f"channel_mask must have shape (6,), got {tuple(cmask.shape)}")
-    factored = getattr(enc, "text_conditioning", "per_channel") == "factored"
+    # Sensor granularity always needs the per-sensor text (role text is retired once xyz folds into
+    # one token), so it takes the factored text path regardless of `text_conditioning`.
+    factored = (getattr(enc, "text_conditioning", "per_channel") == "factored"
+                or getattr(enc, "token_granularity", "channel") == "sensor")
     if factored:
         if dataset is None or stream is None:
             raise ValueError("a factored encoder needs dataset+stream to build the factored "
@@ -176,6 +180,8 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
         )
         sensor_id_t = torch.tensor(sensor_id_list, dtype=torch.long)
     embs = []
+    sensor_z_parts, sensor_window_parts, sensor_slot_parts = [], [], []
+    sensor_time_parts, sensor_duration_parts, sensor_resolution_parts = [], [], []
     patch_z_parts = []
     patch_window_parts = []
     patch_time_parts = []
@@ -243,6 +249,25 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
             patch_duration_parts.append(durations[valid].to(metadata_device))
             patch_resolution_parts.append(resolutions[valid].to(metadata_device))
 
+            # PER-SENSOR rows (design of record bank layout). Only available at sensor granularity,
+            # where out["tokens"] is (B,P,S,d) and each slot is one modality triad. Emitting these
+            # is what lets an accel-only query match accel rows exactly instead of comparing against
+            # an embedding with a channel-set mismatch smeared into it.
+            if export_sensor_rows and "sensor_present" in out:
+                tokens = out["tokens"]                                # (B,P,S,d)
+                present = out["sensor_present"]                       # (B,S)
+                keep = valid_on_output.unsqueeze(2) & present.unsqueeze(1)   # (B,P,S)
+                b_idx, p_idx, s_idx = keep.nonzero(as_tuple=True)
+                sensor_z_parts.append(tokens[b_idx, p_idx, s_idx])
+                sensor_window_parts.append((b_idx.cpu() + int(start)).to(metadata_device))
+                sensor_slot_parts.append(s_idx.to(metadata_device))
+                sensor_time_parts.append(
+                    batch["positions"].float().to(keep.device)[b_idx, p_idx].to(metadata_device))
+                sensor_duration_parts.append(
+                    durations.to(keep.device)[b_idx, p_idx].to(metadata_device))
+                sensor_resolution_parts.append(
+                    resolutions.to(keep.device)[b_idx, p_idx].to(metadata_device))
+
     pooled = torch.cat(embs)
     d_model = int(pooled.shape[-1])
     return {
@@ -266,6 +291,33 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
         "patch_resolution": (
             torch.cat(patch_resolution_parts)
             if patch_resolution_parts else torch.empty(0, dtype=torch.long)
+        ),
+        # Per-(patch, sensor) rows — empty unless export_sensor_rows AND the encoder is at sensor
+        # granularity. `sensor_slot` indexes into the stream's sensor_texts order, which is how a
+        # consumer recovers modality, descriptor and sensor_bias for the row.
+        "sensor_Z": (
+            torch.cat(sensor_z_parts)
+            if sensor_z_parts else torch.empty((0, d_model), dtype=pooled.dtype)
+        ),
+        "sensor_window": (
+            torch.cat(sensor_window_parts)
+            if sensor_window_parts else torch.empty(0, dtype=torch.long)
+        ),
+        "sensor_slot": (
+            torch.cat(sensor_slot_parts)
+            if sensor_slot_parts else torch.empty(0, dtype=torch.long)
+        ),
+        "sensor_time": (
+            torch.cat(sensor_time_parts)
+            if sensor_time_parts else torch.empty(0, dtype=torch.float32)
+        ),
+        "sensor_duration": (
+            torch.cat(sensor_duration_parts)
+            if sensor_duration_parts else torch.empty(0, dtype=torch.float32)
+        ),
+        "sensor_resolution": (
+            torch.cat(sensor_resolution_parts)
+            if sensor_resolution_parts else torch.empty(0, dtype=torch.long)
         ),
     }
 

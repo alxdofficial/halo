@@ -208,6 +208,55 @@ def test_sensor_encoder_forward_shapes_and_masking():
     assert not torch.allclose(out["pooled"], masked["pooled"])
 
 
+def test_per_sensor_row_export_doubles_six_channel_streams():
+    """Bank layout: one row per (patch, SENSOR). 6-channel -> 2x, accel-only -> 1x, never phantom."""
+    from model.tokenizer.encoder import SetTokenizerEncoder
+    from training.tokenizer.eval_transfer import encode_dataset_detailed
+
+    enc = SetTokenizerEncoder(d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
+                              dropout=0.0, token_granularity="sensor", sensor_bias_dim=9).eval()
+    g = torch.Generator().manual_seed(SEED)
+    data = torch.randn(6, 300, 6, generator=g).numpy()
+    texts = [f"c{i}" for i in range(6)]
+
+    both = encode_dataset_detailed(enc, data, texts, torch.device("cpu"), 50.0,
+                                   gravity_state="present", channel_mask=[True] * 6,
+                                   dataset="wisdm", stream="phone_pocket",
+                                   export_sensor_rows=True)
+    assert both["sensor_Z"].shape[0] == 2 * both["patch_Z"].shape[0]
+    assert sorted(set(both["sensor_slot"].tolist())) == [0, 1]
+    # Every per-sensor column must be the same length or a consumer silently mispairs rows.
+    n = both["sensor_Z"].shape[0]
+    for key in ("sensor_window", "sensor_slot", "sensor_time", "sensor_duration",
+                "sensor_resolution"):
+        assert both[key].shape[0] == n, key
+
+    accel_only = encode_dataset_detailed(enc, data, texts, torch.device("cpu"), 50.0,
+                                         gravity_state="present",
+                                         channel_mask=[True, True, True, False, False, False],
+                                         dataset="capture24", stream="watch_wrist",
+                                         export_sensor_rows=True)
+    assert accel_only["sensor_Z"].shape[0] == accel_only["patch_Z"].shape[0]
+    assert sorted(set(accel_only["sensor_slot"].tolist())) == [0]      # no phantom gyroscope
+
+
+def test_channel_granularity_exports_no_sensor_rows():
+    """The flag must be inert on a channel-granularity encoder, not silently emit patch rows."""
+    from model.tokenizer.encoder import SetTokenizerEncoder
+    from training.tokenizer.eval_transfer import encode_dataset_detailed
+
+    enc = SetTokenizerEncoder(d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
+                              dropout=0.0, text_conditioning="factored").eval()
+    g = torch.Generator().manual_seed(SEED)
+    data = torch.randn(4, 300, 6, generator=g).numpy()
+    out = encode_dataset_detailed(enc, data, [f"c{i}" for i in range(6)], torch.device("cpu"),
+                                  50.0, gravity_state="present", channel_mask=[True] * 6,
+                                  dataset="wisdm", stream="phone_pocket",
+                                  export_sensor_rows=True)
+    assert out["sensor_Z"].shape[0] == 0
+    assert out["patch_Z"].shape[0] > 0
+
+
 def test_sensor_encoder_handles_accel_only_streams():
     from model.tokenizer.encoder import SetTokenizerEncoder
 

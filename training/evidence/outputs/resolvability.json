@@ -1,0 +1,2247 @@
+{
+  "checkpoint": "training/tokenizer/outputs/phase_a_headline/best.pt",
+  "checkpoint_step": 27000,
+  "per_stream": {
+    "capture24/watch_wrist": {
+      "dataset": "capture24",
+      "stream": "watch_wrist",
+      "n_windows": 3002,
+      "labels": {
+        "household_chores": 0.3149,
+        "mixed_activity": 0.1136,
+        "sitting": 0.4663,
+        "sleeping": 0.7665,
+        "standing": 0.0,
+        "vehicle": 0.2517,
+        "walking": 0.1156
+      }
+    },
+    "dsads/chest": {
+      "dataset": "dsads",
+      "stream": "chest",
+      "n_windows": 3782,
+      "labels": {
+        "cycling_on_an_exercise_bike_in_horizontal_position": 0.7422,
+        "cycling_on_an_exercise_bike_in_vertical_position": 0.3721,
+        "exercising_on_a_cross_trainer": 0.3352,
+        "exercising_on_a_stepper": 0.3235,
+        "jumping": 0.7576,
+        "lying_on_back": 0.2643,
+        "lying_on_right_side": 0.4116,
+        "moving_around_in_an_elevator": 0.3205,
+        "playing_basketball": 0.7886,
+        "rowing": 0.7738,
+        "running_on_a_treadmill": 0.9883,
+        "sitting": 0.1617,
+        "standing": 0.3195,
+        "standing_still_in_an_elevator": 0.0966,
+        "walking_downstairs": 0.2448,
+        "walking_in_a_parking_lot": 0.3299,
+        "walking_on_a_treadmill_in_flat_position": 0.3144,
+        "walking_on_a_treadmill_in_inclined_position": 0.1343,
+        "walking_upstairs": 0.5776
+      }
+    },
+    "dsads/left_knee": {
+      "dataset": "dsads",
+      "stream": "left_knee",
+      "n_windows": 3782,
+      "labels": {
+        "cycling_on_an_exercise_bike_in_horizontal_position": 0.621,
+        "cycling_on_an_exercise_bike_in_vertical_position": 0.6286,
+        "exercising_on_a_cross_trainer": 0.3418,
+        "exercising_on_a_stepper": 0.3471,
+        "jumping": 0.8984,
+        "lying_on_back": 0.3648,
+        "lying_on_right_side": 0.52,
+        "moving_around_in_an_elevator": 0.4943,
+        "playing_basketball": 0.8082,
+        "rowing": 0.8927,
+        "running_on_a_treadmill": 0.9961,
+        "sitting": 0.6101,
+        "standing": 0.3991,
+        "standing_still_in_an_elevator": 0.3166,
+        "walking_downstairs": 0.3121,
+        "walking_in_a_parking_lot": 0.1643,
+        "walking_on_a_treadmill_in_flat_position": 0.2881,
+        "walking_on_a_treadmill_in_inclined_position": 0.3722,
+        "walking_upstairs": 0.6204
+      }
+    },
+    "dsads/left_wrist": {
+      "dataset": "dsads",
+      "stream": "left_wrist",
+      "n_windows": 3782,
+      "labels": {
+        "cycling_on_an_exercise_bike_in_horizontal_position": 0.1744,
+        "cycling_on_an_exercise_bike_in_vertical_position": 0.4451,
+        "exercising_on_a_cross_trainer": 0.724,
+        "exercising_on_a_stepper": 0.1276,
+        "jumping": 0.9041,
+        "lying_on_back": 0.2039,
+        "lying_on_right_side": 0.3989,
+        "moving_around_in_an_elevator": 0.3282,
+        "playing_basketball": 0.9058,
+        "rowing": 0.5553,
+        "running_on_a_treadmill": 0.76,
+        "sitting": 0.448,
+        "standing": 0.4356,
+        "standing_still_in_an_elevator": 0.3676,
+        "walking_downstairs": 0.6208,
+        "walking_in_a_parking_lot": 0.4133,
+        "walking_on_a_treadmill_in_flat_position": 0.216,
+        "walking_on_a_treadmill_in_inclined_position": 0.4558,
+        "walking_upstairs": 0.6702
+      }
+    },
+    "dsads/right_knee": {
+      "dataset": "dsads",
+      "stream": "right_knee",
+      "n_windows": 3782,
+      "labels": {
+        "cycling_on_an_exercise_bike_in_horizontal_position": 0.6249,
+        "cycling_on_an_exercise_bike_in_vertical_position": 0.6656,
+        "exercising_on_a_cross_trainer": 0.2402,
+        "exercising_on_a_stepper": 0.346,
+        "jumping": 0.8766,
+        "lying_on_back": 0.4048,
+        "lying_on_right_side": 0.8233,
+        "moving_around_in_an_elevator": 0.5843,
+        "playing_basketball": 0.7746,
+        "rowing": 0.8505,
+        "running_on_a_treadmill": 0.995,
+        "sitting": 0.5404,
+        "standing": 0.1909,
+        "standing_still_in_an_elevator": 0.3055,
+        "walking_downstairs": 0.5405,
+        "walking_in_a_parking_lot": 0.3032,
+        "walking_on_a_treadmill_in_flat_position": 0.4788,
+        "walking_on_a_treadmill_in_inclined_position": 0.3125,
+        "walking_upstairs": 0.2876
+      }
+    },
+    "dsads/right_wrist": {
+      "dataset": "dsads",
+      "stream": "right_wrist",
+      "n_windows": 3782,
+      "labels": {
+        "cycling_on_an_exercise_bike_in_horizontal_position": 0.4616,
+        "cycling_on_an_exercise_bike_in_vertical_position": 0.4922,
+        "exercising_on_a_cross_trainer": 0.5175,
+        "exercising_on_a_stepper": 0.0926,
+        "jumping": 0.5023,
+        "lying_on_back": 0.1531,
+        "lying_on_right_side": 0.1999,
+        "moving_around_in_an_elevator": 0.3221,
+        "playing_basketball": 0.8677,
+        "rowing": 0.6019,
+        "running_on_a_treadmill": 0.8788,
+        "sitting": 0.2544,
+        "standing": 0.3811,
+        "standing_still_in_an_elevator": 0.3043,
+        "walking_downstairs": 0.2516,
+        "walking_in_a_parking_lot": 0.3088,
+        "walking_on_a_treadmill_in_flat_position": 0.3282,
+        "walking_on_a_treadmill_in_inclined_position": 0.3476,
+        "walking_upstairs": 0.3793
+      }
+    },
+    "extrasensory/phone_hand": {
+      "dataset": "extrasensory",
+      "stream": "phone_hand",
+      "n_windows": 3039,
+      "labels": {
+        "lying": 0.058,
+        "sitting": 0.1383,
+        "standing": 0.0,
+        "walking": 0.2993
+      }
+    },
+    "extrasensory/phone_pocket": {
+      "dataset": "extrasensory",
+      "stream": "phone_pocket",
+      "n_windows": 3135,
+      "labels": {
+        "sitting": 0.4181,
+        "standing": 0.1688,
+        "walking": 0.312
+      }
+    },
+    "extrasensory/watch_wrist": {
+      "dataset": "extrasensory",
+      "stream": "watch_wrist",
+      "n_windows": 3010,
+      "labels": {
+        "lying": 0.3611,
+        "sitting": 0.2171,
+        "standing": 0.0498,
+        "walking": 0.1697
+      }
+    },
+    "forth_trace/left_ankle": {
+      "dataset": "forth_trace",
+      "stream": "left_ankle",
+      "n_windows": 2068,
+      "labels": {
+        "climbing_stairs_and_talking": 0.0482,
+        "sitting": 0.3454,
+        "sitting_and_talking": 0.289,
+        "standing": 0.633,
+        "walking": 0.4097,
+        "walking_and_talking": 0.2342,
+        "walking_upstairs": 0.3936
+      }
+    },
+    "forth_trace/left_wrist": {
+      "dataset": "forth_trace",
+      "stream": "left_wrist",
+      "n_windows": 2068,
+      "labels": {
+        "climbing_stairs_and_talking": 0.0331,
+        "sitting": 0.3929,
+        "sitting_and_talking": 0.2666,
+        "standing": 0.7967,
+        "walking": 0.3331,
+        "walking_and_talking": 0.2272,
+        "walking_upstairs": 0.569
+      }
+    },
+    "forth_trace/right_thigh": {
+      "dataset": "forth_trace",
+      "stream": "right_thigh",
+      "n_windows": 2068,
+      "labels": {
+        "climbing_stairs_and_talking": 0.1777,
+        "sitting": 0.4882,
+        "sitting_and_talking": 0.5553,
+        "standing": 0.9275,
+        "walking": 0.231,
+        "walking_and_talking": 0.197,
+        "walking_upstairs": 0.317
+      }
+    },
+    "forth_trace/right_wrist": {
+      "dataset": "forth_trace",
+      "stream": "right_wrist",
+      "n_windows": 2068,
+      "labels": {
+        "climbing_stairs_and_talking": 0.1737,
+        "sitting": 0.4001,
+        "sitting_and_talking": 0.1441,
+        "standing": 0.7237,
+        "walking": 0.3361,
+        "walking_and_talking": 0.1767,
+        "walking_upstairs": 0.6082
+      }
+    },
+    "forth_trace/torso": {
+      "dataset": "forth_trace",
+      "stream": "torso",
+      "n_windows": 2068,
+      "labels": {
+        "climbing_stairs_and_talking": 0.2338,
+        "sitting": 0.3148,
+        "sitting_and_talking": 0.2434,
+        "standing": 0.5135,
+        "walking": 0.4268,
+        "walking_and_talking": 0.2391,
+        "walking_upstairs": 0.7006
+      }
+    },
+    "hapt/phone_waist": {
+      "dataset": "hapt",
+      "stream": "phone_waist",
+      "n_windows": 2112,
+      "labels": {
+        "lying": 0.2306,
+        "sitting": 0.1593,
+        "standing": 0.2743,
+        "walking": 0.8359,
+        "walking_downstairs": 0.77,
+        "walking_upstairs": 0.7851
+      }
+    },
+    "harmes/watch_wrist": {
+      "dataset": "harmes",
+      "stream": "watch_wrist",
+      "n_windows": 3096,
+      "labels": {
+        "applying_hand_cream": 0.0,
+        "brushing_teeth": 0.6464,
+        "cleaning_table": 0.0078,
+        "cutting_vegetables": 0.5133,
+        "disinfecting_hands": 0.0,
+        "drinking": 0.2963,
+        "emptying_dishwasher": 0.0127,
+        "floor_cleaning": 0.2593,
+        "making_tea": 0.2509,
+        "putting_away_dishes": 0.05,
+        "vacuum_cleaning": 0.242,
+        "washing_dishes": 0.0854,
+        "washing_hands": 0.0587,
+        "watering_plants": 0.1187,
+        "window_cleaning": 0.2921
+      }
+    },
+    "hhar/phone_waist": {
+      "dataset": "hhar",
+      "stream": "phone_waist",
+      "n_windows": 3196,
+      "labels": {
+        "cycling": 0.9952,
+        "sitting": 0.5087,
+        "standing": 0.6764,
+        "walking": 0.3708,
+        "walking_downstairs": 0.654,
+        "walking_upstairs": 0.5407
+      }
+    },
+    "hmog/phone_hand": {
+      "dataset": "hmog",
+      "stream": "phone_hand",
+      "n_windows": 3041,
+      "labels": {
+        "sitting": 0.8081,
+        "walking": 0.8081
+      }
+    },
+    "inclusivehar/phone_waist": {
+      "dataset": "inclusivehar",
+      "stream": "phone_waist",
+      "n_windows": 1260,
+      "labels": {
+        "jogging": 0.3332,
+        "ramp_ascent": 0.1671,
+        "ramp_descent": 0.094,
+        "sitting": 0.2602,
+        "standing": 0.3895,
+        "walking": 0.1152
+      }
+    },
+    "kneepad/left_gastrocnemius": {
+      "dataset": "kneepad",
+      "stream": "left_gastrocnemius",
+      "n_windows": 168,
+      "labels": {
+        "walking": 0.286,
+        "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted": 0.0,
+        "walking_with_the_injured_knee_not_fully_extended": 0.1397
+      }
+    },
+    "kneepad/left_hamstrings": {
+      "dataset": "kneepad",
+      "stream": "left_hamstrings",
+      "n_windows": 168,
+      "labels": {
+        "walking": 0.558,
+        "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted": 0.0345,
+        "walking_with_the_injured_knee_not_fully_extended": 0.202
+      }
+    },
+    "kneepad/left_rectus_femoris": {
+      "dataset": "kneepad",
+      "stream": "left_rectus_femoris",
+      "n_windows": 168,
+      "labels": {
+        "walking": 0.4517,
+        "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted": 0.1207,
+        "walking_with_the_injured_knee_not_fully_extended": 0.2323
+      }
+    },
+    "kneepad/left_tibialis_anterior": {
+      "dataset": "kneepad",
+      "stream": "left_tibialis_anterior",
+      "n_windows": 168,
+      "labels": {
+        "walking": 0.5287,
+        "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted": 0.0345,
+        "walking_with_the_injured_knee_not_fully_extended": 0.2054
+      }
+    },
+    "kneepad/right_gastrocnemius": {
+      "dataset": "kneepad",
+      "stream": "right_gastrocnemius",
+      "n_windows": 168,
+      "labels": {
+        "walking": 0.4846,
+        "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted": 0.1552,
+        "walking_with_the_injured_knee_not_fully_extended": 0.202
+      }
+    },
+    "kneepad/right_hamstrings": {
+      "dataset": "kneepad",
+      "stream": "right_hamstrings",
+      "n_windows": 168,
+      "labels": {
+        "walking": 0.5147,
+        "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted": 0.1552,
+        "walking_with_the_injured_knee_not_fully_extended": 0.2071
+      }
+    },
+    "kneepad/right_rectus_femoris": {
+      "dataset": "kneepad",
+      "stream": "right_rectus_femoris",
+      "n_windows": 168,
+      "labels": {
+        "walking": 0.4238,
+        "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted": 0.1897,
+        "walking_with_the_injured_knee_not_fully_extended": 0.0387
+      }
+    },
+    "kneepad/right_tibialis_anterior": {
+      "dataset": "kneepad",
+      "stream": "right_tibialis_anterior",
+      "n_windows": 168,
+      "labels": {
+        "walking": 0.5448,
+        "walking_with_the_injured_knee_fully_extended_and_the_hip_abducted": 0.2586,
+        "walking_with_the_injured_knee_not_fully_extended": 0.2997
+      }
+    },
+    "kuhar/phone_waist": {
+      "dataset": "kuhar",
+      "stream": "phone_waist",
+      "n_windows": 3108,
+      "labels": {
+        "jumping": 1.0,
+        "lying": 0.4258,
+        "picking_up": 0.8313,
+        "sit_up": 0.1033,
+        "sitting": 0.4868,
+        "standing": 0.2877,
+        "standing_up_from_lying": 0.4989,
+        "standing_up_from_sitting": 0.8521,
+        "table_tennis": 0.8802,
+        "talking_sitting": 0.7931,
+        "talking_standing": 0.6875,
+        "walking": 0.51,
+        "walking_downstairs": 0.9121,
+        "walking_upstairs": 0.3011
+      }
+    },
+    "mhealth/watch_wrist": {
+      "dataset": "mhealth",
+      "stream": "watch_wrist",
+      "n_windows": 1104,
+      "labels": {
+        "cycling": 1.0,
+        "frontal_elevation_arms": 0.9763,
+        "jogging": 0.7622,
+        "knees_bending": 0.4068,
+        "lying": 0.2563,
+        "running": 0.6142,
+        "sitting": 0.3725,
+        "standing": 0.232,
+        "waist_bends_forward": 0.4356,
+        "walking": 1.0,
+        "walking_upstairs": 0.8478
+      }
+    },
+    "mmfit/left_ear": {
+      "dataset": "mmfit",
+      "stream": "left_ear",
+      "n_windows": 1570,
+      "labels": {
+        "bicep_curls": 0.1295,
+        "dumbbell_rows": 0.1406,
+        "dumbbell_shoulder_press": 0.4228,
+        "jumping_jacks": 1.0,
+        "lateral_shoulder_raises": 0.109,
+        "lunges": 0.8871,
+        "pushups": 0.0831,
+        "situps": 0.6379,
+        "squats": 0.4233,
+        "tricep_extensions": 0.3449
+      }
+    },
+    "mmfit/left_wrist": {
+      "dataset": "mmfit",
+      "stream": "left_wrist",
+      "n_windows": 1570,
+      "labels": {
+        "bicep_curls": 0.9973,
+        "dumbbell_rows": 0.7892,
+        "dumbbell_shoulder_press": 0.5852,
+        "jumping_jacks": 1.0,
+        "lateral_shoulder_raises": 0.7966,
+        "lunges": 0.9511,
+        "pushups": 0.7737,
+        "situps": 0.7228,
+        "squats": 0.7225,
+        "tricep_extensions": 0.914
+      }
+    },
+    "mmfit/right_pocket": {
+      "dataset": "mmfit",
+      "stream": "right_pocket",
+      "n_windows": 1570,
+      "labels": {
+        "bicep_curls": 0.585,
+        "dumbbell_rows": 0.823,
+        "dumbbell_shoulder_press": 0.3248,
+        "jumping_jacks": 1.0,
+        "lateral_shoulder_raises": 0.2291,
+        "lunges": 0.9571,
+        "pushups": 0.4264,
+        "situps": 0.5319,
+        "squats": 0.9891,
+        "tricep_extensions": 0.2325
+      }
+    },
+    "mmfit/right_wrist": {
+      "dataset": "mmfit",
+      "stream": "right_wrist",
+      "n_windows": 1570,
+      "labels": {
+        "bicep_curls": 0.9605,
+        "dumbbell_rows": 0.5271,
+        "dumbbell_shoulder_press": 0.3802,
+        "jumping_jacks": 1.0,
+        "lateral_shoulder_raises": 0.915,
+        "lunges": 0.8917,
+        "pushups": 0.634,
+        "situps": 0.4934,
+        "squats": 0.3502,
+        "tricep_extensions": 0.7752
+      }
+    },
+    "monipar/watch_wrist": {
+      "dataset": "monipar",
+      "stream": "watch_wrist",
+      "n_windows": 3020,
+      "labels": {
+        "finger_tapping": 0.0448,
+        "gait": 0.8124,
+        "moving_hands_to_the_chest": 0.0519,
+        "postural_hand_tremor": 0.1841,
+        "postural_transition": 0.5607,
+        "pronation_supination": 0.7007,
+        "rapid_hand_opening_and_closing": 0.4479,
+        "resting": 0.6977
+      }
+    },
+    "motionsense/phone_front_pocket": {
+      "dataset": "motionsense",
+      "stream": "phone_front_pocket",
+      "n_windows": 4534,
+      "labels": {
+        "jogging": 0.9809,
+        "sitting": 0.6845,
+        "standing": 0.7595,
+        "walking": 0.6945,
+        "walking_downstairs": 0.7239,
+        "walking_upstairs": 0.437
+      }
+    },
+    "nfi_fared/back": {
+      "dataset": "nfi_fared",
+      "stream": "back",
+      "n_windows": 3360,
+      "labels": {
+        "cycling": 0.8353,
+        "dragging": 0.4483,
+        "running": 0.9975,
+        "sitting": 0.0273,
+        "standing": 0.6699,
+        "vehicle": 0.7917,
+        "walking": 0.8532,
+        "walking_upstairs": 0.4173
+      }
+    },
+    "nfi_fared/wrist": {
+      "dataset": "nfi_fared",
+      "stream": "wrist",
+      "n_windows": 3360,
+      "labels": {
+        "cycling": 0.8242,
+        "dragging": 0.3624,
+        "running": 0.9805,
+        "sitting": 0.0,
+        "standing": 0.3079,
+        "vehicle": 0.5128,
+        "walking": 0.8526,
+        "walking_upstairs": 0.2726
+      }
+    },
+    "opportunity/back": {
+      "dataset": "opportunity",
+      "stream": "back",
+      "n_windows": 2153,
+      "labels": {
+        "lying": 0.3519,
+        "sitting": 0.4533,
+        "standing": 0.4734,
+        "walking": 0.9331
+      }
+    },
+    "opportunity/left_lower_arm": {
+      "dataset": "opportunity",
+      "stream": "left_lower_arm",
+      "n_windows": 2153,
+      "labels": {
+        "lying": 0.2577,
+        "sitting": 0.2788,
+        "standing": 0.4295,
+        "walking": 0.8141
+      }
+    },
+    "opportunity/left_upper_arm": {
+      "dataset": "opportunity",
+      "stream": "left_upper_arm",
+      "n_windows": 2153,
+      "labels": {
+        "lying": 0.2868,
+        "sitting": 0.2029,
+        "standing": 0.3787,
+        "walking": 0.8974
+      }
+    },
+    "opportunity/right_lower_arm": {
+      "dataset": "opportunity",
+      "stream": "right_lower_arm",
+      "n_windows": 2153,
+      "labels": {
+        "lying": 0.5583,
+        "sitting": 0.3941,
+        "standing": 0.3552,
+        "walking": 0.8012
+      }
+    },
+    "opportunity/right_upper_arm": {
+      "dataset": "opportunity",
+      "stream": "right_upper_arm",
+      "n_windows": 2153,
+      "labels": {
+        "lying": 0.1156,
+        "sitting": 0.39,
+        "standing": 0.4103,
+        "walking": 0.8306
+      }
+    },
+    "pamap2/watch_wrist": {
+      "dataset": "pamap2",
+      "stream": "watch_wrist",
+      "n_windows": 3186,
+      "labels": {
+        "cycling": 0.9194,
+        "ironing": 0.5267,
+        "lying": 0.604,
+        "nordic_walking": 0.9331,
+        "rope_jumping": 0.6517,
+        "running": 0.8635,
+        "sitting": 0.202,
+        "standing": 0.3104,
+        "vacuum_cleaning": 0.5452,
+        "walking": 0.694,
+        "walking_downstairs": 0.4818,
+        "walking_upstairs": 0.3467
+      }
+    },
+    "phytmo/left_arm": {
+      "dataset": "phytmo",
+      "stream": "left_arm",
+      "n_windows": 1824,
+      "labels": {
+        "elbow_flexion_extension": 0.3461,
+        "elbow_flexion_extension_performed_incorrectly": 0.2694,
+        "extension_of_the_arms_over_the_head": 0.5747,
+        "extension_of_the_arms_over_the_head_performed_incorrectly": 0.5648,
+        "squeezing": 0.2839,
+        "squeezing_performed_incorrectly": 0.2554
+      }
+    },
+    "phytmo/left_forearm": {
+      "dataset": "phytmo",
+      "stream": "left_forearm",
+      "n_windows": 1824,
+      "labels": {
+        "elbow_flexion_extension": 0.4727,
+        "elbow_flexion_extension_performed_incorrectly": 0.3143,
+        "extension_of_the_arms_over_the_head": 0.5502,
+        "extension_of_the_arms_over_the_head_performed_incorrectly": 0.3201,
+        "squeezing": 0.505,
+        "squeezing_performed_incorrectly": 0.269
+      }
+    },
+    "phytmo/left_shin": {
+      "dataset": "phytmo",
+      "stream": "left_shin",
+      "n_windows": 4347,
+      "labels": {
+        "gait_along_an_infinity_shaped_path": 0.3296,
+        "heel_to_toe_gait": 0.3915,
+        "hip_abduction_of_the_left_limb": 0.3605,
+        "hip_abduction_of_the_left_limb_performed_incorrectly": 0.3033,
+        "hip_abduction_of_the_right_limb": 0.5881,
+        "hip_abduction_of_the_right_limb_performed_incorrectly": 0.2636,
+        "knee_flexion_extension_of_the_left_limb": 0.4762,
+        "knee_flexion_extension_of_the_left_limb_performed_incorrectly": 0.3475,
+        "knee_flexion_extension_of_the_right_limb": 0.474,
+        "knee_flexion_extension_of_the_right_limb_performed_incorrectly": 0.3837,
+        "natural_gait": 0.2026,
+        "natural_gait_performed_incorrectly": 0.3481,
+        "squat": 0.2729,
+        "squat_performed_incorrectly": 0.2432
+      }
+    },
+    "phytmo/left_thigh": {
+      "dataset": "phytmo",
+      "stream": "left_thigh",
+      "n_windows": 4347,
+      "labels": {
+        "gait_along_an_infinity_shaped_path": 0.2438,
+        "heel_to_toe_gait": 0.3931,
+        "hip_abduction_of_the_left_limb": 0.2124,
+        "hip_abduction_of_the_left_limb_performed_incorrectly": 0.1638,
+        "hip_abduction_of_the_right_limb": 0.5317,
+        "hip_abduction_of_the_right_limb_performed_incorrectly": 0.265,
+        "knee_flexion_extension_of_the_left_limb": 0.2755,
+        "knee_flexion_extension_of_the_left_limb_performed_incorrectly": 0.0,
+        "knee_flexion_extension_of_the_right_limb": 0.62,
+        "knee_flexion_extension_of_the_right_limb_performed_incorrectly": 0.2164,
+        "natural_gait": 0.1552,
+        "natural_gait_performed_incorrectly": 0.1458,
+        "squat": 0.421,
+        "squat_performed_incorrectly": 0.2891
+      }
+    },
+    "phytmo/right_arm": {
+      "dataset": "phytmo",
+      "stream": "right_arm",
+      "n_windows": 1824,
+      "labels": {
+        "elbow_flexion_extension": 0.4933,
+        "elbow_flexion_extension_performed_incorrectly": 0.1756,
+        "extension_of_the_arms_over_the_head": 0.6713,
+        "extension_of_the_arms_over_the_head_performed_incorrectly": 0.5412,
+        "squeezing": 0.2176,
+        "squeezing_performed_incorrectly": 0.1302
+      }
+    },
+    "phytmo/right_forearm": {
+      "dataset": "phytmo",
+      "stream": "right_forearm",
+      "n_windows": 1824,
+      "labels": {
+        "elbow_flexion_extension": 0.342,
+        "elbow_flexion_extension_performed_incorrectly": 0.186,
+        "extension_of_the_arms_over_the_head": 0.4755,
+        "extension_of_the_arms_over_the_head_performed_incorrectly": 0.2302,
+        "squeezing": 0.3931,
+        "squeezing_performed_incorrectly": 0.3285
+      }
+    },
+    "phytmo/right_shin": {
+      "dataset": "phytmo",
+      "stream": "right_shin",
+      "n_windows": 4347,
+      "labels": {
+        "gait_along_an_infinity_shaped_path": 0.3014,
+        "heel_to_toe_gait": 0.2841,
+        "hip_abduction_of_the_left_limb": 0.6619,
+        "hip_abduction_of_the_left_limb_performed_incorrectly": 0.2013,
+        "hip_abduction_of_the_right_limb": 0.4277,
+        "hip_abduction_of_the_right_limb_performed_incorrectly": 0.1806,
+        "knee_flexion_extension_of_the_left_limb": 0.592,
+        "knee_flexion_extension_of_the_left_limb_performed_incorrectly": 0.2763,
+        "knee_flexion_extension_of_the_right_limb": 0.5345,
+        "knee_flexion_extension_of_the_right_limb_performed_incorrectly": 0.1712,
+        "natural_gait": 0.2684,
+        "natural_gait_performed_incorrectly": 0.2542,
+        "squat": 0.2511,
+        "squat_performed_incorrectly": 0.1254
+      }
+    },
+    "phytmo/right_thigh": {
+      "dataset": "phytmo",
+      "stream": "right_thigh",
+      "n_windows": 4347,
+      "labels": {
+        "gait_along_an_infinity_shaped_path": 0.1854,
+        "heel_to_toe_gait": 0.2451,
+        "hip_abduction_of_the_left_limb": 0.5395,
+        "hip_abduction_of_the_left_limb_performed_incorrectly": 0.3141,
+        "hip_abduction_of_the_right_limb": 0.2197,
+        "hip_abduction_of_the_right_limb_performed_incorrectly": 0.0761,
+        "knee_flexion_extension_of_the_left_limb": 0.7331,
+        "knee_flexion_extension_of_the_left_limb_performed_incorrectly": 0.2467,
+        "knee_flexion_extension_of_the_right_limb": 0.2298,
+        "knee_flexion_extension_of_the_right_limb_performed_incorrectly": 0.0027,
+        "natural_gait": 0.2435,
+        "natural_gait_performed_incorrectly": 0.1735,
+        "squat": 0.3643,
+        "squat_performed_incorrectly": 0.16
+      }
+    },
+    "realdisp/back": {
+      "dataset": "realdisp",
+      "stream": "back",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.2512,
+        "arms_frontal_elevation": 0.3324,
+        "arms_inner_rotation": 0.6757,
+        "arms_lateral_elevation": 0.1404,
+        "cycling": 0.5657,
+        "elliptic_bike": 0.4308,
+        "frontal_hand_claps": 0.3573,
+        "jogging": 0.5452,
+        "jump_front_and_back": 0.2242,
+        "jump_rope": 0.0,
+        "jump_sideways": 0.1731,
+        "jump_up": 0.5226,
+        "jump_with_legs_and_arms_open_and_closed": 0.3039,
+        "knees_alternately_bending_forward": 0.5639,
+        "knees_bending_crouching": 0.5518,
+        "lateral_bend": 0.1647,
+        "lateral_bend_with_the_arm_up": 0.0173,
+        "reach_heels_backwards": 0.4195,
+        "repetitive_forward_stretching": 0.1227,
+        "rotation_on_the_knees": 0.3858,
+        "rowing": 0.5872,
+        "running": 0.6848,
+        "shoulders_high_amplitude_rotation": 0.3254,
+        "shoulders_low_amplitude_rotation": 0.4367,
+        "trunk_twist_with_arms_outstretched": 0.3185,
+        "trunk_twist_with_elbows_bent": 0.477,
+        "upper_trunk_and_lower_body_opposite_twist": 0.3746,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.6365,
+        "waist_bends_forward": 0.7817,
+        "waist_rotation": 0.237,
+        "walking": 0.8138
+      }
+    },
+    "realdisp/lc": {
+      "dataset": "realdisp",
+      "stream": "lc",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.0666,
+        "arms_frontal_elevation": 0.0275,
+        "arms_inner_rotation": 0.405,
+        "arms_lateral_elevation": 0.012,
+        "cycling": 0.6346,
+        "elliptic_bike": 0.6921,
+        "frontal_hand_claps": 0.0648,
+        "jogging": 0.9722,
+        "jump_front_and_back": 0.5841,
+        "jump_rope": 0.2665,
+        "jump_sideways": 0.5881,
+        "jump_up": 0.4266,
+        "jump_with_legs_and_arms_open_and_closed": 0.4502,
+        "knees_alternately_bending_forward": 0.713,
+        "knees_bending_crouching": 0.3146,
+        "lateral_bend": 0.078,
+        "lateral_bend_with_the_arm_up": 0.0169,
+        "reach_heels_backwards": 0.2795,
+        "repetitive_forward_stretching": 0.0959,
+        "rotation_on_the_knees": 0.6923,
+        "rowing": 0.6208,
+        "running": 0.7992,
+        "shoulders_high_amplitude_rotation": 0.031,
+        "shoulders_low_amplitude_rotation": 0.0,
+        "trunk_twist_with_arms_outstretched": 0.1768,
+        "trunk_twist_with_elbows_bent": 0.2405,
+        "upper_trunk_and_lower_body_opposite_twist": 0.6472,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.1467,
+        "waist_bends_forward": 0.2301,
+        "waist_rotation": 0.7274,
+        "walking": 0.9591
+      }
+    },
+    "realdisp/lla": {
+      "dataset": "realdisp",
+      "stream": "lla",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.5269,
+        "arms_frontal_elevation": 0.2493,
+        "arms_inner_rotation": 0.4532,
+        "arms_lateral_elevation": 0.5026,
+        "cycling": 0.8211,
+        "elliptic_bike": 0.7989,
+        "frontal_hand_claps": 0.5221,
+        "jogging": 0.5826,
+        "jump_front_and_back": 0.2202,
+        "jump_rope": 0.7288,
+        "jump_sideways": 0.4604,
+        "jump_up": 0.3333,
+        "jump_with_legs_and_arms_open_and_closed": 0.9773,
+        "knees_alternately_bending_forward": 0.4366,
+        "knees_bending_crouching": 0.2564,
+        "lateral_bend": 0.2947,
+        "lateral_bend_with_the_arm_up": 0.1855,
+        "reach_heels_backwards": 0.4223,
+        "repetitive_forward_stretching": 0.4343,
+        "rotation_on_the_knees": 0.2033,
+        "rowing": 0.5369,
+        "running": 0.3624,
+        "shoulders_high_amplitude_rotation": 0.8553,
+        "shoulders_low_amplitude_rotation": 0.4363,
+        "trunk_twist_with_arms_outstretched": 0.5716,
+        "trunk_twist_with_elbows_bent": 0.87,
+        "upper_trunk_and_lower_body_opposite_twist": 0.4127,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.2003,
+        "waist_bends_forward": 0.3324,
+        "waist_rotation": 0.4707,
+        "walking": 0.8758
+      }
+    },
+    "realdisp/lt": {
+      "dataset": "realdisp",
+      "stream": "lt",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.1813,
+        "arms_frontal_elevation": 0.0763,
+        "arms_inner_rotation": 0.4324,
+        "arms_lateral_elevation": 0.188,
+        "cycling": 0.7737,
+        "elliptic_bike": 0.7394,
+        "frontal_hand_claps": 0.049,
+        "jogging": 0.7871,
+        "jump_front_and_back": 0.4905,
+        "jump_rope": 0.345,
+        "jump_sideways": 0.196,
+        "jump_up": 0.3326,
+        "jump_with_legs_and_arms_open_and_closed": 0.526,
+        "knees_alternately_bending_forward": 0.7857,
+        "knees_bending_crouching": 0.5734,
+        "lateral_bend": 0.0382,
+        "lateral_bend_with_the_arm_up": 0.0597,
+        "reach_heels_backwards": 0.2971,
+        "repetitive_forward_stretching": 0.0205,
+        "rotation_on_the_knees": 0.4282,
+        "rowing": 0.3215,
+        "running": 0.8947,
+        "shoulders_high_amplitude_rotation": 0.0636,
+        "shoulders_low_amplitude_rotation": 0.0609,
+        "trunk_twist_with_arms_outstretched": 0.4348,
+        "trunk_twist_with_elbows_bent": 0.4844,
+        "upper_trunk_and_lower_body_opposite_twist": 0.704,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.1283,
+        "waist_bends_forward": 0.2526,
+        "waist_rotation": 0.3918,
+        "walking": 0.9124
+      }
+    },
+    "realdisp/lua": {
+      "dataset": "realdisp",
+      "stream": "lua",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.292,
+        "arms_frontal_elevation": 0.5936,
+        "arms_inner_rotation": 0.3224,
+        "arms_lateral_elevation": 0.3703,
+        "cycling": 0.3116,
+        "elliptic_bike": 0.5547,
+        "frontal_hand_claps": 0.5257,
+        "jogging": 0.699,
+        "jump_front_and_back": 0.4008,
+        "jump_rope": 0.3454,
+        "jump_sideways": 0.4608,
+        "jump_up": 0.2377,
+        "jump_with_legs_and_arms_open_and_closed": 0.9968,
+        "knees_alternately_bending_forward": 0.5942,
+        "knees_bending_crouching": 0.3528,
+        "lateral_bend": 0.1651,
+        "lateral_bend_with_the_arm_up": 0.1427,
+        "reach_heels_backwards": 0.4821,
+        "repetitive_forward_stretching": 0.5357,
+        "rotation_on_the_knees": 0.3834,
+        "rowing": 0.581,
+        "running": 0.4784,
+        "shoulders_high_amplitude_rotation": 0.667,
+        "shoulders_low_amplitude_rotation": 0.4348,
+        "trunk_twist_with_arms_outstretched": 0.3265,
+        "trunk_twist_with_elbows_bent": 0.7351,
+        "upper_trunk_and_lower_body_opposite_twist": 0.4444,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.6629,
+        "waist_bends_forward": 0.4695,
+        "waist_rotation": 0.3252,
+        "walking": 0.8086
+      }
+    },
+    "realdisp/rc": {
+      "dataset": "realdisp",
+      "stream": "rc",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.0385,
+        "arms_frontal_elevation": 0.0,
+        "arms_inner_rotation": 0.5672,
+        "arms_lateral_elevation": 0.0596,
+        "cycling": 0.5972,
+        "elliptic_bike": 0.6274,
+        "frontal_hand_claps": 0.015,
+        "jogging": 0.835,
+        "jump_front_and_back": 0.7738,
+        "jump_rope": 0.0765,
+        "jump_sideways": 0.3952,
+        "jump_up": 0.1873,
+        "jump_with_legs_and_arms_open_and_closed": 0.3274,
+        "knees_alternately_bending_forward": 0.6081,
+        "knees_bending_crouching": 0.417,
+        "lateral_bend": 0.0583,
+        "lateral_bend_with_the_arm_up": 0.0117,
+        "reach_heels_backwards": 0.3521,
+        "repetitive_forward_stretching": 0.1251,
+        "rotation_on_the_knees": 0.5098,
+        "rowing": 0.4995,
+        "running": 0.7154,
+        "shoulders_high_amplitude_rotation": 0.0884,
+        "shoulders_low_amplitude_rotation": 0.0,
+        "trunk_twist_with_arms_outstretched": 0.1423,
+        "trunk_twist_with_elbows_bent": 0.1335,
+        "upper_trunk_and_lower_body_opposite_twist": 0.6155,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.1639,
+        "waist_bends_forward": 0.1981,
+        "waist_rotation": 0.6839,
+        "walking": 0.8751
+      }
+    },
+    "realdisp/rla": {
+      "dataset": "realdisp",
+      "stream": "rla",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.5297,
+        "arms_frontal_elevation": 0.3339,
+        "arms_inner_rotation": 0.2083,
+        "arms_lateral_elevation": 0.4447,
+        "cycling": 0.7238,
+        "elliptic_bike": 0.6756,
+        "frontal_hand_claps": 0.8087,
+        "jogging": 0.4089,
+        "jump_front_and_back": 0.1655,
+        "jump_rope": 0.8819,
+        "jump_sideways": 0.7106,
+        "jump_up": 0.5238,
+        "jump_with_legs_and_arms_open_and_closed": 0.943,
+        "knees_alternately_bending_forward": 0.4197,
+        "knees_bending_crouching": 0.3469,
+        "lateral_bend": 0.312,
+        "lateral_bend_with_the_arm_up": 0.0196,
+        "reach_heels_backwards": 0.4318,
+        "repetitive_forward_stretching": 0.4552,
+        "rotation_on_the_knees": 0.3434,
+        "rowing": 0.5547,
+        "running": 0.4053,
+        "shoulders_high_amplitude_rotation": 0.9126,
+        "shoulders_low_amplitude_rotation": 0.4973,
+        "trunk_twist_with_arms_outstretched": 0.4368,
+        "trunk_twist_with_elbows_bent": 0.6529,
+        "upper_trunk_and_lower_body_opposite_twist": 0.2429,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.2556,
+        "waist_bends_forward": 0.3453,
+        "waist_rotation": 0.3228,
+        "walking": 0.87
+      }
+    },
+    "realdisp/rt": {
+      "dataset": "realdisp",
+      "stream": "rt",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.2238,
+        "arms_frontal_elevation": 0.0,
+        "arms_inner_rotation": 0.3784,
+        "arms_lateral_elevation": 0.058,
+        "cycling": 0.5939,
+        "elliptic_bike": 0.6157,
+        "frontal_hand_claps": 0.1569,
+        "jogging": 0.8468,
+        "jump_front_and_back": 0.2695,
+        "jump_rope": 0.0761,
+        "jump_sideways": 0.1549,
+        "jump_up": 0.0937,
+        "jump_with_legs_and_arms_open_and_closed": 0.4275,
+        "knees_alternately_bending_forward": 0.773,
+        "knees_bending_crouching": 0.4884,
+        "lateral_bend": 0.0354,
+        "lateral_bend_with_the_arm_up": 0.081,
+        "reach_heels_backwards": 0.2026,
+        "repetitive_forward_stretching": 0.1002,
+        "rotation_on_the_knees": 0.2637,
+        "rowing": 0.3923,
+        "running": 0.813,
+        "shoulders_high_amplitude_rotation": 0.1218,
+        "shoulders_low_amplitude_rotation": 0.1851,
+        "trunk_twist_with_arms_outstretched": 0.292,
+        "trunk_twist_with_elbows_bent": 0.4832,
+        "upper_trunk_and_lower_body_opposite_twist": 0.6555,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.1215,
+        "waist_bends_forward": 0.2873,
+        "waist_rotation": 0.4127,
+        "walking": 0.8768
+      }
+    },
+    "realdisp/rua": {
+      "dataset": "realdisp",
+      "stream": "rua",
+      "n_windows": 5654,
+      "labels": {
+        "arms_frontal_crossing": 0.4694,
+        "arms_frontal_elevation": 0.4291,
+        "arms_inner_rotation": 0.5311,
+        "arms_lateral_elevation": 0.2395,
+        "cycling": 0.3363,
+        "elliptic_bike": 0.5259,
+        "frontal_hand_claps": 0.1802,
+        "jogging": 0.4328,
+        "jump_front_and_back": 0.3691,
+        "jump_rope": 0.575,
+        "jump_sideways": 0.3541,
+        "jump_up": 0.4742,
+        "jump_with_legs_and_arms_open_and_closed": 0.9937,
+        "knees_alternately_bending_forward": 0.3594,
+        "knees_bending_crouching": 0.4194,
+        "lateral_bend": 0.2057,
+        "lateral_bend_with_the_arm_up": 0.2256,
+        "reach_heels_backwards": 0.437,
+        "repetitive_forward_stretching": 0.2556,
+        "rotation_on_the_knees": 0.1754,
+        "rowing": 0.6825,
+        "running": 0.5912,
+        "shoulders_high_amplitude_rotation": 0.6799,
+        "shoulders_low_amplitude_rotation": 0.5554,
+        "trunk_twist_with_arms_outstretched": 0.1721,
+        "trunk_twist_with_elbows_bent": 0.6001,
+        "upper_trunk_and_lower_body_opposite_twist": 0.2155,
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": 0.5203,
+        "waist_bends_forward": 0.3116,
+        "waist_rotation": 0.2817,
+        "walking": 0.8608
+      }
+    },
+    "realworld/phone_waist": {
+      "dataset": "realworld",
+      "stream": "phone_waist",
+      "n_windows": 3746,
+      "labels": {
+        "jumping": 0.9722,
+        "lying": 0.3851,
+        "running": 0.7884,
+        "sitting": 0.1531,
+        "standing": 0.3459,
+        "walking": 0.6629,
+        "walking_downstairs": 0.7079,
+        "walking_upstairs": 0.7846
+      }
+    },
+    "shoaib/phone_right_pocket": {
+      "dataset": "shoaib",
+      "stream": "phone_right_pocket",
+      "n_windows": 2100,
+      "labels": {
+        "cycling": 0.9878,
+        "jogging": 1.0,
+        "sitting": 0.6444,
+        "standing": 0.5778,
+        "walking": 0.8922,
+        "walking_downstairs": 0.93,
+        "walking_upstairs": 0.8356
+      }
+    },
+    "sp_sw_har/phone_pocket": {
+      "dataset": "sp_sw_har",
+      "stream": "phone_pocket",
+      "n_windows": 1179,
+      "labels": {
+        "sitting": 0.9087,
+        "sitting_down": 0.5264,
+        "standing_up_from_sitting": 0.485,
+        "turning": 0.1675,
+        "walking": 0.6856
+      }
+    },
+    "sp_sw_har/watch_wrist": {
+      "dataset": "sp_sw_har",
+      "stream": "watch_wrist",
+      "n_windows": 2578,
+      "labels": {
+        "sitting": 0.791,
+        "sitting_down": 0.1498,
+        "standing_up_from_sitting": 0.5008,
+        "turning": 0.0403,
+        "walking": 0.5247
+      }
+    },
+    "spar/watch_left_wrist": {
+      "dataset": "spar",
+      "stream": "watch_left_wrist",
+      "n_windows": 953,
+      "labels": {
+        "bent_over_row": 0.5284,
+        "lower_trapezius_row": 0.3423,
+        "shoulder_abduction": 0.4465,
+        "shoulder_external_rotation": 0.2735,
+        "shoulder_forward_elevation": 0.6389,
+        "shoulder_internal_rotation": 0.2634,
+        "shoulder_pendulum": 0.9902
+      }
+    },
+    "spar/watch_right_wrist": {
+      "dataset": "spar",
+      "stream": "watch_right_wrist",
+      "n_windows": 945,
+      "labels": {
+        "bent_over_row": 0.3204,
+        "lower_trapezius_row": 0.1996,
+        "shoulder_abduction": 0.4385,
+        "shoulder_external_rotation": 0.2658,
+        "shoulder_forward_elevation": 0.536,
+        "shoulder_internal_rotation": 0.1873,
+        "shoulder_pendulum": 0.7958
+      }
+    },
+    "uci_har/phone_waist": {
+      "dataset": "uci_har",
+      "stream": "phone_waist",
+      "n_windows": 3433,
+      "labels": {
+        "lying": 0.2447,
+        "sitting": 0.2149,
+        "standing": 0.2672,
+        "walking": 0.8746,
+        "walking_downstairs": 0.7468,
+        "walking_upstairs": 0.7146
+      }
+    },
+    "unimib_shar/phone_pocket": {
+      "dataset": "unimib_shar",
+      "stream": "phone_pocket",
+      "n_windows": 3924,
+      "labels": {
+        "falling_backward": 0.0236,
+        "falling_backward_sitting": 0.0824,
+        "falling_forward": 0.0778,
+        "falling_hitting_obstacle": 0.255,
+        "falling_left": 0.075,
+        "falling_right": 0.0653,
+        "falling_with_protection": 0.0515,
+        "jumping": 0.7812,
+        "lying_down_from_standing": 0.3487,
+        "running": 0.9401,
+        "sitting_down": 0.3485,
+        "standing_up_from_lying": 0.1394,
+        "standing_up_from_sitting": 0.3682,
+        "syncope": 0.0044,
+        "walking": 0.877,
+        "walking_downstairs": 0.5054,
+        "walking_upstairs": 0.4892
+      }
+    },
+    "upper_limb_use/control_left_wrist": {
+      "dataset": "upper_limb_use",
+      "stream": "control_left_wrist",
+      "n_windows": 361,
+      "labels": {
+        "making_a_call_on_a_mobile_phone": 0.1862,
+        "typing_on_a_keyboard": 0.2054,
+        "writing_with_a_pen": 0.372
+      }
+    },
+    "upper_limb_use/control_right_wrist": {
+      "dataset": "upper_limb_use",
+      "stream": "control_right_wrist",
+      "n_windows": 363,
+      "labels": {
+        "making_a_call_on_a_mobile_phone": 0.6141,
+        "typing_on_a_keyboard": 0.6286,
+        "writing_with_a_pen": 0.284
+      }
+    },
+    "usc_had/phone_hip": {
+      "dataset": "usc_had",
+      "stream": "phone_hip",
+      "n_windows": 4350,
+      "labels": {
+        "elevator_down": 0.0953,
+        "elevator_up": 0.2912,
+        "jumping_up": 0.9054,
+        "running_forward": 0.9913,
+        "sitting": 0.3203,
+        "sleeping": 0.8112,
+        "standing": 0.3517,
+        "walking_downstairs": 0.4484,
+        "walking_forward": 0.1931,
+        "walking_left": 0.1204,
+        "walking_right": 0.2778,
+        "walking_upstairs": 0.5405
+      }
+    },
+    "ut_complex/watch_wrist": {
+      "dataset": "ut_complex",
+      "stream": "watch_wrist",
+      "n_windows": 3900,
+      "labels": {
+        "biking": 0.9733,
+        "drinking_coffee": 0.3789,
+        "eating": 0.595,
+        "jogging": 0.9867,
+        "sitting": 0.3461,
+        "smoking": 0.36,
+        "standing": 0.3583,
+        "talking": 0.6078,
+        "typing": 0.47,
+        "walking": 0.3628,
+        "walking_downstairs": 0.63,
+        "walking_upstairs": 0.7228,
+        "writing": 0.6872
+      }
+    },
+    "wisdm/phone_pocket": {
+      "dataset": "wisdm",
+      "stream": "phone_pocket",
+      "n_windows": 3026,
+      "labels": {
+        "brushing_teeth": 0.0132,
+        "clapping": 0.216,
+        "dribbling": 0.1069,
+        "drinking": 0.0266,
+        "eating_chips": 0.0077,
+        "eating_pasta": 0.0072,
+        "eating_sandwich": 0.0,
+        "eating_soup": 0.0062,
+        "folding_clothes": 0.1262,
+        "jogging": 0.8831,
+        "kicking": 0.2198,
+        "playing_catch": 0.1383,
+        "sitting": 0.0,
+        "stairs": 0.2927,
+        "standing": 0.0055,
+        "typing": 0.0,
+        "walking": 0.567,
+        "writing": 0.0
+      }
+    },
+    "wisdm/watch_wrist": {
+      "dataset": "wisdm",
+      "stream": "watch_wrist",
+      "n_windows": 3088,
+      "labels": {
+        "brushing_teeth": 0.6514,
+        "clapping": 0.5768,
+        "dribbling": 0.4799,
+        "drinking": 0.0481,
+        "eating_chips": 0.0265,
+        "eating_pasta": 0.083,
+        "eating_sandwich": 0.0281,
+        "eating_soup": 0.0799,
+        "folding_clothes": 0.4106,
+        "jogging": 0.8637,
+        "kicking": 0.3223,
+        "playing_catch": 0.7013,
+        "sitting": 0.1176,
+        "stairs": 0.3974,
+        "standing": 0.0588,
+        "typing": 0.3217,
+        "walking": 0.4681,
+        "writing": 0.3292
+      }
+    },
+    "xrf_v2/airpods_ear": {
+      "dataset": "xrf_v2",
+      "stream": "airpods_ear",
+      "n_windows": 5794,
+      "labels": {
+        "answering_phone": 0.0,
+        "cleaning_table": 0.3893,
+        "cutting_fruit": 0.0924,
+        "drinking": 0.0188,
+        "eating_fruit": 0.0,
+        "lying_down_from_standing": 0.0,
+        "opening_curtains": 0.0088,
+        "opening_envelope": 0.0,
+        "opening_windows": 0.0,
+        "picking_fruit": 0.1117,
+        "picking_up": 0.1322,
+        "pouring_water": 0.0297,
+        "reading": 0.0315,
+        "sitting_down": 0.1263,
+        "standing_up_from_lying": 0.0,
+        "standing_up_from_sitting": 0.2519,
+        "stretching": 0.0248,
+        "taking_medicine": 0.1322,
+        "throwing_garbage": 0.1511,
+        "toggling_lamp": 0.0488,
+        "typing": 0.027,
+        "using_mouse": 0.0909,
+        "using_phone": 0.2591,
+        "walking": 0.6552,
+        "washing_hands": 0.6003,
+        "watering_plants": 0.0342,
+        "writing": 0.0,
+        "writing_on_blackboard": 0.0
+      }
+    },
+    "xrf_v2/glasses": {
+      "dataset": "xrf_v2",
+      "stream": "glasses",
+      "n_windows": 5794,
+      "labels": {
+        "answering_phone": 0.0136,
+        "cleaning_table": 0.5516,
+        "cutting_fruit": 0.0468,
+        "drinking": 0.1044,
+        "eating_fruit": 0.0,
+        "lying_down_from_standing": 0.2906,
+        "opening_curtains": 0.0106,
+        "opening_envelope": 0.0153,
+        "opening_windows": 0.0,
+        "picking_fruit": 0.2445,
+        "picking_up": 0.1315,
+        "pouring_water": 0.0499,
+        "reading": 0.0765,
+        "sitting_down": 0.1705,
+        "standing_up_from_lying": 0.0435,
+        "standing_up_from_sitting": 0.3061,
+        "stretching": 0.0316,
+        "taking_medicine": 0.2021,
+        "throwing_garbage": 0.0421,
+        "toggling_lamp": 0.0212,
+        "typing": 0.0422,
+        "using_mouse": 0.1227,
+        "using_phone": 0.3367,
+        "walking": 0.7226,
+        "washing_hands": 0.5907,
+        "watering_plants": 0.1418,
+        "writing": 0.0094,
+        "writing_on_blackboard": 0.0252
+      }
+    },
+    "xrf_v2/left_pocket": {
+      "dataset": "xrf_v2",
+      "stream": "left_pocket",
+      "n_windows": 5794,
+      "labels": {
+        "answering_phone": 0.0842,
+        "cleaning_table": 0.102,
+        "cutting_fruit": 0.1068,
+        "drinking": 0.0351,
+        "eating_fruit": 0.0,
+        "lying_down_from_standing": 0.0388,
+        "opening_curtains": 0.0835,
+        "opening_envelope": 0.0,
+        "opening_windows": 0.0246,
+        "picking_fruit": 0.0548,
+        "picking_up": 0.0804,
+        "pouring_water": 0.0132,
+        "reading": 0.0397,
+        "sitting_down": 0.4122,
+        "standing_up_from_lying": 0.0,
+        "standing_up_from_sitting": 0.4576,
+        "stretching": 0.0077,
+        "taking_medicine": 0.0501,
+        "throwing_garbage": 0.032,
+        "toggling_lamp": 0.0035,
+        "typing": 0.0518,
+        "using_mouse": 0.1209,
+        "using_phone": 0.0167,
+        "walking": 0.8839,
+        "washing_hands": 0.7177,
+        "watering_plants": 0.1029,
+        "writing": 0.0108,
+        "writing_on_blackboard": 0.0675
+      }
+    },
+    "xrf_v2/left_wrist": {
+      "dataset": "xrf_v2",
+      "stream": "left_wrist",
+      "n_windows": 5794,
+      "labels": {
+        "answering_phone": 0.1706,
+        "cleaning_table": 0.2478,
+        "cutting_fruit": 0.2021,
+        "drinking": 0.0712,
+        "eating_fruit": 0.085,
+        "lying_down_from_standing": 0.0,
+        "opening_curtains": 0.2349,
+        "opening_envelope": 0.0605,
+        "opening_windows": 0.3333,
+        "picking_fruit": 0.1691,
+        "picking_up": 0.0,
+        "pouring_water": 0.0123,
+        "reading": 0.1218,
+        "sitting_down": 0.218,
+        "standing_up_from_lying": 0.0,
+        "standing_up_from_sitting": 0.1363,
+        "stretching": 0.3158,
+        "taking_medicine": 0.1772,
+        "throwing_garbage": 0.032,
+        "toggling_lamp": 0.0765,
+        "typing": 0.6663,
+        "using_mouse": 0.1206,
+        "using_phone": 0.017,
+        "walking": 0.6655,
+        "washing_hands": 0.9524,
+        "watering_plants": 0.0876,
+        "writing": 0.1543,
+        "writing_on_blackboard": 0.2173
+      }
+    },
+    "xrf_v2/right_pocket": {
+      "dataset": "xrf_v2",
+      "stream": "right_pocket",
+      "n_windows": 5794,
+      "labels": {
+        "answering_phone": 0.8033,
+        "cleaning_table": 0.2851,
+        "cutting_fruit": 0.0343,
+        "drinking": 0.0246,
+        "eating_fruit": 0.0278,
+        "lying_down_from_standing": 0.0406,
+        "opening_curtains": 0.0088,
+        "opening_envelope": 0.0,
+        "opening_windows": 0.0249,
+        "picking_fruit": 0.1321,
+        "picking_up": 0.0259,
+        "pouring_water": 0.026,
+        "reading": 0.0534,
+        "sitting_down": 0.4003,
+        "standing_up_from_lying": 0.0,
+        "standing_up_from_sitting": 0.319,
+        "stretching": 0.0268,
+        "taking_medicine": 0.0869,
+        "throwing_garbage": 0.0544,
+        "toggling_lamp": 0.0503,
+        "typing": 0.0715,
+        "using_mouse": 0.0531,
+        "using_phone": 0.262,
+        "walking": 0.8656,
+        "washing_hands": 0.4267,
+        "watering_plants": 0.052,
+        "writing": 0.0127,
+        "writing_on_blackboard": 0.0205
+      }
+    },
+    "xrf_v2/right_wrist": {
+      "dataset": "xrf_v2",
+      "stream": "right_wrist",
+      "n_windows": 5794,
+      "labels": {
+        "answering_phone": 0.2158,
+        "cleaning_table": 0.59,
+        "cutting_fruit": 0.3296,
+        "drinking": 0.2977,
+        "eating_fruit": 0.0132,
+        "lying_down_from_standing": 0.0413,
+        "opening_curtains": 0.0649,
+        "opening_envelope": 0.0,
+        "opening_windows": 0.1495,
+        "picking_fruit": 0.0544,
+        "picking_up": 0.2389,
+        "pouring_water": 0.0173,
+        "reading": 0.0999,
+        "sitting_down": 0.2165,
+        "standing_up_from_lying": 0.087,
+        "standing_up_from_sitting": 0.3076,
+        "stretching": 0.1167,
+        "taking_medicine": 0.147,
+        "throwing_garbage": 0.1287,
+        "toggling_lamp": 0.0647,
+        "typing": 0.4963,
+        "using_mouse": 0.2409,
+        "using_phone": 0.0359,
+        "walking": 0.7795,
+        "washing_hands": 0.9136,
+        "watering_plants": 0.032,
+        "writing": 0.1525,
+        "writing_on_blackboard": 0.1805
+      }
+    }
+  },
+  "paired_contrast": {
+    "sp_sw_har": {
+      "n_labels": 5,
+      "mean_gap": 0.1596,
+      "max_gap": 0.3766,
+      "concept_dependence": {
+        "n_pairs": 1,
+        "mean_correlation": 0.8849,
+        "inverting_pairs": 0,
+        "inverting_fraction": 0.0
+      },
+      "labels": {
+        "sitting": {
+          "best_stream": "phone_pocket",
+          "best": 0.9087,
+          "worst_stream": "watch_wrist",
+          "worst": 0.791,
+          "gap": 0.1177,
+          "n_streams": 2
+        },
+        "sitting_down": {
+          "best_stream": "phone_pocket",
+          "best": 0.5264,
+          "worst_stream": "watch_wrist",
+          "worst": 0.1498,
+          "gap": 0.3766,
+          "n_streams": 2
+        },
+        "standing_up_from_sitting": {
+          "best_stream": "watch_wrist",
+          "best": 0.5008,
+          "worst_stream": "phone_pocket",
+          "worst": 0.485,
+          "gap": 0.0158,
+          "n_streams": 2
+        },
+        "turning": {
+          "best_stream": "phone_pocket",
+          "best": 0.1675,
+          "worst_stream": "watch_wrist",
+          "worst": 0.0403,
+          "gap": 0.1272,
+          "n_streams": 2
+        },
+        "walking": {
+          "best_stream": "phone_pocket",
+          "best": 0.6856,
+          "worst_stream": "watch_wrist",
+          "worst": 0.5247,
+          "gap": 0.1609,
+          "n_streams": 2
+        }
+      }
+    },
+    "xrf_v2": {
+      "n_labels": 28,
+      "mean_gap": 0.2553,
+      "max_gap": 0.8033,
+      "concept_dependence": {
+        "n_pairs": 15,
+        "mean_correlation": 0.703,
+        "inverting_pairs": 14,
+        "inverting_fraction": 0.9333
+      },
+      "labels": {
+        "answering_phone": {
+          "best_stream": "right_pocket",
+          "best": 0.8033,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0,
+          "gap": 0.8033,
+          "n_streams": 6
+        },
+        "cleaning_table": {
+          "best_stream": "right_wrist",
+          "best": 0.59,
+          "worst_stream": "left_pocket",
+          "worst": 0.102,
+          "gap": 0.488,
+          "n_streams": 6
+        },
+        "cutting_fruit": {
+          "best_stream": "right_wrist",
+          "best": 0.3296,
+          "worst_stream": "right_pocket",
+          "worst": 0.0343,
+          "gap": 0.2953,
+          "n_streams": 6
+        },
+        "drinking": {
+          "best_stream": "right_wrist",
+          "best": 0.2977,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0188,
+          "gap": 0.2789,
+          "n_streams": 6
+        },
+        "eating_fruit": {
+          "best_stream": "left_wrist",
+          "best": 0.085,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0,
+          "gap": 0.085,
+          "n_streams": 6
+        },
+        "lying_down_from_standing": {
+          "best_stream": "glasses",
+          "best": 0.2906,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0,
+          "gap": 0.2906,
+          "n_streams": 6
+        },
+        "opening_curtains": {
+          "best_stream": "left_wrist",
+          "best": 0.2349,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0088,
+          "gap": 0.2261,
+          "n_streams": 6
+        },
+        "opening_envelope": {
+          "best_stream": "left_wrist",
+          "best": 0.0605,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0,
+          "gap": 0.0605,
+          "n_streams": 6
+        },
+        "opening_windows": {
+          "best_stream": "left_wrist",
+          "best": 0.3333,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0,
+          "gap": 0.3333,
+          "n_streams": 6
+        },
+        "picking_fruit": {
+          "best_stream": "glasses",
+          "best": 0.2445,
+          "worst_stream": "right_wrist",
+          "worst": 0.0544,
+          "gap": 0.1901,
+          "n_streams": 6
+        },
+        "picking_up": {
+          "best_stream": "right_wrist",
+          "best": 0.2389,
+          "worst_stream": "left_wrist",
+          "worst": 0.0,
+          "gap": 0.2389,
+          "n_streams": 6
+        },
+        "pouring_water": {
+          "best_stream": "glasses",
+          "best": 0.0499,
+          "worst_stream": "left_wrist",
+          "worst": 0.0123,
+          "gap": 0.0376,
+          "n_streams": 6
+        },
+        "reading": {
+          "best_stream": "left_wrist",
+          "best": 0.1218,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0315,
+          "gap": 0.0903,
+          "n_streams": 6
+        },
+        "sitting_down": {
+          "best_stream": "left_pocket",
+          "best": 0.4122,
+          "worst_stream": "airpods_ear",
+          "worst": 0.1263,
+          "gap": 0.2859,
+          "n_streams": 6
+        },
+        "standing_up_from_lying": {
+          "best_stream": "right_wrist",
+          "best": 0.087,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0,
+          "gap": 0.087,
+          "n_streams": 6
+        },
+        "standing_up_from_sitting": {
+          "best_stream": "left_pocket",
+          "best": 0.4576,
+          "worst_stream": "left_wrist",
+          "worst": 0.1363,
+          "gap": 0.3213,
+          "n_streams": 6
+        },
+        "stretching": {
+          "best_stream": "left_wrist",
+          "best": 0.3158,
+          "worst_stream": "left_pocket",
+          "worst": 0.0077,
+          "gap": 0.3081,
+          "n_streams": 6
+        },
+        "taking_medicine": {
+          "best_stream": "glasses",
+          "best": 0.2021,
+          "worst_stream": "left_pocket",
+          "worst": 0.0501,
+          "gap": 0.152,
+          "n_streams": 6
+        },
+        "throwing_garbage": {
+          "best_stream": "airpods_ear",
+          "best": 0.1511,
+          "worst_stream": "left_pocket",
+          "worst": 0.032,
+          "gap": 0.1191,
+          "n_streams": 6
+        },
+        "toggling_lamp": {
+          "best_stream": "left_wrist",
+          "best": 0.0765,
+          "worst_stream": "left_pocket",
+          "worst": 0.0035,
+          "gap": 0.073,
+          "n_streams": 6
+        },
+        "typing": {
+          "best_stream": "left_wrist",
+          "best": 0.6663,
+          "worst_stream": "airpods_ear",
+          "worst": 0.027,
+          "gap": 0.6393,
+          "n_streams": 6
+        },
+        "using_mouse": {
+          "best_stream": "right_wrist",
+          "best": 0.2409,
+          "worst_stream": "right_pocket",
+          "worst": 0.0531,
+          "gap": 0.1878,
+          "n_streams": 6
+        },
+        "using_phone": {
+          "best_stream": "glasses",
+          "best": 0.3367,
+          "worst_stream": "left_pocket",
+          "worst": 0.0167,
+          "gap": 0.32,
+          "n_streams": 6
+        },
+        "walking": {
+          "best_stream": "left_pocket",
+          "best": 0.8839,
+          "worst_stream": "airpods_ear",
+          "worst": 0.6552,
+          "gap": 0.2287,
+          "n_streams": 6
+        },
+        "washing_hands": {
+          "best_stream": "left_wrist",
+          "best": 0.9524,
+          "worst_stream": "right_pocket",
+          "worst": 0.4267,
+          "gap": 0.5257,
+          "n_streams": 6
+        },
+        "watering_plants": {
+          "best_stream": "glasses",
+          "best": 0.1418,
+          "worst_stream": "right_wrist",
+          "worst": 0.032,
+          "gap": 0.1098,
+          "n_streams": 6
+        },
+        "writing": {
+          "best_stream": "left_wrist",
+          "best": 0.1543,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0,
+          "gap": 0.1543,
+          "n_streams": 6
+        },
+        "writing_on_blackboard": {
+          "best_stream": "left_wrist",
+          "best": 0.2173,
+          "worst_stream": "airpods_ear",
+          "worst": 0.0,
+          "gap": 0.2173,
+          "n_streams": 6
+        }
+      }
+    },
+    "opportunity": {
+      "n_labels": 4,
+      "mean_gap": 0.2358,
+      "max_gap": 0.4427,
+      "concept_dependence": {
+        "n_pairs": 10,
+        "mean_correlation": 0.8722,
+        "inverting_pairs": 1,
+        "inverting_fraction": 0.1
+      },
+      "labels": {
+        "lying": {
+          "best_stream": "right_lower_arm",
+          "best": 0.5583,
+          "worst_stream": "right_upper_arm",
+          "worst": 0.1156,
+          "gap": 0.4427,
+          "n_streams": 5
+        },
+        "sitting": {
+          "best_stream": "back",
+          "best": 0.4533,
+          "worst_stream": "left_upper_arm",
+          "worst": 0.2029,
+          "gap": 0.2504,
+          "n_streams": 5
+        },
+        "standing": {
+          "best_stream": "back",
+          "best": 0.4734,
+          "worst_stream": "right_lower_arm",
+          "worst": 0.3552,
+          "gap": 0.1182,
+          "n_streams": 5
+        },
+        "walking": {
+          "best_stream": "back",
+          "best": 0.9331,
+          "worst_stream": "right_lower_arm",
+          "worst": 0.8012,
+          "gap": 0.1319,
+          "n_streams": 5
+        }
+      }
+    },
+    "realdisp": {
+      "n_labels": 31,
+      "mean_gap": 0.5078,
+      "max_gap": 0.8819,
+      "concept_dependence": {
+        "n_pairs": 36,
+        "mean_correlation": 0.4191,
+        "inverting_pairs": 35,
+        "inverting_fraction": 0.9722
+      },
+      "labels": {
+        "arms_frontal_crossing": {
+          "best_stream": "rla",
+          "best": 0.5297,
+          "worst_stream": "rc",
+          "worst": 0.0385,
+          "gap": 0.4912,
+          "n_streams": 9
+        },
+        "arms_frontal_elevation": {
+          "best_stream": "lua",
+          "best": 0.5936,
+          "worst_stream": "rc",
+          "worst": 0.0,
+          "gap": 0.5936,
+          "n_streams": 9
+        },
+        "arms_inner_rotation": {
+          "best_stream": "back",
+          "best": 0.6757,
+          "worst_stream": "rla",
+          "worst": 0.2083,
+          "gap": 0.4674,
+          "n_streams": 9
+        },
+        "arms_lateral_elevation": {
+          "best_stream": "lla",
+          "best": 0.5026,
+          "worst_stream": "lc",
+          "worst": 0.012,
+          "gap": 0.4906,
+          "n_streams": 9
+        },
+        "cycling": {
+          "best_stream": "lla",
+          "best": 0.8211,
+          "worst_stream": "lua",
+          "worst": 0.3116,
+          "gap": 0.5095,
+          "n_streams": 9
+        },
+        "elliptic_bike": {
+          "best_stream": "lla",
+          "best": 0.7989,
+          "worst_stream": "back",
+          "worst": 0.4308,
+          "gap": 0.3681,
+          "n_streams": 9
+        },
+        "frontal_hand_claps": {
+          "best_stream": "rla",
+          "best": 0.8087,
+          "worst_stream": "rc",
+          "worst": 0.015,
+          "gap": 0.7937,
+          "n_streams": 9
+        },
+        "jogging": {
+          "best_stream": "lc",
+          "best": 0.9722,
+          "worst_stream": "rla",
+          "worst": 0.4089,
+          "gap": 0.5633,
+          "n_streams": 9
+        },
+        "jump_front_and_back": {
+          "best_stream": "rc",
+          "best": 0.7738,
+          "worst_stream": "rla",
+          "worst": 0.1655,
+          "gap": 0.6083,
+          "n_streams": 9
+        },
+        "jump_rope": {
+          "best_stream": "rla",
+          "best": 0.8819,
+          "worst_stream": "back",
+          "worst": 0.0,
+          "gap": 0.8819,
+          "n_streams": 9
+        },
+        "jump_sideways": {
+          "best_stream": "rla",
+          "best": 0.7106,
+          "worst_stream": "rt",
+          "worst": 0.1549,
+          "gap": 0.5557,
+          "n_streams": 9
+        },
+        "jump_up": {
+          "best_stream": "rla",
+          "best": 0.5238,
+          "worst_stream": "rt",
+          "worst": 0.0937,
+          "gap": 0.4301,
+          "n_streams": 9
+        },
+        "jump_with_legs_and_arms_open_and_closed": {
+          "best_stream": "lua",
+          "best": 0.9968,
+          "worst_stream": "back",
+          "worst": 0.3039,
+          "gap": 0.6929,
+          "n_streams": 9
+        },
+        "knees_alternately_bending_forward": {
+          "best_stream": "lt",
+          "best": 0.7857,
+          "worst_stream": "rua",
+          "worst": 0.3594,
+          "gap": 0.4263,
+          "n_streams": 9
+        },
+        "knees_bending_crouching": {
+          "best_stream": "lt",
+          "best": 0.5734,
+          "worst_stream": "lla",
+          "worst": 0.2564,
+          "gap": 0.317,
+          "n_streams": 9
+        },
+        "lateral_bend": {
+          "best_stream": "rla",
+          "best": 0.312,
+          "worst_stream": "rt",
+          "worst": 0.0354,
+          "gap": 0.2766,
+          "n_streams": 9
+        },
+        "lateral_bend_with_the_arm_up": {
+          "best_stream": "rua",
+          "best": 0.2256,
+          "worst_stream": "rc",
+          "worst": 0.0117,
+          "gap": 0.2139,
+          "n_streams": 9
+        },
+        "reach_heels_backwards": {
+          "best_stream": "lua",
+          "best": 0.4821,
+          "worst_stream": "rt",
+          "worst": 0.2026,
+          "gap": 0.2795,
+          "n_streams": 9
+        },
+        "repetitive_forward_stretching": {
+          "best_stream": "lua",
+          "best": 0.5357,
+          "worst_stream": "lt",
+          "worst": 0.0205,
+          "gap": 0.5152,
+          "n_streams": 9
+        },
+        "rotation_on_the_knees": {
+          "best_stream": "lc",
+          "best": 0.6923,
+          "worst_stream": "rua",
+          "worst": 0.1754,
+          "gap": 0.5169,
+          "n_streams": 9
+        },
+        "rowing": {
+          "best_stream": "rua",
+          "best": 0.6825,
+          "worst_stream": "lt",
+          "worst": 0.3215,
+          "gap": 0.361,
+          "n_streams": 9
+        },
+        "running": {
+          "best_stream": "lt",
+          "best": 0.8947,
+          "worst_stream": "lla",
+          "worst": 0.3624,
+          "gap": 0.5323,
+          "n_streams": 9
+        },
+        "shoulders_high_amplitude_rotation": {
+          "best_stream": "rla",
+          "best": 0.9126,
+          "worst_stream": "lc",
+          "worst": 0.031,
+          "gap": 0.8816,
+          "n_streams": 9
+        },
+        "shoulders_low_amplitude_rotation": {
+          "best_stream": "rua",
+          "best": 0.5554,
+          "worst_stream": "lc",
+          "worst": 0.0,
+          "gap": 0.5554,
+          "n_streams": 9
+        },
+        "trunk_twist_with_arms_outstretched": {
+          "best_stream": "lla",
+          "best": 0.5716,
+          "worst_stream": "rc",
+          "worst": 0.1423,
+          "gap": 0.4293,
+          "n_streams": 9
+        },
+        "trunk_twist_with_elbows_bent": {
+          "best_stream": "lla",
+          "best": 0.87,
+          "worst_stream": "rc",
+          "worst": 0.1335,
+          "gap": 0.7365,
+          "n_streams": 9
+        },
+        "upper_trunk_and_lower_body_opposite_twist": {
+          "best_stream": "lt",
+          "best": 0.704,
+          "worst_stream": "rua",
+          "worst": 0.2155,
+          "gap": 0.4885,
+          "n_streams": 9
+        },
+        "waist_bend_reaching_the_foot_with_the_opposite_hand": {
+          "best_stream": "lua",
+          "best": 0.6629,
+          "worst_stream": "rt",
+          "worst": 0.1215,
+          "gap": 0.5414,
+          "n_streams": 9
+        },
+        "waist_bends_forward": {
+          "best_stream": "back",
+          "best": 0.7817,
+          "worst_stream": "rc",
+          "worst": 0.1981,
+          "gap": 0.5836,
+          "n_streams": 9
+        },
+        "waist_rotation": {
+          "best_stream": "lc",
+          "best": 0.7274,
+          "worst_stream": "back",
+          "worst": 0.237,
+          "gap": 0.4904,
+          "n_streams": 9
+        },
+        "walking": {
+          "best_stream": "lc",
+          "best": 0.9591,
+          "worst_stream": "lua",
+          "worst": 0.8086,
+          "gap": 0.1505,
+          "n_streams": 9
+        }
+      }
+    },
+    "mmfit": {
+      "n_labels": 10,
+      "mean_gap": 0.4927,
+      "max_gap": 0.8678,
+      "concept_dependence": {
+        "n_pairs": 6,
+        "mean_correlation": 0.3792,
+        "inverting_pairs": 2,
+        "inverting_fraction": 0.3333
+      },
+      "labels": {
+        "bicep_curls": {
+          "best_stream": "left_wrist",
+          "best": 0.9973,
+          "worst_stream": "left_ear",
+          "worst": 0.1295,
+          "gap": 0.8678,
+          "n_streams": 4
+        },
+        "dumbbell_rows": {
+          "best_stream": "right_pocket",
+          "best": 0.823,
+          "worst_stream": "left_ear",
+          "worst": 0.1406,
+          "gap": 0.6824,
+          "n_streams": 4
+        },
+        "dumbbell_shoulder_press": {
+          "best_stream": "left_wrist",
+          "best": 0.5852,
+          "worst_stream": "right_pocket",
+          "worst": 0.3248,
+          "gap": 0.2604,
+          "n_streams": 4
+        },
+        "jumping_jacks": {
+          "best_stream": "left_ear",
+          "best": 1.0,
+          "worst_stream": "left_ear",
+          "worst": 1.0,
+          "gap": 0.0,
+          "n_streams": 4
+        },
+        "lateral_shoulder_raises": {
+          "best_stream": "right_wrist",
+          "best": 0.915,
+          "worst_stream": "left_ear",
+          "worst": 0.109,
+          "gap": 0.806,
+          "n_streams": 4
+        },
+        "lunges": {
+          "best_stream": "right_pocket",
+          "best": 0.9571,
+          "worst_stream": "left_ear",
+          "worst": 0.8871,
+          "gap": 0.07,
+          "n_streams": 4
+        },
+        "pushups": {
+          "best_stream": "left_wrist",
+          "best": 0.7737,
+          "worst_stream": "left_ear",
+          "worst": 0.0831,
+          "gap": 0.6906,
+          "n_streams": 4
+        },
+        "situps": {
+          "best_stream": "left_wrist",
+          "best": 0.7228,
+          "worst_stream": "right_wrist",
+          "worst": 0.4934,
+          "gap": 0.2294,
+          "n_streams": 4
+        },
+        "squats": {
+          "best_stream": "right_pocket",
+          "best": 0.9891,
+          "worst_stream": "right_wrist",
+          "worst": 0.3502,
+          "gap": 0.6389,
+          "n_streams": 4
+        },
+        "tricep_extensions": {
+          "best_stream": "left_wrist",
+          "best": 0.914,
+          "worst_stream": "right_pocket",
+          "worst": 0.2325,
+          "gap": 0.6815,
+          "n_streams": 4
+        }
+      }
+    }
+  }
+}

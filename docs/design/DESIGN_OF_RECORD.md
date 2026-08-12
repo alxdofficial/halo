@@ -185,9 +185,30 @@ cannot separate "descriptor captures channel physics" (intended) from "descripto
 something — but reporting it as a pass would be false assurance.
 
 The decisive guards are downstream, where the confound does not apply:
-1. **Encoder probe** — linear probe from the trunk's `feature` output to dataset ID must sit at
-   chance. `sensor_bias` enters the trunk (user's call, 2026-08-11), so this tests whether the
-   representation absorbed provenance. **Not yet built.**
+
+1. **Encoder probe — RUN 2026-08-12. FIRES.** `training/tokenizer/probe_provenance.py`, group-disjoint
+   (subject) linear readouts over the same embeddings:
+
+   | probe | balanced accuracy | classes |
+   |---|---:|---:|
+   | dataset identity | **0.7019** | 32 |
+   | activity, class-count matched | **0.5002** | 32 |
+   | margin | **+0.2017** | |
+   | within-placement provenance, excess over chance | 0.5814 | 13 placements |
+
+   At matched class count the encoder reads *which study this is* 20 points more sharply than *what
+   the person is doing*, and provenance stays readable even among streams sharing a body location.
+
+   **A correction on the metric:** the first version compared excess-over-chance across a 32-class
+   and a 211-class problem and reported a 4.3x ratio. That is not a fair comparison — more classes
+   lowers chance while making the task harder, so the two excesses are not on one scale. The
+   class-count-matched margin above (+0.20) is the honest number, roughly half the impression the
+   ratio gave.
+
+   **Scope:** this is the CURRENT checkpoint, which does **not** carry `sensor_bias` in the trunk. So
+   provenance absorption is pre-existing, not caused by the redesign — but it means the sensor-
+   granularity retrain starts from an already-compromised position. Re-run after that retrain; if the
+   margin grows, `sensor_bias` comes out of the trunk and becomes a bank-only field.
 2. **Phase-B retrieval-provenance guard** — does enabling the bias blend shift retrieval toward the
    query's own dataset, against a placement-matched baseline? Measures the harm directly rather than
    proxying it. **Not yet built.**
@@ -281,11 +302,36 @@ boundary of the effect, not a counterexample.
   robust is the *contrast*, since every stream passes through the same encoder on the same events.
 - **Same-protocol only.** Each label is scored against its own stream's other labels, so the number
   means "can this config tell this concept from its neighbours here", not an absolute.
-- **NO GENERALISATION TO UNSEEN PAIRS.** `gate_tensor` is a lookup; unmeasured (stream, label) pairs
-  return `default=0.5`, neither veto nor licence. At deployment with a novel label there is no
-  estimate. **This is precisely where language would have to do the work** — predicting resolvability
-  for an unseen (placement, concept) pair from their descriptions — and it is unbuilt. It is also the
-  one remaining place the language interface could earn its keep after failing everywhere else.
+- **Generalisation to unseen pairs: PARTIAL.** See the learned predictor below. `gate_tensor` remains
+  a lookup with `default=0.5` for unmeasured pairs — neither veto nor licence.
+
+## Learned resolvability from text — MEASURED 2026-08-12. Rank signal, insufficient accuracy.
+
+`training/evidence/resolvability_predictor.py`. Learns `(placement description, concept description)
+→ resolvability` from SBERT embeddings, supervised by the measured table, and evaluated with **entire
+concepts held out** (25% of labels, 5 seeds) so every test pair involves a concept whose
+resolvability was never seen at any placement — the deployment condition.
+
+| metric | value | reading |
+|---|---:|---|
+| mean Pearson r | **+0.455** (positive on 5/5 seeds) | text gets the ORDER right |
+| mean skill score vs. a constant | **−0.086** (2/5 seeds positive) | it does NOT beat the training mean on error |
+| after affine recalibration on train | −0.086 | miscalibration was **not** the problem |
+
+**Language knows which placement is better for a concept it has never been measured on, but not by
+how much.** That is a real signal and an insufficient one. Consequences:
+
+- The gate keeps its **measured lookup**; unseen pairs keep the neutral default. Feeding raw
+  predicted values in as weights would inject noise a constant beats.
+- A rank-only use (relative down-weighting within one candidate set, never absolute) is the form the
+  signal could actually support, and is untried.
+- The likeliest cause is data volume: only ~80 streams contribute, and only five datasets have
+  simultaneous streams. More paired recordings is the direct lever.
+
+This is also the fairest test the language interface has been given. The parity ablation asked "which
+concept is this" and got +0.0086. This asks "can this sensor witness this concept" — a question about
+body mechanics rather than semantics — and gets r=0.46. Weaker than needed, but the first place text
+has shown any real structure in this project.
 
 ---
 
