@@ -198,6 +198,27 @@ def stream_sensor_bias(dataset: str, stream: str, modalities: Sequence[str]) -> 
     return torch.tensor(rows, dtype=torch.float32)
 
 
+def _pad_sensor_rows(batch: list[dict], key: str, width: int | None = None) -> torch.Tensor | None:
+    """Stack a ragged per-sensor field to (B, N_max, ...), zero-padded.
+
+    Sensor count varies across a batch (accel-only streams carry one, acc+gyro carry two), so the
+    per-sensor conditioning tensors are ragged exactly like ``sensor_texts``. Padding rows are zero
+    and are masked downstream by ``sensor_present``, which is derived from the text-id table — a
+    padded slot never has a real description, so it can never be mistaken for a measured sensor.
+    """
+    if key not in batch[0] or batch[0][key] is None:
+        return None
+    rows = [item[key] for item in batch]
+    n_max = max(r.shape[0] for r in rows)
+    if width is None:
+        width = rows[0].shape[1] if rows[0].dim() > 1 else None
+    shape = (len(rows), n_max) + ((width,) if width is not None else ())
+    out = torch.zeros(shape, dtype=rows[0].dtype)
+    for i, r in enumerate(rows):
+        out[i, :r.shape[0]] = r
+    return out
+
+
 def stream_sensor_texts(
     dataset: str,
     stream: str,
@@ -548,6 +569,18 @@ class PretrainDataset(Dataset):
             "role_texts": role_texts6,
             "sensor_texts": list(sample.sensor_descriptions or sensor_texts),
             "sensor_id": sensor_id6,
+            # Third conditioning vector (design of record). Rows follow the SAME order as
+            # sensor_texts, which is [accel?, gyro?] — so the modality list is derived from which
+            # modalities the stream actually carries, not assumed.
+            "sensor_bias": stream_sensor_bias(
+                ref.dataset, ref.stream,
+                [m for m, present in (("accel", bool(any(ref.mask[:3]))),
+                                      ("gyro", bool(any(ref.mask[3:])))) if present] or ["accel"],
+            ),
+            # Placement group id per sensor. The sensor-mask JEPA objective uses this to refuse
+            # cross-placement prediction; within one stream every sensor shares a placement, so
+            # this is constant here and becomes meaningful when paired streams are fused.
+            "sensor_placement": torch.zeros(len(sensor_texts), dtype=torch.long),
             "channel_mask": mask6,
             "gravity_state": sample.gravity_state,
             "augmentations": tuple(sample.applied_augmentations),
@@ -763,6 +796,7 @@ class MultiScaleCollate:
             out_b = self._collate_impl([item["view_b"] for item in batch], ps)
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "texts",
                       "role_texts", "sensor_texts", "sensor_id",
+                      "sensor_bias", "sensor_placement",
                       "channel_mask", "patch_padding_mask", "augmentations"):
                 out[f"{k}_b"] = out_b[k]
         return out
@@ -824,6 +858,9 @@ class MultiScaleCollate:
             "sensor_texts": [item.get("sensor_texts") for item in batch],
             "sensor_id": (torch.stack([item["sensor_id"] for item in batch])
                           if "sensor_id" in batch[0] else None),
+            # Sensor-granularity conditioning (design of record). Ragged in the sensor axis.
+            "sensor_bias": _pad_sensor_rows(batch, "sensor_bias"),
+            "sensor_placement": _pad_sensor_rows(batch, "sensor_placement"),
             "labels": torch.tensor([item["label_id"] for item in batch]),
             "sources": [item.get("source", "?") for item in batch],   # per-window dataset (telemetry)
             "streams": [item.get("stream", "?") for item in batch],
@@ -909,6 +946,7 @@ class MultiResolutionCollate:
             out_b = self._collate_impl([item["view_b"] for item in batch], pair)
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "patch_durations",
                       "resolution_ids", "texts", "role_texts", "sensor_texts", "sensor_id",
+                      "sensor_bias", "sensor_placement",
                       "channel_mask", "patch_padding_mask", "augmentations"):
                 out[f"{k}_b"] = out_b[k]
         return out
@@ -996,6 +1034,9 @@ class MultiResolutionCollate:
             "sensor_texts": [item.get("sensor_texts") for item in batch],
             "sensor_id": (torch.stack([item["sensor_id"] for item in batch])
                           if "sensor_id" in batch[0] else None),
+            # Sensor-granularity conditioning (design of record). Ragged in the sensor axis.
+            "sensor_bias": _pad_sensor_rows(batch, "sensor_bias"),
+            "sensor_placement": _pad_sensor_rows(batch, "sensor_placement"),
             "labels": torch.tensor([item["label_id"] for item in batch]),
             "sources": [item.get("source", "?") for item in batch],
             "streams": [item.get("stream", "?") for item in batch],

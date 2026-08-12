@@ -42,10 +42,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from model.tokenizer.encoder import SetTokenizerEncoder
+from model.tokenizer.sensor_tokens import descriptor_retrieval_loss
 from training.tokenizer.losses_repr import (
     MASK_RATIO_TIME,
     make_mask_plan,
     make_per_resolution_mask_plan,
+    make_sensor_mask_plan,
     masked_ema_latent_loss,
     pair_contrast,
     phase_a_loss,
@@ -84,6 +86,11 @@ class PretrainConfig:
     # per-sensor IDENTITY text. Default MUST stay 'per_channel' (do-no-harm). asdict(cfg) serializes
     # both into the checkpoint config, so eval/reconstruction picks up the arm automatically.
     text_conditioning: str = "per_channel"
+    # Design of record: 'sensor' folds each modality triad into ONE token, retires role text, and
+    # enables the sensor-mask + descriptor-mask JEPA strategies. Default stays 'channel'
+    # (do-no-harm); asdict(cfg) serializes it so eval reconstructs the right arm.
+    token_granularity: str = "channel"
+    descriptor_weight: float = 0.5        # weight on the descriptor-retrieval term
     gate_bias_init: float = -2.0          # factored fusion identity-gate bias at init (sigma~=0.12)
     # NB: the `pretrain` CLI defaults multiresolution=True (the diagnostic-confirmed winner); this
     # dataclass default stays False so direct constructors (e.g. grad_check) get the single-res encoder.
@@ -216,6 +223,7 @@ class PipelineAModel(nn.Module):
             dim_feedforward=cfg.dim_feedforward, dropout=cfg.dropout, dft_size=DFT_SIZE,
             frontend=cfg.frontend,                # 'fixed' (default) | 'learnable'
             text_conditioning=cfg.text_conditioning,  # 'per_channel' (default) | 'factored'
+            token_granularity=cfg.token_granularity,  # 'channel' (default) | 'sensor'
             gate_bias_init=cfg.gate_bias_init,
             use_duration_embedding=cfg.multiresolution,
             duration_min_seconds=min(cfg.short_patch_choices),
@@ -878,6 +886,10 @@ def main() -> None:
                         help="config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). "
                              "'per_channel' = one description per channel; 'factored' (the CLI "
                              "DEFAULT) = per-channel ROLE text + per-sensor IDENTITY text.")
+    parser.add_argument("--token-granularity", choices=("channel", "sensor"), default=None,
+                        help="token granularity (docs/design/DESIGN_OF_RECORD.md). 'channel' = one "
+                             "token per channel (legacy); 'sensor' = fold each modality triad into "
+                             "one token and enable the sensor-mask + descriptor-mask objectives.")
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
                         help="override multiresolution (default ON); --no-multiresolution is the "
                              "single-resolution ablation")
@@ -962,6 +974,8 @@ def main() -> None:
     )
     if args.text_conditioning is not None:
         cfg.text_conditioning = args.text_conditioning
+    if args.token_granularity is not None:
+        cfg.token_granularity = args.token_granularity
     if args.multiresolution is not None:
         cfg.multiresolution = args.multiresolution
     if args.jepa_weight is not None:
@@ -1536,8 +1550,38 @@ def main() -> None:
             for names in traces:
                 augmentation_counts.update(names)
 
+        sensor_granularity = cfg.token_granularity == "sensor"
+        sensor_bias = batch.get("sensor_bias")
+        sensor_placement = batch.get("sensor_placement")
+        if sensor_bias is not None:
+            sensor_bias = sensor_bias.to(device, non_blocking=True)
+        if sensor_placement is not None:
+            sensor_placement = sensor_placement.to(device, non_blocking=True)
+        descriptor_mask = None
+
         if cfg.jepa_weight > 0:
-            if cfg.multiresolution:
+            if sensor_granularity:
+                # Sensor granularity: the mask grid is (B,P,S), and the planner also emits the
+                # descriptor mask. `sensor_present` is not known until the fold runs inside the
+                # encoder, so approximate it here from which sensor slots carry a real description
+                # (a padded slot has an all-zero bias row and no text) — the encoder re-derives the
+                # authoritative mask and intersects, so an over-permissive guess cannot mask a
+                # sensor that does not exist.
+                # n_max across the batch, NOT sample 0's count: sensor counts are ragged (an
+                # accel-only stream carries one, acc+gyro carry two) and the text-id table is padded
+                # to the batch maximum, which is the width the encoder derives N from.
+                sensor_text_lists = batch.get("sensor_texts") or [[]]
+                n_sensors = max((len(texts) for texts in sensor_text_lists), default=1) or 1
+                present = torch.tensor(
+                    [[i < len(texts) for i in range(n_sensors)]
+                     for texts in sensor_text_lists],
+                    dtype=torch.bool, device=device)
+                plan = make_sensor_mask_plan(
+                    B, P, n_sensors, device=device, time_ratio=cfg.mask_ratio_time,
+                    valid_patches=patch_pad, sensor_present=present,
+                    sensor_placement=sensor_placement)
+                descriptor_mask = plan.descriptor_mask
+            elif cfg.multiresolution:
                 plan = make_per_resolution_mask_plan(
                     resolution_ids, C, GYRO_IDX, channel_mask=channel_mask,
                     valid_patches=patch_pad, time_ratio=cfg.mask_ratio_time)
@@ -1570,7 +1614,9 @@ def main() -> None:
             # per_channel (default): per-channel descriptions -> (B,C,S,384); UNCHANGED from before.
             # factored: ROLE text -> text_embs/text_masks; the per-sensor IDENTITY carried separately
             # (sensor_text_embs/masks/id), summed inside the fusion (docs/design/TEXT_CONDITIONING.md).
-            if cfg.text_conditioning == "factored":
+            if cfg.text_conditioning == "factored" or sensor_granularity:
+                # Sensor granularity needs the SENSOR half of the factored text (role text is
+                # retired once xyz folds into one token), so it always takes this branch.
                 (text_embs, text_masks, role_text_ids,
                  sensor_text_embs, sensor_text_masks, sensor_text_ids) = \
                     model.encoder.encode_texts_factored_unique(
@@ -1580,6 +1626,7 @@ def main() -> None:
                 text_embs, text_masks = model.encoder.encode_texts(enc_texts, device)
                 sensor_text_embs = sensor_text_masks = enc_sensor_id = None
                 role_text_ids = sensor_text_ids = None
+            granularity_kw = ({"sensor_bias": sensor_bias} if sensor_granularity else {})
             clean = encode_fn(sensor_tokens, text_embs, text_masks, positions,
                                          patch_durations=patch_durations,
                                          resolution_ids=resolution_ids,
@@ -1588,7 +1635,8 @@ def main() -> None:
                                          sensor_text_embs=sensor_text_embs,
                                          sensor_text_masks=sensor_text_masks,
                                          sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
-                                         sensor_text_ids=sensor_text_ids)
+                                         sensor_text_ids=sensor_text_ids,
+                                         **granularity_kw)
             z = model.vicreg_projector(clean["pooled"])
             if cfg.jepa_weight > 0:
                 masked = encode_fn(sensor_tokens, text_embs, text_masks, positions,
@@ -1600,8 +1648,18 @@ def main() -> None:
                                               sensor_text_embs=sensor_text_embs,
                                               sensor_text_masks=sensor_text_masks,
                                               sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
-                                              sensor_text_ids=sensor_text_ids)
-                jepa_mask = plan.token_mask & enc_channel_mask.unsqueeze(1) & patch_pad.unsqueeze(2)
+                                              sensor_text_ids=sensor_text_ids,
+                                              **granularity_kw,
+                                              **({"descriptor_mask": descriptor_mask}
+                                                 if sensor_granularity else {}))
+                if sensor_granularity:
+                    # The authoritative presence mask comes from the fold, not the pre-encoder
+                    # guess used to plan the mask.
+                    jepa_mask = (plan.token_mask & masked["sensor_present"].unsqueeze(1)
+                                 & patch_pad.unsqueeze(2))
+                else:
+                    jepa_mask = (plan.token_mask & enc_channel_mask.unsqueeze(1)
+                                 & patch_pad.unsqueeze(2))
             else:
                 masked = clean
                 jepa_mask = torch.zeros(clean["tokens"].shape[:3], dtype=torch.bool, device=device)
@@ -1641,6 +1699,12 @@ def main() -> None:
                         sensor_id=enc_sensor_id,
                         role_text_ids=role_text_ids,
                         sensor_text_ids=sensor_text_ids,
+                        # The teacher consumes the SAME `patches` as view A, so it inherits view A's
+                        # acquisition config automatically — no separate config draw exists here.
+                        # It sees the descriptor unmasked: the target must be the fully-informed
+                        # representation, or the student would be chasing a teacher handicapped the
+                        # same way it is.
+                        **granularity_kw,
                     )
                 jepa_prediction = model.jepa_predictor(masked["tokens"])
                 jepa_loss = masked_ema_latent_loss(
@@ -1657,7 +1721,12 @@ def main() -> None:
                     jepa_parts = {f"jepa/{k}": v for k, v in jepa_diag.items()}
                     if resolution_ids is not None:
                         with torch.no_grad():
-                            real = patch_pad.unsqueeze(2) & enc_channel_mask.unsqueeze(1)
+                            # Token-axis validity: sensors at sensor granularity, channels
+                            # otherwise. Using the channel mask against a (B,P,S) grid would
+                            # broadcast-error, and silently would be worse.
+                            token_valid = (masked["sensor_present"] if sensor_granularity
+                                           else enc_channel_mask)
+                            real = patch_pad.unsqueeze(2) & token_valid.unsqueeze(1)
                             for group, name in ((0, "short"), (1, "long")):
                                 group_tokens = resolution_ids.eq(group).unsqueeze(2) & real
                                 selected = jepa_mask & group_tokens
@@ -1683,6 +1752,21 @@ def main() -> None:
                 jepa_weight=cfg.jepa_weight,
                 vicreg_weight=cfg.vicreg_weight,
             )
+            # Descriptor-mask objective (design of record). Only the sensors whose descriptor was
+            # actually hidden are scored — an unmasked sensor's descriptor was fed to the encoder,
+            # so "reconstructing" it is a copy, not a prediction, and including those rows would
+            # report a high accuracy that means nothing.
+            descriptor_loss = out.total.new_zeros(())
+            descriptor_acc = 0.0
+            if sensor_granularity and descriptor_mask is not None and bool(descriptor_mask.any()):
+                score_rows = descriptor_mask & masked["sensor_present"]
+                if bool(score_rows.any()):
+                    descriptor_loss, acc = descriptor_retrieval_loss(
+                        masked["descriptor_pred"][score_rows],
+                        masked["descriptor"][score_rows].detach(),
+                    )
+                    descriptor_acc = float(acc)
+                    out.total = out.total + cfg.descriptor_weight * descriptor_loss
             frontend_reg = model.encoder.filterbank.adaptation_regularization()
             out.total = out.total + cfg.frontend_reg_weight * frontend_reg
             # Converting a CUDA scalar to float synchronizes the whole stream. These values are
@@ -1700,6 +1784,8 @@ def main() -> None:
                     "frontend_reg_weighted": float(
                         (cfg.frontend_reg_weight * frontend_reg).detach()),
                     **jepa_parts,
+                    "descriptor/loss": float(descriptor_loss.detach()),
+                    "descriptor/top1": descriptor_acc,
                 }
                 parts.update({f"vicreg/{key}": value
                               for key, value in pair_contrast(z, z_b).items()})

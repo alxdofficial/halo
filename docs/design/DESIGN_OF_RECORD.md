@@ -100,8 +100,20 @@ Phase-B vote-merge, never an attention operation (constraint 1).
 | **nuisance** | jitter, small scale, window crop, **text paraphrase** | independent per view | applies |
 | **config** | rotation_3d, rate, unit scale, gravity state, sensor dropout | **one draw per window per step, shared across ALL views** | does **not** apply |
 
-"All views" = VICReg view A + VICReg view B + **the JEPA teacher's clean view**. If the teacher's view
-is not transformed identically, JEPA silently re-imposes the invariance VICReg just stopped demanding.
+"All views" = VICReg view A + VICReg view B + the JEPA teacher's clean view.
+
+**Verified 2026-08-12:** the teacher is NOT a separate augmentation in this codebase — it consumes
+the same `patches` tensor as view A (`jepa_teacher.tokenize(patches, ...)`, or the shared fixed-arm
+analysis), so it inherits view A's configuration automatically. Sharing the draw between A and B is
+therefore sufficient, and the "third view" concern raised while designing this does not apply here.
+
+Implemented by generalising the pre-existing `shared_config_seed` hook, which previously covered only
+the sensor-text-dropout *decision*. That was not enough: the physical transforms draw their
+PARAMETERS internally (`_random_so3` from `np.random.randn`, rate from `np.random.uniform`, dropout
+from `_random.sample`), so a shared decision still left the two views rotated by different rotations
+to different rates — the same invariance demand one level down. `_shared_draw` now seeds and restores
+both module RNGs around each config transform. Measured: two views of one window come out with
+identical rate, channel mask and gravity state, while nuisance draws stay independent.
 
 **Why paraphrase is nuisance, not config:** the grouping rule is "did the underlying acquisition
 change," not "which field was touched". Paraphrase changes the wording of an identical
@@ -307,22 +319,38 @@ fingerprint guard.
 | retrieval-provenance guard | `training/evidence/admissible_retrieval.py` |
 | 30 gate tests | `tests/test_sensor_granularity.py`, `tests/test_admissible_retrieval.py` |
 
-**NOT YET BUILT — the integration seam.** Every component above exists and is tested in isolation;
-what remains is wiring them into the two running loops:
+**TRAINER INTEGRATION — BUILT AND SMOKE-TESTED 2026-08-12** (commit below):
 
-1. **`pretrain.py` trainer integration** — call `split_by_group()` and draw the config transform ONCE
-   per window per step across all three views (VICReg A, VICReg B, JEPA teacher); switch the mask
-   planner to `make_sensor_mask_plan`; add the descriptor-retrieval loss term; thread `sensor_bias`
-   and `descriptor_mask` into the forward. This is the largest remaining piece and the riskiest,
-   because the trainer is long and currently working.
-2. **`pretrain_data.py` batch emission** — emit `sensor_bias` and per-sensor placement ids per batch.
-3. **`build_memory.py` per-sensor rows** — emit `[feature, text_descriptor, sensor_bias]` per patch
+- shared config draw across views (`_shared_draw`, generalised `shared_config_seed`)
+- `sensor_bias` + `sensor_placement` emitted per batch, ragged-padded, carried to view B
+- `--token-granularity sensor` CLI flag, threaded into cfg and the encoder builder
+- `make_sensor_mask_plan` wired, with `descriptor_mask` and `sensor_bias` into both forwards and the
+  teacher; `jepa_mask` and the per-resolution diagnostic switched to the sensor presence mask
+- descriptor-retrieval loss added to the objective, scored ONLY on sensors whose descriptor was
+  actually hidden (an unmasked descriptor was fed to the encoder, so "reconstructing" it is a copy)
+- telemetry: `descriptor/loss`, `descriptor/top1`
+
+**300-step smoke, both arms, real corpus subset** (5 datasets, batch 16):
+
+| arm | jepa | total | descriptor top1 | AMP skips | val_knn_ba |
+|---|---|---|---|---|---|
+| sensor | 0.997 → 0.047 | 25.0 → 13.5 | 0.0 → 0.67–1.0 | 2 | 0.2395 |
+| channel | 1.031 → 0.041 | 24.2 → 10.6 | n/a | 0 | 0.2789 |
+
+No persistent NaN (the step-1 value is AMP scaler startup). The sensor arm's val is *lower* here, but
+300 steps on a 5-dataset subset is far below the 3k-step screening noise floor (sd 0.0065) — it
+carries no signal and must not be read as an arm comparison.
+
+**STILL NOT BUILT:**
+
+1. **`build_memory.py` per-sensor rows** — emit `[feature, text_descriptor, sensor_bias]` per patch
    per sensor (~7M rows) instead of per patch.
-4. **`resolvability` estimation** — the (source config, target config, candidate) table the
-   admissibility gate consumes. Stage 1 currently accepts it as an argument; nothing produces it yet.
-   The paired multi-stream recordings (sp_sw_har, xrf_v2, opportunity, realdisp, mmfit) are the
-   intended source.
-5. **Encoder dataset-ID probe** — the decisive fingerprint guard, since `sensor_bias` enters the trunk.
+2. **`resolvability` estimation** — the (source config, target config, candidate) table the
+   admissibility gate consumes. Stage 1 accepts it as an argument; nothing produces it yet. The
+   paired multi-stream recordings (sp_sw_har, xrf_v2, opportunity, realdisp, mmfit) are the intended
+   source. **This is the critical path: admissibility is the contribution, and a null result here
+   changes what Phase A should be optimising for.**
+3. **Encoder dataset-ID probe** — the decisive fingerprint guard, since `sensor_bias` enters the trunk.
 
 **Unmeasured and load-bearing:** whether cross-config enrollment works at all; whether the bias term
 is physics or fingerprint; whether the redesign moves the parity number off +0.0086.

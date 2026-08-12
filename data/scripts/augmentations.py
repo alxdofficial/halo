@@ -28,6 +28,7 @@ _SENSOR_TOKEN_RE = re.compile(
 # (the loader appends the "sampled at NHz" suffix from sample.sampling_rate).
 
 import random as _random
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from dataclasses import fields as _dc_fields
 from fractions import Fraction
@@ -398,6 +399,26 @@ def _mark_gravity_removed(desc: str) -> str:
     return d
 
 
+@contextmanager
+def _shared_draw(seed: int):
+    """Seed BOTH module RNGs for the duration, then restore them exactly.
+
+    The config transforms draw their parameters from the module-level ``random`` and ``np.random``
+    generators, so making a transform reproducible across views means seeding those, not passing an
+    rng object. State is saved and restored so the surrounding nuisance draws stay independent — a
+    view whose nuisance stream got reseeded would silently become a duplicate of its partner.
+    """
+    py_state = _random.getstate()
+    np_state = np.random.get_state()
+    _random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
+    try:
+        yield
+    finally:
+        _random.setstate(py_state)
+        np.random.set_state(np_state)
+
+
 def _random_so3() -> "torch.Tensor":
     """Uniform-random rotation matrix (3x3, float32) from SO(3) (Haar measure).
 
@@ -427,26 +448,47 @@ class IMUAugmenter:
                  ) -> "IMUSample":
         """Apply the configured augmentations in ORDER.
 
-        ``shared_config_seed`` makes the CONFIG-BEARING sensor-text dropout deterministic for a given
-        window, so the two VICReg views of that window make the SAME dropout decision. Without it,
-        the views draw independently and ~2p(1-p) of positive pairs end up with the config described
-        in one view and neutralised in the other; the invariance term then trains ``embed(config) ==
-        embed(no config)``, i.e. pressure to IGNORE the acquisition config — the opposite of the
-        config-conditional ("salient, not invariant") thesis. Sharing the decision keeps the
-        graceful-degradation lesson (both views config-less) without ever demanding that equality.
-        Signal augmentations stay independent — that is what makes the pair a positive.
+        ``shared_config_seed`` makes every CONFIG_GROUP augmentation deterministic for a given
+        window, so all views of that window (VICReg A, VICReg B, and the JEPA teacher) see the SAME
+        acquisition configuration. NUISANCE_GROUP augmentations still draw independently — that is
+        what makes the pair a positive.
+
+        WHY THE PARAMETERS, NOT JUST THE DECISION. An earlier revision shared only the
+        sensor-text-dropout *decision*, with the right argument: if one view describes the config and
+        the other neutralises it, the invariance term trains ``embed(config) == embed(no config)``,
+        i.e. pressure to IGNORE acquisition config — the opposite of the thesis. But the physical
+        config transforms draw their parameters INTERNALLY (``_random_so3`` from ``np.random.randn``,
+        rate from ``np.random.uniform``, dropout from ``_random.sample``), so sharing only the
+        decision leaves both views rotated by DIFFERENT rotations to different rates. VICReg then
+        demands invariance to the difference, which is the same failure one level down.
+
+        Measured 2026-08-11: under the undifferentiated stack, config conditioning was worth
+        +0.0086 kNN-BA against a 0.0065 noise floor, sign-flipping on half the cohort — nothing.
+        Seeding both module RNGs around the transform makes the drawn rotation, target rate, gravity
+        decision and dropped channels identical across views, so the config becomes a property of
+        the sample rather than a difference to be erased.
         """
-        for name in AugmentationConfig.ORDER:
+        for index, name in enumerate(AugmentationConfig.ORDER):
             spec = getattr(self.cfg, name)
             if not spec.enabled:
                 continue
-            rng = _random
-            if name == "sensor_text_dropout" and shared_config_seed is not None \
-                    and getattr(spec, "shared_across_views", True):
-                rng = _random.Random(shared_config_seed)
-            if rng.random() >= spec.p:
+            shared = (shared_config_seed is not None
+                      and name in AugmentationConfig.CONFIG_GROUP
+                      and getattr(spec, "shared_across_views", True))
+            if shared:
+                # Derive a per-(window, transform) seed deterministically. Not hash(): PYTHONHASHSEED
+                # randomises it per process, so two dataloader workers would disagree about the same
+                # window's configuration.
+                with _shared_draw(shared_config_seed * 1_000_003 + index):
+                    if _random.random() >= spec.p:
+                        continue
+                    sample = (self._sensor_text_dropout(sample, spec, _random)
+                              if name == "sensor_text_dropout"
+                              else getattr(self, "_" + name)(sample, spec))
                 continue
-            sample = (self._sensor_text_dropout(sample, spec, rng)
+            if _random.random() >= spec.p:
+                continue
+            sample = (self._sensor_text_dropout(sample, spec, _random)
                       if name == "sensor_text_dropout"
                       else getattr(self, "_" + name)(sample, spec))
         return sample
