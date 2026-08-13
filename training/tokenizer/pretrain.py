@@ -1624,10 +1624,17 @@ def main() -> None:
         # Objective gradient telemetry re-walks the graph with retain_graph=True; disable Inductor's
         # donated-buffer optimization so the diagnostic backward remains valid.
         import torch._functorch.config as functorch_config
+        import torch._dynamo.config as dynamo_config
         functorch_config.donated_buffer = False
         # Backward executes after leaving autocast below. This explicit setting follows PyTorch's
         # compiled-AMP contract instead of relying on its "same_as_forward" default assumption.
         functorch_config.backward_pass_autocast = "off"
+        # Dynamic patch/sensor shapes can expose an unsupported Inductor specialization even after
+        # hundreds of successful compiled updates (observed immediately after the step-1000
+        # validation on torch 2.9.0+cu128). Compilation is an optimization, not part of the model:
+        # fall back to the identical eager transformer for a graph the backend cannot lower instead
+        # of terminating an otherwise healthy run.
+        dynamo_config.suppress_errors = True
         model.encoder._compiled_transformer_forward = torch.compile(
             model.encoder.transformer.forward, dynamic=True)
         if jepa_teacher is not None:
