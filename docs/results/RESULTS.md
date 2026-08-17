@@ -31,6 +31,11 @@ external frozen-feature linear head. Specialized activities are at identity pari
 fall 1.39 points below it at k=16. Full generated tables are in
 `eval/adaptation_tables/v1_d85761d_stage2/`.
 
+“Ordinary” denotes the four held-out population locomotion/daily-activity datasets. “Specialized
+novel” denotes the three held-out clinical, rehabilitation, and fine-grained upper-limb datasets; it
+is a predefined evaluation proxy, not a claim that every underlying movement is physically new. The
+complete model-by-k tables, including k=0, are in `PHASE_B_TRAINING_STATUS.md`.
+
 Under one matched fixed-one-second transfer protocol, the older sensor checkpoint scores 0.617 mean
 kNN balanced accuracy and the current checkpoint scores 0.509 across the same seven held-out datasets
 (-0.108). This removes evaluation patching as the explanation for the gap, but corpus and training

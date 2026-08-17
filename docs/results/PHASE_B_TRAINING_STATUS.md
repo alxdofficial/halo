@@ -96,36 +96,44 @@ gate instead of the selected Stage-2 checkpoint. Those outputs are excluded from
 evaluator now requires an explicit predictor path, and the assembler reports paired intervals
 separately by action regime, label mode, and k.
 
-**Semantic zero-shot macro F1**
+The action regimes are fixed before scoring. **Ordinary** contains InclusiveHAR, USC-HAD, TNDA-HAR,
+and UT-Complex: population locomotion and daily activities. **Specialized novel** contains Monipar,
+SPAR, and Upper Limb Use: held-out clinical motor assessments, shoulder rehabilitation exercises,
+and fine-grained upper-limb tasks outside the Phase-B training ontology. “Novel” describes the
+held-out dataset/category regime; it does not claim that every underlying motion is physically
+unprecedented. Random aliases are a separate binding control and are not what defines this regime.
 
-| representation and method | ordinary | specialized novel |
-|---|---:|---:|
-| CrossHAR + ConSE | **37.01** | 10.88 |
-| HARNet + ConSE | 33.82 | 11.40 |
-| UniMTS + ConSE | 32.70 | **19.24** |
-| LiMU-BERT + ConSE | 27.60 | 9.11 |
-| HALO Stage 2 | 23.75 | 9.81 |
-| HALO identity retrieval | 23.99 | 7.95 |
-| ImageBind + ConSE | 11.38 | 8.15 |
-| NormWear + ConSE | 5.08 | 3.58 |
+At k=0, external models use their matched ConSE zero-shot bridge and HALO has no enrolled support.
+At positive k, each external row fits the common 200-step linear head on k labeled executions per
+class while freezing its representation; HALO performs gradient-free memory enrollment.
 
-**Coherent enrollment macro F1**
+**Ordinary activities, macro F1**
 
-| regime and method | k=1 | k=2 | k=4 | k=8 | k=16 |
-|---|---:|---:|---:|---:|---:|
-| ordinary, HALO Stage 2 | 44.79 | 48.89 | 51.36 | 51.18 | 49.32 |
-| ordinary, HALO identity | 45.71 | 49.60 | 52.89 | 53.20 | 50.93 |
-| ordinary, HALO ridge | 46.66 | 50.25 | 54.00 | 53.82 | 49.95 |
-| ordinary, strongest external linear head | 54.81 | 61.00 | 65.49 | 66.69 | 65.05 |
-| specialized, HALO Stage 2 | 28.62 | 29.20 | 39.74 | 43.10 | 45.53 |
-| specialized, HALO identity | 28.58 | 29.11 | 39.69 | 43.41 | 46.92 |
-| specialized, HALO ridge | 30.56 | 30.64 | 41.43 | 44.48 | 48.05 |
-| specialized, strongest external linear head | 38.95 | 39.38 | 55.23 | 61.34 | 66.37 |
+| model | k=0 | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|---:|---:|
+| HALO Stage 2 | 23.75 | 44.79 | 48.89 | 51.36 | 51.18 | 49.32 |
+| HARNet | 33.82 | 51.35 | 56.63 | 61.56 | 62.77 | 59.73 |
+| CrossHAR | **37.01** | 51.94 | 57.46 | 63.02 | 63.53 | 61.37 |
+| LiMU-BERT | 27.60 | 54.26 | **61.00** | 64.80 | 64.65 | 60.29 |
+| UniMTS | 32.70 | **54.81** | 59.92 | **65.49** | **66.69** | **65.05** |
+| ImageBind | 11.38 | 45.17 | 53.12 | 58.48 | 58.98 | 55.94 |
+| NormWear | 5.08 | 35.81 | 42.43 | 46.81 | 46.76 | 44.99 |
 
-The strongest external row may name a different model at each k; the generated table contains every
-model separately. The common external linear head fits 200 optimization steps to the k labeled
-executions per class while keeping each representation frozen. It is a common label-efficiency
-control, not model-native end-to-end fine-tuning.
+**Specialized novel activities, macro F1**
+
+| model | k=0 | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|---:|---:|
+| HALO Stage 2 | 9.81 | 28.62 | 29.20 | 39.74 | 43.10 | 45.53 |
+| HARNet | 11.40 | 34.72 | 37.54 | 54.40 | **61.34** | **66.37** |
+| CrossHAR | 10.88 | 32.20 | 36.35 | 46.69 | 49.07 | 51.12 |
+| LiMU-BERT | 9.11 | 28.95 | 31.12 | 38.29 | 39.40 | 39.96 |
+| UniMTS | **19.24** | **38.95** | **39.38** | **55.23** | 61.04 | 65.17 |
+| ImageBind | 8.15 | 29.19 | 32.91 | 40.36 | 44.98 | 48.53 |
+| NormWear | 3.58 | 25.31 | 25.94 | 33.89 | 36.36 | 38.19 |
+
+The positive-k comparison is a common label-efficiency control, not model-native end-to-end
+fine-tuning. k=16 has fewer eligible datasets because some cohorts lack 16 independent executions;
+comparisons between models within a given k remain matched.
 
 Paired subject bootstrap intervals support a narrow conclusion. On ordinary activities, Stage 2
 minus identity is -0.23 at k=1 (95% CI -0.78 to 0.26), -0.38 at k=2 (-0.77 to -0.00), -1.06 at k=4
