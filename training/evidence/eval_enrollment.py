@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +110,26 @@ def _write_json(path: Path, payload: dict) -> None:
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     os.replace(temporary, path)
+
+
+def _git_provenance() -> dict:
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=_REPO, text=True
+        ).strip()
+        dirty = bool(subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=_REPO, text=True
+        ).strip())
+    except (OSError, subprocess.CalledProcessError):
+        commit, dirty = None, None
+    return {"git_commit": commit, "git_dirty": dirty}
+
+
+def _predictor_step(predictor: dict) -> int | None:
+    step = predictor.get("checkpoint_step")
+    if step is None:
+        step = predictor.get("provenance", {}).get("stage2", {}).get("step")
+    return int(step) if step is not None else None
 
 
 def phase_b_evaluation_source_fingerprint(paths=None) -> str:
@@ -1094,7 +1115,10 @@ def main() -> None:
         _REPO / "training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt",
     )))
     parser.add_argument("--bank", type=Path, default=_OUT / "memory_bank.pt")
-    parser.add_argument("--predictor", type=Path, default=_OUT / "admissibility_gate.pt")
+    parser.add_argument(
+        "--predictor", type=Path, required=True,
+        help="explicit Stage-1 or selected Stage-2 predictor artifact",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--datasets", nargs="*", default=None,
                         help="explicit override; otherwise --protocol-role selects the sealed roster")
@@ -1655,6 +1679,8 @@ def main() -> None:
     if capabilities["limitations"]:
         print("[coverage] " + "; ".join(capabilities["limitations"]), flush=True)
     _write_json(out, {
+        "schema_version": 1,
+        **_git_provenance(),
         "results": results,
         "random_aliases": bool(args.random_aliases),
         "support": args.support,
@@ -1719,7 +1745,7 @@ def main() -> None:
         "predictor_fp": predictor_fp,
         # Which arm produced this file. Comparisons across checkpoints are only meaningful when
         # these agree on everything except the step, so they are recorded, not inferred.
-        "predictor_step": predictor.get("checkpoint_step"),
+        "predictor_step": _predictor_step(predictor),
         "predictor_selection": predictor.get("checkpoint_selection"),
         "untrained_control": bool(predictor.get("untrained_control", False)),
         "training_regime": recorded_regime,

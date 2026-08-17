@@ -5,7 +5,8 @@
 > [`training/evidence/README.md`](../../training/evidence/README.md). This file owns completed-run
 > results, current readiness, and their interpretation.
 >
-> Last updated: 2026-08-17. The current rank-8 per-sensor admissibility experiment is recorded below.
+> Last updated: 2026-08-17. The current rank-8 per-sensor admissibility experiment and matched
+> five-seed adaptation suite are recorded below.
 > Its checkpoint was selected on internal and external development results before the frozen test
 > roster was opened. No test result was used for fitting, checkpoint selection, or configuration
 > changes. Later sections retain historical relational-decoder results for comparison only.
@@ -23,7 +24,7 @@ outperforms closed-form retrieval on held-out datasets.
 | schema-5 memory bank | ready: 250,000 windows, 1,350,834 patches, 2,629,972 sensor rows, fp `34e1ce91c843f1b2` | descriptor text/modality/gravity are stored and fingerprinted |
 | schema-2 resolvability table | ready: 110 sensors, 1,664 train-only cells, bound to the selected checkpoint | valid gate-fitting source |
 | bound admissibility gate | ready: artifact version 4, rank 8, bound to the schema-5 bank | Stage 2 is finite, reaches every gate module, and has completed external evaluation |
-| current enrollment curves | complete: 3 development and 7 test datasets | coherent and arbitrary-label protocols both include retrieval, support-removal, label-shuffle, prototype, and ridge controls |
+| current enrollment curves | complete: 3 development datasets and a matched five-seed suite over 7 test datasets | coherent and arbitrary-label protocols include retrieval, support-removal, label-shuffle, prototype, and ridge controls; six external representations use the same episodes |
 
 The selected Phase-A checkpoint records `git='8e64e39-dirty'`. Its weights, configuration, corpus
 fingerprint, and fixed behavioral probes make development use auditable, but the source tree that
@@ -73,12 +74,87 @@ held-out margin over identity retrieval is effectively zero.
 
 | mechanism | checkpoint/bank | dev | test | status |
 |---|---|---:|---:|---|
-| current per-sensor admissibility | current 27k / schema 5 / Stage-2 step 1,000 | measured | measured once after selection | pipeline valid; test parity with identity retrieval, not a learned Stage-2 win |
+| current per-sensor admissibility | current 27k / schema 5 / Stage-2 step 1,000 | measured | five matched seeds plus six external representations | pipeline valid; test is near or below identity retrieval, not a learned Stage-2 win |
 | parked relational v22 | historical channel checkpoint / schema 3 | measured | not the main v22 run | retained below |
 | parked relational checkpoint study | Phase-A 4k and 30k / schema 3 | measured | measured once after selection | retained in Section 9 |
 | frozen HARNet enrollment control | released HARNet trunk | measured | measured once | retained in Section 10 |
 
-## Current Rank-8 Run: 2026-08-17
+## Matched Adaptation Suite: 2026-08-17
+
+The paper-facing suite is under `eval/adaptation_results/v1_d85761d_stage2/`; assembled output is
+under `eval/adaptation_tables/v1_d85761d_stage2/`. It uses source revision `d85761d`, manifest
+fingerprint `1bd89d35f5aed197`, predictor fingerprint `64af1db442d9cc75`, bank fingerprint
+`34e1ce91c843f1b2`, and manifest seeds 20260808 through 20260812. The seven test datasets have no
+dataset overlap with the 18-source Phase-A corpus, gate fitting data, or memory bank. Supports and
+queries are execution-disjoint, k counts executions per candidate, candidate rosters are serialized,
+and the headline is an unweighted macro average over datasets. Full support-removal and label-shuffle
+controls run on the first seed; positive-k primary curves use five seeds, while deterministic k=0 is
+scored once.
+
+During the pre-assembly audit, an initial HALO invocation was found to have used the default Stage-1
+gate instead of the selected Stage-2 checkpoint. Those outputs are excluded from this section. The
+evaluator now requires an explicit predictor path, and the assembler reports paired intervals
+separately by action regime, label mode, and k.
+
+**Semantic zero-shot macro F1**
+
+| representation and method | ordinary | specialized novel |
+|---|---:|---:|
+| CrossHAR + ConSE | **37.01** | 10.88 |
+| HARNet + ConSE | 33.82 | 11.40 |
+| UniMTS + ConSE | 32.70 | **19.24** |
+| LiMU-BERT + ConSE | 27.60 | 9.11 |
+| HALO Stage 2 | 23.75 | 9.81 |
+| HALO identity retrieval | 23.99 | 7.95 |
+| ImageBind + ConSE | 11.38 | 8.15 |
+| NormWear + ConSE | 5.08 | 3.58 |
+
+**Coherent enrollment macro F1**
+
+| regime and method | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|---:|
+| ordinary, HALO Stage 2 | 44.79 | 48.89 | 51.36 | 51.18 | 49.32 |
+| ordinary, HALO identity | 45.71 | 49.60 | 52.89 | 53.20 | 50.93 |
+| ordinary, HALO ridge | 46.66 | 50.25 | 54.00 | 53.82 | 49.95 |
+| ordinary, strongest external linear head | 54.81 | 61.00 | 65.49 | 66.69 | 65.05 |
+| specialized, HALO Stage 2 | 28.62 | 29.20 | 39.74 | 43.10 | 45.53 |
+| specialized, HALO identity | 28.58 | 29.11 | 39.69 | 43.41 | 46.92 |
+| specialized, HALO ridge | 30.56 | 30.64 | 41.43 | 44.48 | 48.05 |
+| specialized, strongest external linear head | 38.95 | 39.38 | 55.23 | 61.34 | 66.37 |
+
+The strongest external row may name a different model at each k; the generated table contains every
+model separately. The common external linear head fits 200 optimization steps to the k labeled
+executions per class while keeping each representation frozen. It is a common label-efficiency
+control, not model-native end-to-end fine-tuning.
+
+Paired subject bootstrap intervals support a narrow conclusion. On ordinary activities, Stage 2
+minus identity is -0.23 at k=1 (95% CI -0.78 to 0.26), -0.38 at k=2 (-0.77 to -0.00), -1.06 at k=4
+(-1.73 to -0.40), and -1.70 at k=8 (-2.68 to -0.77). Specialized activities are statistically at
+parity through k=8; k=16 is -0.99 (-1.62 to -0.39). The learned gate therefore does not improve the
+enrollment mechanism as a whole.
+
+Arbitrary labels produce the intended neutral-gate behavior: learned and identity retrieval are
+exactly equal. Their ordinary curve is 46.26, 50.27, 53.43, 53.35, 50.73; the specialized curve is
+30.66, 30.39, 41.35, 44.62, 47.51. On the first seed, removing support reduces the arbitrary-label
+dataset-macro range to 1.90-2.58 and shuffling support labels reduces it to 3.17-12.23. This is strong
+evidence that labeled enrollment drives prediction, but no evidence that Stage 2 improves arbitrary
+label binding because semantic admissibility is deliberately neutral there.
+
+This binding ability is not yet a representation-quality win. Against training-free nearest-support
+controls under arbitrary labels, HALO trails LiMU-BERT and UniMTS at every k in both regimes, and
+also trails CrossHAR and HARNet at most points. The result validates the protocol and memory
+mechanism, while locating the remaining deficit primarily in representation/retrieval quality.
+
+The suite is valid for matched model comparisons within a given k. It has three interpretation
+limits. First, k=16 covers fewer datasets because some cohorts lack 16 independent executions;
+cross-k changes must be read with the dataset-count column. Second, counterfactual controls have one
+seed rather than five. Third, this test roster has now informed diagnosis, so future design selection
+requires a newly sealed confirmation roster.
+
+## Initial Rank-8 Run: 2026-08-17
+
+> Superseded for paper comparison by the matched five-seed suite above. Retained as the development
+> and checkpoint-selection record.
 
 Artifacts are under `training/evidence/outputs/admissibility_stage2_rank8_20260817/`. Stage 1 fitted
 the rank-8 gate in 8.25 seconds. Stage 2 ran for 2,000 optimizer steps with four independent episodes
@@ -135,18 +211,12 @@ out-of-vocabulary aliases receive neutral admissibility. Removing the enrolled r
 arbitrary-label mean to 3.22; shuffling their episode-local label bindings reduces it to 10.03. The
 memory therefore provides genuine adaptation, but Stage 2 does not improve that path.
 
-### Matched k=0 Baseline Gap
+### Historical k=0 Gap, Now Resolved
 
-A current matched coherent k=0 baseline table does not yet exist. The completed eight-model baseline
-table is protocol v4 (93 labels and the older seven-dataset roster). This run is protocol v5 (166
-labels and a different held-out roster). Running `python -m eval.assemble_table` correctly refuses to
-combine them: 112 required cells are stale or missing. HARNet's current enrollment control also
-starts at k=1 because it deliberately removes HARNet's fitted global-vocabulary classifier.
-
-The final zero-support table must rerun HARNet, CrossHAR, UniMTS, LiMU-BERT, ImageBind, and NormWear
-on the current query windows, native candidate sets, preprocessing, and macro-F1 aggregation. Until
-that is done, only HALO's within-protocol coherent k=0 controls above are valid. No method receives an
-arbitrary-label k=0 entry.
+At the time of this initial run, a matched coherent k=0 table did not exist. The five-seed suite above
+has now run HARNet, CrossHAR, UniMTS, LiMU-BERT, ImageBind, and NormWear on the serialized current
+query windows and candidate rosters. Arbitrary-label k=0 remains N/A because the class-to-alias
+permutation is unidentifiable without enrollment.
 
 Held-out coherent results are heterogeneous:
 
@@ -164,8 +234,8 @@ Held-out coherent results are heterogeneous:
 poor fitted-gate initialization, and labeled memory demonstrably drives arbitrary-label adaptation.
 The scientific result is still modest: coherent test performance is effectively tied with identity
 retrieval and remains below prototype/ridge controls, while arbitrary-label predictions are exactly
-the retrieval-only result. Replicate seeds and a development-only investigation of the UT-Complex
-regression are required before making a learned-admissibility claim.
+the retrieval-only result. The matched five-seed suite above confirms the lack of a general learned-
+admissibility advantage and retains the UT-Complex regression.
 
 ## Current Design Audit and Literature Check
 
@@ -192,8 +262,8 @@ What is sound:
 
 What should change before a strong result:
 
-1. **Replicate the current result.** Repeat Stage 2 with independent seeds and use development-only
-   selection. The current one-seed test result is evidence of parity, not a stable effect estimate.
+1. **Completed: replicate the current result.** Five fixed manifest seeds now confirm parity or a
+   small regression rather than a stable learned-gate improvement.
 2. **Register the candidate roster independently of query truth.** Keep the support-feasible cohort
    as a named secondary analysis, and add a fixed dataset-roster arm for the main closed-set curve.
 3. **Measure memory size.** Sweep the active windows per label on development data, record runtime,
@@ -467,8 +537,8 @@ favors step 4,000.
 - query-weighted tables: `comparison_learned_*.{csv,json}`
 - training telemetry: `step*/telemetry_relational/`
 
-This is still a one-seed Phase-B comparison. Seed replication is required before treating the small
-engine-versus-identity differences as stable.
+This historical checkpoint comparison remains one-seed and should not be used for a stable effect
+estimate. The current admissibility result uses the five-seed suite at the top of this document.
 
 ## 10. Frozen HARNet Representation Control (2026-08-17)
 

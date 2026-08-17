@@ -14,14 +14,22 @@
 | zero-shot baselines | v4, 93 labels, 7 datasets | HARNet 45.7 mean macro F1; CrossHAR 42.8; UniMTS 34.7 | historical completed table; predates the 18-source/166-label protocol |
 | current Phase A | `phase_a_fixed_1s_rotation_20260817/best.pt` | selected step 27,000 | complete; sensor-granularity, fixed 1 s patches, rotation only |
 | parked relational Phase B | v22 and checkpoint study | learned adaptation exists, but usually trails identity/prototype/ridge | historical evidence only |
-| current admissibility Phase B | schema-5 sensor bank + rank-8 Stage-2 step 1,000 | coherent test 25.14 versus identity 25.04; random-label test 30.35, exactly identity | operational one-seed result; adaptation exists, but learned admissibility has no held-out advantage |
+| current admissibility Phase B | matched adaptation v1, rank-8 Stage-2 step 1,000, five seeds | ordinary coherent k=1: 44.79 versus identity 45.71; specialized k=1: 28.62 versus 28.58; arbitrary labels exactly identity | complete seven-dataset result; adaptation exists, but learned admissibility has no held-out advantage |
 
 The current Phase-A checkpoint is
 `training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt`. It records 18 training
 datasets, `token_granularity='sensor'`, fixed one-second patches, and step 27,000. Its current
-rank-8 enrollment run and controls are recorded in `PHASE_B_TRAINING_STATUS.md`. The corresponding
+rank-8 matched enrollment suite and controls are recorded in `PHASE_B_TRAINING_STATUS.md`. The corresponding
 `memory_bank.pt`, `resolvability.json`, and Stage-2 artifacts are bound to that checkpoint; older
 result JSON files remain historical and must not be mixed into the current table.
+
+The matched suite uses manifest fingerprint `1bd89d35f5ae`, five fixed episode seeds, seven held-out
+datasets, and six external representations. HALO Stage 2 scores 23.75 ordinary and 9.81 specialized
+macro F1 at semantic k=0. With enrollment, its ordinary curve is 44.79, 48.89, 51.36, 51.18, and
+49.32 for k=1,2,4,8,16. This is below identity retrieval at every point and below the strongest
+external frozen-feature linear head. Specialized activities are at identity parity through k=8 and
+fall 1.39 points below it at k=16. Full generated tables are in
+`eval/adaptation_tables/v1_d85761d_stage2/`.
 
 Under one matched fixed-one-second transfer protocol, the older sensor checkpoint scores 0.617 mean
 kNN balanced accuracy and the current checkpoint scores 0.509 across the same seven held-out datasets
@@ -51,8 +59,8 @@ from `eval/results/` on 2026-08-06. It must not be mixed with current Phase-A or
 | NormWear | 5.1 |
 
 The two historical HALO rows do not identify the current sensor-granularity checkpoint and are not
-current headline values. The 18-source expansion now has 166 canonical labels and 10 default
-evaluation datasets. That complete table has not been rerun.
+current headline values. The separate legacy 10-dataset zero-shot table has not been rerun; the
+current matched seven-dataset suite is reported above and in `PHASE_B_TRAINING_STATUS.md`.
 
 ## Phase-B Design Ledger
 
@@ -62,15 +70,15 @@ evaluation datasets. That complete table has not been rerun.
 | v22 arbitrary-alias relational decoder | strong support-removal/shuffle effects; positive k-curve | learned support binding, but usually remained 3-5 F1 below prototype/ridge |
 | Phase-A 4k vs 30k relational study | 4k representation usually stronger; decoder rarely beat identity | more Phase-A training did not repair evidence interpretation |
 | frozen HARNet enrollment control | HALO identity retrieval led aggregate low-k cells | no evidence that HARNet alone removes the adaptation ceiling |
-| current per-sensor admissibility design | valid one-seed external result; coherent test at identity parity, random-label path exactly identity | memory adaptation works, but learned admissibility has not improved the held-out result |
+| current per-sensor admissibility design | valid five-seed matched result; coherent test near or below identity, random-label path exactly identity | memory adaptation works, but learned admissibility has not improved the held-out result |
 
 Full historical tables, artifact paths, and their scope limits are in
 [`PHASE_B_TRAINING_STATUS.md`](PHASE_B_TRAINING_STATUS.md).
 
-## Next Confirmatory Readout
+## Completed Matched Readout
 
 The matched zero-shot, supervised-adaptation, and HALO-ablation protocol is defined in
-`../baselines/BASELINE_FAIRNESS_POLICY.md` Section 6. The next confirmatory readout must record:
+`../baselines/BASELINE_FAIRNESS_POLICY.md` Section 6. The 2026-08-17 readout records:
 
 1. Exact Phase-A checkpoint, schema-5 bank fingerprint, active memory population, gate artifact, and
    evaluation source fingerprint, including modality/gravity partition coverage.
@@ -78,11 +86,12 @@ The matched zero-shot, supervised-adaptation, and HALO-ablation protocol is defi
 3. k = 0, 1, 2, 4, 8 and supported k=16, split into ordinary population activities, specialized
    novel activities, and a separate random-label binding control.
 4. Same/cross-subject and same/cross-configuration cells without pooling unsupported cohorts.
-5. Current-protocol coherent k=0 baselines; supervised head-only and end-to-end fine-tuning at
-   positive k; and admissibility-disabled, support-removed, label-shuffled, nearest-support,
-   prototype, and ridge controls on identical serialized manifests.
+5. Current-protocol coherent k=0 baselines; common frozen-feature supervised heads at positive k;
+   and admissibility-disabled, support-removed, label-shuffled, nearest-support, prototype, and ridge
+   controls on identical serialized manifests. Model-native end-to-end fine-tuning remains a
+   separate experiment and is not represented by the common head table.
 6. Subject-level paired bootstrap intervals and explicit candidate-roster coverage.
 
-The current seven-dataset test roster has now been inspected under the current design and is
-exploratory. Any subsequent design selected using those results requires confirmation on a newly
-designated untouched holdout roster after the implementation and analysis are frozen.
+The current seven-dataset test roster has now been inspected under the current design. Any subsequent
+design selected using these results requires confirmation on a newly designated untouched holdout
+roster after the implementation and analysis are frozen.

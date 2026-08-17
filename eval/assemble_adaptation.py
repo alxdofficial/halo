@@ -137,11 +137,12 @@ def dataset_macro(rows: list[dict]) -> list[dict]:
 
 
 def paired_deltas(subject_rows: list[dict], samples: int = 5_000) -> list[dict]:
-    """Paired subject bootstrap for HALO learned versus every matched comparator."""
+    """Paired subject bootstrap within each evaluation condition."""
     indexed = defaultdict(dict)
     for row in subject_rows:
         key = (
-            row["cell"], row["label_mode"], row["k"], row["seed"], row["subject"]
+            row["regime"], row["label_mode"], row["k"], row["cell"],
+            row["seed"], row["subject"],
         )
         indexed[(row["model"], row["method"])][key] = row["f1_macro"]
     target_key = ("halo_learned_gate", "learned")
@@ -156,20 +157,33 @@ def paired_deltas(subject_rows: list[dict], samples: int = 5_000) -> list[dict]:
         common = sorted(set(target) & set(values))
         if not common:
             continue
-        # Average repeated stream/seed cells within the independent dataset-subject unit.
-        by_subject = defaultdict(list)
+        # Keep unlike protocols separate, then average repeated stream/seed cells
+        # within each independent dataset-subject unit.
+        by_condition = defaultdict(lambda: defaultdict(list))
         for key in common:
-            by_subject[key[-1]].append(target[key] - values[key])
-        deltas = np.asarray([np.mean(value) for value in by_subject.values()], dtype=np.float64)
-        draws = rng.choice(deltas, size=(samples, len(deltas)), replace=True).mean(1)
-        output.append({
-            "target": "halo_learned_gate/learned",
-            "comparator": f"{comparator[0]}/{comparator[1]}",
-            "paired_subjects": len(deltas),
-            "delta_f1_macro": float(deltas.mean()),
-            "ci95": [float(value) for value in np.quantile(draws, [0.025, 0.975])],
-        })
-    return output
+            condition = key[:3]
+            by_condition[condition][key[-1]].append(target[key] - values[key])
+        for (regime, label_mode, k), by_subject in by_condition.items():
+            deltas = np.asarray(
+                [np.mean(value) for value in by_subject.values()], dtype=np.float64
+            )
+            draws = rng.choice(deltas, size=(samples, len(deltas)), replace=True).mean(1)
+            output.append({
+                "target": "halo_learned_gate/learned",
+                "comparator": f"{comparator[0]}/{comparator[1]}",
+                "regime": regime,
+                "label_mode": label_mode,
+                "k": k,
+                "paired_subjects": len(deltas),
+                "delta_f1_macro": float(deltas.mean()),
+                "ci95": [float(value) for value in np.quantile(draws, [0.025, 0.975])],
+            })
+    return sorted(
+        output,
+        key=lambda row: (
+            row["regime"], row["label_mode"], row["k"], row["comparator"]
+        ),
+    )
 
 
 def _markdown(aggregates: list[dict]) -> str:

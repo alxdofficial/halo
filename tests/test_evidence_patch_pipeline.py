@@ -59,6 +59,7 @@ from training.evidence.train_patch_decoder import (
 from training.evidence.subject_style import SubjectStyle, apply_subject_style
 from training.evidence.runtime_memory import build_enrollment_memory
 from training.evidence.eval_enrollment import (
+    _predictor_step,
     _support_and_query_rows,
     accepted_training_regimes,
     active_index_seed,
@@ -140,6 +141,12 @@ def _sensor_bank():
         for config, stream in ((0, "a"), (1, "b"))
     }
     return bank
+
+
+def test_predictor_step_reads_selected_stage2_checkpoint():
+    assert _predictor_step({"checkpoint_step": 25}) == 25
+    assert _predictor_step({"provenance": {"stage2": {"step": 1000}}}) == 1000
+    assert _predictor_step({}) is None
 
 
 def test_runtime_sensor_rows_accept_preindexed_query_gather(monkeypatch):

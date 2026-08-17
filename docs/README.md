@@ -15,23 +15,28 @@
 > Then take every number from Results below, and nothing at all from
 > [`archive/`](archive/README.md).
 
-## Zero-Shot Baseline Results
+## Current Matched Results
 
-The last completed table was generated from `eval/results/` by `python -m eval.assemble_table`:
-**56 cells** (8 models × 7 zero-shot test sets), all **historical protocol v4 (93 labels)**, as of
-2026-08-06. The 18-source expansion defines protocol v5 (166 labels, 10 default evaluation datasets,
-alignment-specific quality screening); its baseline cells have not been rerun and must not be mixed
-with this completed v4 table.
+The matched adaptation-v1 suite was completed on 2026-08-17 over seven held-out test datasets, five
+serialized episode seeds, HALO, and six external representations. It reports ordinary and
+specialized-novel activities separately. Full enrollment curves and controls are in
+[`results/PHASE_B_TRAINING_STATUS.md`](results/PHASE_B_TRAINING_STATUS.md); generated tables are in
+`eval/adaptation_tables/v1_d85761d_stage2/`.
 
-| harnet | halo_evidence | crosshar | unimts | halo | limubert | imagebind | normwear |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| **45.7** | 42.9 | 42.8 | 34.7 | 34.4 | 32.2 | 11.4 | 5.1 |
+| semantic k=0 method | ordinary macro F1 | specialized-novel macro F1 |
+|---|---:|---:|
+| CrossHAR + ConSE | **37.01** | 10.88 |
+| HARNet + ConSE | 33.82 | 11.40 |
+| UniMTS + ConSE | 32.70 | **19.24** |
+| LiMU-BERT + ConSE | 27.60 | 9.11 |
+| HALO Stage 2 | 23.75 | 9.81 |
+| ImageBind + ConSE | 11.38 | 8.15 |
+| NormWear + ConSE | 5.08 | 3.58 |
 
-**harnet (frozen UK-Biobank) is ahead in this completed zero-shot baseline protocol.** These numbers
-precede the current Phase-B admissibility design and must not be mixed with its future enrollment
-tables. The
-current Phase-B empirical status is owned by
-[`results/PHASE_B_TRAINING_STATUS.md`](results/PHASE_B_TRAINING_STATUS.md).
+HALO's labeled-memory path shows real adaptation under support-removal and label-shuffle controls,
+but the learned admissibility gate is near or below identity retrieval and does not beat the strongest
+external frozen-feature linear heads. This is the current result; the older protocol-v4 table remains
+historical and is indexed in [`results/RESULTS.md`](results/RESULTS.md).
 
 ### Retracted — do not cite
 - the **49.5 "beats harnet"** evidence-decoder headline — retracted twice: first for eval-label text
