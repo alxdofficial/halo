@@ -339,6 +339,33 @@ def classification_metrics(
     }
 
 
+def macro_f1_fast(
+    gt_names: Sequence[str], pred_names: Sequence[str]
+) -> float:
+    """Macro-F1 over ``GT union predicted`` without sklearn estimator setup.
+
+    This is for high-volume per-subject telemetry. Aggregate paper metrics still use
+    :func:`classification_metrics`; the formula and active class set are identical.
+    """
+    truth = np.asarray(gt_names, dtype=object)
+    prediction = np.asarray(pred_names, dtype=object)
+    if truth.shape != prediction.shape:
+        raise ValueError("ground truth and predictions must have equal shape")
+    if len(truth) == 0:
+        return 0.0
+    classes = np.unique(np.concatenate((truth, prediction)))
+    truth_position = np.searchsorted(classes, truth)
+    prediction_position = np.searchsorted(classes, prediction)
+    true_count = np.bincount(truth_position, minlength=len(classes))
+    predicted_count = np.bincount(prediction_position, minlength=len(classes))
+    true_positive = np.bincount(
+        truth_position[truth_position == prediction_position], minlength=len(classes)
+    )
+    return float(
+        np.mean(2.0 * true_positive / np.maximum(true_count + predicted_count, 1)) * 100.0
+    )
+
+
 def per_class_f1(
     gt_names: Sequence[str],
     pred_names: Sequence[str],
@@ -570,6 +597,7 @@ def fit_temperature(logits, labels, max_iter: int = 100) -> float:
 # =============================================================================
 
 _SBERT_CACHE: dict = {}
+_SBERT_EMBED_CACHE: dict[tuple[str, tuple[str, ...]], np.ndarray] = {}
 
 
 def get_sbert_encoder(model_name: str = "all-MiniLM-L6-v2") -> Callable[[Sequence[str]], np.ndarray]:
@@ -582,8 +610,13 @@ def get_sbert_encoder(model_name: str = "all-MiniLM-L6-v2") -> Callable[[Sequenc
     sbert = _SBERT_CACHE[model_name]
 
     def encode(labels: Sequence[str]) -> np.ndarray:
-        texts = [l.replace("_", " ") for l in labels]
-        return np.asarray(sbert.encode(texts, normalize_embeddings=True))
+        key = (model_name, tuple(labels))
+        if key not in _SBERT_EMBED_CACHE:
+            texts = [label.replace("_", " ") for label in labels]
+            _SBERT_EMBED_CACHE[key] = np.asarray(
+                sbert.encode(texts, normalize_embeddings=True), dtype=np.float32
+            )
+        return _SBERT_EMBED_CACHE[key]
 
     return encode
 

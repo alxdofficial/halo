@@ -73,6 +73,7 @@ from training.evidence.build_comparison_table import (
     assert_matched_evaluation_provenance,
 )
 from training.evidence.device import resolve_device
+from training.evidence import gate_predictor
 
 
 def _bank():
@@ -139,6 +140,35 @@ def _sensor_bank():
         for config, stream in ((0, "a"), (1, "b"))
     }
     return bank
+
+
+def test_runtime_sensor_rows_accept_preindexed_query_gather(monkeypatch):
+    encoded = {
+        "sensor_window": torch.tensor([0, 0, 1, 2, 2]),
+        "sensor_slot": torch.tensor([0, 1, 0, 0, 1]),
+        "sensor_Z": torch.arange(20, dtype=torch.float32).view(5, 4),
+    }
+    monkeypatch.setattr(
+        gate_predictor,
+        "_runtime_sensor_metadata",
+        lambda *_: (
+            torch.arange(6, dtype=torch.float32).view(2, 3),
+            torch.zeros(2, 1),
+            torch.tensor([0, 1]),
+            torch.tensor([0, 0]),
+        ),
+    )
+    rows = gate_predictor.sensor_rows_from_encoded(
+        encoded,
+        torch.tensor([2, 0]),
+        "test",
+        "wrist",
+        channel_mask=(True, True),
+        candidate_positions=torch.tensor([7, 8]),
+        sensor_row_indices=torch.tensor([3, 4, 0, 1]),
+    )
+    assert torch.equal(rows.rows.feature, encoded["sensor_Z"][[3, 4, 0, 1]])
+    assert rows.rows.enrolled_candidate.tolist() == [7, 7, 8, 8]
 
 
 def _support_feasibility_bank(subjects):

@@ -325,13 +325,18 @@ underlying movement new. A random-alias k=0 cell is unidentifiable and is always
 
 - `k` counts **independent labeled executions per candidate**, never windows or patches. The main
   curve is k = 0, 1, 2, 4, 8. k = 16 is a secondary high-support point only for cohorts with 16
-  independent executions per candidate.
+  independent executions per candidate. The k=16 cohort is serialized separately so its stricter
+  eligibility requirement cannot shrink or otherwise change the main k=1–8 query cohort.
 - Candidate labels, query executions, support prefixes, subject relation, configuration relation,
   and random seeds are serialized once. HALO and every baseline consume that same manifest.
 - Support and query executions are disjoint. Overlapping windows from one recording never appear on
-  opposite sides. Support prefixes are nested, so the k=1 execution is retained at k=2, and so on.
+  opposite sides. Every labeled window from a selected execution is supplied as support; `k` does
+  not discard the execution down to one arbitrary window. Support prefixes are nested, so the k=1
+  execution is retained at k=2, and so on.
 - The candidate roster is fixed across a reported k curve. It is not shrunk according to the query
   truth or the requested k. A cohort that lacks enough support is N/A beyond its declared ceiling.
+  The manifest freezes the labels globally observed by the query/support stream pair before support
+  sampling; a label with zero windows in that acquisition stream is not a candidate.
 - Same-subject personalization and cross-subject transfer are separate results. Same-configuration
   and cross-configuration results are also separate; unsupported combinations are N/A.
 - At least five support-manifest seeds are evaluated. Random-label experiments also use at least
@@ -352,20 +357,25 @@ before comparison with current HALO.
 
 ### 6d. Question 2: label efficiency against supervised adaptation
 
-For k greater than zero, every model receives exactly the same labeled executions. The comparison
-contains three adaptation strengths:
+For k greater than zero, every model receives exactly the same labeled executions. The core
+comparison contains two adaptation strengths:
 
 1. **HALO enrollment:** insert support embeddings and labels into memory; perform no gradient update.
 2. **Frozen-representation supervised adaptation:** nearest support, class prototype, and one common
-   L2 ridge/linear-head recipe on each model's frozen representation.
-3. **Model-native supervised fine-tuning:** replace or adapt the target classifier and update the
-   parameters allowed by that model's published transfer recipe. Report trainable parameters,
-   optimization steps, wall time, and peak memory.
+   L2 ridge/target-head recipe on each model's frozen representation. The target head uses 200
+   AdamW steps initialized from class prototypes. Thus `k=4` means four labeled executions per
+   candidate and still 200 optimizer steps; k never denotes the number of gradient updates.
 
-Head-only and end-to-end fine-tuning hyperparameters are selected on the development datasets and
-then frozen for every test dataset and k. Test queries are never used for early stopping. The main
-baseline row is the best adaptation recipe selected on development; the frozen shared-head rows
-remain visible so representation quality is not confounded with model-specific optimization.
+The second row is the supervised fine-tuning comparison: it fits a new target classifier by
+gradient descent while keeping the pretrained representation frozen. This is the one common update
+scope every model supports and prevents a per-architecture optimizer search from confounding label
+efficiency. An additional model-native end-to-end transfer row may be reported where a publication
+defines one, but it is secondary and does not replace the common target-head comparison.
+
+Target-head hyperparameters are selected on the development datasets and then frozen for every test
+dataset and k. Test queries are never used for early stopping. Report optimizer steps, wall time,
+and trainable parameters; keep nearest, prototype, and ridge visible so representation quality is
+not confounded with gradient optimization.
 
 For random labels, baseline classifiers use the aliases only as class identifiers. Text-aligned
 models do not receive semantic information hidden from HALO. This directly compares HALO's
@@ -421,3 +431,57 @@ The current seven-dataset test roster has already been inspected during model de
 exploratory benchmark from this point forward. Any design or hyperparameter changed in response to
 those results must be confirmed on a newly designated, untouched holdout roster after code,
 checkpoints, support manifests, and analysis are frozen.
+
+### 6i. Executable artifacts
+
+The shared manifest is generated once and committed as
+`eval/manifests/adaptation_v1.json.gz`. It binds every row index to a fingerprint of the exact grid
+labels, subjects, execution ids, candidate vocabulary, channel schema, quality screen, and rate.
+All consumers fail if that fingerprint no longer matches the grids.
+
+```bash
+PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
+
+# Rebuild only when deliberately starting a new protocol version.
+$PY -m eval.enrollment_protocol \
+  --out eval/manifests/adaptation_v1.json.gz
+
+# Cheap fail-loud structural audit.
+$PY -m eval.check_adaptation_readiness \
+  --manifest eval/manifests/adaptation_v1.json.gz
+
+# External semantic k=0 plus matched k>0 frozen-representation controls.
+$PY -m eval.run_adaptation_baselines \
+  --manifest eval/manifests/adaptation_v1.json.gz \
+  --baselines harnet crosshar limubert unimts imagebind normwear --device cuda
+
+# HALO: run every serialized seed once with coherent text and once with random aliases. k=0 is
+# seed-independent, so retain it only for the first coherent run.
+for seed in 20260808 20260809 20260810 20260811 20260812; do
+  zero=()
+  controls=()
+  if test "$seed" != 20260808; then
+    zero=(--skip-zero-shot)
+    controls=(--counterfactual-controls none)
+  fi
+  $PY -m training.evidence.eval_enrollment \
+    --manifest eval/manifests/adaptation_v1.json.gz --manifest-seed "$seed" \
+    --protocol-role test --device cuda --batch 64 "${zero[@]}" "${controls[@]}" \
+    --out "training/evidence/outputs/eval_manifest_${seed}.json"
+  $PY -m training.evidence.eval_enrollment \
+    --manifest eval/manifests/adaptation_v1.json.gz --manifest-seed "$seed" \
+    --protocol-role test --device cuda --batch 64 --random-aliases "${controls[@]}" \
+    --out "training/evidence/outputs/eval_manifest_${seed}_alias.json"
+done
+
+# Assemble any completed artifacts; manifest mismatches fail loudly.
+$PY -m eval.assemble_adaptation \
+  --manifest eval/manifests/adaptation_v1.json.gz \
+  --inputs <result-json> [<result-json> ...] \
+  --out-dir eval/adaptation_tables/v1
+```
+
+`eval.run_adaptation_baselines` reports the common target-head fit separately from nearest,
+prototype, and ridge. Model-native end-to-end transfer remains an optional separate experiment
+because not every released foundation model permits or recommends updating its trunk; it must never
+be silently substituted for the common frozen-representation comparison.

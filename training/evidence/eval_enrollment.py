@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from eval.scoring import (
     align_ground_truth_labels,
     classification_metrics,
     get_sbert_encoder,
+    macro_f1_fast,
 )
 from model.evidence.patch_retrieval import PatchSubspaceRetriever
 from training.evidence.bank_guard import (
@@ -43,7 +45,11 @@ from training.evidence.gate_predictor import (
     sensor_rows_from_encoded,
     subset_bank_rows,
 )
-from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
+from training.evidence.episode_labels import (
+    EpisodeLabelSet,
+    encode_neutral_aliases,
+    episode_label_set,
+)
 from training.evidence.device import resolve_device
 from training.evidence.labeltext import ensemble_text
 from training.evidence.live_encoder import SourcePatchEncoder
@@ -83,6 +89,7 @@ _EVALUATION_BEHAVIOR_PATHS = (
     "training/tokenizer/eval_transfer.py",
     "model/evidence/relational_decoder.py",
     "model/evidence/patch_retrieval.py",
+    "eval/enrollment_protocol.py",
     "eval/data.py",
     "eval/scoring.py",
     "data/scripts/curate/deployment_policy.py",
@@ -197,6 +204,57 @@ class EnrollmentSubjectPlan:
     candidate_names: tuple[str, ...]
     support_rows: tuple[tuple[int, ...], ...]
     query_rows: np.ndarray
+    support_execution_rows: tuple[tuple[tuple[int, ...], ...], ...] | None = None
+
+
+def _manifest_plans(payload: dict) -> list[EnrollmentSubjectPlan]:
+    return [
+        EnrollmentSubjectPlan(
+            subject=plan["subject"],
+            candidate_names=tuple(plan["candidate_names"]),
+            support_rows=tuple(() for _ in plan["candidate_names"]),
+            query_rows=np.asarray(plan["query_rows"], dtype=np.int64),
+            support_execution_rows=tuple(
+                tuple(tuple(int(row) for row in execution) for execution in candidate)
+                for candidate in plan["support_execution_rows"]
+            ),
+        )
+        for plan in payload.get("plans", ())
+    ]
+
+
+def _selected_support_rows(
+    plan: EnrollmentSubjectPlan, position: int, support_count: int
+) -> tuple[int, ...]:
+    if plan.support_execution_rows is None:
+        return tuple(plan.support_rows[position][:support_count])
+    return tuple(
+        row
+        for execution in plan.support_execution_rows[position][:support_count]
+        for row in execution
+    )
+
+
+def _episode_labels(
+    candidate_names,
+    coherent,
+    sbert,
+    device,
+    *,
+    random_aliases,
+    rng,
+    alias_embeddings,
+    fixed_aliases=None,
+):
+    if random_aliases and fixed_aliases is not None:
+        phrases = tuple(fixed_aliases[name] for name in candidate_names)
+        embeddings = torch.from_numpy(sbert(list(phrases)).astype(np.float32)).to(device)
+        return EpisodeLabelSet("random_alias", phrases, embeddings)
+    return episode_label_set(
+        torch.arange(len(candidate_names), device=device), coherent,
+        mode="random_alias" if random_aliases else "coherent", rng=rng,
+        alias_embeddings=alias_embeddings, canonical_names=candidate_names,
+    )
 
 
 def paired_subject_summary(subject_results: dict, *, seed: int, samples: int = 2_000) -> dict:
@@ -490,8 +548,12 @@ def _summarize_enrollment_predictions(
         }
     metrics = classification_metrics(all_true, all_pred)
     identity_metrics = classification_metrics(all_true, all_identity_pred)
-    removed_metrics = classification_metrics(all_true, all_removed_pred)
-    shuffled_metrics = classification_metrics(all_true, all_shuffled_pred)
+    removed_metrics = (
+        classification_metrics(all_true, all_removed_pred) if all_removed_pred else None
+    )
+    shuffled_metrics = (
+        classification_metrics(all_true, all_shuffled_pred) if all_shuffled_pred else None
+    )
     bank_vocab = set(base_bank["vocab"])
     exact_phase_a_mask = np.asarray([label in bank_vocab for label in all_true])
     canonical_phase_a_mask = np.asarray([
@@ -512,10 +574,20 @@ def _summarize_enrollment_predictions(
         "f1_macro": float(metrics["f1_macro"]),
         "identity_f1_macro": float(identity_metrics["f1_macro"]),
         "adaptation_f1_gain": float(metrics["f1_macro"] - identity_metrics["f1_macro"]),
-        "support_removed_f1_macro": float(removed_metrics["f1_macro"]),
-        "support_removal_f1_gain": float(metrics["f1_macro"] - removed_metrics["f1_macro"]),
-        "support_label_shuffled_f1_macro": float(shuffled_metrics["f1_macro"]),
-        "correct_support_label_f1_gain": float(metrics["f1_macro"] - shuffled_metrics["f1_macro"]),
+        "support_removed_f1_macro": (
+            float(removed_metrics["f1_macro"]) if removed_metrics else None
+        ),
+        "support_removal_f1_gain": (
+            float(metrics["f1_macro"] - removed_metrics["f1_macro"])
+            if removed_metrics else None
+        ),
+        "support_label_shuffled_f1_macro": (
+            float(shuffled_metrics["f1_macro"]) if shuffled_metrics else None
+        ),
+        "correct_support_label_f1_gain": (
+            float(metrics["f1_macro"] - shuffled_metrics["f1_macro"])
+            if shuffled_metrics else None
+        ),
         "prototype_f1_macro": (
             float(classification_metrics(all_true, all_prototype_pred)["f1_macro"])
             if all_prototype_pred else None
@@ -577,6 +649,7 @@ def score_enrollment_cell(
     phase_b_seen_labels: set[str] | None = None,
     same_configuration: bool = True,
     predictor_mode: str = "relational_decoder",
+    fixed_aliases: dict[str, str] | None = None,
 ):
     all_true, all_pred, all_identity_pred = [], [], []
     all_removed_pred, all_shuffled_pred = [], []
@@ -612,12 +685,14 @@ def score_enrollment_cell(
             ).astype(np.int64, copy=False)
         enrolled_set = set(enrolled_positions.tolist())
         support = np.asarray([
-            row for position, rows in enumerate(plan.support_rows)
-            if position in enrolled_set for row in rows[:support_count]
+            row for position in range(len(candidate_names))
+            if position in enrolled_set
+            for row in _selected_support_rows(plan, position, support_count)
         ], dtype=np.int64)
         support_position = np.asarray([
-            position for position, rows in enumerate(plan.support_rows)
-            if position in enrolled_set for _ in rows[:support_count]
+            position for position in range(len(candidate_names))
+            if position in enrolled_set
+            for _ in _selected_support_rows(plan, position, support_count)
         ], dtype=np.int64)
         external_subjects = [plan.subject] + [support_subjects[int(row)] for row in support]
         runtime_subject = {
@@ -629,13 +704,10 @@ def score_enrollment_cell(
         ], dtype=torch.long)
         coherent = ensemble_text(candidate_names, sbert, 1).to(device)
         label_mode = "random_alias" if random_aliases else "coherent"
-        label_set = episode_label_set(
-            torch.arange(len(candidate_names), device=device),
-            coherent,
-            mode=label_mode,
-            rng=rng,
-            alias_embeddings=alias_embeddings,
-            canonical_names=candidate_names,
+        label_set = _episode_labels(
+            candidate_names, coherent, sbert, device,
+            random_aliases=random_aliases, rng=rng,
+            alias_embeddings=alias_embeddings, fixed_aliases=fixed_aliases,
         )
         def make_memory(position):
             memory = build_enrollment_memory(
@@ -746,22 +818,18 @@ def score_enrollment_cell(
         else:
             prototype_names = ridge_names = None
         subject_results[str(plan.subject)] = {
-            "f1_macro": float(classification_metrics(subject_true, subject_pred)["f1_macro"]),
-            "identity_f1_macro": float(
-                classification_metrics(subject_true, subject_identity)["f1_macro"]
-            ),
-            "support_removed_f1_macro": float(
-                classification_metrics(subject_true, subject_removed)["f1_macro"]
-            ),
-            "support_label_shuffled_f1_macro": float(
-                classification_metrics(subject_true, subject_shuffled)["f1_macro"]
+            "f1_macro": macro_f1_fast(subject_true, subject_pred),
+            "identity_f1_macro": macro_f1_fast(subject_true, subject_identity),
+            "support_removed_f1_macro": macro_f1_fast(subject_true, subject_removed),
+            "support_label_shuffled_f1_macro": macro_f1_fast(
+                subject_true, subject_shuffled
             ),
             "prototype_f1_macro": (
-                float(classification_metrics(subject_true, prototype_names)["f1_macro"])
+                macro_f1_fast(subject_true, prototype_names)
                 if prototype_names is not None else None
             ),
             "ridge_head_f1_macro": (
-                float(classification_metrics(subject_true, ridge_names)["f1_macro"])
+                macro_f1_fast(subject_true, ridge_names)
                 if ridge_names is not None else None
             ),
             "queries": len(subject_true),
@@ -814,7 +882,9 @@ def score_admissibility_cell(
     enrolled_candidate_count: int | None = None,
     phase_b_seen_labels: set[str] | None = None,
     top_k: int = 64,
-    batch_size: int = 16,
+    batch_size: int = 64,
+    fixed_aliases: dict[str, str] | None = None,
+    counterfactual_controls: bool = True,
 ):
     """Evaluate the closed-form sensor-row path without invoking the parked relational decoder."""
     all_true, all_pred, all_identity_pred = [], [], []
@@ -829,6 +899,10 @@ def score_admissibility_cell(
     support_mask = query_mask if support_mask is None else support_mask
     phase_b_seen_labels = phase_b_seen_labels or set()
     vocab_position = {label: index for index, label in enumerate(base_bank["vocab"])}
+    source_sensor_window = torch.as_tensor(encoded["sensor_window"]).long().cpu()
+    sensor_rows_by_window: dict[int, list[int]] = {}
+    for sensor_row, source_window in enumerate(source_sensor_window.tolist()):
+        sensor_rows_by_window.setdefault(int(source_window), []).append(sensor_row)
 
     for subject_index, plan in enumerate(plans):
         candidate_names = list(plan.candidate_names)
@@ -849,12 +923,14 @@ def score_admissibility_cell(
             ).astype(np.int64, copy=False)
         enrolled_set = set(enrolled_positions.tolist())
         support = np.asarray([
-            row for position, rows in enumerate(plan.support_rows)
-            if position in enrolled_set for row in rows[:support_count]
+            row for position in range(len(candidate_names))
+            if position in enrolled_set
+            for row in _selected_support_rows(plan, position, support_count)
         ], dtype=np.int64)
         support_position = np.asarray([
-            position for position, rows in enumerate(plan.support_rows)
-            if position in enrolled_set for _ in rows[:support_count]
+            position for position in range(len(candidate_names))
+            if position in enrolled_set
+            for _ in _selected_support_rows(plan, position, support_count)
         ], dtype=np.int64)
 
         excluded = torch.tensor(sorted({
@@ -865,10 +941,10 @@ def score_admissibility_cell(
         corpus = subset_bank_rows(base_sensor_rows, keep)
         coherent = ensemble_text(candidate_names, sbert, 1).to(device)
         label_mode = "random_alias" if random_aliases else "coherent"
-        label_set = episode_label_set(
-            torch.arange(len(candidate_names), device=device), coherent,
-            mode=label_mode, rng=rng, alias_embeddings=alias_embeddings,
-            canonical_names=candidate_names,
+        label_set = _episode_labels(
+            candidate_names, coherent, sbert, device,
+            random_aliases=random_aliases, rng=rng,
+            alias_embeddings=alias_embeddings, fixed_aliases=fixed_aliases,
         )
         semantic_labels = not random_aliases
 
@@ -886,19 +962,23 @@ def score_admissibility_cell(
         removed = corpus
         shuffled = (
             memory((support_position + 1) % len(candidate_names))
-            if len(support_position) else None
+            if counterfactual_controls and len(support_position) else None
         )
         position_by_name = {name: i for i, name in enumerate(candidate_names)}
         subject_true, subject_pred, subject_identity = [], [], []
         subject_removed, subject_shuffled = [], []
 
-        source_sensor_window = torch.as_tensor(encoded["sensor_window"]).long().cpu()
         for start in range(0, len(query_rows), batch_size):
             batch_rows = np.asarray(query_rows[start:start + batch_size], dtype=np.int64)
             batch_tensor = torch.from_numpy(batch_rows)
-            selected_sensor_window = source_sensor_window[
-                torch.isin(source_sensor_window, batch_tensor)
-            ]
+            selected_sensor_rows = torch.tensor([
+                sensor_row
+                for window in batch_rows
+                for sensor_row in sensor_rows_by_window.get(int(window), ())
+            ], dtype=torch.long)
+            selected_sensor_window = source_sensor_window.index_select(
+                0, selected_sensor_rows
+            )
             owner_of = {int(window): position for position, window in enumerate(batch_rows)}
             query_group = torch.tensor([
                 owner_of[int(window)] for window in selected_sensor_window.tolist()
@@ -906,6 +986,7 @@ def score_admissibility_cell(
             query = sensor_rows_from_encoded(
                 encoded, batch_tensor, query_dataset, query_stream,
                 channel_mask=query_mask,
+                sensor_row_indices=selected_sensor_rows,
             ).to(device).rows
             if len(query_group) != len(query.feature):
                 raise RuntimeError("query sensor ownership does not align with encoded sensor rows")
@@ -927,7 +1008,7 @@ def score_admissibility_cell(
                 )
 
             logits, aux = run(enrollment)
-            removed_logits, _ = run(removed)
+            removed_logits = run(removed)[0] if counterfactual_controls else None
             shuffled_logits = run(shuffled)[0] if shuffled is not None else removed_logits
             gate_telemetry.append({
                 key: float(value) for key, value in aux.items()
@@ -935,19 +1016,25 @@ def score_admissibility_cell(
             })
             predictions = logits.argmax(1).tolist()
             identities = aux["identity_logits"].argmax(1).tolist()
-            removed_predictions = removed_logits.argmax(1).tolist()
-            shuffled_predictions = shuffled_logits.argmax(1).tolist()
+            removed_predictions = (
+                removed_logits.argmax(1).tolist() if removed_logits is not None else None
+            )
+            shuffled_predictions = (
+                shuffled_logits.argmax(1).tolist() if shuffled_logits is not None else None
+            )
             for offset, row in enumerate(batch_rows):
                 truth = str(labels[row])
                 prediction = candidate_names[int(predictions[offset])]
                 identity = candidate_names[int(identities[offset])]
-                removed_name = candidate_names[int(removed_predictions[offset])]
-                shuffled_name = candidate_names[int(shuffled_predictions[offset])]
                 all_true.append(truth); subject_true.append(truth)
                 all_pred.append(prediction); subject_pred.append(prediction)
                 all_identity_pred.append(identity); subject_identity.append(identity)
-                all_removed_pred.append(removed_name); subject_removed.append(removed_name)
-                all_shuffled_pred.append(shuffled_name); subject_shuffled.append(shuffled_name)
+                if removed_predictions is not None:
+                    removed_name = candidate_names[int(removed_predictions[offset])]
+                    all_removed_pred.append(removed_name); subject_removed.append(removed_name)
+                if shuffled_predictions is not None:
+                    shuffled_name = candidate_names[int(shuffled_predictions[offset])]
+                    all_shuffled_pred.append(shuffled_name); subject_shuffled.append(shuffled_name)
                 all_enrolled_query.append(position_by_name[truth] in enrolled_set)
 
         prototype, ridge = _few_shot_baselines(
@@ -962,22 +1049,20 @@ def score_admissibility_cell(
         else:
             prototype_names = ridge_names = None
         subject_results[str(plan.subject)] = {
-            "f1_macro": float(classification_metrics(subject_true, subject_pred)["f1_macro"]),
-            "identity_f1_macro": float(
-                classification_metrics(subject_true, subject_identity)["f1_macro"]
+            "f1_macro": macro_f1_fast(subject_true, subject_pred),
+            "identity_f1_macro": macro_f1_fast(subject_true, subject_identity),
+            "support_removed_f1_macro": (
+                macro_f1_fast(subject_true, subject_removed) if subject_removed else None
             ),
-            "support_removed_f1_macro": float(
-                classification_metrics(subject_true, subject_removed)["f1_macro"]
-            ),
-            "support_label_shuffled_f1_macro": float(
-                classification_metrics(subject_true, subject_shuffled)["f1_macro"]
+            "support_label_shuffled_f1_macro": (
+                macro_f1_fast(subject_true, subject_shuffled) if subject_shuffled else None
             ),
             "prototype_f1_macro": (
-                float(classification_metrics(subject_true, prototype_names)["f1_macro"])
+                macro_f1_fast(subject_true, prototype_names)
                 if prototype_names is not None else None
             ),
             "ridge_head_f1_macro": (
-                float(classification_metrics(subject_true, ridge_names)["f1_macro"])
+                macro_f1_fast(subject_true, ridge_names)
                 if ridge_names is not None else None
             ),
             "queries": len(subject_true),
@@ -1002,6 +1087,7 @@ def score_admissibility_cell(
 
 
 def main() -> None:
+    started = time.perf_counter()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=Path(os.environ.get(
         "HALO_CKPT",
@@ -1027,10 +1113,34 @@ def main() -> None:
         help="positive-support protocols; partial enrolls half of each candidate set",
     )
     parser.add_argument("--random-aliases", action="store_true")
-    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--batch", type=int, default=64)
+    parser.add_argument(
+        "--skip-zero-shot", action="store_true",
+        help="skip k=0 when it was already scored by another manifest seed",
+    )
+    parser.add_argument(
+        "--counterfactual-controls", choices=("full", "none"), default="full",
+        help="support-removal and support-label-shuffle controls; use full for at least one seed",
+    )
+    parser.add_argument(
+        "--encoded-cache-dir", type=Path,
+        default=_OUT / "encoded_eval_cache",
+        help="persistent CPU cache for frozen Phase-A eval embeddings; keyed by checkpoint, grid, "
+             "predictor layout, and evaluation source",
+    )
+    parser.add_argument("--no-encoded-cache", action="store_true")
     parser.add_argument("--gate-top-k", type=int, default=64,
                         help="evidence rows retrieved per query patch and candidate")
     parser.add_argument("--seed", type=int, default=20260808)
+    parser.add_argument(
+        "--manifest", type=Path, default=None,
+        help="versioned shared support/query manifest. When set, dataset rosters, candidate sets, "
+             "query rows, support prefixes, and seeds come exclusively from this artifact.",
+    )
+    parser.add_argument(
+        "--manifest-seed", type=int, default=None,
+        help="one serialized manifest seed to score; defaults to the manifest's first seed",
+    )
     parser.add_argument("--out", type=Path, default=None,
                         help="explicit result path; otherwise derived from the protocol role. "
                              "Use this to score several arms without clobbering each other.")
@@ -1047,6 +1157,25 @@ def main() -> None:
     )
     args = parser.parse_args()
     explicit_datasets = args.datasets is not None
+    shared_manifest = None
+    manifest_seed = None
+    if args.manifest is not None:
+        from eval.enrollment_protocol import load_manifest
+
+        shared_manifest = load_manifest(args.manifest, validate_grids=True)
+        if shared_manifest["alignment"] != "native":
+            parser.error("HALO manifest evaluation currently requires alignment='native'")
+        args.datasets = list(shared_manifest["datasets"])
+        args.support = list(shared_manifest["support_counts"])
+        available_seeds = [int(value) for value in shared_manifest["seeds"]]
+        manifest_seed = args.manifest_seed if args.manifest_seed is not None else available_seeds[0]
+        if manifest_seed not in available_seeds:
+            parser.error(
+                f"--manifest-seed {manifest_seed} is absent from manifest seeds {available_seeds}"
+            )
+        args.seed = manifest_seed
+        args.enrollment_shapes = ["full"]
+        explicit_datasets = False
     if args.datasets is None:
         args.datasets = {
             "dev": list(PHASE_B_DEV_DATASETS),
@@ -1060,6 +1189,8 @@ def main() -> None:
     if args.batch < 1:
         parser.error("--batch must be positive")
     device = resolve_device(args.device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     bank = torch.load(args.bank, map_location="cpu", weights_only=True)
     assert_bank_current(bank, context="eval_enrollment")
@@ -1187,6 +1318,8 @@ def main() -> None:
     phase_b_subject_names = set(predictor.get("phase_b_train_subject_names", ()))
 
     encoded_streams = {}
+    encoded_cache_stats = {"hits": 0, "misses": 0}
+    evaluation_source_fp = phase_b_evaluation_source_fingerprint()
 
     def load_and_encode(stream_spec):
         cache_key = (stream_spec.dataset, stream_spec.stream_id)
@@ -1199,14 +1332,45 @@ def main() -> None:
             raise RuntimeError(
                 f"{stream_spec.dataset}/{stream.stream}: native grid has no execution ids"
             )
-        encoded = encode_dataset_detailed(
-            encoder, np.asarray(stream.windows),
-            stream_channel_descriptions(stream.dataset, stream.stream),
-            device, float(stream.rate_hz),
-            _stream_gravity_state(stream.dataset, stream.stream),
-            channel_mask=stream.mask, dataset=stream.dataset, stream=stream.stream,
-            export_sensor_rows=predictor_mode == "admissibility_gate",
-        )
+        encoded = None
+        cache_path = None
+        if shared_manifest is not None and not args.no_encoded_cache:
+            stream_key = f"{stream.dataset}/{stream.stream}"
+            cache_identity = _json_fingerprint({
+                "checkpoint": checkpoint_fp,
+                "stream": stream_key,
+                "stream_fingerprint": shared_manifest["stream_fingerprints"][stream_key],
+                "predictor_mode": predictor_mode,
+                "evaluation_source": evaluation_source_fp,
+            })
+            cache_path = args.encoded_cache_dir / f"{cache_identity}.pt"
+            if cache_path.exists():
+                payload = torch.load(cache_path, map_location="cpu", weights_only=True)
+                if payload.get("identity") != cache_identity:
+                    raise RuntimeError(f"encoded eval cache identity mismatch: {cache_path}")
+                encoded = payload["encoded"]
+                encoded_cache_stats["hits"] += 1
+        if encoded is None:
+            encoded = encode_dataset_detailed(
+                encoder, np.asarray(stream.windows),
+                stream_channel_descriptions(stream.dataset, stream.stream),
+                device, float(stream.rate_hz),
+                _stream_gravity_state(stream.dataset, stream.stream),
+                channel_mask=stream.mask, dataset=stream.dataset, stream=stream.stream,
+                export_sensor_rows=predictor_mode == "admissibility_gate",
+            )
+            # Phase-B evaluation is frozen. Keeping detailed patch/sensor exports on CUDA only
+            # consumes VRAM between cells; move once to CPU and transfer selected rows on demand.
+            encoded = {
+                key: value.detach().cpu() if torch.is_tensor(value) else value
+                for key, value in encoded.items()
+            }
+            encoded_cache_stats["misses"] += 1
+            if cache_path is not None:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = cache_path.with_name(f"{cache_path.name}.tmp.{os.getpid()}")
+                torch.save({"identity": cache_identity, "encoded": encoded}, temporary)
+                os.replace(temporary, cache_path)
         value = {
             "stream": stream,
             "encoded": encoded,
@@ -1266,14 +1430,33 @@ def main() -> None:
                     hashlib.sha256(relation_id.encode()).hexdigest()[:8], 16
                 )
                 for mode in args.modes:
-                    plans, coverage = build_paired_enrollment_plans(
-                        query_source["labels"], query_source["subjects"],
-                        query_source["executions"], common_labels,
-                        requested_support=args.support, mode=mode, seed=relation_seed,
-                        support_labels=support_source["labels"],
-                        support_subjects=support_source["subjects"],
-                        support_execution_ids=support_source["executions"],
-                    )
+                    protocol_key = f"{relation_id}/{mode}"
+                    fixed_aliases = None
+                    if shared_manifest is not None:
+                        manifest_cell = shared_manifest["cells"].get(protocol_key)
+                        if manifest_cell is None:
+                            continue
+                        manifest_seed_payload = manifest_cell["seeds"][str(manifest_seed)]
+                        plans = _manifest_plans(manifest_seed_payload)
+                        fixed_aliases = manifest_seed_payload.get("aliases")
+                        coverage = {
+                            "status": manifest_cell["status"],
+                            "support_ceiling": int(manifest_cell["support_ceiling"]),
+                            "subjects": len(plans),
+                            "candidate_count_min": len(manifest_cell["candidate_names"]),
+                            "candidate_count_median": float(len(manifest_cell["candidate_names"])),
+                            "candidate_count_max": len(manifest_cell["candidate_names"]),
+                            "manifest_fingerprint": shared_manifest["manifest_fingerprint"],
+                        }
+                    else:
+                        plans, coverage = build_paired_enrollment_plans(
+                            query_source["labels"], query_source["subjects"],
+                            query_source["executions"], common_labels,
+                            requested_support=args.support, mode=mode, seed=relation_seed,
+                            support_labels=support_source["labels"],
+                            support_subjects=support_source["subjects"],
+                            support_execution_ids=support_source["executions"],
+                        )
                     coverage.update({
                         "query_stream": query_spec.stream_id,
                         "support_stream": support_spec.stream_id,
@@ -1286,24 +1469,58 @@ def main() -> None:
                         "support_execution_granularity":
                             support_source["execution_granularity"],
                     })
-                    protocol_key = f"{relation_id}/{mode}"
                     protocol[protocol_key] = coverage
                     cells = []
-                    if 0 in args.support and not args.random_aliases \
-                            and configuration_relation == "same_configuration":
+                    if 0 in args.support and not args.skip_zero_shot and not args.random_aliases \
+                            and configuration_relation == "same_configuration" \
+                            and (shared_manifest is None or mode == "cross_subject"):
                         cells.append(("zero", 0))
                     for support_count in sorted({value for value in args.support if value > 0}):
                         shapes = ("full",) if args.random_aliases else args.enrollment_shapes
                         cells.extend((shape, support_count) for shape in shapes)
                     for enrollment_shape, support_count in cells:
                         key = f"{relation_id}/{mode}/{enrollment_shape}/k{support_count}"
-                        if not plans:
-                            result = {**coverage, "queries": 0}
-                        elif support_count > int(coverage["support_ceiling"]):
-                            result = {
+                        cell_plans = plans
+                        cell_coverage = coverage
+                        cell_fixed_aliases = fixed_aliases
+                        cohort = "main"
+                        if shared_manifest is not None and support_count == 0:
+                            zero_id = f"{dataset}/{query_spec.stream_id}/zero_shot"
+                            zero_cell = shared_manifest["cells"].get(zero_id)
+                            if zero_cell is None:
+                                continue
+                            cell_plans = _manifest_plans(zero_cell["seeds"]["0"])
+                            cell_coverage = {
                                 **coverage,
+                                "status": zero_cell["status"],
+                                "subjects": len(cell_plans),
+                                "support_ceiling": 0,
+                            }
+                        elif shared_manifest is not None and support_count > int(
+                            coverage["support_ceiling"]
+                        ):
+                            secondary = manifest_cell.get("secondary_high_support", {})
+                            if secondary.get("status") == "ok" and support_count <= int(
+                                secondary.get("support_ceiling", 0)
+                            ):
+                                secondary_payload = secondary["seeds"][str(manifest_seed)]
+                                cell_plans = _manifest_plans(secondary_payload)
+                                cell_fixed_aliases = secondary_payload.get("aliases")
+                                cell_coverage = {
+                                    **coverage,
+                                    "status": "ok",
+                                    "subjects": len(cell_plans),
+                                    "support_ceiling": int(secondary["support_ceiling"]),
+                                    "cohort": "secondary_high_support",
+                                }
+                                cohort = "secondary_high_support"
+                        if not cell_plans:
+                            result = {**coverage, "queries": 0}
+                        elif support_count > int(cell_coverage["support_ceiling"]):
+                            result = {
+                                **cell_coverage,
                                 "status": "above_paired_support_ceiling",
-                                "subjects": len(plans),
+                                "subjects": len(cell_plans),
                                 "queries": 0,
                             }
                         else:
@@ -1317,11 +1534,12 @@ def main() -> None:
                                     0 if enrollment_shape == "partial" else None
                                 ),
                                 phase_b_seen_labels=phase_b_seen_labels,
+                                fixed_aliases=cell_fixed_aliases,
                             )
                             if predictor_mode == "admissibility_gate":
                                 result = score_admissibility_cell(
                                     query_source["encoded"], query_source["labels"],
-                                    query_source["subjects"], plans, bank,
+                                    query_source["subjects"], cell_plans, bank,
                                     base_sensor_rows, gate, canonical_text, sbert, aliases, device,
                                     query_dataset=query_source["stream"].dataset,
                                     query_stream=query_source["stream"].stream,
@@ -1331,12 +1549,15 @@ def main() -> None:
                                     support_mask=support_source["stream"].mask,
                                     top_k=args.gate_top_k,
                                     batch_size=args.batch,
+                                    counterfactual_controls=(
+                                        args.counterfactual_controls == "full"
+                                    ),
                                     **common,
                                 )
                             else:
                                 result = score_enrollment_cell(
                                     query_source["encoded"], query_source["labels"],
-                                    query_source["subjects"], plans, bank,
+                                    query_source["subjects"], cell_plans, bank,
                                     base_rows, base_selector_z, decoder, retriever,
                                     canonical_text, sbert, aliases, policy, device,
                                     mode=mode, batch_size=args.batch,
@@ -1346,7 +1567,7 @@ def main() -> None:
                                     predictor_mode=predictor_mode,
                                     **common,
                                 )
-                            result["paired_protocol"] = coverage
+                            result["paired_protocol"] = cell_coverage
                         result.update({
                             "query_stream": query_spec.stream_id,
                             "support_stream": support_spec.stream_id,
@@ -1354,28 +1575,33 @@ def main() -> None:
                             "subject_relation": mode,
                             "enrollment_shape": enrollment_shape,
                             "support_count": support_count,
+                            "cohort": cohort,
                             "phase_a_dataset_seen": dataset in phase_a_datasets,
                             "phase_b_dataset_seen": dataset in phase_b_datasets,
                             "phase_b_any_subject_seen": any(
                                 str(plan.subject) in phase_b_subject_names
                                 or f"{dataset}:{plan.subject}" in phase_b_subject_names
-                                for plan in plans
+                                for plan in cell_plans
                             ),
-                            "phase_b_all_subjects_seen": bool(plans) and all(
+                            "phase_b_all_subjects_seen": bool(cell_plans) and all(
                                 str(plan.subject) in phase_b_subject_names
                                 or f"{dataset}:{plan.subject}" in phase_b_subject_names
-                                for plan in plans
+                                for plan in cell_plans
                             ),
                         })
                         results[key] = result
                         if result.get("status"):
                             print(f"{key}: skipped ({result['status']})", flush=True)
                         else:
+                            removed = result.get("support_removed_f1_macro")
+                            shuffled = result.get("support_label_shuffled_f1_macro")
+                            removed_text = "n/a" if removed is None else f"{removed:.1f}"
+                            shuffled_text = "n/a" if shuffled is None else f"{shuffled:.1f}"
                             print(
                                 f"{key}: F1={result['f1_macro']:.1f} "
                                 f"identity={result['identity_f1_macro']:.1f} "
-                                f"removed={result['support_removed_f1_macro']:.1f} "
-                                f"shuffled={result['support_label_shuffled_f1_macro']:.1f} "
+                                f"removed={removed_text} "
+                                f"shuffled={shuffled_text} "
                                 f"n={result['queries']}",
                                 flush=True,
                             )
@@ -1384,7 +1610,6 @@ def main() -> None:
     out = args.out or _OUT / (
         f"eval_enrollment_{protocol_tag}_{predictor_mode}{suffix}.json"
     )
-    evaluation_source_fp = phase_b_evaluation_source_fingerprint()
     evaluation_protocol = {
         "protocol_role": args.protocol_role,
         "dataset_selection": "explicit" if explicit_datasets else "protocol_roster",
@@ -1394,6 +1619,18 @@ def main() -> None:
         "configuration_modes": args.configuration_modes,
         "enrollment_shapes": args.enrollment_shapes,
         "seed": args.seed,
+        "skip_zero_shot": bool(args.skip_zero_shot),
+        "counterfactual_controls": args.counterfactual_controls,
+        "shared_manifest": str(args.manifest.resolve()) if args.manifest else None,
+        "shared_manifest_fingerprint": (
+            shared_manifest["manifest_fingerprint"] if shared_manifest else None
+        ),
+        "shared_manifest_seed": manifest_seed,
+        "encoded_cache": {
+            "enabled": not args.no_encoded_cache,
+            "directory": str(args.encoded_cache_dir),
+            **encoded_cache_stats,
+        },
         "gate_top_k": args.gate_top_k,
         "active_windows_per_label": ACTIVE_WINDOWS_PER_LABEL,
         "active_archive_patch_rows": int(len(base_rows)),
@@ -1428,7 +1665,23 @@ def main() -> None:
         "dataset_selection": "explicit" if explicit_datasets else "protocol_roster",
         "datasets": args.datasets,
         "seed": args.seed,
+        "manifest": str(args.manifest.resolve()) if args.manifest else None,
+        "manifest_fingerprint": (
+            shared_manifest["manifest_fingerprint"] if shared_manifest else None
+        ),
+        "manifest_seed": manifest_seed,
+        "encoded_cache": {
+            "enabled": not args.no_encoded_cache,
+            "directory": str(args.encoded_cache_dir),
+            **encoded_cache_stats,
+        },
         "batch_size": args.batch,
+        "skip_zero_shot": bool(args.skip_zero_shot),
+        "counterfactual_controls": args.counterfactual_controls,
+        "elapsed_seconds": time.perf_counter() - started,
+        "peak_gpu_memory_bytes": (
+            int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
+        ),
         "gate_top_k": args.gate_top_k,
         "active_windows_per_label": ACTIVE_WINDOWS_PER_LABEL,
         "active_archive_patch_rows": int(len(base_rows)),
@@ -1456,9 +1709,11 @@ def main() -> None:
         "controls": [
             ("admissibility_disabled" if predictor_mode == "admissibility_gate"
              else "identity_decoder"),
-            "support_removed", "support_labels_cyclically_shifted",
             "prototype", "l2_ridge_head",
-        ],
+        ] + (
+            ["support_removed", "support_labels_cyclically_shifted"]
+            if args.counterfactual_controls == "full" else []
+        ),
         "bank": str(args.bank),
         "predictor": str(args.predictor),
         "predictor_fp": predictor_fp,

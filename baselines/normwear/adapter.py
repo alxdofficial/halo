@@ -160,33 +160,53 @@ class NormWearAdapter(BaselineAdapter):
         return {"model": model, "query_emb": query_emb}
 
     @torch.no_grad()
-    def predict(self, stream: eval_data.EvalStream, state, device) -> Tuple[List[str], dict]:
+    def window_features(self, stream: eval_data.EvalStream, state, device) -> np.ndarray:
         model, query_emb = state["model"], state["query_emb"]
-
-        X = _to_normwear_input(stream.windows, stream.mask, stream.rate_hz)   # (N, Creal, 390)
-        outs = []
-        # MSiTF attention pools over (nvar * n_patches) tokens per sample, so peak memory
-        # scales with batch; 32 keeps a 6-channel window comfortably under ~24 GB.
+        inputs = _to_normwear_input(stream.windows, stream.mask, stream.rate_hz)
+        outputs = []
         batch = int(os.environ.get("NORMWEAR_BATCH", "32"))
-        for i in range(0, len(X), batch):
-            emb = _signal_encode_np(model, X[i:i + batch], query_emb, device)  # (b, 2048)
-            outs.append(emb.float().cpu().numpy())
-            if device != "cpu":
-                torch.cuda.empty_cache()
-        win = np.concatenate(outs, axis=0)                                    # (N, 2048)
+        for start in range(0, len(inputs), batch):
+            embedding = _signal_encode_np(
+                model, inputs[start:start + batch], query_emb, device
+            )
+            outputs.append(embedding.float().cpu().numpy())
+        return np.concatenate(outputs, axis=0).astype(np.float32, copy=False)
 
-        lab = _encode_labels(stream.eval_labels, model, device)              # (L, 2048)
+    @torch.no_grad()
+    def predict(self, stream: eval_data.EvalStream, state, device) -> Tuple[List[str], dict]:
+        return self.predict_candidates(stream, stream.eval_labels, state, device)
 
-        # L1 (Manhattan) argmin — NormWear's native matching metric. -dist so argmax picks
-        # the nearest label.
-        dist = np.abs(win[:, None, :] - lab[None, :, :]).sum(-1)             # (N, L)
-        idx = (-dist).argmax(axis=1)
-        preds = [stream.eval_labels[i] for i in idx]
+    @torch.no_grad()
+    def predict_candidates(self, stream, candidates, state, device) -> Tuple[List[str], dict]:
+        win = self.window_features(stream, state, device)                      # (N, 2048)
+        predictions, info = self.predict_candidates_from_features(
+            win, candidates, state, device
+        )
+        info["n_channels_used"] = int(np.asarray(stream.mask, dtype=bool).sum())
+        return predictions, info
 
-        n_real = int(np.asarray(stream.mask, dtype=bool).sum())
+    def predict_candidates_from_features(self, features, candidates, state, device):
+        win = np.asarray(features)
+
+        candidates = list(candidates)
+        cache = state.setdefault("_candidate_embedding_cache", {})
+        cache_key = tuple(candidates)
+        if cache_key not in cache:
+            cache[cache_key] = _encode_labels(
+                candidates, state["model"], device
+            ).astype(np.float32, copy=False)
+        lab = cache[cache_key]                                                 # (L, 2048)
+
+        # scipy's C implementation preserves NormWear's native L1 rule without allocating
+        # the otherwise very large (windows, labels, 2048) broadcast temporary.
+        from scipy.spatial.distance import cdist
+
+        dist = cdist(win, lab, metric="cityblock")                            # (N, L)
+        idx = dist.argmin(axis=1)
+        preds = [candidates[i] for i in idx]
+
         info = {
             "predicted_classes": sorted(set(preds)),
-            "n_channels_used": n_real,
             "match_metric": "l1_argmin",
         }
         return preds, info

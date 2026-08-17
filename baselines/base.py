@@ -83,6 +83,32 @@ class BaselineAdapter:
         ``stream.windows``) plus an info dict. Implemented by each tier."""
         raise NotImplementedError
 
+    def predict_candidates(
+        self, stream: eval_data.EvalStream, candidates: Sequence[str], state, device
+    ) -> Tuple[List[str], dict]:
+        """Predict over an explicitly frozen candidate roster."""
+        if list(candidates) != list(stream.eval_labels):
+            raise NotImplementedError(
+                f"{self.name} cannot override its candidate roster"
+            )
+        return self.predict(stream, state, device)
+
+    def window_features(self, stream: eval_data.EvalStream, state, device) -> np.ndarray:
+        """Frozen per-window representation used by the matched enrollment protocol.
+
+        Concrete adapters must expose the representation immediately before their published
+        classifier or native text-matching rule.  Keeping this method explicit prevents the
+        adaptation evaluator from accidentally training on logits for one model and trunk features
+        for another.
+        """
+        raise NotImplementedError(f"{self.name} does not expose frozen window features")
+
+    def predict_candidates_from_features(
+        self, features: np.ndarray, candidates: Sequence[str], state, device
+    ) -> Tuple[List[str], dict]:
+        """Predict from :meth:`window_features` without re-encoding the signal."""
+        raise NotImplementedError(f"{self.name} cannot predict from cached window features")
+
     def evaluate(
         self,
         dataset: str,
@@ -129,6 +155,9 @@ class ConSEAdapter(BaselineAdapter):
         raise NotImplementedError
 
     def predict(self, stream, state, device) -> Tuple[List[str], dict]:
+        return self.predict_candidates(stream, stream.eval_labels, state, device)
+
+    def predict_candidates(self, stream, candidates, state, device) -> Tuple[List[str], dict]:
         probs = np.asarray(self.window_probs(stream, state, device))
         vocab = global_labels()
         if probs.shape[1] != len(vocab):
@@ -136,7 +165,7 @@ class ConSEAdapter(BaselineAdapter):
                 f"{self.name}: window_probs has {probs.shape[1]} columns but the "
                 f"global vocabulary has {len(vocab)} labels."
             )
-        return scoring.conse_predict(probs, vocab, stream.eval_labels)
+        return scoring.conse_predict(probs, vocab, list(candidates))
 
 
 class CosineAdapter(BaselineAdapter):
@@ -152,11 +181,28 @@ class CosineAdapter(BaselineAdapter):
         raise NotImplementedError
 
     def predict(self, stream, state, device) -> Tuple[List[str], dict]:
+        return self.predict_candidates(stream, stream.eval_labels, state, device)
+
+    def predict_candidates(self, stream, candidates, state, device) -> Tuple[List[str], dict]:
         emb = np.asarray(self.window_embeddings(stream, state, device))      # (N, D)
-        lab = np.asarray(self.encode_labels(stream.eval_labels, state, device))  # (L, D)
+        return self.predict_candidates_from_features(emb, candidates, state, device)
+
+    def predict_candidates_from_features(self, features, candidates, state, device):
+        emb = np.asarray(features)
+        candidates = list(candidates)
+        cache = state.setdefault("_candidate_embedding_cache", {})
+        cache_key = tuple(candidates)
+        if cache_key not in cache:
+            cache[cache_key] = np.asarray(
+                self.encode_labels(candidates, state, device), dtype=np.float32
+            )
+        lab = cache[cache_key]                                                # (L, D)
         sims = emb @ lab.T                                                    # (N, L)
-        preds = scoring.predict_from_similarity(sims, stream.eval_labels)
+        preds = scoring.predict_from_similarity(sims, candidates)
         return preds, {"predicted_classes": sorted(set(preds))}
+
+    def window_features(self, stream, state, device) -> np.ndarray:
+        return np.asarray(self.window_embeddings(stream, state, device), dtype=np.float32)
 
 
 # =============================================================================

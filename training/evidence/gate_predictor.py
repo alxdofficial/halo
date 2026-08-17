@@ -482,6 +482,7 @@ def sensor_rows_from_encoded(
     *,
     channel_mask: Sequence[bool],
     candidate_positions: torch.Tensor | None = None,
+    sensor_row_indices: torch.Tensor | None = None,
 ) -> BankRows:
     """Turn selected external windows into per-sensor query or enrolled-evidence rows.
 
@@ -494,12 +495,22 @@ def sensor_rows_from_encoded(
         raise ValueError("cannot construct runtime sensor rows from zero windows")
     if candidate_positions is not None and len(candidate_positions) != len(source_windows):
         raise ValueError("candidate_positions must have one entry per selected source window")
-    source_row = encoded["sensor_window"].long().cpu()
-    selected = torch.isin(source_row, source_windows)
-    if not bool(selected.any()):
+    all_source_rows = encoded["sensor_window"].long().cpu()
+    if sensor_row_indices is None:
+        selected = torch.isin(all_source_rows, source_windows)
+        selected_index = selected.nonzero(as_tuple=False).flatten()
+    else:
+        selected_index = torch.as_tensor(sensor_row_indices, dtype=torch.long).cpu()
+        if len(selected_index) and (
+            int(selected_index.min()) < 0 or int(selected_index.max()) >= len(all_source_rows)
+        ):
+            raise IndexError("sensor_row_indices are outside the encoded sensor-row table")
+    if not len(selected_index):
         raise ValueError("selected windows exported no per-sensor rows")
-    source_row = source_row[selected]
-    slot = encoded["sensor_slot"].long().cpu()[selected]
+    source_row = all_source_rows.index_select(0, selected_index)
+    if not bool(torch.isin(source_row, source_windows).all()):
+        raise ValueError("sensor_row_indices include a window outside window_rows")
+    slot = encoded["sensor_slot"].long().cpu().index_select(0, selected_index)
 
     descriptors, bias_by_slot, modality_by_slot, gravity_by_slot = _runtime_sensor_metadata(
         dataset, stream, tuple(bool(value) for value in channel_mask)
@@ -522,7 +533,9 @@ def sensor_rows_from_encoded(
         )
     return BankRows(
         rows=SensorRows(
-            feature=encoded["sensor_Z"][selected.to(encoded["sensor_Z"].device)].float().cpu(),
+            feature=encoded["sensor_Z"].index_select(
+                0, selected_index.to(encoded["sensor_Z"].device)
+            ).float().cpu(),
             descriptor=descriptors.index_select(0, slot),
             bias=bias_by_slot.index_select(0, slot),
             modality=modality_by_slot.index_select(0, slot),

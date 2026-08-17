@@ -432,3 +432,17 @@ class HarnetAdapter(ConSEAdapter):
                 b = torch.from_numpy(x[s:s + EMBED_BATCH]).float().to(device)
                 probs.append(F.softmax(model(b) / T, dim=1).cpu().numpy())
         return np.concatenate(probs, axis=0)
+
+    def window_features(self, stream, state, device) -> np.ndarray:
+        x = _to_30hz_150(_select_accel(stream.windows, stream.channels), stream.rate_hz)
+        return _extract_feats(state["model"], x, device)
+
+    def predict_candidates_from_features(self, features, candidates, state, device):
+        model = state["model"]
+        temperature = float(state.get("temperature", 1.0))
+        values = []
+        with torch.no_grad():
+            for start in range(0, len(features), EMBED_BATCH):
+                batch = torch.from_numpy(features[start:start + EMBED_BATCH]).float().to(device)
+                values.append(F.softmax(model.classifier(batch) / temperature, dim=1).cpu().numpy())
+        return scoring.conse_predict(np.concatenate(values), global_labels(), list(candidates))

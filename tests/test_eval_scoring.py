@@ -107,6 +107,14 @@ def test_macro_f1_on_known_confusion():
     assert m["n_gt_classes"] == 2
 
 
+def test_fast_macro_f1_matches_full_metric():
+    gt = ["walk", "walk", "sit", "sit", "sit"]
+    pred = ["walk", "run", "sit", "walk", "run"]
+    assert scoring.macro_f1_fast(gt, pred) == pytest.approx(
+        scoring.classification_metrics(gt, pred)["f1_macro"]
+    )
+
+
 def test_macro_f1_charges_false_positive_into_unseen_candidate():
     # Predicting a class with zero GT windows must be penalized (union class set).
     gt = ["walk", "walk", "walk", "walk"]

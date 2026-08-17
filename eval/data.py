@@ -26,6 +26,7 @@ exposed via the `alignment` argument.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -190,6 +191,20 @@ def load_global_labels() -> List[str]:
     return list(json.loads(GLOBAL_LABELS_PATH.read_text())["labels"])
 
 
+@lru_cache(maxsize=3)
+def _quality_exclusion_cache(alignment: str) -> dict[str, set[int]]:
+    """Validate each corpus-wide quality artifact once per process."""
+    from data.scripts.scan_duplicates import load as load_duplicates
+    from data.scripts.scan_implausible import load as load_implausible
+
+    duplicate = load_duplicates(alignment, require=True)
+    implausible = load_implausible(alignment, require=True)
+    return {
+        key: set(duplicate.get(key, ())) | set(implausible.get(key, ()))
+        for key in set(duplicate) | set(implausible)
+    }
+
+
 def _quality_excluded(dataset: str, stream: str, alignment: str) -> tuple[np.ndarray, str]:
     """Window indices this stream must not serve, plus a one-word provenance string.
 
@@ -205,13 +220,9 @@ def _quality_excluded(dataset: str, stream: str, alignment: str) -> tuple[np.nda
     alignment this returns the reason rather than an empty set, so a silently unscreened load is
     distinguishable from a genuinely clean one — :attr:`EvalStream.quality_screen` records which.
     """
-    from data.scripts.scan_duplicates import load as load_duplicates
-    from data.scripts.scan_implausible import load as load_implausible
-
     key = f"{dataset}/{stream}"
     try:
-        excluded = load_duplicates(alignment, require=True).get(key, set()) | \
-            load_implausible(alignment, require=True).get(key, set())
+        excluded = _quality_exclusion_cache(alignment).get(key, set())
     except (FileNotFoundError, ValueError) as error:
         return np.zeros(0, dtype=int), f"unavailable: {error}"
     return np.asarray(sorted(excluded), dtype=int), "applied"

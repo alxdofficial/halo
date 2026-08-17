@@ -375,3 +375,17 @@ class CrossHARAdapter(ConSEAdapter):
                 b = torch.from_numpy(feats[s:s + EMBED_BATCH]).float().to(device)
                 probs.append(F.softmax(head(b) / T, dim=1).cpu().numpy())
         return np.concatenate(probs, axis=0)
+
+    def window_features(self, stream, state, device) -> np.ndarray:
+        x6 = prep.grid_to_contract(stream.windows, stream.channels, stream.rate_hz)
+        return _features(state["backbone"], x6, device)
+
+    def predict_candidates_from_features(self, features, candidates, state, device):
+        head = state["head"]
+        temperature = float(state.get("temperature", 1.0))
+        values = []
+        with torch.no_grad():
+            for start in range(0, len(features), EMBED_BATCH):
+                batch = torch.from_numpy(features[start:start + EMBED_BATCH]).float().to(device)
+                values.append(F.softmax(head(batch) / temperature, dim=1).cpu().numpy())
+        return scoring.conse_predict(np.concatenate(values), global_labels(), list(candidates))

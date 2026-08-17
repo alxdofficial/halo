@@ -13,6 +13,7 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[3]
 DATASETS_DIR = REPO / "data" / "datasets"
+_FINGERPRINT_CACHE: dict[tuple, str] = {}
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,20 @@ def grid_corpus_fingerprint(
     byte-identical clean rebuild on another machine must accept the same reviewed cache.
     """
     selected = list(refs) if refs is not None else discover_grids(alignment)
+    cache_parts = []
+    for ref in sorted(selected, key=lambda item: item.key):
+        paths = [ref.grid_dir / "data.npy", ref.grid_dir / "meta.json", ref.grid_dir / "mask.npy"]
+        lengths = ref.grid_dir / "lengths.npy"
+        if lengths.exists():
+            paths.append(lengths)
+        cache_parts.append((
+            ref.key,
+            tuple((path.stat().st_size, path.stat().st_mtime_ns) for path in paths),
+        ))
+    cache_key = (alignment, tuple(cache_parts))
+    cached = _FINGERPRINT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     digest = hashlib.sha256()
 
     def add(value: object) -> None:
@@ -159,7 +174,9 @@ def grid_corpus_fingerprint(
             lengths = np.ascontiguousarray(ref.load_lengths(), dtype=np.int32)
             add(hashlib.sha256(lengths.tobytes()).hexdigest())
 
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    _FINGERPRINT_CACHE[cache_key] = value
+    return value
 
 
 def triad_indices(ref: GridRef, modality: str) -> tuple[int, int, int] | None:
