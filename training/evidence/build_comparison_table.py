@@ -21,7 +21,7 @@ Usage:
     python -m training.evidence.build_comparison_table \
         --arm step0 out/enroll_step0_coherent.json out/enroll_step0_aliases.json \
         --arm step1000 out/enroll_step1000_coherent.json out/enroll_step1000_aliases.json \
-        --out-prefix training/evidence/outputs/stage1_step0_control/comparison
+        --out-prefix training/evidence/outputs/diagnostics/phase_b_20260808/stage1_step0_control/comparison
 """
 
 from __future__ import annotations
@@ -40,8 +40,9 @@ ARM_METRICS = {
     "support_removed_f1": "support_removed_f1_macro",
     "support_shuffled_f1": "support_label_shuffled_f1_macro",
 }
-# Columns computed directly from the frozen Phase-A embeddings and the declared support. They do
-# not involve the decoder or the retriever, so every arm must reproduce them exactly.
+# Columns computed directly from the frozen Phase-A embeddings and the declared support. They must
+# match across Phase-B predictors that share a backbone, but are expected to change when the arm is
+# a different Phase-A checkpoint.
 SHARED_METRICS = {
     "prototype_f1": "prototype_f1_macro",
     "ridge_f1": "ridge_head_f1_macro",
@@ -63,6 +64,7 @@ def load_arm(paths: list[Path]) -> dict:
                 raise SystemExit(f"duplicate cell {cell} across {paths}")
             cells[cell] = result
         for field in ("predictor", "predictor_fp", "predictor_step", "predictor_selection",
+                      "predictor_mode",
                       "untrained_control", "training_regime", "bank_fp", "checkpoint_fp", "seed",
                       "evaluation_regime", "evaluation_source_fp", "evaluation_protocol_fp"):
             value = payload.get(field)
@@ -138,6 +140,30 @@ def candidate_count(result: dict) -> float:
     ) / total
 
 
+def assert_matched_cohorts(arms: dict, shared_cells: set) -> None:
+    """Require one query cohort, allowing embedding controls to vary by backbone."""
+    same_backbone = len({arm["meta"].get("checkpoint_fp") for arm in arms.values()}) == 1
+    for cell in sorted(shared_cells):
+        queries = [arm["cells"][cell].get("queries") for arm in arms.values()]
+        candidates = [candidate_count(arm["cells"][cell]) for arm in arms.values()]
+        if len(set(queries)) != 1 or max(candidates) - min(candidates) > SHARED_TOLERANCE:
+            raise SystemExit(
+                f"cohort differs across arms at {cell}: queries={queries}, "
+                f"candidates={candidates}"
+            )
+        if same_backbone:
+            for column, field in SHARED_METRICS.items():
+                values = [arm["cells"][cell].get(field) for arm in arms.values()]
+                present = [v for v in values if v is not None]
+                if present and max(present) - min(present) <= SHARED_TOLERANCE:
+                    continue
+                raise SystemExit(
+                    f"{column} differs across arms at {cell}: {values}. This control does not use "
+                    "the Phase-B predictor and the arms share a Phase-A checkpoint, so they are "
+                    "not scoring the same cohort."
+                )
+
+
 def floors(n_candidates: float) -> tuple[float, float]:
     if not math.isfinite(n_candidates) or n_candidates < 1:
         return float("nan"), float("nan")
@@ -181,17 +207,7 @@ def main() -> None:
     if not shared_cells:
         raise SystemExit("no cell was scored by every arm; nothing is comparable")
 
-    # The support-free controls must be identical across arms. If they are not, the arms did not
-    # see the same query cohort and no comparison between them is valid.
-    for cell in sorted(shared_cells):
-        for column, field in SHARED_METRICS.items():
-            values = [arm["cells"][cell].get(field) for arm in arms.values()]
-            present = [v for v in values if v is not None]
-            if present and max(present) - min(present) > SHARED_TOLERANCE:
-                raise SystemExit(
-                    f"{column} differs across arms at {cell}: {values}. This control does not use "
-                    "the decoder or retriever, so the arms are not scoring the same cohort."
-                )
+    assert_matched_cohorts(arms, shared_cells)
 
     rows, cell_rows = [], []
     groups = defaultdict(list)

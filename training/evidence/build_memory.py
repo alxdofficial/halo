@@ -15,13 +15,13 @@ Cached bank (``memory_bank.pt``):
     label_text (L, 384) float32  frozen-SBERT embedding of each vocab label (the ConSE text space)
     subj_names / cfg_names        int->string decoders for subj / cfg
     backbone   dict              provenance (ckpt path, step, val_ba, git, content fingerprint)
-    patch      dict              schema-v3 valid patch vectors + parent window/event/config,
+    patch      dict              valid patch vectors + parent window/event/config,
                                 center time, duration, resolution, and verification metadata
     source_row (N,) int64        original native-grid row for exact live re-encoding
 
-The pooled keys are intentionally unchanged: they are the T2.0 control. ``schema_version=3`` adds
-the patch table, exact source provenance, and a behavioral patch-path probe without reinterpreting
-pooled vectors.
+The pooled keys are intentionally unchanged: they are the T2.0 control. Schema 3 adds the patch
+    table, exact source provenance, and a behavioral patch-path probe. ``--sensor-rows`` emits schema 5
+with the per-(patch, sensor) table required by the current admissibility design.
 
 Memory is built from CLEAN (un-augmented) encodings — a retrieval bank of jittered
 vectors would be matching against noise. Label/query augmentation is a *training-loop*
@@ -29,7 +29,7 @@ concern (the learned t-kernel), not a memory concern.
 
 Run:
     PY=/home/alex/code/HALO/legacy_code/.venv/bin/python
-    HALO_CKPT=training/tokenizer/outputs/phase_a_headline/best.pt \
+    HALO_CKPT=training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt \
       $PY -m training.evidence.build_memory --device cuda
 """
 
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import os
 from pathlib import Path
@@ -52,14 +53,22 @@ from training.tokenizer.eval_transfer import (
     embedding_fingerprint,
     encode_dataset_detailed,
     patch_embedding_fingerprint,
+    sensor_embedding_fingerprint,
 )
-from training.tokenizer.pretrain_data import (TRAIN_DATASETS, _stream_gravity_state,
-                                              stream_channel_descriptions, stream_sensor_bias)
+from training.tokenizer.pretrain_data import (
+    TRAIN_DATASETS,
+    _stream_gravity_state,
+    stream_channel_descriptions,
+    stream_sensor_bias,
+    stream_sensor_texts,
+)
 from training.evidence.policy import ARCHIVE_BUDGET_WINDOWS
 from training.evidence.device import resolve_device
 
 _REPO = Path(__file__).resolve().parents[2]
-_DEFAULT_CKPT = _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt"
+_DEFAULT_CKPT = (
+    _REPO / "training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt"
+)
 _DEFAULT_OUT = Path(__file__).resolve().parent / "outputs" / "memory_bank.pt"
 _GLOBAL_LABELS = _REPO / "data/labels/global_labels.json"
 
@@ -251,7 +260,7 @@ def main() -> None:
     if not args.checkpoint.exists():
         raise FileNotFoundError(
             f"encoder checkpoint missing at {args.checkpoint}. Point --checkpoint / HALO_CKPT "
-            "at the frozen Phase-A run (default: phase_a_headline/best.pt).")
+            "at the frozen sensor-granularity Phase-A run.")
     ckpt = torch.load(str(args.checkpoint), map_location="cpu", weights_only=False)
     enc = build_encoder(ckpt, device)
     sensor_rows = bool(args.sensor_rows)
@@ -286,7 +295,7 @@ def main() -> None:
     sensor_Z_parts, sensor_window_parts, sensor_slot_parts = [], [], []
     sensor_time_parts, sensor_duration_parts, sensor_resolution_parts = [], [], []
     sensor_y_parts, sensor_subj_parts, sensor_cfg_parts, sensor_event_parts = [], [], [], []
-    sensor_modality_parts, sensor_bias_parts = [], []
+    sensor_modality_parts, sensor_gravity_parts, sensor_bias_parts = [], [], []
     patch_window_parts, patch_event_parts, patch_event_verified_parts = [], [], []
     patch_time_parts, patch_duration_parts, patch_resolution_parts, patch_ordinal_parts = [], [], [], []
     subj_names: dict[str, int] = {}
@@ -295,6 +304,7 @@ def main() -> None:
     event_names: dict[str, int] = {}
     bank_streams: dict[str, int] = {}       # ref.key -> encoded window count (corpus provenance, F3)
     bank_datasets: set[str] = set()
+    sensor_descriptions: dict[int, list[dict]] = {}
     next_window = 0
 
     # Quality screens. build_memory reads grids directly rather than through CorpusIndex, so it
@@ -334,6 +344,7 @@ def main() -> None:
         encoded = encode_dataset_detailed(
             enc, data, texts, device, float(ref.rate_hz), gs,
             channel_mask=ref.mask, dataset=ref.dataset, stream=ref.stream,
+            lengths=np.asarray(ref.load_lengths())[keep],
             export_sensor_rows=sensor_rows,
         )
         z = encoded["pooled"]   # (n, d) cpu; unchanged pooled compatibility path
@@ -380,7 +391,27 @@ def main() -> None:
             slot_modality = torch.tensor([0 if m == "accel" else 1 for m in modalities],
                                          dtype=torch.int64)
             sensor_modality_parts.append(slot_modality[slot])
+            slot_gravity = torch.tensor([
+                int(m == "accel" and gs == "removed") for m in modalities
+            ], dtype=torch.int64)
+            sensor_gravity_parts.append(slot_gravity[slot])
             sensor_bias_parts.append(stream_sensor_bias(ref.dataset, ref.stream, modalities)[slot])
+            _, descriptions, _ = stream_sensor_texts(
+                ref.dataset,
+                ref.stream,
+                gravity_removed=gs == "removed",
+                has_accel="accel" in modalities,
+                has_gyro="gyro" in modalities,
+            )
+            sensor_descriptions[cfg_id] = [
+                {
+                    "slot": index,
+                    "modality": 0 if modality == "accel" else 1,
+                    "gravity": int(modality == "accel" and gs == "removed"),
+                    "text": descriptions[index],
+                }
+                for index, modality in enumerate(modalities)
+            ]
         patch_y_parts.append(torch.from_numpy(gl[keep].astype(np.int64))[local_patch_window])
         patch_subj_parts.append(torch.from_numpy(s_ids)[local_patch_window])
         patch_cfg_parts.append(
@@ -430,6 +461,23 @@ def main() -> None:
         "resolution": torch.cat(patch_resolution_parts),
         "ordinal": torch.cat(patch_ordinal_parts),
     }
+    sensor_table = None
+    if sensor_rows:
+        sensor_table = {
+            "Z": torch.cat(sensor_Z_parts),
+            "window": torch.cat(sensor_window_parts),
+            "slot": torch.cat(sensor_slot_parts),
+            "time": torch.cat(sensor_time_parts),
+            "duration": torch.cat(sensor_duration_parts),
+            "resolution": torch.cat(sensor_resolution_parts),
+            "y": torch.cat(sensor_y_parts),
+            "subj": torch.cat(sensor_subj_parts),
+            "cfg": torch.cat(sensor_cfg_parts),
+            "event": torch.cat(sensor_event_parts),
+            "modality": torch.cat(sensor_modality_parts),
+            "gravity": torch.cat(sensor_gravity_parts),
+            "bias": torch.cat(sensor_bias_parts),
+        }
 
     # One global budget, distributed label -> configuration. This replaces independently tunable
     # stream/label caps whose interactions made the effective memory population hard to explain.
@@ -442,6 +490,10 @@ def main() -> None:
         keep_patch = keep_mask[patch["window"]]
         patch = {name: values[keep_patch] for name, values in patch.items()}
         patch["window"] = remap[patch["window"]]
+        if sensor_table is not None:
+            keep_sensor = keep_mask[sensor_table["window"]]
+            sensor_table = {name: values[keep_sensor] for name, values in sensor_table.items()}
+            sensor_table["window"] = remap[sensor_table["window"]]
         Z, y, subj, cfg, event, event_verified, source_row = (
             Z[keep_mask], y[keep_mask], subj[keep_mask], cfg[keep_mask], event[keep_mask],
             event_verified[keep_mask], source_row[keep_mask],
@@ -460,32 +512,24 @@ def main() -> None:
     print(f"[memory] patch table: {len(patch['Z'])} valid patches · "
           f"{patch['Z'].numel() * 2 / 1e6:.0f} MB (fp16)", flush=True)
 
-    from training.evidence.bank_guard import bank_fingerprint, vocab_fingerprint
+    from training.evidence.bank_guard import (
+        bank_fingerprint, text_embedding_probe, vocab_fingerprint,
+    )
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    population_fp = _population_fingerprint({
+    population_fields = {
         "y": y, "subj": subj, "cfg": cfg, "event": event,
         "event_verified": event_verified, "source_row": source_row,
         **{f"patch_{name}": value for name, value in patch.items() if name != "Z"},
-    })
+    }
+    if sensor_table is not None:
+        population_fields.update({
+            f"sensor_{name}": value for name, value in sensor_table.items() if name != "Z"
+        })
+    population_fp = _population_fingerprint(population_fields)
     represented_refs = [ref for ref in refs if ref.key in bank_streams]
     # Per-sensor table (design of record). Absent unless --sensor-rows, so every existing consumer
     # sees exactly the schema-3 contract it already reads.
-    sensor_table = None
-    if sensor_rows:
-        sensor_table = {
-            "Z": torch.cat(sensor_Z_parts),
-            "window": torch.cat(sensor_window_parts),
-            "slot": torch.cat(sensor_slot_parts),
-            "time": torch.cat(sensor_time_parts),
-            "duration": torch.cat(sensor_duration_parts),
-            "resolution": torch.cat(sensor_resolution_parts),
-            "y": torch.cat(sensor_y_parts),
-            "subj": torch.cat(sensor_subj_parts),
-            "cfg": torch.cat(sensor_cfg_parts),
-            "event": torch.cat(sensor_event_parts),
-            "modality": torch.cat(sensor_modality_parts),
-            "bias": torch.cat(sensor_bias_parts),
-        }
+    if sensor_table is not None:
         widths = {k: len(v) for k, v in sensor_table.items()}
         if len(set(widths.values())) != 1:
             raise ValueError(f"per-sensor table columns disagree in length: {widths}")
@@ -494,14 +538,20 @@ def main() -> None:
               f"{sensor_table['Z'].numel() * 2 / 1e6:.0f} MB (fp16)", flush=True)
 
     payload = {
-        "schema_version": 4 if sensor_rows else 3,
+        "schema_version": 5 if sensor_rows else 3,
         "Z": Z, "y": y, "subj": subj, "cfg": cfg, "event": event,
         "event_verified": event_verified, "source_row": source_row,
         # Versioned patch evidence. The legacy pooled keys above intentionally remain unchanged so
         # official pooled controls and old adapters keep their exact data contract.
         "patch": patch,
         **({"sensor": sensor_table} if sensor_table is not None else {}),
+        **({"sensor_descriptions": sensor_descriptions} if sensor_table is not None else {}),
         "vocab": vocab, "vocab_fp": vocab_fingerprint(vocab), "label_text": label_text,
+        "text_encoder": {
+            "model": "all-MiniLM-L6-v2",
+            "sentence_transformers": importlib.metadata.version("sentence-transformers"),
+        },
+        "text_embed_probe": text_embedding_probe(),
         "subj_names": {v: k for k, v in subj_names.items()},
         "cfg_names": {v: k for k, v in cfg_names.items()},
         "cfg_rate_hz": cfg_rates,
@@ -538,6 +588,7 @@ def main() -> None:
         # function. Consumers re-run the probe and compare (see bank_guard).
         "embed_probe": embedding_fingerprint(enc, device),
         "patch_embed_probe": patch_embedding_fingerprint(enc, device),
+        **({"sensor_embed_probe": sensor_embedding_fingerprint(enc, device)} if sensor_rows else {}),
     }
     payload["bank_fp"] = bank_fingerprint(payload)
     torch.save(payload, str(args.out))

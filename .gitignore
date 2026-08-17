@@ -72,6 +72,17 @@ training/tokenizer/outputs/*/
 training/tokenizer/outputs/**/*.log
 training/evidence/outputs/telemetry/
 
+# Per-run Phase-B artifacts. Mirrors the tokenizer rule above: memory banks, fitted gates and
+# per-run eval dumps are reproducible from the source plus a checkpoint, and are far too heavy to
+# version (the checkpoint-selection study alone is 15 GB, and memory_bank.pt is 2.6 GB). Top-level
+# analysis deliverables stay tracked; per-run subdirectories do not.
+training/evidence/outputs/**/*.pt
+training/evidence/outputs/*/
+training/evidence/outputs/**/*.log
+
+# Debug plots regenerated on demand from the gridded corpus.
+data/scripts/debug/outputs/
+
 # agent worktrees / session scratch
 .claude/
 

@@ -51,7 +51,7 @@ Per (patch, sensor) the model carries three vectors:
 
 | name | contents | provenance |
 |---|---|---|
-| `feature` | filterbank band energies + signed DC + phase + observability masks | per patch, computed |
+| `feature` | filterbank band energies + signed DC + amplitude + observability masks | per patch, computed |
 | `text_descriptor` | SBERT of "accelerometer of a smartwatch on the left wrist" | per sensor, frozen artifact |
 | `sensor_bias` | activity-invariant channel physics | per sensor, offline closed-form statistics |
 
@@ -62,10 +62,9 @@ property dies.
 
 ## Front end — keep
 
-Constant-Q physical-Hz filterbank (32 bands, 0.3-15 Hz, Q=4, `FB_DFT_SIZE=256`), the **Nyquist
+Constant-Q physical-Hz filterbank (32 bands, 0.3-15 Hz, Q=4, `DFT_SIZE=256`), the **Nyquist
 observability mask** (`center + 2σ ≤ 0.9·rate/2`), the **low-frequency resolution mask** (cycles
-fitting in the window), the signed DC feature with frozen standardisation, the within-sensor phase
-feature.
+fitting in the window), an amplitude scalar, and the signed DC feature with frozen standardisation.
 
 The two masks are the built instantiation of the thesis at the band level: they state what this
 configuration cannot resolve. Nothing else in the wearable literature does this — LSM-2 models data
@@ -93,41 +92,19 @@ index; identity is text, so sensor count and order are free.
 Cross-sensor attention operates **within a placement** in Phase A. Cross-*placement* fusion is a
 Phase-B vote-merge, never an attention operation (constraint 1).
 
-## Augmentations — split by whether the acquisition changed
+## Augmentations
 
-| group | members | draw | VICReg invariance |
-|---|---|---|---|
-| **nuisance** | jitter, small scale, window crop, **text paraphrase** | independent per view | applies |
-| **config** | rotation_3d, rate, unit scale, gravity state, sensor dropout | **one draw per window per step, shared across ALL views** | does **not** apply |
+The minimal reference recipe enables only SO(3) rotation. Each VICReg view draws an independent
+rotation, applied jointly to co-located accelerometer and gyroscope triads. Jitter, scaling, gravity
+removal, synthetic rate changes, channel dropout, temporal crop, and text augmentation are disabled.
+Their implementations remain controlled ablations, not hidden parts of the default recipe.
 
-"All views" = VICReg view A + VICReg view B + the JEPA teacher's clean view.
-
-**Verified 2026-08-12:** the teacher is NOT a separate augmentation in this codebase — it consumes
-the same `patches` tensor as view A (`jepa_teacher.tokenize(patches, ...)`, or the shared fixed-arm
-analysis), so it inherits view A's configuration automatically. Sharing the draw between A and B is
-therefore sufficient, and the "third view" concern raised while designing this does not apply here.
-
-Implemented by generalising the pre-existing `shared_config_seed` hook, which previously covered only
-the sensor-text-dropout *decision*. That was not enough: the physical transforms draw their
-PARAMETERS internally (`_random_so3` from `np.random.randn`, rate from `np.random.uniform`, dropout
-from `_random.sample`), so a shared decision still left the two views rotated by different rotations
-to different rates — the same invariance demand one level down. `_shared_draw` now seeds and restores
-both module RNGs around each config transform. Measured: two views of one window come out with
-identical rate, channel mask and gravity state, while nuisance draws stay independent.
-
-**Why paraphrase is nuisance, not config:** the grouping rule is "did the underlying acquisition
-change," not "which field was touched". Paraphrase changes the wording of an identical
-configuration. Keeping it nuisance is what forces the model to work off text *semantics* rather than
-memorising ~20 fixed strings — the pressure that has to generalise to an unseen placement description
-at deployment.
-
-**`sensor_text_dropout` is REMOVED.** Under VICReg it trained "with descriptor" and "without
-descriptor" toward the same representation, which is precisely the mechanism that makes conditioning
-inert. Descriptor-mask JEPA supersedes it with a supervised version of the same robustness.
+The JEPA teacher consumes view A's signal. The two VICReg views differ only by their independent
+mounting rotations, making the invariance being learned direct and auditable.
 
 ## Objectives
 
-**JEPA** — latent masked prediction against an EMA teacher, three mask strategies:
+**JEPA** — latent masked prediction against an EMA teacher, two active mask strategies:
 
 1. **Time-mask** (existing): mask physical-time intervals of `feature`.
 2. **Sensor-mask** (new): mask *all* of one sensor's channels; reconstruct from the other sensor plus
@@ -136,53 +113,45 @@ inert. Descriptor-mask JEPA supersedes it with a supervised version of the same 
    structurally in the mask planner, with a test.** This is the well-posed successor to the
    cross-placement objective deleted 2026-08-06 — that one was ill-posed by constraint 1; this one is
    rigid-body kinematics.
-3. **Descriptor-mask** (new): mask `text_descriptor`, keep `feature` + `sensor_bias`, reconstruct the
-   descriptor. **Scored retrievally** — is the true descriptor the nearest among the batch's
-   descriptors — not by MSE, which predicting the corpus-mean text would game.
-
-**VICReg** — variance and covariance terms retained as anti-collapse; the invariance MSE applies to
-nuisance-group pairs only.
-
-Strategy 3 is what makes the descriptor load-bearing. It replaces the standalone contrastive
-descriptor-matching head considered earlier: same effect, one framework, no new loss family.
+Descriptor-mask retrieval remains available as an ablation but has zero probability and zero weight in
+the reference run. **VICReg** retains its variance and covariance terms for collapse prevention; its
+invariance MSE applies to the independently rotated positive views.
 
 ## `sensor_bias`
 
-Computed **offline**, per sensor, over all recordings from that sensor. **Activity-invariant channel
+Computed **offline**, per sensor, over Phase-A training subjects only. **Activity-invariant channel
 physics only** — pooling over a sensor whose dataset has a skewed activity distribution would
 otherwise make this a dataset fingerprint.
 
 | field | computed as | catches |
 |---|---|---|
 | gravity magnitude | median ‖acc‖ over quiescent patches | recgym min-max ([0,1] → nonsense) |
-| gravity presence | median \|DC\| | kuhar / uci_har gravity-removed (≈0.04) |
+| gravity presence | median norm of the per-window DC vector | gravity-removed streams |
 | noise floor | quiescent energy above the motion band (>~20 Hz is instrument, not person) | sensor grade |
 | quantization step | min positive gap in sorted unique value diffs | effective bits |
-| clipping | fraction at rails + rail value | range limits |
-| rate fidelity | declared rate vs measured inter-sample statistics | FORTH-TRACE-style clocks |
-| dropout structure | gap fraction + gap-length statistics | transmission character |
-| gyro rest bias | resting gyro norm | calibration |
+| clipping | fraction at observed rails | range limits |
+| rate fidelity | source acquisition rate / stored array rate from converter metadata | resampling |
+| rest bias | median quiescent sensor norm | gyro offset / accelerometer rest magnitude |
 
 Quiescent-patch selection = low-variance percentile per stream. Every field is a **norm or aggregate**
 — which is why rotation leaves the descriptor unchanged. That is by construction, not luck.
 
-**OPEN (deferred by user, 2026-08-11):** whether accel and gyro need different field sets, and
-pruning to the minimal set that serves the goal. Build the full set, measure, then prune.
+The artifact carries seven standardized values plus seven support bits. Unsupported measurements
+therefore differ from a real value at the corpus mean. Implausible and byte-duplicate windows are
+excluded before statistics are estimated.
 
-**BUILT 2026-08-11** — `data/scripts/curate/sensor_bias.py`, artifact
-`data/scripts/curate/sensor_bias.json`: **163 sensors across 34 datasets**. Values verified physical:
-accel gravity magnitude 1.000–1.002 g, gyro rest bias 0.012–0.026, gravity fields correctly NaN for
-gyro, `noise_floor` NaN on 16% of sensors (streams at ≤40 Hz have Nyquist below the 20 Hz motion band,
-so out-of-band content is genuinely unmeasurable — reported unsupported, never filled).
+**BUILT 2026-08-12** — `data/scripts/curate/sensor_bias.py`, artifact
+`data/scripts/curate/sensor_bias.json`: **110 sensors across the 18-source expanded Phase-A corpus**.
+Normalisation uses training subjects only (58 validation subjects excluded), at most 4,000 valid
+windows per stream. The artifact persists the dataset roster, data seed, and validation-subject hash;
+the trainer rejects a mismatch rather than silently changing conditioning.
 
 **Guard status: INCONCLUSIVE, and it cannot be made conclusive on this corpus.**
-Nearest-neighbour dataset purity is 0.534 against a 0.029 chance. Restricting neighbours to
-*different placements* returns **the identical number** (0.5337, all 163 scored) — the exclusion
-removes nothing, because every stream carries a unique placement and every dataset a single device
-model. **Dataset identity and acquisition hardware are confounded by construction**, so this statistic
-cannot separate "descriptor captures channel physics" (intended) from "descriptor is a dataset ID"
-(leakage). It is retained as a monitor — a sharp increase across corpus revisions still means
-something — but reporting it as a pass would be false assurance.
+Nearest-neighbour dataset purity is 0.4211 against a 0.0833 chance. Restricting neighbours to
+different placements gives 0.4474 (all 38 scored). This changes the statistic but does not resolve
+the central confound: acquisition hardware and processing are generally dataset-specific, and the
+corpus lacks an independent same-hardware control across studies. The check is therefore a monitor,
+not a pass/fail guard.
 
 The decisive guards are downstream, where the confound does not apply:
 
@@ -251,87 +220,77 @@ a parity control.
 
 ---
 
-# Resolvability — MEASURED 2026-08-12. The premise holds.
+# Resolvability — implementation ready; current measurement pending
 
-`training/evidence/resolvability.py`, artifact `training/evidence/outputs/resolvability.json`,
-80 streams encoded with `phase_a_headline/best.pt`.
+The earlier `resolvability.json` was exploratory and is rejected by the current loader. It cannot be
+used to fit or validate the current gate for three reasons: it included development and test
+datasets, it pooled Phase-A validation subjects into the measurement corpus, and each stream target
+pooled accelerometer with gyroscope while the runtime gate acts on one sensor at a time. Its reported
+placement gaps motivated the design, but they are not evidence for the current implementation.
 
-**How the score is computed — and what it is NOT.** Per stream: encode windows with the frozen
-encoder, hold out half the subjects, and for each label run a one-vs-rest kNN over cosine similarity
-in *embedding* space; score balanced accuracy rescaled `2·(ba − 0.5)`, clipped at 0. **The label
-strings are used only as groupers — their semantic content never enters the score.** No SBERT, no
-text kernel. That matters: if resolvability were derived from linguistic similarity it would be
-re-measuring the text interface we already showed is inert (+0.0086), and the result would be
-circular. It isn't.
+The current `training/evidence/resolvability.py` contract is:
 
-## The paired contrast — simultaneous streams, same events, placement the only variable
+- use only datasets recorded in the sensor-granularity Phase-A checkpoint;
+- exclude the exact Phase-A validation subjects and all quality-screened windows;
+- measure accelerometer and gyroscope independently;
+- pool patches within resolution and then average resolutions for each source window;
+- use subject-disjoint, one-vs-rest kNN and map chance balanced accuracy to zero; and
+- report simultaneous-placement contrasts separately.
 
-| dataset | labels | mean gap | max gap | stream-profile correlation | inverting pairs |
-|---|---:|---:|---:|---:|---:|
-| realdisp | 31 | 0.508 | 0.882 | **+0.419** | 35/36 (97%) |
-| mmfit | 10 | 0.493 | 0.868 | **+0.379** | 2/6 (33%) |
-| xrf_v2 | 28 | 0.255 | 0.803 | +0.703 | 14/15 (93%) |
-| opportunity | 4 | 0.236 | 0.443 | +0.872 | 1/10 (10%) |
-| sp_sw_har | 5 | 0.160 | 0.377 | +0.885 | 0/1 (0%) |
-| **overall** | | **0.330** | | **+0.652** | |
+The label string is only a grouper in this measurement. No language embedding enters the score. A
+new scientific result must be produced from the completed sensor-granularity Phase-A checkpoint.
 
-Representative rows, all on identical physical events:
+## The admissibility gate
 
-| concept | best | worst | gap |
-|---|---|---|---:|
-| mmfit `bicep_curls` | left_wrist 1.00 | left_ear 0.13 | 0.87 |
-| realdisp `jump_rope` | right_lower_arm 0.88 | back 0.00 | 0.88 |
-| xrf_v2 `answering_phone` | right_pocket 0.80 | airpods_ear 0.00 | 0.80 |
-| mmfit `squats` | right_pocket 0.99 | right_wrist 0.35 | 0.64 |
+`training/evidence/admissibility_gate.py`. The train-only measured table is the gate's warm-start
+data. It is not an independent validation set after fitting. Held-out concept, dataset, and body-
+region folds in `gate_extrapolation.py` are the generalization evidence.
 
-**Both halves of the claim are confirmed.** The gap establishes that placement determines whether a
-concept is witnessable at all. The *correlation* establishes the sharper half: if placements had a
-fixed quality ordering, stream profiles would correlate near +1 and a scalar per placement would
-suffice — no third argument needed. On the two datasets with rich concept vocabularies (realdisp 31
-labels, mmfit 10) correlation falls to ~0.4 and **93–97% of stream pairs invert**: the pocket wins
-`squats` and loses `tricep_extensions`, the wrist the reverse. Which placement wins depends on the
-concept, which is exactly what makes the gate's `(config, config, concept)` signature necessary.
+**Why the lookup had to go.** `gate_tensor` keyed on the literal `"<dataset>/<stream>"` string and an
+exact label match. Against a novel vocabulary every entry hit the neutral default, so the gate became
+a uniform multiplier — and a uniform multiplier **provably cannot change the argmax**. It was doing
+nothing in exactly the open-vocabulary case it existed for. Deleted.
 
-The two high-correlation datasets (sp_sw_har 0.885, opportunity 0.872) carry only 4–5 coarse
-locomotion labels, where every sensor sees roughly the same whole-body posture. That is the expected
-boundary of the effect, not a counterexample.
+**The replacement**, a function of text alone (no curated placement fields, no anchor templates — a
+deployment supplies only its sensor's description):
 
-## Honest limits
+```
+u = A · sbert(sensor_text)      A: (r, 384)   "where does this sensor sit"
+v = B · sbert(concept_text)     B: (r, 384)   "where does this concept move"
+w = sigmoid(u^T LAMBDA v + b)   LAMBDA: (r, r)
+```
 
-- **Encoder-dependent.** Scores come from one checkpoint; a better encoder shifts them. What is
-  robust is the *contrast*, since every stream passes through the same encoder on the same events.
-- **Same-protocol only.** Each label is scored against its own stream's other labels, so the number
-  means "can this config tell this concept from its neighbours here", not an absolute.
-- **Generalisation to unseen pairs: PARTIAL.** See the learned predictor below. `gate_tensor` remains
-  a lookup with `default=0.5` for unmeasured pairs — neither veto nor licence.
+An additive `f(sensor)+g(concept)` gives a sensor one fixed quality ordering and cannot express cases
+where placement A is useful for one concept and placement B is useful for another. The bilinear form
+can express that interaction. Rank 1 is a valid signed ablation and can express a two-by-two
+inversion; it is not prohibited mathematically. Rank 8 is the current default; ranks 1, 2, and 4
+remain registered held-out ablations. Full learned projections are the default; fixed PCA remains an
+ablation.
 
-## Learned resolvability from text — MEASURED 2026-08-12. Rank signal, insufficient accuracy.
+### Prediction path
 
-`training/evidence/resolvability_predictor.py`. Learns `(placement description, concept description)
-→ resolvability` from SBERT embeddings, supervised by the measured table, and evaluated with **entire
-concepts held out** (25% of labels, 5 seeds) so every test pair involves a concept whose
-resolvability was never seen at any placement — the deployment condition.
+1. **Hard compatibility** — modality and gravity codes only, so it is label-independent and already
+   works unchanged on unseen vocabulary.
+2. **Soft admissibility** — score both query and evidence sensor descriptions against the candidate
+   and combine them with a scale-preserving geometric mean.
+3. **Joint retrieval score** — `feature cosine / temperature + log(admissibility)`, followed by
+   per-candidate top-k and a query-wide stabilized exponential that produces evidence mass. This
+   preserves candidate-level observability while applying the learned gate exactly once.
 
-| metric | value | reading |
-|---|---:|---|
-| mean Pearson r | **+0.455** (positive on 5/5 seeds) | text gets the ORDER right |
-| mean skill score vs. a constant | **−0.086** (2/5 seeds positive) | it does NOT beat the training mean on error |
-| after affine recalibration on train | −0.086 | miscalibration was **not** the problem |
+`BIAS_BLEND_WEIGHT` defaults to **0**: the provenance probe reads dataset identity out of the pooled
+feature at BA 0.702, so a bias-similarity term pulls toward same-dataset retrieval. Enable it only
+beside a reported `retrieval_provenance` with the blend on and off.
 
-**Language knows which placement is better for a concept it has never been measured on, but not by
-how much.** That is a real signal and an insufficient one. Consequences:
+### Three guards, each making the null observable
 
-- The gate keeps its **measured lookup**; unseen pairs keep the neutral default. Feeding raw
-  predicted values in as weights would inject noise a constant beats.
-- A rank-only use (relative down-weighting within one candidate set, never absolute) is the form the
-  signal could actually support, and is untried.
-- The likeliest cause is data volume: only ~80 streams contribute, and only five datasets have
-  simultaneous streams. More paired recordings is the direct lever.
+| guard | where | fires when |
+|---|---|---|
+| gate collapse | `AdmissibilityGate.spread`, logged per prediction | the gate flattens to a constant — "admissibility does not help" is a result |
+| provenance capture | `retrieval_provenance`, gate on vs off | the gate raises same-dataset retrieval: it learned provenance, not physics |
+| latent ↔ measurement | `latent_measurement_correlation` | learned latents do not track the table: the gate found something, but not the claim |
 
-This is also the fairest test the language interface has been given. The parity ablation asked "which
-concept is this" and got +0.0086. This asks "can this sensor witness this concept" — a question about
-body mechanics rather than semantics — and gets r=0.46. Weaker than needed, but the first place text
-has shown any real structure in this project.
+`within_concept_pearson_r` is the load-bearing statistic in the third: it removes per-concept
+difficulty and leaves only configuration-dependent structure.
 
 ---
 
@@ -355,18 +314,24 @@ of smearing a channel-set mismatch into the embedding.
 
 # Phase B — Stage 1, fully closed-form
 
-Not a fallback. At 65.4 vs 45.5 the closed form is the champion; this promotes it to the design of
-record.
+The earlier closed-form control beat the learned decoder, but those numbers used the previous
+encoder and bank and are not directly comparable. They motivate this design; Stage 1 must establish
+its result again under the current sensor-row protocol.
 
 **Prediction:**
 
-1. **Compatibility filter** — hard, index partition: modality accel↔accel / gyro↔gyro, gravity state,
-   units. Makes the comparison meaningful at all.
-2. **Rank** — `feature` cosine within the admissible pool, additive `sensor_bias` blend.
-3. **Admissibility gate** — soft, placement- **and concept**-dependent; initially rule-based.
-   **Never hard-filters placement**: wrist evidence can bear on ambulation and not on arm gestures,
-   and that distinction is the contribution. Hard filter = "is this comparison interpretable"; soft
-   gate = "is this evidence relevant to this concept."
+1. **Compatibility filter** — hard: modality accel↔accel / gyro↔gyro, gravity state. Makes the
+   comparison meaningful at all. Reads only the row's modality and gravity codes, never the label, so
+   it works unchanged on a vocabulary it has never seen.
+2. **Soft admissibility** — `AdmissibilityGate` scores the query sensor and evidence sensor against
+   the candidate concept. Their geometric mean preserves the fitted gate scale while requiring both
+   sides to observe the concept. It enters the retrieval score continuously and is never a fixed
+   placement filter or a learned hard exclusion.
+3. **Rank** — `feature cosine / temperature + log(admissibility)`. Select top-k separately per
+   candidate, then use one query-wide stabilizer across all selected candidate-row choices so query-side
+   observability cannot cancel. The `sensor_bias` blend defaults to **0** (the
+   provenance probe reads dataset identity at BA 0.702); enable only beside a reported
+   `retrieval_provenance` with the blend on and off.
 4. **Vote** — enrolled rows vote their bound candidate by identity (aliasing proved this is what
    carries at k≥1); corpus rows vote through label text (the k=0 path).
 5. **Merge across the query's sensors** — sum votes, per-sensor weights at most. Cross-placement
@@ -385,13 +350,38 @@ Stage 3 ever runs.
 - **Retrieval-provenance guard** — does enabling the `sensor_bias` blend shift retrieval toward the
   query's own dataset, against a placement-matched baseline? If yes it is fingerprint-matching.
 
-**Stage 2** — train the gate and blend scalars only. A handful of parameters over a working closed
-form.
+**Stage 2** — optional gate-only refinement. Candidate cross-entropy refines `A`, `B` and `LAMBDA`.
+The training path uses a fully soft distribution over every physically compatible row in a bounded,
+label-balanced working memory; top-k on the same continuous score is the validation and deployment rule.
+The train-only measured table supplies the warm start and a small replay anchor. Query and support
+come from distinct executions, candidate labels are removed from corpus memory, and only explicitly
+sampled supports are restored. External development results, not fitted cells or training loss,
+decide whether Stage 2 replaces Stage 1.
+
+The soft path is intentionally simple. Matching-style soft attention supplies the needed credit
+assignment without introducing an optimal-transport or sparse-top-k subsystem. Add a differentiable
+sparse selector only if telemetry demonstrates a material gap between soft training and exact hard
+validation. The refined gate must also beat its gate-disabled and step-zero controls; otherwise the
+closed-form warm start remains the design.
+
+Why this is not the fourth repetition of a failed learning attempt: the three that went net-negative
+(decoder 44.2 vs a 46.7 control, Phase-B training below chance, parity +0.0086) were all
+**closed-vocabulary classifiers trained with cross-entropy**, which memorise the training label set.
+This is ~1.5–3k parameters emitting *one scalar per (config, concept) pair*, constrained linear in a
+frozen embedding space. There is nowhere to put a memorised vocabulary. That is an argument from the
+parameterisation, which is why all three guards ship before the first run rather than after.
 
 **Stage 3** — tokenizer finetune: frozen-index retrieve → re-forward selected rows with grad →
 end-to-end. Needs scheduled bank re-embeds (or a drift threshold on the existing fingerprint probe),
 SSL loss retained as a regulariser, learnable projections over `sensor_bias` with frozen raw
 statistics, and eligibility gated on beating Stage 1.
+
+**Artifact build pending.** The sensor-granularity Phase-A checkpoint completed on 2026-08-17, so the
+model prerequisite now exists. `predictor_mode='admissibility_gate'` still requires a schema-5
+bank, train-only schema-2 resolvability table, and bank-bound gate. The persisted files predate the
+current checkpoint/vocabulary and are rejected. The wiring fails loudly rather than falling back to
+the pooled table, because scoring pooled session vectors under this mode's name would report a
+different mechanism.
 
 **Parked, not deleted:** relational decoder, counterfactual objective, retriever training. If a dozen
 learned parameters cannot improve a working closed form, that says what a million would do — for a
@@ -399,32 +389,46 @@ day of compute instead of a week.
 
 ---
 
-## Ledger — build status as of 2026-08-11
+## Ledger — build status as of 2026-08-12
 
-**Pre-existing:** filterbank + observability masks, signed DC, phase feature, dual-branch trunk with
-physical-time RoPE, gated text fusion, JEPA + VICReg, episodic construction, execution leakage units,
+**Pre-existing:** filterbank + observability masks, signed DC, dual-branch trunk with physical-time
+RoPE, gated conditioning, JEPA + VICReg, episodic construction, execution leakage units,
 canaries (support-removed / label-shuffled), prototype + ridge comparators, `live_encoder`, bank
 fingerprint guard.
 
-**BUILT in this plan** (commits `9b7d75d`, `1ebaf0a`, `dad8ee9`; 475 tests pass):
+**Built and covered by the current test suite:**
 
 | piece | where |
 |---|---|
 | parity ablation + `--parity` arm | `training/tokenizer/eval_transfer.py` — **run, result above** |
 | augmentation NUISANCE/CONFIG split + `split_by_group()` | `data/scripts/augmentations.py` |
 | `sensor_text_dropout` disabled | `data/scripts/augmentations.py` |
-| `sensor_bias` computation + guard + artifact (163 sensors) | `data/scripts/curate/sensor_bias.py` |
+| `sensor_bias` computation + guard + train-only artifact (110 sensors) | `data/scripts/curate/sensor_bias.py` |
 | `sensor_bias` loader for the data path | `training/tokenizer/pretrain_data.py` |
 | `SensorFold` + axis validity mask | `model/tokenizer/sensor_tokens.py` |
 | `ConditioningProjection` (learnable MLP over frozen artifact) | `model/tokenizer/sensor_tokens.py` |
 | `DescriptorHead` + retrieval-scored loss | `model/tokenizer/sensor_tokens.py` |
 | sensor-granularity encoder path (`token_granularity='sensor'`) | `model/tokenizer/encoder.py` |
 | sensor-mask + descriptor-mask JEPA planner | `training/tokenizer/losses_repr.py` |
-| Phase-B Stage 1 closed-form predictor | `training/evidence/admissible_retrieval.py` |
+| Phase-B Stage 1 predictor (compat -> soft admissibility/rank -> vote -> merge) | `training/evidence/admissible_retrieval.py` |
 | retrieval-provenance guard | `training/evidence/admissible_retrieval.py` |
-| 30 gate tests | `tests/test_sensor_granularity.py`, `tests/test_admissible_retrieval.py` |
+| `AdmissibilityGate` + warm start + abstention + collapse telemetry | `training/evidence/admissibility_gate.py` |
+| held-out body-region/dataset/concept study implementation | `training/evidence/gate_extrapolation.py` |
+| gate persistence, bank adapter, `predict_bank` | `training/evidence/gate_predictor.py` |
+| `predictor_mode='admissibility_gate'` + schema-5 guard | `training/evidence/eval_enrollment.py` |
+| provenance probe on **per-sensor rows**, not just pooled | `training/tokenizer/probe_provenance.py` |
+| one shared modality-presence rule (`modalities_present`) | `training/tokenizer/pretrain_data.py` |
+| sensor/retrieval/gate tests | `tests/test_sensor_granularity.py`, `tests/test_admissible_retrieval.py`, `tests/test_admissibility_gate.py`, `tests/test_gate_predictor.py` |
 
-**TRAINER INTEGRATION — BUILT AND SMOKE-TESTED 2026-08-12** (commit below):
+**Deleted 2026-08-12, superseded by the gate:**
+
+| piece | why |
+|---|---|
+| `resolvability.gate_tensor` | string-keyed lookup; on novel vocabulary it defaulted everywhere and became a uniform multiplier that provably could not change the argmax |
+| `resolvability_predictor.py` | standalone (placement text, concept text) -> resolvability stage; folded into the gate, which fits the same map jointly with the coupling |
+| `admissible_retrieval.admissibility` + `GATE_FLOOR` | replaced by one continuous log-admissibility retrieval prior |
+
+**Trainer integration — built and smoke-tested 2026-08-12:**
 
 - shared config draw across views (`_shared_draw`, generalised `shared_config_seed`)
 - `sensor_bias` + `sensor_placement` emitted per batch, ragged-padded, carried to view B
@@ -433,7 +437,8 @@ fingerprint guard.
   teacher; `jepa_mask` and the per-resolution diagnostic switched to the sensor presence mask
 - descriptor-retrieval loss added to the objective, scored ONLY on sensors whose descriptor was
   actually hidden (an unmasked descriptor was fed to the encoder, so "reconstructing" it is a copy)
-- telemetry: `descriptor/loss`, `descriptor/top1`
+- telemetry: descriptor loss/top-1/target rate and gradients for fold, descriptor projection, bias
+  projection, and descriptor head
 
 **300-step smoke, both arms, real corpus subset** (5 datasets, batch 16):
 
@@ -446,16 +451,15 @@ No persistent NaN (the step-1 value is AMP scaler startup). The sensor arm's val
 300 steps on a 5-dataset subset is far below the 3k-step screening noise floor (sd 0.0065) — it
 carries no signal and must not be read as an arm comparison.
 
-**STILL NOT BUILT:**
+**Work after Phase-A training:**
 
-1. **`build_memory.py` per-sensor rows** — emit `[feature, text_descriptor, sensor_bias]` per patch
-   per sensor (~7M rows) instead of per patch.
-2. **`resolvability` estimation** — the (source config, target config, candidate) table the
-   admissibility gate consumes. Stage 1 accepts it as an argument; nothing produces it yet. The
-   paired multi-stream recordings (sp_sw_har, xrf_v2, opportunity, realdisp, mmfit) are the intended
-   source. **This is the critical path: admissibility is the contribution, and a null result here
-   changes what Phase A should be optimising for.**
-3. **Encoder dataset-ID probe** — the decisive fingerprint guard, since `sensor_bias` enters the trunk.
+1. **Build the memory from the completed checkpoint.** `build_memory.py --sensor-rows` emits
+   `[feature, text_descriptor, sensor_bias]` per patch per sensor. The current output is still the
+   historical schema-3 bank and must be replaced.
+2. **Build the current resolvability table.** The implementation produces train-only per-sensor
+   measurements and paired contrasts. The current JSON is historical and intentionally rejected.
+3. **Re-run the encoder dataset-ID probe** on the new checkpoint. The probe is implemented, but its
+   existing result predates sensor bias in the trunk.
 
 **Unmeasured and load-bearing:** whether cross-config enrollment works at all; whether the bias term
 is physics or fingerprint; whether the redesign moves the parity number off +0.0086.

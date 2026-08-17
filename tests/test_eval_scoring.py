@@ -351,13 +351,12 @@ def test_quality_screen_drops_the_windows_training_refuses():
         assert len(getattr(screened, field)) == screened.n_windows
 
 
-def test_quality_screen_reports_when_the_cache_cannot_cover_the_alignment():
-    """The caches are built one alignment at a time. A silent empty screen is indistinguishable
-    from a clean stream, so an uncovered alignment has to say so rather than return nothing."""
+def test_non_harmonised_quality_screen_is_materialized():
+    """Baseline evaluation has its own cache and must not overwrite the native training cache."""
     s = eval_data.load_eval_stream("motionsense", "phone_front_pocket",
                                    alignment="non_harmonised")
-    assert s.quality_screen.startswith("unavailable:")
-    assert s.n_quality_excluded == 0
+    assert s.quality_screen == "applied"
+    assert s.n_quality_excluded > 0
 
 
 # =============================================================================

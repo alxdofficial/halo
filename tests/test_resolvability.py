@@ -19,7 +19,7 @@ import numpy as np
 import torch
 
 from training.evidence.resolvability import (
-    _concept_dependence, _one_vs_rest_resolvability, gate_tensor, paired_contrast,
+    _concept_dependence, _one_vs_rest_resolvability, paired_contrast,
 )
 
 
@@ -65,7 +65,10 @@ def test_single_subject_stream_is_unscorable():
 
 # ------------------------------------------------------------------------- paired contrast
 def _per_stream(dataset, streams: dict[str, dict[str, float]]) -> dict:
-    return {f"{dataset}/{s}": {"dataset": dataset, "stream": s, "n_windows": 100, "labels": lab}
+    return {f"{dataset}/{s}::accel": {
+                "dataset": dataset, "stream": s, "modality": "accel",
+                "n_windows": 100, "labels": lab,
+            }
             for s, lab in streams.items()}
 
 
@@ -78,7 +81,7 @@ def test_paired_contrast_only_covers_simultaneous_datasets():
 def test_paired_contrast_reports_the_gap():
     per_stream = _per_stream("mmfit", {"left_wrist": {"curls": 1.0, "squats": 0.3},
                                        "right_pocket": {"curls": 0.1, "squats": 0.95}})
-    out = paired_contrast(per_stream)["mmfit"]
+    out = paired_contrast(per_stream)["mmfit::accel"]
     assert out["labels"]["curls"]["best_stream"] == "left_wrist"
     assert out["labels"]["squats"]["best_stream"] == "right_pocket"
     assert out["labels"]["curls"]["gap"] > 0.8
@@ -87,7 +90,7 @@ def test_paired_contrast_reports_the_gap():
 def test_paired_contrast_skips_labels_seen_by_one_stream():
     per_stream = _per_stream("mmfit", {"left_wrist": {"curls": 1.0, "solo": 0.5},
                                        "right_pocket": {"curls": 0.1}})
-    assert "solo" not in paired_contrast(per_stream)["mmfit"]["labels"]
+    assert "solo" not in paired_contrast(per_stream)["mmfit::accel"]["labels"]
 
 
 # ---------------------------------------------------------------------- concept dependence
@@ -114,26 +117,3 @@ def test_concept_dependent_ordering_inverts():
 
 def test_concept_dependence_needs_enough_labels():
     assert _concept_dependence({"a": {"x": 0.5, "y": 0.4}})["mean_correlation"] is None
-
-
-# --------------------------------------------------------------------------- gate consumption
-def test_gate_tensor_reads_row_config_against_candidate():
-    table = {"per_stream": {"mmfit/left_ear": {"labels": {"bicep_curls": 0.13, "squats": 0.7}}}}
-    gate = gate_tensor(["mmfit/left_ear"], ["bicep_curls", "squats"], table)
-    assert gate.shape == (1, 1, 2)
-    assert abs(float(gate[0, 0, 0]) - 0.13) < 1e-6
-    assert abs(float(gate[0, 0, 1]) - 0.70) < 1e-6
-
-
-def test_unmeasured_pairs_get_the_neutral_default():
-    """Absent evidence must not silently become a veto (0) or a licence (1)."""
-    table = {"per_stream": {}}
-    gate = gate_tensor(["unknown/stream"], ["novel_label"], table, default=0.5)
-    assert float(gate[0, 0, 0]) == 0.5
-
-
-def test_gate_tensor_broadcasts_over_query_sensors():
-    table = {"per_stream": {"a/b": {"labels": {"x": 0.9}}}}
-    gate = gate_tensor(["a/b"], ["x"], table, n_query_sensors=3)
-    assert gate.shape == (3, 1, 1)
-    assert torch.allclose(gate, torch.full((3, 1, 1), 0.9))

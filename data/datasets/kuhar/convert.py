@@ -115,6 +115,28 @@ def load_csv_file(filepath: Path) -> Optional[pd.DataFrame]:
         result["gyro_y"] = df.iloc[:, 6].values
         result["gyro_z"] = df.iloc[:, 7].values
 
+        channels = ["acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"]
+        values = result[channels].apply(pd.to_numeric, errors="coerce")
+        values = values.replace([np.inf, -np.inf], np.nan)
+        complete = values.notna().all(axis=1).to_numpy()
+        if not complete.all():
+            valid_rows = np.flatnonzero(complete)
+            if valid_rows.size == 0:
+                print(f"  ERROR {filepath}: no row has a complete finite IMU sample")
+                return None
+            # A modality occasionally stops a few samples before the other one (for example the last
+            # four gyro rows of 1101_O_11.csv). Those rows are not six-channel observations and must
+            # not be extrapolated. Trim unsupported edges, then interpolate only bounded interior gaps.
+            first, last = int(valid_rows[0]), int(valid_rows[-1]) + 1
+            result = result.iloc[first:last].reset_index(drop=True)
+            result[channels] = values.iloc[first:last].interpolate(
+                method="linear", limit_area="inside",
+            ).to_numpy()
+            if not np.isfinite(result[channels].to_numpy(dtype=np.float64)).all():
+                print(f"  ERROR {filepath}: unresolved non-finite IMU samples")
+                return None
+            print(f"  trimmed/interpolated {int((~complete).sum())} incomplete rows in {filepath.name}")
+
         return result
 
     except Exception as e:

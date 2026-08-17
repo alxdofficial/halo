@@ -9,17 +9,13 @@ Design decisions carried in from the gates:
     not HALO's. Source-balanced sampling (no per-stream cap) spreads each activity across configs.
   * Subject-disjoint train/val split per dataset.
   * Label-free hierarchical temperature sampling is the sole Phase-A sampler.
-  * The Phase-A augmentation stack (data/scripts/augmentations.py phase_a), with
-    per-worker reseeding of BOTH np.random and stdlib random (the CrossHAR lesson —
-    the augmenter draws from both RNGs).
-  * Multi-scale patch duration: ONE patch_seconds draw per BATCH (the token-count
-    axis, §5.2.1); sampling RATE varies per SAMPLE (the filterbank takes (B,) rates
-    and (B,) patch lengths — batches need bucketing only by patch_seconds; this
-    CORRECTS the earlier "bucket by (rate, patch_seconds)" note, which applied to
-    the legacy experiment encoder, not the ported filterbank).
-  * Channel identity/config = per-stream TEXT (placement parsed from the stream id),
-    with the text augmentations (paraphrase/dropout) supplying variety; absent
-    channels (pad+mask grids) carry a channel_mask, never fake text confidence.
+  * The reference augmentation is one independent SO(3) rotation per positive view. More aggressive
+    signal, sensor, rate, crop, and text transforms remain explicit ablations.
+  * Fixed one-second patches by default. Native sampling RATE still varies per sample and true patch
+    lengths vary for final partial contexts; the filterbank consumes both explicitly.
+  * Channel role and sensor identity/config come from deployment-policy text. Text augmentation is
+    disabled in the reference recipe; absent channels carry a channel_mask and never fake text
+    confidence.
 """
 
 from __future__ import annotations
@@ -56,14 +52,9 @@ OPTIONAL_PHASE_A_DATASETS = ("extrasensory", "nhanes", "hmog", "kneepad")
 PHASE_A_ONLY_DATASETS = frozenset({"nhanes"})
 UNLABELED_LABEL = "__unlabeled__"
 WINDOW_SECONDS = 6.0
+PATCH_SECONDS = 1.0
 VAL_SUBJECT_FRACTION = 0.10      # subject-disjoint val within the train datasets
-GRAVITY_AUG_P = 0.15             # audit: p=0.5 removed gravity from half the corpus
-                                 # removed on 52% of windows, killing the M0 gravity-align /
-                                 # DC-tilt features on half the corpus. 0.15 keeps the
-                                 # iOS-userAcceleration robustness without dominating.
-# per-batch multi-scale draw -> T = 6s / ps in {12, 8, 6, 4}. 2.0s (T=3) DROPPED: T=3 is
-# too coarse for masked prediction, and it's where native-short windows (uci_har 2.56s,
-# unimib falls) collapse to a single un-maskable patch (objective-health audit 2026-07-18).
+# Explicit multi-resolution ablation settings. The reference path above uses PATCH_SECONDS only.
 PATCH_SECONDS_CHOICES = (0.5, 0.75, 1.0, 1.5)
 SHORT_PATCH_SECONDS_CHOICES = (0.4, 0.5, 0.6, 0.7, 0.8)
 LONG_PATCH_SECONDS_CHOICES = (1.0, 1.1, 1.2, 1.3, 1.4, 1.5)
@@ -79,8 +70,8 @@ VAL_RESOLUTION_PAIR = (0.5, 1.5)
 # RTX 4090. 12,288 therefore admits every draw through batch 512 (worst case 11,264 tokens) without
 # silently changing the augmentation distribution. Set 0 to disable.
 MAX_BATCH_TOKENS = 12_288
-DFT_SIZE = 256                   # must cover max NATIVE rate (100 Hz) x max patch (1.5 s) = 150;
-                                 # the rate aug caps at 100 Hz too, so 256 keeps ample headroom
+DFT_SIZE = 256                   # covers the 100 Hz x 1 s reference patches and all retained
+                                 # multi-resolution ablation choices (up to 150 samples)
 # Streams whose SOURCE (acquisition) rate differs from the rate the grid is stored at, because a
 # converter resampled them onto the dataset-wide grid rate. Upsampling cannot create information, so
 # the filterbank must take its Nyquist/observability bound from the ACQUISITION rate while the DFT
@@ -612,12 +603,11 @@ class PretrainDataset(Dataset):
         self.keys = keys
         self.two_view = two_view
         cfg = AugmentationConfig.phase_a() if augment else AugmentationConfig.none()
-        if augment:
-            cfg.gravity.p = GRAVITY_AUG_P     # audit: 0.5 killed gravity on half the corpus
         nuisance_cfg, config_cfg = cfg.split_by_group()
         self.config_augmenter = IMUAugmenter(config_cfg)
         self.nuisance_augmenter = IMUAugmenter(nuisance_cfg)
         self._data_cache: dict[int, np.ndarray] = {}
+        self._length_cache: dict[int, np.ndarray] = {}
 
     def __len__(self) -> int:
         return len(self.keys)
@@ -626,6 +616,11 @@ class PretrainDataset(Dataset):
         if stream_i not in self._data_cache:
             self._data_cache[stream_i] = self.index.refs[stream_i].load_data()
         return self._data_cache[stream_i]
+
+    def _lengths(self, stream_i: int) -> np.ndarray:
+        if stream_i not in self._length_cache:
+            self._length_cache[stream_i] = self.index.refs[stream_i].load_lengths()
+        return self._length_cache[stream_i]
 
     @staticmethod
     def _clone_sample(sample: IMUSample) -> IMUSample:
@@ -646,8 +641,9 @@ class PretrainDataset(Dataset):
         )
 
     def _raw_sample(self, ref, key: WindowKey, base_texts: list[str]) -> IMUSample:
+        valid_length = int(self._lengths(key.stream_i)[key.window_i])
         window = torch.tensor(
-            np.asarray(self._grid(key.stream_i)[key.window_i], dtype=np.float32)
+            np.asarray(self._grid(key.stream_i)[key.window_i, :valid_length], dtype=np.float32)
         )
         role_texts, sensor_texts, sensor_id = stream_sensor_texts(
             ref.dataset, ref.stream,
@@ -985,6 +981,31 @@ def _batch_identity_seed(batch: list[dict], seed: int) -> int:
     return int.from_bytes(digest.digest(), "little")
 
 
+def _physical_patch_bounds(num_samples: int, rate_hz: float,
+                           patch_seconds: float) -> list[tuple[int, int]]:
+    """Partition samples using rounded physical-time boundaries.
+
+    Repeatedly stepping by ``round(rate * seconds)`` accumulates rounding error. At 51.2 Hz a
+    six-second, 307-sample context became six 51-sample patches plus a meaningless one-sample token.
+    Rounding each absolute boundary distributes that sample across the six intended supports.
+    """
+    if num_samples <= 0:
+        return []
+    span = float(rate_hz) * float(patch_seconds)
+    if span <= 0:
+        raise ValueError("rate_hz and patch_seconds must be positive")
+    count = max(1, int(np.ceil(num_samples / span - 1e-9)))
+    bounds: list[tuple[int, int]] = []
+    for patch in range(count):
+        start = int(round(patch * span))
+        if start >= num_samples:
+            break
+        end = min(num_samples, int(round((patch + 1) * span)))
+        end = max(end, start + 1)
+        bounds.append((start, end))
+    return bounds
+
+
 class MultiScaleCollate:
     """Draw ONE patch_seconds per batch; patchify each sample at its OWN rate.
 
@@ -995,7 +1016,7 @@ class MultiScaleCollate:
     SO(3) augmentation teaches mounting robustness. Canonicalizing pitch/roll would erase posture
     information and cancel that augmentation.
 
-    Output: patches (B, P, S, 6) zero-padded · patch_len (B,) · rates (B,) ·
+    Output: patches (B, P, S, 6) zero-padded · patch_len (B,P) · rates (B,) ·
     positions (B, P) s · channel_mask (B, 6) · patch_padding_mask (B, P) True=real ·
     texts · labels.
     """
@@ -1025,7 +1046,8 @@ class MultiScaleCollate:
         if self.two_view and batch and "view_b" in batch[0]:
             # Second positive view uses the same patch duration; JEPA uses only view A.
             out_b = self._collate_impl([item["view_b"] for item in batch], ps)
-            for k in ("patches", "patch_len", "rates", "source_rates", "positions", "texts",
+            for k in ("patches", "patch_len", "rates", "source_rates", "positions",
+                      "patch_durations", "texts",
                       "role_texts", "sensor_texts", "sensor_target_texts", "sensor_id",
                       "sensor_bias", "sensor_placement",
                       "channel_mask", "patch_padding_mask", "augmentations"):
@@ -1033,45 +1055,38 @@ class MultiScaleCollate:
         return out
 
     def _collate_impl(self, batch: list[dict], ps: float) -> dict:
-        P = max(1, int(round(WINDOW_SECONDS / ps)))
+        P = max(1, max(
+            len(_physical_patch_bounds(item["data"].shape[0], float(item["rate"]), ps))
+            for item in batch
+        ))
         B = len(batch)
         patches = torch.zeros(B, P, self.dft_size, len(CHANNELS))
-        patch_len = torch.zeros(B, dtype=torch.long)
+        patch_len = torch.zeros(B, P, dtype=torch.long)
+        patch_durations = torch.zeros(B, P)
         patch_pad = torch.zeros(B, P, dtype=torch.bool)     # True = real patch
         rates = torch.zeros(B)
         source_rates = torch.zeros(B)
-        # Per-sample patch-CENTER positions (seconds). Default = the nominal patch grid; the
-        # usable==0 fallback below overrides row b's single patch to the window's TRUE center (F4a).
-        positions = (torch.arange(P).float() * ps + ps / 2).unsqueeze(0).repeat(B, 1)
+        positions = torch.zeros(B, P)
 
         for b, item in enumerate(batch):
             data, rate = item["data"], item["rate"]
-            n = max(1, int(round(rate * ps)))
-            if n > self.dft_size:
-                raise ValueError(f"patch length {n} exceeds dft_size {self.dft_size}")
-            per_patch = n
-            usable = min(P, data.shape[0] // n)
-            if usable == 0 and data.shape[0] > 0:
-                # Window shorter than one patch at this scale (e.g. sp_sw_har's 1.0 s TUG
-                # windows in a ps=1.5 batch). Emit ONE short patch spanning the whole
-                # window rather than an all-padding window (which yields a degenerate
-                # pooled embedding that poisons VICReg). patch_len is honest (< n); the
-                # filterbank flags the under-resolved bands via its resolution mask.
-                per_patch, usable = data.shape[0], 1
-                positions[b, 0] = 0.5 * per_patch / rate   # true center of the short patch (F4a)
-                patches[b, 0, :per_patch] = data[:per_patch]
-            else:
-                for p in range(usable):
-                    patches[b, p, :n] = data[p * n:(p + 1) * n]
-                # Recover the discarded tail (data.shape[0] % n samples) with ONE extra patch.
-                if usable < P and data.shape[0] > usable * n:
-                    # End-anchor one full-length tail patch. It may overlap the prior patch, which is
-                    # valid because the filterbank tokenizes every patch independently.
-                    patches[b, usable, :n] = data[-n:]
-                    positions[b, usable] = (data.shape[0] - 0.5 * n) / rate
-                    usable += 1
+            if int(np.ceil(rate * ps)) > self.dft_size:
+                raise ValueError(
+                    f"patch length {int(np.ceil(rate * ps))} exceeds dft_size {self.dft_size}"
+                )
+            usable = 0
+            for p, (start, end) in enumerate(
+                _physical_patch_bounds(data.shape[0], float(rate), ps)
+            ):
+                if p >= P:
+                    break
+                length = end - start
+                patches[b, p, :length] = data[start:end]
+                patch_len[b, p] = length
+                patch_durations[b, p] = length / rate
+                positions[b, p] = (start + 0.5 * length) / rate
+                usable += 1
             patch_pad[b, :usable] = True
-            patch_len[b] = per_patch
             rates[b] = rate
             source_rates[b] = float(item.get("source_rate", rate))
         return {
@@ -1080,6 +1095,7 @@ class MultiScaleCollate:
             "rates": rates,
             "source_rates": source_rates,
             "positions": positions,
+            "patch_durations": patch_durations,
             "patch_seconds": ps,
             "texts": [item["texts"] for item in batch],
             # Factored text conditioning (docs/design/TEXT_CONDITIONING.md §4b), read ONLY by the
@@ -1200,15 +1216,14 @@ class MultiResolutionCollate:
 
             entries = []
             for resolution_id, duration in enumerate(pair):
-                nominal_n = max(1, int(round(rate * duration)))
+                nominal_n = max(1, int(np.ceil(rate * duration)))
                 if nominal_n > self.dft_size:
                     raise ValueError(
                         f"patch length {nominal_n} exceeds dft_size {self.dft_size}"
                     )
                 min_tail = max(4, int(MIN_TAIL_FRACTION * nominal_n))   # F7 tail floor
                 res_start = len(entries)
-                for start in range(0, data.shape[0], nominal_n):
-                    end = min(start + nominal_n, data.shape[0])
+                for start, end in _physical_patch_bounds(data.shape[0], rate, duration):
                     n = end - start
                     if n <= 0:
                         continue

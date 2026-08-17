@@ -105,12 +105,16 @@ def assess(run_dir: Path, stale_seconds: float = 120.0) -> dict:
 
     if latest.get("jepa_zero_target_frac_window", 0.0) > 0:
         alert("critical", "jepa_zero_targets",
-              f"{latest['jepa_zero_target_frac_window']:.2%} of recent windows had no JEPA target.")
+              f"{latest['jepa_zero_target_frac_window']:.2%} of recent JEPA-eligible windows "
+              "had no target.")
     if (config.get("token_granularity") == "sensor" and latest_step > warmup_steps
+            and float(config.get("descriptor_weight", 0.0)) > 0.0
             and float(latest.get("descriptor/target_window_fraction", 0.0)) <= 0.0):
         alert("critical", "descriptor_no_targets",
               "No descriptor-mask target was produced in the latest telemetry window.")
-    if config.get("token_granularity") == "sensor" and latest_step > warmup_steps + 500:
+    if (config.get("token_granularity") == "sensor"
+            and float(config.get("descriptor_weight", 0.0)) > 0.0
+            and latest_step > warmup_steps + 500):
         descriptor_rows = [
             row for row in train[-12:]
             if _finite(row.get("descriptor/top1")) and _finite(row.get("descriptor/chance_top1"))
@@ -252,6 +256,7 @@ def assess(run_dir: Path, stale_seconds: float = 120.0) -> dict:
             "patch_pair_share": latest.get("data/patch_pair_share_window", {}),
             "augmentation_rate": latest.get("data/augmentation_rate_window", {}),
             "zero_target_fraction": latest.get("jepa_zero_target_frac_window"),
+            "ineligible_fraction": latest.get("jepa_ineligible_frac_window"),
             "descriptor_target_window_fraction": latest.get(
                 "descriptor/target_window_fraction"),
             "input_finite_fraction": latest.get("data/input_finite_fraction"),

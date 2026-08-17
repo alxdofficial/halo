@@ -91,9 +91,21 @@ def test_monitor_flags_descriptor_retrieval_stuck_at_chance(tmp_path):
     _write_run(tmp_path, rows, steps=2_000)
     config = json.loads((tmp_path / "run_config.json").read_text())
     config["token_granularity"] = "sensor"
+    config["descriptor_weight"] = 0.5
     (tmp_path / "run_config.json").write_text(json.dumps(config))
     report = assess(tmp_path)
     assert any(item["code"] == "descriptor_not_learning" for item in report["alerts"])
+
+
+def test_monitor_does_not_require_disabled_descriptor_objective(tmp_path):
+    row = _healthy(step=1_000)
+    row["descriptor/target_window_fraction"] = 0.0
+    _write_run(tmp_path, [row], steps=2_000)
+    config = json.loads((tmp_path / "run_config.json").read_text())
+    config.update({"token_granularity": "sensor", "descriptor_weight": 0.0})
+    (tmp_path / "run_config.json").write_text(json.dumps(config))
+    report = assess(tmp_path)
+    assert not any(item["code"].startswith("descriptor_") for item in report["alerts"])
 
 
 def test_monitor_writes_machine_and_human_snapshots_and_plot(tmp_path):

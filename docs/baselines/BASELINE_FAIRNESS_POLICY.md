@@ -296,3 +296,128 @@ activity is never named two ways; eval sets keep native labels (the zero-shot ta
 - **T3** — language alignment (HALO, UniMTS, NormWear) vs ConSE bridge (CrossHAR, LiMU-BERT, harnet).
 Each tier is one axis, one policy, one comparison — which is exactly what keeps the code and the
 paper clean.
+
+---
+
+## 6. Matched zero-shot and enrollment evaluation
+
+This section is the authoritative comparison protocol for the current Phase-B result. It separates
+three questions that must not be collapsed into one mean.
+
+### 6a. Action regimes
+
+| regime | datasets | what it tests |
+|---|---|---|
+| ordinary population activities | InclusiveHAR, USC-HAD, TNDA-HAR, UT-Complex | semantic zero-shot recognition and ordinary few-shot adaptation for locomotion and daily activities |
+| specialized novel activities | Monipar, SPAR, Upper Limb Use | enrollment of clinical, rehabilitation, and fine-grained task categories outside the Phase-B training ontology |
+| random-label binding control | the same specialized novel activities, renamed independently in each episode | whether a method can bind enrolled sensor examples to a new identifier without using label semantics |
+
+All 31 candidate labels in Monipar, SPAR, and Upper Limb Use are absent from the current Phase-B
+training concept list, and the three datasets are absent from both Phase-A and Phase-B training.
+They therefore test genuinely held-out physical categories. They are still published, prescribed
+activities rather than actions invented freely by each participant. The paper must call this a
+**specialized novel-action proxy**, not claim unconstrained user-created activity recognition.
+
+Random aliases are only a mechanism control. They make the name unfamiliar; they do not make the
+underlying movement new. A random-alias k=0 cell is unidentifiable and is always reported as N/A.
+
+### 6b. One support/query manifest for every method
+
+- `k` counts **independent labeled executions per candidate**, never windows or patches. The main
+  curve is k = 0, 1, 2, 4, 8. k = 16 is a secondary high-support point only for cohorts with 16
+  independent executions per candidate.
+- Candidate labels, query executions, support prefixes, subject relation, configuration relation,
+  and random seeds are serialized once. HALO and every baseline consume that same manifest.
+- Support and query executions are disjoint. Overlapping windows from one recording never appear on
+  opposite sides. Support prefixes are nested, so the k=1 execution is retained at k=2, and so on.
+- The candidate roster is fixed across a reported k curve. It is not shrunk according to the query
+  truth or the requested k. A cohort that lacks enough support is N/A beyond its declared ceiling.
+- Same-subject personalization and cross-subject transfer are separate results. Same-configuration
+  and cross-configuration results are also separate; unsupported combinations are N/A.
+- At least five support-manifest seeds are evaluated. Random-label experiments also use at least
+  five independent alias permutations. Learned Phase-B results require at least three training
+  seeds before a paper claim.
+
+### 6c. Question 1: coherent k=0 zero-shot comparison
+
+Every method predicts the dataset's frozen, meaningful candidate labels without target support.
+The table includes HARNet+ConSE, CrossHAR+ConSE, LiMU-BERT+ConSE, UniMTS, ImageBind, NormWear, HALO
+with admissibility disabled, and HALO with the learned gate. Closed-set models fit their shared
+global-vocabulary head and ConSE calibration on source training subjects only. No arbitrary-label
+k=0 table is produced.
+
+The current protocol-v4 baseline table cannot be reused: its 93-label vocabulary and dataset roster
+do not match the current 166-label protocol. All baseline heads and result cells must be regenerated
+before comparison with current HALO.
+
+### 6d. Question 2: label efficiency against supervised adaptation
+
+For k greater than zero, every model receives exactly the same labeled executions. The comparison
+contains three adaptation strengths:
+
+1. **HALO enrollment:** insert support embeddings and labels into memory; perform no gradient update.
+2. **Frozen-representation supervised adaptation:** nearest support, class prototype, and one common
+   L2 ridge/linear-head recipe on each model's frozen representation.
+3. **Model-native supervised fine-tuning:** replace or adapt the target classifier and update the
+   parameters allowed by that model's published transfer recipe. Report trainable parameters,
+   optimization steps, wall time, and peak memory.
+
+Head-only and end-to-end fine-tuning hyperparameters are selected on the development datasets and
+then frozen for every test dataset and k. Test queries are never used for early stopping. The main
+baseline row is the best adaptation recipe selected on development; the frozen shared-head rows
+remain visible so representation quality is not confounded with model-specific optimization.
+
+For random labels, baseline classifiers use the aliases only as class identifiers. Text-aligned
+models do not receive semantic information hidden from HALO. This directly compares HALO's
+gradient-free memory update with ordinary supervised adaptation to novel physical categories.
+
+### 6e. Question 3: HALO mechanism attribution
+
+On the same Phase-A embeddings and manifests, report:
+
+- learned admissibility;
+- identity retrieval with admissibility fixed to one;
+- nearest labeled support;
+- normalized class prototypes;
+- an L2 ridge head;
+- support removed; and
+- support-label bindings shuffled.
+
+The learned gate is useful only if it improves over identity retrieval, not merely if HALO improves
+with k. Prototype and ridge determine whether a simpler supervised rule already extracts more from
+the same representation. Support removal and shuffling establish that an apparent k gain is caused
+by the enrolled evidence.
+
+### 6f. Metrics and aggregation
+
+- Primary metric: macro F1 on the frozen candidate roster.
+- Primary aggregate: first average protocol cells within each dataset, then average datasets. This
+  gives each dataset equal weight; Upper Limb Use must not dominate because it has more streams.
+- Report every dataset, the number of candidates, subjects, query executions, support executions,
+  and eligible cells beside the aggregate.
+- Confidence intervals resample subjects, with executions nested inside subjects. Method
+  comparisons use paired deltas on the same manifest rather than overlapping independent intervals.
+- Report coherent and specialized-novel regimes separately, followed by their combined
+  dataset-macro mean. Random-label results are a separate panel and begin at k=1.
+
+### 6g. Paper tables
+
+1. **Semantic zero-shot:** model by held-out dataset at coherent k=0, with ordinary and specialized
+   dataset means and an equal-dataset overall mean.
+2. **Label efficiency:** HALO enrollment versus each baseline's frozen-head and supervised
+   fine-tuning curves at k = 0, 1, 2, 4, 8, and supported k=16, with separate ordinary and
+   specialized-novel panels.
+3. **HALO ablation:** learned gate versus identity, nearest support, prototype, and ridge over the
+   same k values, with coherent and random-label panels plus support-removal/shuffle controls.
+
+The first two tables establish external performance. The third attributes any gain to the evidence
+mechanism. A contribution claim requires a paired improvement over the strongest external baseline
+and over HALO's strongest closed-form control across datasets and seeds, not a win in one aggregate
+cell.
+
+### 6h. Test sealing
+
+The current seven-dataset test roster has already been inspected during model development. It is an
+exploratory benchmark from this point forward. Any design or hyperparameter changed in response to
+those results must be confirmed on a newly designated, untouched holdout roster after code,
+checkpoints, support manifests, and analysis are frozen.

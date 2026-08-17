@@ -46,14 +46,18 @@ def cache_path(alignment: str) -> Path:
 BLOCK = 4096
 
 
-def scan_stream(data, labels) -> tuple[list[int], int, int]:
+def scan_stream(data, labels, lengths=None) -> tuple[list[int], int, int]:
     """Return (indices to drop, n duplicate groups, n groups dropped whole for label conflict)."""
     groups: dict[bytes, list[int]] = {}
     n = data.shape[0]
+    if lengths is None:
+        lengths = np.full(n, data.shape[1], dtype=np.int32)
     for start in range(0, n, BLOCK):
         block = np.asarray(data[start:start + BLOCK], dtype=np.float32)
         for j, window in enumerate(block):
-            digest = hashlib.blake2b(window.tobytes(), digest_size=16).digest()
+            length = int(lengths[start + j])
+            payload = length.to_bytes(4, "little") + window[:length].tobytes()
+            digest = hashlib.blake2b(payload, digest_size=16).digest()
             groups.setdefault(digest, []).append(start + j)
 
     drop: list[int] = []
@@ -79,7 +83,9 @@ def scan(alignment: str = "native") -> dict:
     for ref in sorted(refs, key=lambda r: r.key):
         if ref.n_windows == 0:
             continue
-        drop, n_groups, n_conflict = scan_stream(ref.load_data(), ref.labels)
+        drop, n_groups, n_conflict = scan_stream(
+            ref.load_data(), ref.labels, ref.load_lengths(),
+        )
         if drop:
             bad[ref.key] = drop
             stats.append((ref.key, len(drop), ref.n_windows, n_groups, n_conflict))

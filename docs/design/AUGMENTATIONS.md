@@ -1,7 +1,7 @@
 # Augmentation policy — what each model gets, and why
 
-> **Updated for the consolidated SSL recipe.** The augmentation objective uses label-free VICReg;
-> SO(3) rotation includes gravity-removed streams; a bounded **sensor-text dropout** was added.
+> **Updated for the minimal Phase-A reference recipe.** VICReg receives two independently rotated
+> views of the same clean context. Every other transform is an explicit ablation.
 > The authoritative Phase-A recipe table is in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md).
 
@@ -21,22 +21,26 @@ Source of truth: `data/scripts/augmentations.py`. Applied per-sample in the load
 
 | Aug | Enabled | p | Params |
 |---|---|---|---|
-| `jitter` | ✅ | 0.5 | σ = 0.05 |
-| `scale` | ✅ | 0.5 | ×[0.9, 1.1] |
-| `gravity` (remove gravity) | ✅ | **0.15** | cutoff 0.4 Hz — **lowered from 0.5** (audit: p=0.5 stripped gravity on 52 % of windows, killing the DC/gravity feature on half the corpus) |
-| `rotation_3d` (SO(3)) | ✅ | 0.5 | rotates real acc+gyro triads jointly; gravity presence is not required |
-| `rate` (resample) | ✅ | 0.5 | 15–100 Hz, min 32 samples |
-| `channel_dropout` | ✅ | 0.3 | drops the `gyro` group (acc never dropped) |
-| `window_crop` (P5) | ✅ | 0.5 | keep a random contiguous ≥50 % sub-window (session-length invariance); floor 32 samples |
-| `channel_text_phrase` / `channel_text_dropout` | ✅ | 0.5 / 0.15 | text-side augs (channel-text paraphrase, channel-desc dropout) |
+| `jitter` | ❌ | 0.5 | available as an ablation; disabled in the reference recipe |
+| `scale` | ❌ | 0.5 | available as an ablation |
+| `gravity` (remove gravity) | ❌ | 0.5 | available as an ablation |
+| `rotation_3d` (SO(3)) | ✅ | 1.0 | independent per VICReg view; rotates co-located acc+gyro triads jointly |
+| `rate` (resample) | ❌ | 0.5 | available as an ablation; native rates already provide real rate diversity |
+| `channel_dropout` | ❌ | 0.3 | available as an ablation |
+| `window_crop` | ❌ | 0.5 | available as an ablation |
+| text paraphrase/dropout | ❌ | varies | available as ablations |
+
+The narrow recipe makes the first run interpretable. Rotation addresses the unavoidable mounting-axis
+nuisance without assuming that weak motion, gravity, sensor availability, rate, duration, or semantic
+metadata should be discarded. Each disabled transform can be added alone and retained only when a
+fixed downstream evaluation shows a repeatable gain. The objectives remain JEPA plus VICReg.
 
 **Rate/length diversity is now REAL, not synthetic (changed 2026-07-18).** HALO trains on the
 `native` grids (`build_grids._ALIGNMENTS`): the corpus's **native sampling rates** (20/50/100 Hz) and
-**native window lengths**, *not* a 60 Hz resampled base. The 60 Hz "harmonised" grids are the
-layout-locked baselines' crutch (CrossHAR/LiMU-BERT need a fixed rate); the filterbank tokenizer is
-rate-invariant, so HALO does not. On top of the real native anchors, `rate` (15–100 Hz) interpolates
-between them and `window_crop` varies the observation length — both are layout-breaking (Bucket 2),
-so a fixed-window/fixed-rate baseline structurally cannot ingest them.
+**recording data**, *not* a 60 Hz resampled base. Native grids use non-overlapping six-second contexts
+and retain the final shorter context with an explicit valid length. The collate then forms sequential
+one-second patches, including an honest final short patch. No synthetic rate or crop transform is part
+of the reference run.
 
 ## Three buckets
 

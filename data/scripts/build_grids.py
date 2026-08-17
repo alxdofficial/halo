@@ -94,6 +94,7 @@ def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
     labels: List = []
     subjects: List = []
     event_ids: List[str] = []
+    lengths: List[np.ndarray] = []
     channels: Optional[Tuple[str, ...]] = None
     mask = None
     rate_out = float(resample_to) if resample_to is not None else None
@@ -110,10 +111,13 @@ def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
         out_rate = resample_to if resample_to is not None else native_rate
         window = forced_window if forced_window is not None else max(1, round(window_seconds * out_rate))
         g = assemble(frame, dataset, spec, alignment=view, window=window,
-                     rate_hz=native_rate, resample_to=resample_to)
+                     rate_hz=native_rate, resample_to=resample_to,
+                     include_partial=(alignment == "native"))
         if len(g.data) == 0:
             continue
         datas.append(g.data)
+        lengths.append(g.lengths if g.lengths is not None
+                       else np.full(len(g.data), g.data.shape[1], dtype=np.int32))
         channels, mask, rate_out = g.channels, g.mask, g.rate_hz
         if canonical_labels:
             labels.extend(canonicalize(l) for l in g.labels)   # unify synonyms in the canonical corpora
@@ -134,9 +138,10 @@ def stream_grid(dataset: str, spec: StreamSpec, sessions: Iterable[Session], *,
         _, out_channels, empty_mask = baseline_view.to_view(
             np.zeros((0, len(declared)), np.float32), declared, view)
         return Grid(np.zeros((0, 0, len(out_channels)), np.float32), empty_mask, out_channels, [],
-                    alignment, dataset, float(resample_to) if resample_to is not None else 0.0), []
+                    alignment, dataset, float(resample_to) if resample_to is not None else 0.0,
+                    lengths=np.empty(0, dtype=np.int32)), []
     return Grid(np.concatenate(datas, axis=0), mask, channels, labels, alignment, dataset,
-                float(rate_out), event_ids), subjects
+                float(rate_out), event_ids, np.concatenate(lengths)), subjects
 
 
 # --------------------------------------------------------------------------------------------------
@@ -298,6 +303,7 @@ def _session_grid(
     *,
     resample_to: Optional[float],
     view: str,
+    include_partial: bool,
     forced_window: Optional[int],
     window_seconds: float = WINDOW_SECONDS,
 ) -> Grid:
@@ -315,6 +321,7 @@ def _session_grid(
         window=window,
         rate_hz=native_rate,
         resample_to=resample_to,
+        include_partial=include_partial,
     )
 
 
@@ -354,6 +361,7 @@ def _write_streaming_grid(
             native_rate,
             resample_to=resample_to,
             view=view,
+            include_partial=(alignment == "native"),
             forced_window=forced_window,
         )
         if not len(grid.data):
@@ -401,6 +409,7 @@ def _write_streaming_grid(
     labels: list[str] = []
     subjects: list[str] = []
     event_ids: list[str] = []
+    lengths = np.empty(total, dtype=np.int32)
     cursor = 0
     release_cursor = 0
     committed = False
@@ -413,12 +422,17 @@ def _write_streaming_grid(
                 native_rate,
                 resample_to=resample_to,
                 view=view,
+                include_partial=(alignment == "native"),
                 forced_window=forced_window,
             )
             count = len(grid.data)
             if not count:
                 continue
             mapped[cursor : cursor + count] = grid.data
+            lengths[cursor : cursor + count] = (
+                grid.lengths if grid.lengths is not None
+                else np.full(count, grid.data.shape[1], dtype=np.int32)
+            )
             if canonical_labels:
                 labels.extend(canonicalize(label) for label in grid.labels)
             else:
@@ -453,6 +467,7 @@ def _write_streaming_grid(
             temp_data.unlink(missing_ok=True)
 
     np.save(destination / "mask.npy", mask)
+    np.save(destination / "lengths.npy", lengths)
     (destination / "meta.json").write_text(
         json.dumps(
             {
@@ -464,6 +479,8 @@ def _write_streaming_grid(
                 "labels": labels,
                 "subjects": subjects,
                 "event_ids": event_ids,
+                "lengths_file": "lengths.npy",
+                "partial_windows": int(np.count_nonzero(lengths < sample_shape[0])),
             }
         )
     )
@@ -566,11 +583,17 @@ def _save(out_root: Path, spec: StreamSpec, grid: Grid, subjects: List) -> None:
     d.mkdir(parents=True, exist_ok=True)
     np.save(d / "data.npy", grid.data)
     np.save(d / "mask.npy", grid.mask)
+    lengths = (grid.lengths if grid.lengths is not None
+               else np.full(len(grid.data), grid.data.shape[1], dtype=np.int32))
+    np.save(d / "lengths.npy", lengths)
     (d / "meta.json").write_text(json.dumps({
         "dataset": grid.dataset, "stream_id": spec.stream_id, "alignment": grid.alignment,
         "rate_hz": grid.rate_hz, "channels": list(grid.channels),
         "labels": list(map(str, grid.labels)), "subjects": list(map(str, subjects)),
         "event_ids": list(map(str, grid.event_ids or [])),
+        "lengths_file": "lengths.npy",
+        "partial_windows": int(np.count_nonzero(lengths < (grid.data.shape[1]
+                                                               if grid.data.ndim == 3 else 0))),
     }))
     print(f"  {spec.dataset}/{spec.stream_id}/{grid.alignment}: {grid.data.shape}")
 

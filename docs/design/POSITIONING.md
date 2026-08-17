@@ -3,8 +3,9 @@
 > ## ⚠️ The ARGUMENT here is live. The NUMBERS are not.
 > Every figure below (42.7 / 45.1 / 46.1 / 39.6–42.7) predates the vocabulary fix and was produced
 > under the **59-label** protocol on the `pretrain_fixed_mr` encoder. The current protocol is
-> **93 labels (v4)** and the current standing is **harnet 45.7, HALO evidence engine 42.9,
-> HALO + ConSE 34.4** — see [`../README.md`](../README.md), which quotes the only live table.
+> **166 labels (v5 expanded Phase A)**. The last completed comparison was the historical
+> **93-label v4** table (**harnet 45.7, HALO evidence engine 42.9, HALO + ConSE 34.4**); it is not a
+> valid result for v5. See [`../README.md`](../README.md) for protocol status.
 > Do not carry a number out of this file into a paper draft.
 >
 > What remains current is §1–§4 (what the approach is *for*, and how to report it) and the

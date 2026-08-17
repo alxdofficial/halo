@@ -4,7 +4,9 @@
 > not the current implementation contract. Use `training/tokenizer/README.md` for the live Phase-A
 > recipe and `PHASE_B_TRAINING_INTENT.md` for the live Phase-B recipe. References to the
 > former pooled trainer/evaluator and EDL are retained only as audit history; that code was deleted
-> on 2026-08-07.
+> on 2026-08-07. In particular, do not execute the 93-label rebuild sequence below: the current
+> expanded Phase-A protocol has 166 canonical labels and requires newly versioned downstream
+> artifacts.
 
 Consolidates the fairness audit (F-series), the independent pre-run audit (B/H-series), and the
 findings from our own diagnostics. Each item gives **exact location**, **what to do**, **effort**, and

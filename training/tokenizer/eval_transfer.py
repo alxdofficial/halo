@@ -172,10 +172,12 @@ def sensor_embedding_fingerprint(enc, device) -> torch.Tensor:
 def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state=None,
                             channel_mask=None, dataset=None, stream=None,
                             source_rate: float | None = None,
+                            lengths=None,
                             _require_patches: bool = True,
                             requires_grad: bool = False,
                             neutral_text: bool = False,
                             export_sensor_rows: bool = False,
+                            eval_patching: str = "checkpoint",
                             batch_size: int = 256) -> dict[str, torch.Tensor]:
     """Encode windows and retain both pooled and valid per-patch representations.
 
@@ -194,11 +196,16 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
     Phase-B memory bank: padding tokens must never become retrievable evidence. The historical
     :func:`encode_dataset` API below remains a pooled-only compatibility wrapper.
     """
+    if eval_patching not in {"checkpoint", "fixed-1s", "multiresolution"}:
+        raise ValueError(f"unknown eval_patching mode {eval_patching!r}")
+    use_multiresolution = (
+        getattr(enc, "multiresolution", enc.use_duration_embedding)
+        if eval_patching == "checkpoint" else eval_patching == "multiresolution"
+    )
     collate = (
         MultiResolutionCollate(fixed_patch_seconds=enc.eval_resolution_pair,
                                min_resolution_ratio=enc.min_resolution_ratio)
-        if getattr(enc, "multiresolution", enc.use_duration_embedding) else
-        MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS)
+        if use_multiresolution else MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS)
     )
     if source_rate is None:
         source_rate = STREAM_SOURCE_RATE_HZ.get(f"{dataset}/{stream}", float(rate))
@@ -240,12 +247,16 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
     patch_resolution_parts = []
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
+    if lengths is not None and len(lengths) != len(data):
+        raise ValueError("lengths must align 1:1 with data windows")
     grad_context = torch.enable_grad if requires_grad else torch.no_grad
     for start in range(0, len(data), batch_size):
         with grad_context():
-            block = torch.tensor(np.asarray(data[start:start + batch_size]), dtype=torch.float32)
             items = []
-            for window in block:
+            stop = min(start + batch_size, len(data))
+            for local, row in enumerate(range(start, stop)):
+                valid = int(lengths[row]) if lengths is not None else data.shape[1]
+                window = torch.tensor(np.asarray(data[row, :valid]), dtype=torch.float32)
                 item = {"data": window, "rate": rate, "source_rate": source_rate,
                         "texts": enc_texts, "label_id": 0,
                         "channel_mask": cmask, "gravity_state": gravity_state, "source": "eval"}
@@ -284,17 +295,24 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
             per_patch = out["per_patch"]
             valid_on_output = valid.to(per_patch.device)
             local_rows = (
-                torch.arange(len(block), dtype=torch.long).unsqueeze(1)
+                torch.arange(len(items), dtype=torch.long).unsqueeze(1)
                 .expand_as(valid) + int(start)
             )
             if "patch_durations" in batch:
                 durations = batch["patch_durations"].float()
-                resolutions = batch["resolution_ids"].long()
             else:
+                patch_len = batch["patch_len"].float()
+                rates = batch["rates"].float().clamp_min(1e-8)
                 durations = (
-                    batch["patch_len"].float() / batch["rates"].clamp_min(1e-8)
-                ).unsqueeze(1).expand_as(batch["positions"])
-                resolutions = torch.zeros_like(batch["positions"], dtype=torch.long)
+                    patch_len / rates
+                    if patch_len.ndim == 1
+                    else patch_len / rates.unsqueeze(1)
+                )
+            resolutions = (
+                batch["resolution_ids"].long()
+                if "resolution_ids" in batch
+                else torch.zeros_like(batch["positions"], dtype=torch.long)
+            )
 
             patch_z_parts.append(per_patch[valid_on_output])
             metadata_device = per_patch.device if requires_grad else torch.device("cpu")
@@ -380,13 +398,16 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
 def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
                    channel_mask=None, dataset=None, stream=None,
                    source_rate: float | None = None,
-                   neutral_text: bool = False) -> torch.Tensor:
+                   lengths=None,
+                   neutral_text: bool = False,
+                   eval_patching: str = "checkpoint") -> torch.Tensor:
     """Compatibility API: raw windows at native rate -> pooled embeddings only."""
     return encode_dataset_detailed(
         enc, data, texts, device, rate, gravity_state=gravity_state,
         channel_mask=channel_mask, dataset=dataset, stream=stream,
-        source_rate=source_rate,
+        source_rate=source_rate, lengths=lengths,
         neutral_text=neutral_text,
+        eval_patching=eval_patching,
         _require_patches=False,
     )["pooled"]
 
@@ -415,6 +436,11 @@ def main() -> None:
                          "value of acquisition-config conditioning — BASELINE_FAIRNESS_POLICY.md §5.")
     ap.add_argument("--out", type=Path, default=None,
                     help="Where to write the JSON (default: <checkpoint dir>/transfer_eval.json)")
+    ap.add_argument(
+        "--patching", choices=("checkpoint", "fixed-1s", "multiresolution"),
+        default="checkpoint",
+        help="evaluation patch grid; use one explicit mode for controlled checkpoint comparisons",
+    )
     args = ap.parse_args()
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
@@ -444,7 +470,8 @@ def main() -> None:
             z = encode_dataset(enc, data, texts, device, ref.rate_hz,
                                _stream_gravity_state(dataset, stream),
                                channel_mask=ref.mask, dataset=dataset, stream=stream,
-                               neutral_text=neutral)
+                               lengths=ref.load_lengths(),
+                               neutral_text=neutral, eval_patching=args.patching)
 
             # subject-disjoint 50/50 split
             hold = subject_holdout(subjects, dataset)
@@ -483,7 +510,7 @@ def main() -> None:
     payload = {"checkpoint": str(args.checkpoint), "step": ckpt["step"],
                "internal_val_ba": ckpt["val_ba"], "per_dataset": results,
                "per_stream": arm_stream_results["full"],
-               "mean_knn_ba": round(mean, 4)}
+               "mean_knn_ba": round(mean, 4), "patching": args.patching}
     if args.parity:
         gap = mean - arm_means["parity"]
         payload["parity"] = {

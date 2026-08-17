@@ -1,4 +1,4 @@
-# Phase-A data scaling plan (authoritative, 2026-07-26)
+# Phase-A data scaling plan (authoritative, updated 2026-08-12)
 
 This replaces the historical acquisition survey. It records what is actually accessible, implemented,
 materialised, and allowed into each experiment.
@@ -7,19 +7,25 @@ materialised, and allowed into each experiment.
 
 Keep two claims separate:
 
-1. **Technique comparison:** the frozen 12-source corpus is the default for HALO and corpus-matched
-   baselines. ExtraSensory, NHANES, and H-MOG are absent. This is the arm used to argue that the
-   method, rather than extra data, improves results.
-2. **Data-scaling ablation:** explicitly add ExtraSensory, a versioned bounded NHANES subset, and
-   H-MOG. This tests whether more free-living variation plus a large six-channel phone-in-hand source
-   raises HALO's ceiling. It must be reported as an expanded data result, never substituted for the
-   matched technique comparison.
+1. **Technique comparison:** preserve the original 12-source recipe as `pretrain --corpus matched`
+   (with a separately rebuilt, corpus-fitted sensor-bias artifact).
+   This is the arm used to argue that the method, rather than extra data, improves results against
+   corpus-matched baselines.
+2. **Expanded design-of-record:** `pretrain --corpus expanded` is the current default. It adds
+   DSADS, Forth-TRACE, Opportunity, REALDISP, MM-Fit, and PHYTMO for real placement and execution
+   variation. This arm must be called expanded, and a baseline comparison against it is
+   corpus-matched only after the baseline has been refitted on the same 18 sources. KneE-PAD remains
+   an explicit short-window/clinical-stress ablation rather than part of this default.
+3. **Additional scale ablation:** ExtraSensory, bounded NHANES, and H-MOG remain opt-in through an
+   explicit `--datasets` roster. They must never enter either named recipe implicitly.
 
 Optional datasets require both `build_grids --dataset ...` and an explicit `pretrain --datasets ...`
-roster. Missing requested grids fail fast. The exact roster and subset manifest are persisted.
+roster. Missing requested grids fail fast. Both named recipes resolve to explicit tuples that are
+persisted in checkpoints, so a later default-roster change cannot alter an artifact rebuild.
 
-**The scaling arm also shifts composition, so read a null result carefully.** Both optional sources
-are accelerometer-only wrist free-living, so adding them dilutes capture24 but also cuts the
+**The scaling arm also shifts composition, so read a null result carefully.** The two optional
+free-living sources, ExtraSensory and NHANES, are accelerometer-only wrist data, so adding them
+dilutes capture24 but also cuts the
 multi-placement, gyro-bearing share. "More free-living data did not help" and "the batch got less
 heterogeneous" are not distinguishable from the headline number alone; report the per-source val
 breakdown alongside it.
@@ -33,8 +39,9 @@ primary-corpus claim.
 
 | Corpus | Streams | Materialised windows | Materialised hours | Train / val at the default data seed 20260718 | Semantic labels |
 |---|---:|---:|---:|---:|---:|
-| Primary 12 sources | 20 | 1,730,241 | 2,858.93 | 1,542,518 / 186,625 (95 implausible + 1,003 duplicate dropped) | 93 |
-| Expanded (+ExtraSensory + NHANES pilot + H-MOG) | 25 | 2,695,892 | 4,468.35 | 2,382,969 / 278,080 (95 implausible + 34,748 duplicate dropped) | 93 + reserved `__unlabeled__` |
+| Matched 12 sources | 20 | 1,783,208 | 2,899.13 | 1,589,481 / 192,617 (101 implausible + 1,009 duplicate dropped) | 93 |
+| Expanded 18 sources (default) | 56 | 1,963,606 | 3,166.12 | 1,744,926 / 217,554 (102 implausible + 1,024 duplicate dropped) | 166 |
+| Expanded + optional ExtraSensory/NHANES/H-MOG | 61 | 2,929,257 | 4,775.54 | 2,592,013 / 302,373 (102 implausible + 34,769 duplicate dropped) | 166 + reserved `__unlabeled__` |
 
 The seed is `pretrain.py`'s `data_seed` default; an earlier revision of this table quoted 20260726,
 which no default command reproduces. Materialised counts are what `build_grids` wrote; the train/val
@@ -47,12 +54,14 @@ Both screens cache window indices to `data/quality/` and are applied by `CorpusI
 trained on).
 
 - `scan_implausible` — accelerometer beyond ±16 g or gyroscope beyond ±2000 dps, i.e. outside any
-  consumer full-scale range. 95 windows corpus-wide (kuhar 91, wisdm 4). The accelerometer half was
-  added after an audit found accel-only streams were skipped entirely; it currently catches nothing
-  (peak observed |accel| is 8.0 g on wisdm) but the streams are no longer unscreened.
+  consumer full-scale range. 102 windows in the expanded corpus (KU-HAR 96, WISDM 4, PAMAP2 1,
+  PHYTMO 1). The accelerometer
+  half was added after an audit found accel-only streams were skipped entirely; the PHYTMO shin hit
+  confirms that branch is live.
 - `scan_duplicates` — byte-identical repeated windows, i.e. a device re-emitting a stale buffer
-  rather than sampling. 34,814 windows corpus-wide: **extrasensory/watch_wrist 18,421 (3.3%)**,
-  nhanes 15,324 (13.3%), unimib_shar 940 (8.0%), kuhar 75, motionsense 34, xrf_v2/airpods_ear 20.
+  rather than sampling. 34,835 windows across all built native grids: **extrasensory/watch_wrist
+  18,421 (3.3%)**, nhanes 15,324 (13.3%), unimib_shar 940 (8.0%), kuhar 79, motionsense 34,
+  xrf_v2/airpods_ear 22, and 3 in each DSADS stream.
   Where a duplicate group carries one label, one member is kept; where members disagree, the whole
   group is dropped because the label is unknowable (97 such groups on ExtraSensory's wrist, 5 on
   xrf_v2's ear stream).
@@ -69,7 +78,7 @@ trained on).
 Window count is not converted to hours by multiplying by six: UCI HAR has 2.56 s pre-windowed records
 and SP-SW-HAR uses 1 s windows. Hours above use each grid's actual samples/rate.
 
-Capture-24 is now uncapped: 1,530,792 native windows / 2,551.32 h. Its full harmonised baseline view
+Capture-24 is now uncapped: 1,543,573 native contexts / 2,560.38 h. Its full harmonised baseline view
 was also rebuilt (1,530,795 windows), so HALO and compatible baselines no longer see different
 Capture-24 subsets.
 
@@ -186,39 +195,40 @@ high-frequency bands.
 
 ## Sampling implications
 
-The default temperature sampler uses `P(dataset) proportional to n_dataset^0.25`, not raw proportional
-sampling. Expected primary shares are:
+The default temperature sampler uses `P(dataset) proportional to n_dataset^0.25` with a 25% ceiling,
+not raw proportional sampling. Expected shares for the 18-source design-of-record are:
 
-| Dataset | Primary draw share |
+| Dataset | Expanded draw share |
 |---|---:|
-| Capture-24 | 21.0% |
-| NFI-FARED | 14.8% |
-| XRF V2 | 11.3% |
-| WISDM | 9.7% |
-| HARMES | 7.0% |
-| all other primary datasets combined | 36.2% |
+| Capture-24 | 15.91% |
+| WISDM | 7.35% |
+| REALDISP | 6.84% |
+| DSADS | 6.28% |
+| XRF V2 | 6.14% |
+| NFI-FARED | 5.83% |
+| PHYTMO | 5.70% |
+| all other datasets combined | 45.95% |
 
-For the 15-source expanded roster with the pair quota included, measured shares are Capture-24 14.5%,
-NFI-FARED 12.5%, ExtraSensory 11.6%, H-MOG 8.6%, XRF V2 8.5%, and NHANES 7.4%. Within ExtraSensory,
-raw window-proportional drawing makes the watch 84.5% of that dataset's samples. H-MOG therefore
-restores a substantial gyro-bearing phone stream without dominating the expanded arm. Per-source and
-per-stream telemetry should be inspected before changing the sampler.
+The six default direct-converted additions receive their measured temperature-sampler share recorded
+by the launch preflight. KneE-PAD is opt-in: only 4.7% of its trials reach six seconds, so including it
+in the default recipe caused repeated exposure to a tiny muscle-belly stress corpus. Capture-24 still
+contains most admitted rows without defining the representation. Per-source and per-stream telemetry
+should be inspected before changing the sampler.
 
-At batch 256 and 30,000 steps, training draws 7.68 million windows with replacement: about 4.4 raw
-corpus equivalents for primary and 2.8 for expanded, but exposure differs by source. To preserve
-approximately the primary run's Capture-24 exposure in the expanded arm requires about 45,000 steps.
-Report both data roster and optimizer steps; “epochs” alone is not well-defined under temperature
-sampling.
+The production batch-1,024 / 7,500-step recipe draws 7.68 million windows with replacement: the same
+sample budget as the measured batch-256 / 30,000-step reference and about 4.4 aggregate
+expanded-corpus equivalents. Exposure still differs by source. Report the data roster, sampled-window
+budget, batch size, and optimizer steps; “epochs” alone is not well-defined under temperature sampling.
 
 ## Launch sequence
 
-1. Run the matched 12-source Phase A at the frozen 30,000-step recipe.
-2. Run the 15-source expanded pilot at the same 30,000 steps as a fixed-compute ablation.
-3. If the pilot moves transfer/retrieval metrics, run a predeclared approximately 45,000-step
-   exposure-matched arm.
-4. Only then expand NHANES subject count. Prefer more subjects over more hours per subject; 64 subjects
+1. Run the expanded 18-source Phase A at the sample-matched 1,024 / 7,500 production recipe.
+2. Retain or rerun the matched 12-source arm when making a technique-only baseline claim.
+3. Only then consider the optional ExtraSensory/NHANES/H-MOG scale arm or the KneE-PAD short/stress
+   study. Prefer more NHANES subjects
+   over more hours per subject; 64 subjects
    at 24 selected hours would add roughly 1,536 h while remaining a modest download.
-5. Do not delay the current Phase A for another dataset. The corpus is large enough to test the model;
+4. Do not delay the current Phase A for another dataset. The corpus is large enough to test the model;
    its remaining weakness is wrist/config imbalance and scale relative to industrial foundation
    corpora, not a lack of trainable signal.
 

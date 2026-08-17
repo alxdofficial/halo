@@ -89,12 +89,14 @@ def main() -> None:
     rng = np.random.default_rng(SEED)
     for i, ref in enumerate(index.refs):
         data = ref.load_data()
+        lengths = ref.load_lengths()
         sel = rng.choice(ref.n_windows, size=min(50, ref.n_windows), replace=False)
-        block = np.asarray(data[np.sort(sel)], dtype=np.float32)
+        selected = np.sort(sel)
+        block = [np.asarray(data[row, :int(lengths[row])], dtype=np.float32) for row in selected]
         load_stats["checked"] += len(sel)
-        load_stats["nan_windows"] += int(np.isnan(block).any(axis=(1, 2)).sum())
-        load_stats["inf_windows"] += int(np.isinf(block).any(axis=(1, 2)).sum())
-        mag = np.linalg.norm(block[:, :, :3], axis=2)
+        load_stats["nan_windows"] += sum(bool(np.isnan(window).any()) for window in block)
+        load_stats["inf_windows"] += sum(bool(np.isinf(window).any()) for window in block)
+        mag = np.concatenate([np.linalg.norm(window[:, :3], axis=1) for window in block])
         load_stats["acc_median_mag_by_stream"][f"{ref.dataset}/{ref.stream}"] = \
             round(float(np.median(mag)), 3)
     report["loading"] = load_stats
@@ -151,8 +153,8 @@ def main() -> None:
 
     report["mask_plan"] = {
         "authority": "python -m training.tokenizer.objective_health",
-        "note": "The live recipe uses the multiresolution physical-time mask planner; its empirical "
-                "coverage is measured by objective_health rather than this corpus audit.",
+        "note": "The live recipe uses fixed one-second patches and contiguous physical-time "
+                "sensor masking; empirical coverage is measured by objective_health.",
     }
 
     # Live label-free sampler: empirical source share.

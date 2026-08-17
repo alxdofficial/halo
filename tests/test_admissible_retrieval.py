@@ -3,7 +3,7 @@
 Asserts the behaviours the contribution claims, not shapes:
   * accelerometer evidence never scores against a gyroscope query, and vice versa;
   * gravity-removed accelerometry never scores against gravity-present accelerometry;
-  * the admissibility gate DOWN-WEIGHTS but never DELETES (placement must stay soft);
+  * training and inference use the same continuous admissibility-adjusted score;
   * an enrolled row votes its bound candidate by identity, indifferent to the label string --
     the property the alias arm measured;
   * cross-sensor merge is additive, so a second sensor can only add evidence;
@@ -16,8 +16,8 @@ import torch
 import torch.nn.functional as F
 
 from training.evidence.admissible_retrieval import (
-    GATE_FLOOR, SensorRows, admissibility, compatibility_mask, merge_sensors, predict,
-    rank_scores, retrieval_provenance, vote,
+    SensorRows, compatibility_mask, merge_sensors, predict,
+    rank_scores, retrieval_provenance, soft_vote_all, vote,
 )
 
 D, TEXT, C_CAND, V = 16, 384, 3, 5
@@ -76,16 +76,52 @@ def test_incompatible_rows_are_unrankable():
 
 
 # ------------------------------------------------------------------------- gate (soft)
-def test_gate_downweights_but_never_deletes():
-    """Placement must stay SOFT: a hard zero would make an unusual-placement query retrieve nothing."""
-    gate = admissibility(torch.zeros(2, 4, C_CAND))
-    assert torch.allclose(gate, torch.full_like(gate, GATE_FLOOR))
-    assert float(gate.min()) > 0.0
+def test_soft_admissibility_changes_selection_before_top_k():
+    """Admissibility must affect selection, rather than only reweight selected rows.
+
+    Row 0 is the closest by feature but has negligible admissibility for candidate 0. The adjusted
+    score lets another row occupy the slot without introducing a discontinuous threshold.
+    """
+    rows = _rows()
+    cand, lab = _texts()
+    R = rows.feature.shape[0]
+    comp = compatibility_mask(torch.tensor([0]), torch.tensor([0]), rows)
+    scores = rank_scores(torch.randn(1, D), torch.randn(1, 9), rows, comp)
+    scores[0, 0] = 10.0                                   # row 0 is now the nearest by far
+
+    gate = torch.ones(1, R, C_CAND)
+    gate[0, 0, 0] = 1e-8                                  # ...but weak for candidate 0
+    out = vote(scores, rows, cand, lab, gate, top_k=3)
+    assert torch.isfinite(out).all()
+    # Candidate 0 still gets evidence from admissible rows rather than a slot wasted on row 0.
+    assert float(out[0, 0]) > 0.0
 
 
-def test_gate_is_identity_at_full_resolvability():
-    gate = admissibility(torch.ones(2, 4, C_CAND))
-    assert torch.allclose(gate, torch.ones_like(gate))
+def test_uniformly_tiny_admissibility_remains_soft_and_finite():
+    """A learned score may strongly discourage evidence but must not delete all gradient paths."""
+    rows = _rows()
+    cand, lab = _texts()
+    R = rows.feature.shape[0]
+    comp = compatibility_mask(torch.tensor([0]), torch.tensor([0]), rows)
+    scores = rank_scores(torch.randn(1, D), torch.randn(1, 9), rows, comp)
+    gate = torch.ones(1, R, C_CAND)
+    gate[0, :, 0] = 1e-8
+    out = vote(scores, rows, cand, lab, gate, top_k=6)
+    assert torch.isfinite(out).all()
+    assert float(out[0, 0]) >= 0.0
+
+
+def test_admissibility_has_no_hidden_threshold_discontinuity():
+    rows = _rows()
+    cand, lab = _texts()
+    R = rows.feature.shape[0]
+    comp = compatibility_mask(torch.tensor([0]), torch.tensor([0]), rows)
+    scores = rank_scores(torch.randn(1, D), torch.randn(1, 9), rows, comp)
+    just_below = torch.full((1, R, C_CAND), 0.149)
+    just_above = torch.full((1, R, C_CAND), 0.151)
+    below = vote(scores, rows, cand, lab, just_below, top_k=6)
+    above = vote(scores, rows, cand, lab, just_above, top_k=6)
+    assert torch.allclose(below, above, atol=1e-6)
 
 
 def test_gate_changes_the_prediction():
@@ -122,6 +158,29 @@ def test_enrolled_rows_vote_by_identity_not_by_label_text():
     assert torch.argmax(base) == torch.argmax(alias) == 1
 
 
+def test_support_bound_to_another_candidate_cannot_crowd_out_a_voting_row():
+    rows = _rows()
+    bound = rows.enrolled_candidate.clone()
+    bound[0] = 1
+    labels = rows.label.clone()
+    labels[6] = 0
+    rows = SensorRows(
+        rows.feature, rows.descriptor, rows.bias, rows.modality, rows.gravity,
+        labels, rows.dataset, bound,
+    )
+    candidate, label_text = _texts()
+    candidate = candidate.clone()
+    candidate[0] = label_text[0]
+    scores = torch.zeros(1, len(rows.feature))
+    scores[0, 0] = 10.0       # nearest row, but explicitly bound to candidate 1
+    scores[0, 6] = 5.0        # next row can vote for candidate 0 through label text
+    out = vote(
+        scores, rows, candidate, label_text,
+        torch.ones(1, len(rows.feature), C_CAND), top_k=1,
+    )
+    assert float(out[0, 0]) > 0.0
+
+
 def test_corpus_rows_vote_through_label_text():
     """With nothing enrolled, the only mechanism is the ConSE bridge -- the k=0 path."""
     rows = _rows()
@@ -133,6 +192,51 @@ def test_corpus_rows_vote_through_label_text():
     assert out.shape == (1, C_CAND)
     assert torch.isfinite(out).all()
     assert float(out.abs().sum()) > 0.0
+
+
+def test_full_soft_training_vote_gives_low_ranked_rows_credit():
+    rows = _rows(R=12)
+    _, label_text = _texts()
+    candidate = label_text[:C_CAND].clone()
+    scores = torch.linspace(0.0, 0.3, 12).unsqueeze(0)
+    admissibility = torch.full((1, 12, C_CAND), 0.5, requires_grad=True)
+    logits = soft_vote_all(
+        scores, rows, candidate, label_text, admissibility, temperature=0.2,
+    )
+    (-logits.clamp_min(1e-8).log()[0, 0]).backward()
+    assert admissibility.grad is not None
+    # Row zero would be outside top-1, but the all-row training distribution still credits it.
+    assert float(admissibility.grad[0, 0].abs().sum()) > 0.0
+
+
+def test_soft_training_and_topk_inference_are_identical_when_topk_keeps_every_row():
+    rows = _rows(R=12)
+    candidate, label_text = _texts()
+    scores = torch.randn(2, 12)
+    admissibility = torch.sigmoid(torch.randn(2, 12, C_CAND))
+    soft = soft_vote_all(scores, rows, candidate, label_text, admissibility, temperature=0.2)
+    truncated = vote(
+        scores, rows, candidate, label_text, admissibility, top_k=12, temperature=0.2,
+    )
+    assert torch.allclose(soft, truncated, atol=1e-6)
+
+
+def test_full_soft_vote_rectifies_complete_cosine():
+    base = _rows(R=12)
+    rows = SensorRows(
+        base.feature[:2], base.descriptor[:2], base.bias[:2], base.modality[:2],
+        base.gravity[:2], torch.tensor([0, 1]), base.dataset[:2],
+        torch.full((2,), -1, dtype=torch.long),
+    )
+    label_text = F.normalize(torch.tensor([[1.0, -1.0], [-1.0, 1.0]]), dim=-1)
+    candidate_text = F.normalize(torch.tensor([[1.0, 1.0]]), dim=-1)
+    out = soft_vote_all(
+        torch.zeros(1, 2), rows, candidate_text, label_text,
+        torch.ones(1, 2, 1), temperature=1.0,
+    )
+    # Both complete cosines are zero. ReLU on individual coordinate products would be positive and
+    # would make the training vote disagree with deployment.
+    assert torch.allclose(out, torch.zeros_like(out), atol=1e-7)
 
 
 # ------------------------------------------------------------------------ sensor merge
@@ -172,7 +276,7 @@ def test_predict_runs_over_multiple_query_sensors():
         query_modality=torch.tensor([0, 1]),
         query_gravity=torch.tensor([0, 0]),
         rows=rows, candidate_text=cand, label_text=lab,
-        resolvability=torch.ones(2, R, C_CAND), top_k=6,
+        admissibility=torch.ones(2, R, C_CAND), top_k=6,
     )
     assert out.shape == (C_CAND,)
     assert torch.isfinite(out).all()
@@ -185,5 +289,5 @@ def test_predict_is_deterministic():
     kw = dict(query_feature=torch.randn(1, D), query_bias=torch.randn(1, 9),
               query_modality=torch.tensor([0]), query_gravity=torch.tensor([0]),
               rows=rows, candidate_text=cand, label_text=lab,
-              resolvability=torch.ones(1, R, C_CAND), top_k=6)
+              admissibility=torch.ones(1, R, C_CAND), top_k=6)
     assert torch.allclose(predict(**kw), predict(**kw))

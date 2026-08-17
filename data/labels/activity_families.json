@@ -49,8 +49,13 @@
       "standing_up_from_lying",
       "standing_up_from_sitting",
       "syncope",
+      "transition_from_climbing_stairs_and_talking_to_walking_and_talking",
+      "transition_from_climbing_stairs_to_walking",
       "transition_from_sitting_and_talking_to_standing",
+      "transition_from_standing_to_climbing_stairs",
       "transition_from_standing_to_sitting_and_talking",
+      "transition_from_standing_to_walking",
+      "transition_from_walking_to_standing",
       "waist_bends_forward"
     ],
     "falls": [

@@ -9,8 +9,8 @@ The live recipe has exactly two top-level objectives:
 
 | objective | supervision | default weight |
 |---|---|---:|
-| `jepa` | masked student predicts clean contextual sensor tokens from an EMA teacher; descriptor masking is one JEPA strategy | 1.0 initially |
-| `vicreg` | VICReg over two independent augmentations of every window | 1.0 initially |
+| `jepa` | masked student predicts clean contextual sensor tokens from an EMA teacher | 1.0 initially |
+| `vicreg` | VICReg over two independently SO(3)-rotated views of every window | 1.0 initially |
 
 VICReg's published MSE invariance, variance, and covariance terms provide augmentation robustness,
 collapse prevention, and redundancy reduction for every sampled window. Phase A no longer contains
@@ -63,14 +63,14 @@ For a report-only throw-away pilot, omit application explicitly:
 
 ```bash
 python -m training.tokenizer.pretrain --device cuda \
-  --calibrate-objectives-at 2000 \
+  --calibrate-objectives-at 500 \
   --objective-calibration-mode report \
   --out training/tokenizer/outputs/objective_calibration
 ```
 
 Report mode stops immediately after writing the recommendation and emits no validation checkpoint.
-Keep `--steps` equal to the planned full run (normally 30,000), even though report mode exits at the
-calibration step: `steps` defines the cosine LR and EMA schedules, so shortening it to 2,000 would
+Keep `--steps` equal to the planned full run (normally 7,500), even though report mode exits at the
+calibration step: `steps` defines the cosine LR and EMA schedules, so shortening it to 500 would
 measure a different, already-decayed training trajectory.
 
 Ordinary runs continue to log weighted top-level encoder-gradient norms and JEPA/VICReg cosine at
@@ -78,36 +78,30 @@ step 1 and every 500 steps. This is a deterministic one-time schedule, not a con
 optimizer. Nearby 0.5x/1x/2x JEPA-to-VICReg ratio arms should be selected using the fixed transfer
 and robustness probes rather than gradient equality alone.
 
-For a bounded stability monitor, `--steps 30000 --stop-after 4000` checkpoints at step 4,000 while
-retaining the 30,000-step LR and EMA schedules. Resume that checkpoint without `--stop-after` to
+For a bounded stability monitor, `--steps 7500 --stop-after 1000` checkpoints at step 1,000 while
+retaining the 7,500-step LR and EMA schedules. Resume that checkpoint without `--stop-after` to
 continue the same trajectory.
 
 ## JEPA masking
 
 The canonical encoder folds each accelerometer or gyroscope xyz triad into one sensor token. JEPA
-uses three masking strategies inside one objective:
+uses two active signal masking strategies inside one objective:
 
 1. A contiguous temporal block hides sensor tokens over part of the observation.
 2. A whole sensor may be hidden only when another sensor at the same placement remains visible.
-3. A sensor's frozen text descriptor may be hidden while signal and measured bias remain visible;
-   the contextual token retrieves the correct descriptor among distinct batch descriptors.
+Descriptor reconstruction is disabled in the reference recipe (`descriptor_weight=0`). Its code is
+retained only as an explicit ablation because it adds a distinct retrieval target and previously made
+the supposedly simple JEPA term harder to interpret. Padded patches and absent sensors are never
+targets. There is no causal/future-tail branch.
 
-Descriptor retrieval uses a stable semantic target captured after channel/gravity configuration and
-before random wording augmentation. The encoder still consumes independently paraphrased descriptions,
-but equivalent surface forms cannot become false-negative retrieval classes.
-
-The descriptor term is part of the JEPA family before top-level objective calibration, rather than a
-third independently weighted objective. Padded patches and absent sensors are never targets, and a
-sensor's signal and descriptor are never both hidden. There is no causal/future-tail branch.
-
-Multiresolution pooling weights partial tail patches by the physical duration they represent, then
-gives the short and long resolution summaries equal weight. This prevents a short tail from counting
-as a complete patch and prevents the denser short grid from dominating the session representation.
+The reference collate uses fixed one-second patches. A recording's final partial six-second context and
+its final partial one-second patch are retained with honest lengths. Session pooling weights patches by
+the physical duration they represent, so a short tail cannot count as a complete second.
 
 ## Data and sampling
 
 The design-of-record default is the **expanded 18-source native-rate corpus**: 56 streams,
-1,665,869 admitted training windows, 204,043 subject-disjoint validation windows, and 161 canonical
+1,744,926 admitted training windows, 217,554 subject-disjoint validation windows, and 166 canonical
 activity names at data seed 20260718. The original 12-source recipe remains available as
 `--corpus matched`; use it for a technique-only comparison against baselines fitted on that corpus.
 Because sensor-bias standardization is corpus-fitted, rebuild `sensor_bias.json` for the exact
@@ -124,10 +118,11 @@ P(window | subject) uniform
 No source-specific quota overrides this distribution. Synchronous streams are sampled as ordinary
 windows because VICReg uses only two augmentations of the same row and has no negative-pair mining.
 
-At 30,000 steps and batch 256, sampling is with replacement and is not equivalent to equal corpus
-epochs. Capture-24 supplies 15.9% of expected draws despite containing 81.9% of admitted rows;
-expected draws per available row range from 0.90 for Capture-24 to 202 for mHealth. The six
-direct-converted additions collectively supply 31.9% of draws. This is the intended
+At 7,500 steps and batch 1,024, sampling draws the same 7.68 million windows as the measured
+30,000-step batch-256 reference. It is with replacement and is not equivalent to equal corpus
+epochs. Capture-24 supplies 15.3% of expected draws despite containing most admitted rows;
+expected draws per available row range from 0.71 to 550 after subject tempering (median 0.87). The six
+direct-converted additions collectively supply 32.7% of draws. This is the intended
 dataset/subject-temperature policy, and raw-corpus epoch counts must not be used to describe source
 exposure.
 
@@ -142,32 +137,37 @@ upsampled 25 Hz signal from being treated as though it contains genuine 25 Hz sp
 | VICReg expander | 256 -> 256 -> 128 |
 | JEPA temporal mask ratio | 0.5 of physically ordered tokens, up to rounding |
 | frontend | fixed physical filterbank |
-| temporal grids | simultaneous short + long |
+| temporal grid | one-second patches in non-overlapping contexts of at most six seconds |
 | token unit | one token per modality triad (accelerometer or gyroscope) |
 | conditioning | frozen sensor text descriptor + train-only measured sensor bias, each through a gated learnable projection |
-| batch / steps | 256 / 30,000 |
-| LR / warmup / weight decay | 3e-4 / 1,000 / 0.05 |
+| batch / steps | 1,024 / 7,500 (7.68M sampled windows) |
+| LR / warmup / weight decay | 6e-4 / 250 / 0.10 |
 | gradient clip | 1.0 |
 | CUDA precision | FP16 autocast + dynamic loss scaling; FP32 master weights/statistics |
-| JEPA EMA decay | 0.996 |
+| JEPA EMA decay | 0.984095744256 (`0.996^4`, preserving half-life in examples) |
 | validation | subject-disjoint, label/stream-covered kNN + ConSE probes |
-| objective calibration | 50 batches ending at step 2,000, apply once |
+| objective calibration | 50 batches ending at step 500, apply once |
 | RTX 4090 loader | 12 workers (override with `--num-workers`) |
 
 `--lr`, `--warmup-steps`, `--weight-decay`, and `--grad-clip` expose the optimizer controls for
-attributable pilot sweeps; `--lr 4.2e-4` retains the former batch-512-scaled comparison arm.
+attributable pilot sweeps. The batch-1024 defaults use conservative square-root LR scaling; weight
+decay and EMA momentum are adjusted so their cumulative effect remains approximately constant per
+sample relative to the batch-256 reference.
+The batch-1,024 recipe has been throughput- and gradient-smoke-tested, but no completed 7,500-step
+checkpoint has been produced from it yet. The completed reference run used batch 256 for 30,000 steps;
+do not describe the 1,024 recipe as a validated training result until that run exists.
 `best.pt` is selected by kNN recall
 macro-averaged over observed `(label, stream)` cells rather than a source-dominated global average.
 
-The constrained-learnable frontend and single-resolution path remain active tokenizer ablations:
+The constrained-learnable frontend and multi-resolution path remain active tokenizer ablations:
 
 ```bash
 python -m training.tokenizer.pretrain --frontend fixed --device cuda \
   --out training/tokenizer/outputs/fixed
 python -m training.tokenizer.pretrain --frontend learnable --device cuda \
   --out training/tokenizer/outputs/learnable
-python -m training.tokenizer.pretrain --no-multiresolution --device cuda \
-  --out training/tokenizer/outputs/single_resolution
+python -m training.tokenizer.pretrain --multiresolution --device cuda \
+  --out training/tokenizer/outputs/multiresolution
 ```
 
 Sizing arms opened against published precedent, all **off by default** and unmeasured on our data
@@ -176,7 +176,7 @@ Sizing arms opened against published precedent, all **off by default** and unmea
 ```bash
 --num-heads 4              # head dim 32 -> 64, the usual transformer range, same parameter count
 --mask-ratio-time 0.75     # BEiT 40 / MAE 75 / data2vec-2.0 ~80 / I-JEPA 0.7-1.0 vs our 0.5
---jepa-ema-schedule cosine # BYOL ramp 0.996 -> 1.0 instead of 0.996 held for all 30k steps
+--jepa-ema-schedule cosine # BYOL-style ramp from the batch-adjusted base momentum to 1.0
 --vicreg-proj-hidden / --vicreg-proj-dim   # VICReg wants the expander WIDER than d_model
 ```
 
@@ -198,7 +198,7 @@ python -m training.tokenizer.grad_check
 python -m training.tokenizer.pretrain --device cuda \
   --corpus expanded \
   --num-workers 12 \
-  --calibrate-objectives-at 2000 --objective-calibration-mode apply \
+  --calibrate-objectives-at 500 --objective-calibration-mode apply \
   --out training/tokenizer/outputs/<run>
 ```
 
@@ -207,16 +207,17 @@ resolved dataset tuple, so a future change to the module default cannot silently
 rebuild. `--datasets ...` remains the explicit custom/scale-arm escape hatch.
 
 CUDA launches enable transformer-only dynamic compilation by default; pass `--no-compile` only for
-debugging. On the local RTX 4090, the optimized FP16 path sustains about 15.6 updates/s at batch 256
-(roughly 4,000 windows/s) after compilation, with 4.3 GiB peak allocated VRAM. That projects to about
-32–33 minutes for the 30,000 training updates, plus cold compilation, recurring probes, and checkpoint
-I/O. A cold process pays roughly 50–80 seconds once; the full run amortizes this comfortably. The old
+debugging. Profiling on the local RTX 4090 measured about 11.6 updates/s and 11,900 windows/s at batch
+1,024, with 4.75 GiB peak allocated VRAM. The 7,500-step sample-matched run therefore projects to
+roughly 12–13 minutes including cold compilation, recurring probes, and checkpoint I/O. The old
 whole-encoder compile path was slower because ragged unique-text shapes caused specialization churn;
-`--compile` now leaves text conditioning eager and compiles only the dual-branch transformer. Batch
-256 is throughput-optimal in the measured range: batch 320 gained only 2.7% windows/s and batch 384
-regressed, while changing optimization statistics. FP16 and BF16 had indistinguishable measured
-throughput, so FP16 remains the design-of-record precision. Do not use
-the old advice to increase batch merely because the 24 GB card has free VRAM.
+`--compile` leaves text conditioning eager and compiles only the dual-branch transformer. FP16 and
+BF16 had indistinguishable measured throughput, so FP16 remains the design-of-record precision.
+
+Multi-resolution remains a batch-512 ablation: its 12–22 patches per window use 7.67 GiB at batch 512,
+and batch 1,024 would force the collate to discard finer resolution pairs. `--multiresolution`
+therefore selects a sample-matched 512 / 15,000 schedule with the corresponding LR, warmup, decay,
+EMA, and calibration defaults. An explicit multi-resolution batch above 512 is rejected.
 
 This is mixed precision rather than a blanket `model.half()` conversion. Linear projections and
 attention matrix products use FP16 Tensor Cores. Model parameters, AdamW state, the filterbank FFT and
@@ -259,7 +260,7 @@ deliberately compound or sustained where a single noisy batch would otherwise ca
 The dashboard shows weighted objective losses, VICReg components, positive-pair margins, module and
 per-objective encoder gradients, encoder/projector/EMA-teacher health, the actual label/stream
 checkpoint-selection metric, source and augmentation realization, throughput, VRAM, ETA, AMP skips,
-input validity, and descriptor top-1 against its current candidate-set chance level. Validation remains
+and input validity. Descriptor retrieval telemetry appears only when that ablation is enabled. Validation remains
 every 1,000 steps; the minute monitor does not run an extra model probe and therefore adds no training
 compute.
 

@@ -17,6 +17,18 @@ from training.tokenizer.pretrain import (
 from training.tokenizer.pretrain_data import WindowKey
 
 
+def test_batch_1024_recipe_preserves_reference_sample_budget_and_ema_timebase():
+    cfg = PretrainConfig()
+    assert cfg.batch_size == 1024
+    assert cfg.steps == 7_500
+    assert cfg.batch_size * cfg.steps == 256 * 30_000
+    assert cfg.warmup_steps * cfg.batch_size == 1_000 * 256
+    assert cfg.lr == pytest.approx(6e-4)
+    assert cfg.weight_decay == pytest.approx(0.1)
+    assert cfg.jepa_ema_decay == pytest.approx(0.996 ** 4)
+    assert cfg.val_every == 500
+
+
 def test_eval_subset_covers_streams_before_refilling_large_source():
     keys = (
         [WindowKey(0, i, 7) for i in range(100)]

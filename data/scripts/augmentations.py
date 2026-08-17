@@ -244,7 +244,7 @@ class AugmentationConfig:
     #
     #   * NUISANCE — same acquisition, different realization. Two views may draw INDEPENDENTLY and
     #     VICReg's invariance MSE applies: the representation genuinely should not move.
-    #   * CONFIG   — the acquisition itself is different (orientation, sampling rate, units, gravity
+    #   * CONFIG   — the acquisition itself is different (sampling rate, units, gravity
     #     convention, which sensors are present). ONE draw per window per step, applied identically
     #     to EVERY view including the JEPA teacher's. Demanding invariance across these is demanding
     #     the model discard exactly the axes it conditions on.
@@ -258,33 +258,24 @@ class AugmentationConfig:
     # invariance pressure on it is what forces the model off memorising ~20 fixed strings and onto
     # text semantics — the only thing that can generalize to an unseen placement description.
     # ------------------------------------------------------------------------------------------
-    NUISANCE_GROUP = ("window_crop", "scale", "jitter", "channel_text_phrase")
+    # Mounting orientation is deliberately a nuisance in the minimal recipe: independent rotations
+    # make the positive-pair objective teach orientation robustness directly.
+    NUISANCE_GROUP = ("window_crop", "scale", "jitter", "rotation_3d",
+                      "channel_text_phrase")
     # sensor_text_dropout is listed here (rather than omitted) so the two groups partition ORDER: if
     # anyone re-enables it, it lands in the config group by default rather than silently reacquiring
     # VICReg invariance pressure — the failure this whole split exists to prevent.
-    CONFIG_GROUP = ("channel_dropout", "rotation_3d", "gravity", "rate", "channel_text_dropout",
+    CONFIG_GROUP = ("channel_dropout", "gravity", "rate", "channel_text_dropout",
                     "sensor_text_dropout")
 
     @classmethod
     def phase_a(cls) -> "AugmentationConfig":
         cfg = cls()
-        cfg.jitter.enabled = True
-        cfg.scale.enabled = True
-        cfg.gravity.enabled = True
-        # Full SO(3) rotation. NOTE it is no longer "the placement-invariance lever" — it is a CONFIG
-        # transform: shared across views, never a difference the model is asked to erase.
+        # Minimal reference recipe: the only positive-view difference is mounting orientation.
+        # Every other transform remains implemented for controlled ablations, but is not bundled into
+        # the first run where its individual value could not be identified.
         cfg.rotation_3d.enabled = True
-        cfg.rate.enabled = True
-        cfg.channel_dropout.enabled = True
-        cfg.window_crop.enabled = True    # variable observation length (session-length invariance)
-        cfg.channel_text_phrase.enabled = True
-        cfg.channel_text_dropout.enabled = True
-        # sensor_text_dropout DELIBERATELY OFF. Under VICReg it drove "with descriptor" and "without
-        # descriptor" to the same representation — the precise mechanism that makes conditioning
-        # inert, which the parity ablation then measured. Descriptor-mask JEPA supersedes it with a
-        # SUPERVISED version of the same robustness: reconstruct the descriptor rather than learn to
-        # not need it.
-        cfg.sensor_text_dropout.enabled = False
+        cfg.rotation_3d.p = 1.0
         return cfg
 
     def split_by_group(self) -> tuple["AugmentationConfig", "AugmentationConfig"]:

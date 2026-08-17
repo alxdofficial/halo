@@ -3,7 +3,13 @@
 import numpy as np
 import torch
 
-from training.tokenizer.eval_transfer import encode_dataset, encode_dataset_detailed
+from training.tokenizer.eval_transfer import (encode_dataset, encode_dataset_detailed,
+                                               subject_holdout)
+
+
+def test_subject_holdout_is_stream_order_invariant():
+    subjects = np.asarray(["s1", "s2", "s3", "s4", "s1", "s2"])
+    assert subject_holdout(subjects, "spar") == subject_holdout(subjects[::-1], "spar")
 
 
 class _DummyEncoder(torch.nn.Module):
@@ -54,6 +60,20 @@ def test_multiresolution_export_retains_physical_metadata():
     for window in range(2):
         rows = detailed["patch_window"].eq(window)
         assert rows.sum() == 8  # five short-grid + three long-grid patches
+
+
+def test_evaluation_patching_override_controls_the_grid_independently_of_checkpoint():
+    data = np.ones((1, 120, 6), dtype=np.float32)
+    fixed = encode_dataset_detailed(
+        _DummyEncoder(multiresolution=True), data, ["x"] * 6, torch.device("cpu"), 50.0,
+        channel_mask=[True] * 6, eval_patching="fixed-1s",
+    )
+    multi = encode_dataset_detailed(
+        _DummyEncoder(multiresolution=False), data, ["x"] * 6, torch.device("cpu"), 50.0,
+        channel_mask=[True] * 6, eval_patching="multiresolution",
+    )
+    assert fixed["patch_resolution"].eq(0).all()
+    assert set(multi["patch_resolution"].tolist()) == {0, 1}
 
 
 def test_detailed_export_can_retain_a_live_autograd_graph():

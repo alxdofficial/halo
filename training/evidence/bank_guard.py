@@ -22,6 +22,24 @@ import json
 from typing import Sequence
 
 
+TEXT_EMBED_PROBE_LABELS = (
+    "walking",
+    "drinking coffee",
+    "left wrist accelerometer",
+)
+
+
+def text_embedding_probe():
+    """Fixed MiniLM outputs used to bind stored and runtime label-text spaces."""
+    import numpy as np
+    import torch
+
+    from eval.scoring import get_sbert_encoder
+
+    value = np.asarray(get_sbert_encoder()(TEXT_EMBED_PROBE_LABELS), dtype=np.float32)
+    return torch.from_numpy(value)
+
+
 def vocab_fingerprint(labels: Sequence[str]) -> str:
     """Order-sensitive hash of a label vocabulary (order defines the label indices)."""
     return hashlib.sha256(json.dumps(list(labels)).encode()).hexdigest()[:16]
@@ -57,6 +75,13 @@ def bank_fingerprint(bank: dict) -> str:
         "d_model": bank.get("d_model"),
         "embed_probe_fp": probe_fp,
     }
+    text_probe = bank.get("text_embed_probe")
+    if text_probe is not None:
+        import torch
+
+        tensor = torch.as_tensor(text_probe).detach().cpu().contiguous()
+        payload["text_embed_probe_fp"] = hashlib.sha256(tensor.numpy().tobytes()).hexdigest()
+        payload["text_encoder"] = bank.get("text_encoder")
     if "balance_policy" in bank:
         payload["balance_policy"] = bank["balance_policy"]
     # Schema-v2 extends (rather than replaces) the historical pooled bank with a patch table. Keep
@@ -85,6 +110,21 @@ def bank_fingerprint(bank: dict) -> str:
                 "n_source_rows": len(bank.get("source_row", [])),
                 "population_fp": bank.get("population_fp"),
             })
+        if int(bank.get("schema_version", 1)) >= 4:
+            sensor = bank.get("sensor") or {}
+            sensor_probe = bank.get("sensor_embed_probe")
+            sensor_probe_fp = None
+            if sensor_probe is not None:
+                import torch
+                tensor = torch.as_tensor(sensor_probe).detach().cpu().contiguous()
+                sensor_probe_fp = hashlib.sha256(tensor.numpy().tobytes()).hexdigest()
+            payload.update({
+                "n_sensor_rows": len(sensor.get("Z", [])),
+                "sensor_fields": sorted(sensor),
+                "sensor_embed_probe_fp": sensor_probe_fp,
+            })
+        if int(bank.get("schema_version", 1)) >= 5:
+            payload["sensor_descriptions"] = bank.get("sensor_descriptions")
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
@@ -186,6 +226,147 @@ def assert_patch_bank(bank: dict, *, context: str = "") -> None:
         )
 
 
+def assert_sensor_bank(bank: dict, *, context: str = "") -> None:
+    """Validate the schema-5 per-sensor table and all pooled-window foreign keys."""
+    import torch
+
+    where = f" ({context})" if context else ""
+    if int(bank.get("schema_version", 0)) < 5 or "sensor" not in bank:
+        raise SystemExit(
+            f"\n[bank_guard] SENSOR BANK REQUIRED{where}: rebuild with build_memory --sensor-rows.\n"
+        )
+    if "sensor_embed_probe" not in bank:
+        raise SystemExit(
+            f"\n[bank_guard] SENSOR BANK LACKS EMBEDDING-PATH PROVENANCE{where}. Rebuild it.\n"
+        )
+    table = bank["sensor"]
+    required = {
+        "Z", "window", "slot", "time", "duration", "resolution", "y", "subj", "cfg",
+        "event", "modality", "gravity", "bias",
+    }
+    missing = sorted(required - set(table))
+    if missing:
+        raise SystemExit(f"\n[bank_guard] MALFORMED SENSOR BANK{where}: missing {missing}.\n")
+    n = len(table["Z"])
+    mismatched = {name: len(table[name]) for name in required if len(table[name]) != n}
+    if n == 0 or mismatched:
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED SENSOR BANK{where}: rows={n}, mismatched={mismatched}.\n"
+        )
+    window = torch.as_tensor(table["window"])
+    if window.dtype not in (torch.int32, torch.int64) or int(window.min()) < 0 \
+            or int(window.max()) >= len(bank["Z"]):
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED SENSOR BANK{where}: invalid pooled-window foreign key.\n"
+        )
+    for key in ("y", "subj", "cfg", "event"):
+        if not torch.equal(torch.as_tensor(table[key]).cpu(), torch.as_tensor(bank[key])[window].cpu()):
+            raise SystemExit(
+                f"\n[bank_guard] MALFORMED SENSOR BANK{where}: sensor.{key} disagrees with its "
+                "parent pooled window.\n"
+            )
+    modality = torch.as_tensor(table["modality"])
+    slot = torch.as_tensor(table["slot"])
+    cfg = torch.as_tensor(table["cfg"])
+    cfg_names = bank.get("cfg_names") or {}
+    valid_cfg = set(int(value) for value in cfg_names)
+    if not valid_cfg or not set(int(value) for value in cfg.unique()).issubset(valid_cfg):
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED SENSOR BANK{where}: cfg references an unknown stream.\n"
+        )
+    if modality.dtype not in (torch.int32, torch.int64) or \
+            slot.dtype not in (torch.int32, torch.int64) or \
+            not bool(torch.isin(modality, torch.tensor([0, 1])).all()) or int(slot.min()) < 0:
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED SENSOR BANK{where}: invalid modality or sensor slot.\n"
+        )
+    descriptions = bank.get("sensor_descriptions") or {}
+    # Slot order is local to a stream. A gyro-only stream legitimately has (slot=0, modality=gyro),
+    # so validate against the metadata captured at build time rather than equating slot and modality.
+    for config in cfg.unique().tolist():
+        selected = cfg.eq(int(config))
+        pairs = set(zip(slot[selected].tolist(), modality[selected].tolist()))
+        metadata = descriptions.get(int(config), descriptions.get(str(int(config))))
+        expected = set() if metadata is None else {
+            (int(row["slot"]), int(row["modality"])) for row in metadata
+        }
+        if len({pair[0] for pair in pairs}) != len(pairs) or \
+                {pair[0] for pair in pairs} != set(range(len(pairs))) or pairs != expected:
+            raise SystemExit(
+                f"\n[bank_guard] MALFORMED SENSOR BANK{where}: config {config} has inconsistent "
+                f"(slot, modality) pairs {sorted(pairs)}.\n"
+            )
+        gravity = torch.as_tensor(table["gravity"])[selected]
+        for row in metadata:
+            row_mask = slot[selected].eq(int(row["slot"]))
+            if not bool(gravity[row_mask].eq(int(row["gravity"])).all()):
+                raise SystemExit(
+                    f"\n[bank_guard] MALFORMED SENSOR BANK{where}: config {config}, slot "
+                    f"{row['slot']} disagrees with stored gravity metadata.\n"
+                )
+    if torch.as_tensor(table["Z"]).ndim != 2 or torch.as_tensor(table["bias"]).ndim != 2:
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED SENSOR BANK{where}: Z and bias must be row matrices.\n"
+        )
+    for key in ("Z", "bias", "time", "duration"):
+        value = torch.as_tensor(table[key]).float()
+        if not bool(torch.isfinite(value).all()):
+            raise SystemExit(f"\n[bank_guard] MALFORMED SENSOR BANK{where}: {key} is non-finite.\n")
+    if not bool((torch.as_tensor(table["duration"]) > 0).all()) or \
+            not bool((torch.as_tensor(table["time"]) >= 0).all()):
+        raise SystemExit(
+            f"\n[bank_guard] MALFORMED SENSOR BANK{where}: non-physical time metadata.\n"
+        )
+    assert_sensor_description_path_current(bank, context=context)
+
+
+def assert_sensor_description_path_current(bank: dict, *, context: str = "") -> None:
+    """Fail if mutable stream policy now produces text different from the bank's stored semantics."""
+    from training.tokenizer.pretrain_data import _stream_gravity_state, stream_sensor_texts
+
+    where = f" ({context})" if context else ""
+    cfg_names = bank.get("cfg_names") or {}
+    stored = bank.get("sensor_descriptions") or {}
+    for config, rows in stored.items():
+        config_id = int(config)
+        key = cfg_names.get(config_id, cfg_names.get(str(config_id)))
+        if key is None:
+            raise SystemExit(
+                f"\n[bank_guard] SENSOR DESCRIPTION PROVENANCE IS MALFORMED{where}: "
+                f"config {config_id} has no cfg_names entry.\n"
+            )
+        dataset, separator, stream = str(key).partition("/")
+        if not separator:
+            raise SystemExit(
+                f"\n[bank_guard] SENSOR DESCRIPTION PROVENANCE IS MALFORMED{where}: "
+                f"configuration {key!r} is not '<dataset>/<stream>'.\n"
+            )
+        modalities = ["accel" if int(row["modality"]) == 0 else "gyro" for row in rows]
+        removed = _stream_gravity_state(dataset, stream) == "removed"
+        _, current_text, _ = stream_sensor_texts(
+            dataset,
+            stream,
+            gravity_removed=removed,
+            has_accel="accel" in modalities,
+            has_gyro="gyro" in modalities,
+        )
+        current = [
+            {
+                "slot": index,
+                "modality": 0 if modality == "accel" else 1,
+                "gravity": int(modality == "accel" and removed),
+                "text": current_text[index],
+            }
+            for index, modality in enumerate(modalities)
+        ]
+        if current != rows:
+            raise SystemExit(
+                f"\n[bank_guard] SENSOR DESCRIPTION PATH CHANGED{where}: {key} no longer "
+                "reproduces the text/modality/gravity metadata used to encode this bank. Rebuild "
+                "the bank and every bound admissibility artifact before evaluation.\n"
+            )
+
+
 def assert_artifact_matches_bank(artifact: dict, bank: dict, *, context: str,
                                  artifact_name: str) -> None:
     """Fail if a learned evidence artifact was trained against a different bank."""
@@ -231,6 +412,17 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
             missing.append("source_alignment=native")
         if not (bank.get("corpus") or {}).get("source_grid_fp"):
             missing.append("corpus.source_grid_fp")
+    if int(bank.get("schema_version", 1)) >= 4:
+        if "sensor" not in bank:
+            missing.append("sensor")
+        if "sensor_embed_probe" not in bank:
+            missing.append("sensor_embed_probe")
+        if "text_embed_probe" not in bank:
+            missing.append("text_embed_probe")
+        if "text_encoder" not in bank:
+            missing.append("text_encoder")
+    if int(bank.get("schema_version", 1)) >= 5 and "sensor_descriptions" not in bank:
+        missing.append("sensor_descriptions")
     if not missing:
         calculated = bank_fingerprint(bank)
         if bank["bank_fp"] != calculated:
@@ -246,8 +438,9 @@ def _assert_build_params_recorded(bank: dict, context: str) -> None:
         f"  Its vocabulary matches, but without a backbone fingerprint there is no way to tell\n"
         f"  which encoder produced these vectors, so a retrieval number from it is unattributable.\n"
         f"  Rebuild with the current build_memory (which records them):\n\n"
-        f"      HALO_CKPT=training/tokenizer/outputs/phase_a_headline/best.pt \\\n"
-        f"        python -m training.evidence.build_memory --device cuda\n")
+        f"      HALO_CKPT=training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt \\\n"
+        f"        python -m training.evidence.build_memory --sensor-rows --device cuda\n"
+        f"  See training/evidence/README.md for the complete current artifact sequence.\n")
 
 
 def assert_bank_current(bank: dict, *, context: str = "") -> None:
@@ -275,9 +468,35 @@ def assert_bank_current(bank: dict, *, context: str = "") -> None:
         f"  in bank but NOT in global ({len(extra)}): {extra[:12]}{' ...' if len(extra) > 12 else ''}\n"
         f"\n  The bank was built under a different vocabulary, so its windows were filtered by a\n"
         f"  different label set than the ConSE heads now use. Rebuild it:\n\n"
-        f"      HALO_CKPT=training/tokenizer/outputs/phase_a_headline/best.pt \\\n"
-        f"        python -m training.evidence.build_memory --device cuda\n\n"
-        f"  See docs/design/REMEDIATION_PLAN.md Phase 0.2 / Phase 2.\n")
+        f"      HALO_CKPT=training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt \\\n"
+        f"        python -m training.evidence.build_memory --sensor-rows --device cuda\n\n"
+        f"  See training/evidence/README.md for the complete current artifact sequence.\n")
+
+
+def assert_text_embedding_path_current(bank: dict, *, context: str = "") -> None:
+    """Reject a bank whose stored text vectors were produced by another runtime text path."""
+    import torch
+
+    where = f" ({context})" if context else ""
+    stored = bank.get("text_embed_probe")
+    if stored is None:
+        raise SystemExit(
+            f"\n[bank_guard] BANK LACKS TEXT-EMBEDDING PROVENANCE{where}. Rebuild it with the "
+            "current build_memory before comparing stored labels with runtime candidates.\n"
+        )
+    live = text_embedding_probe().float().cpu()
+    stored = torch.as_tensor(stored).float().cpu()
+    if live.shape != stored.shape:
+        raise SystemExit(
+            f"\n[bank_guard] TEXT-EMBEDDING SHAPE MISMATCH{where}: "
+            f"{tuple(live.shape)} != {tuple(stored.shape)}. Rebuild the bank.\n"
+        )
+    drift = float((live - stored).norm() / stored.norm().clamp_min(1e-12))
+    if drift > EMBED_PROBE_TOL:
+        raise SystemExit(
+            f"\n[bank_guard] TEXT-EMBEDDING PATH CHANGED{where}: relative drift {drift:.2e} "
+            f"> {EMBED_PROBE_TOL:.0e}. Rebuild the bank and refit the gate.\n"
+        )
 
 
 #: Max relative L2 drift tolerated between the stored and live embedding probe. Well above CPU/GPU
@@ -344,6 +563,32 @@ def assert_patch_embedding_path_current(bank: dict, enc, device, *, context: str
     if drift > EMBED_PROBE_TOL:
         raise SystemExit(
             f"\n[bank_guard] PATCH EMBEDDING-PATH CHANGED{where}: relative drift "
+            f"{drift:.2e} exceeds {EMBED_PROBE_TOL:.0e}. Rebuild the bank.\n"
+        )
+
+
+def assert_sensor_embedding_path_current(bank: dict, enc, device, *, context: str = "") -> None:
+    """Raise if the live per-sensor export no longer reproduces a sensor bank."""
+    import torch
+    from training.tokenizer.eval_transfer import sensor_embedding_fingerprint
+
+    where = f" ({context})" if context else ""
+    stored = bank.get("sensor_embed_probe")
+    if stored is None:
+        raise SystemExit(
+            f"\n[bank_guard] SENSOR BANK PREDATES THE SENSOR-PATH PROBE{where}. Rebuild it.\n"
+        )
+    live = sensor_embedding_fingerprint(enc, device)
+    stored = torch.as_tensor(stored).float().cpu()
+    if live.shape != stored.shape:
+        raise SystemExit(
+            f"\n[bank_guard] SENSOR EMBEDDING-PATH MISMATCH{where}: probe shape "
+            f"{tuple(live.shape)} != stored {tuple(stored.shape)}. Rebuild the bank.\n"
+        )
+    drift = float((live - stored).norm() / stored.norm().clamp(min=1e-12))
+    if drift > EMBED_PROBE_TOL:
+        raise SystemExit(
+            f"\n[bank_guard] SENSOR EMBEDDING-PATH CHANGED{where}: relative drift "
             f"{drift:.2e} exceeds {EMBED_PROBE_TOL:.0e}. Rebuild the bank.\n"
         )
 

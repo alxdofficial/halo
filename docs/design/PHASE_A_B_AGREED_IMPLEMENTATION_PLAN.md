@@ -1,7 +1,9 @@
 # Phase-A Implementation Record and Phase-B Handoff
 
-Status: Phase A completed on 2026-08-07. The selected checkpoint is
-`training/tokenizer/outputs/phase_a_headline/best.pt` at step 27,000 (`val_ba=0.288435`).
+Status: the sensor-granularity Phase-A run completed on 2026-08-17. The selected checkpoint is
+`training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt` at step 27,000. It can build
+the schema-5 bank required by the current Phase-B design. The older
+`training/tokenizer/outputs/phase_a_headline/best.pt` checkpoint is channel-granular and historical.
 
 This document records the final Phase-A recipe and the artifact contract at the boundary between
 phases. It intentionally does not duplicate the Phase-B design. The canonical Phase-B motivation,
@@ -28,11 +30,13 @@ python -m training.tokenizer.pretrain --smoke --steps 2 \
 Phase B consumes the Phase-A patch representation through:
 
 - memory construction and provenance: `training/evidence/build_memory.py` and `bank_guard.py`;
-- patch retrieval and evidence decoder: `model/evidence/patch_retrieval.py` and
-  `relational_decoder.py`;
-- episodic predictor training: `training/evidence/train_patch_decoder.py`. Confidence calibration
-  is parked and its separate `train_patch_confidence.py` experiment is not part of the active
-  Phase-B claim.
+- train-only per-sensor measurement: `training/evidence/resolvability.py`;
+- admissibility and sensor-patch retrieval: `training/evidence/admissibility_gate.py`,
+  `gate_predictor.py`, and `admissible_retrieval.py`;
+- enrollment evaluation: `training/evidence/eval_enrollment.py`.
+
+The learned subspace retriever, relational decoder, and `train_patch_decoder.py` are parked
+reproduction paths. They are not the current Phase-B handoff.
 
 ## Final Phase-A Objective
 
@@ -97,12 +101,14 @@ Every Phase-B artifact must bind to:
 
 - the exact Phase-A checkpoint and tokenizer configuration;
 - corpus and subject-split fingerprints;
-- patch-bank schema and source-row provenance;
+- schema-5 per-sensor bank layout, stored descriptor semantics, source-row provenance, and sensor
+  embedding-path probe;
 - candidate-text encoder/vocabulary provenance;
 - structural-metadata and event-pair policy.
 
-The existing pre-redesign memory bank is obsolete because it has no current patch table or
-source-row provenance. Rebuild it from the selected Phase-A checkpoint before the first real
-Phase-B run. From that point onward, use `PHASE_B_TRAINING_INTENT.md` for the training contract and
+The existing schema-3 memory bank is obsolete for the current design because it has no per-sensor
+row table and carries the old 93-label vocabulary. Rebuild it from the completed sensor-granularity
+Phase-A checkpoint before the first real Phase-B run. From that point onward, use
+`PHASE_B_TRAINING_INTENT.md` for the training contract and
 `training/evidence/README.md` for commands. This handoff document should not acquire another copy of
 the Phase-B recipe.

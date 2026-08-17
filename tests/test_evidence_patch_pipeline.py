@@ -15,7 +15,7 @@ from model.evidence.confidence import (
 )
 from model.evidence.patch_retrieval import PatchSubspaceRetriever
 from training.evidence.build_memory import archive_budget_balanced_keep, label_config_balanced_keep
-from training.evidence.bank_guard import assert_patch_bank
+from training.evidence.bank_guard import assert_patch_bank, assert_sensor_bank
 from training.evidence.patch_episodes import (
     EpisodeMemoryView,
     PatchTable,
@@ -28,6 +28,7 @@ from training.evidence.patch_episodes import (
 from training.evidence.policy import (
     CANDIDATE_COUNT_RANGE,
     EPISODE_TYPES,
+    LABEL_TEXT_MODES,
     PHYSICAL_VIEW_MODES,
     SUPPORT_COUNT_RANGE,
     PhaseBPolicy,
@@ -36,16 +37,20 @@ from training.evidence.live_encoder import PatchViewSpec, SourcePatchEncoder
 from training.tokenizer.eval_transfer import encode_dataset_detailed
 from training.evidence.train_patch_decoder import (
     AdaptationEpisodeSpec,
-    EpisodeCurriculum,
+    EpisodeSampler,
     _episode_view_specs,
+    checkpoint_eligibility,
     checkpoint_is_better,
+    decoder_gradient_components,
+    deranged_support_view,
     family_holdout_labels,
     load_activity_families,
     milestone_checkpoint_path,
+    nested_support_view,
     parameter_gradient_norm,
+    parameter_gradient_statistics,
     phase_b_source_fingerprint,
     prepare_support_feasible_query_pool,
-    query_loss_group_ids,
     sample_queries,
     sample_queries_covering_labels,
     structured_fingerprint,
@@ -55,12 +60,18 @@ from training.evidence.subject_style import SubjectStyle, apply_subject_style
 from training.evidence.runtime_memory import build_enrollment_memory
 from training.evidence.eval_enrollment import (
     _support_and_query_rows,
+    accepted_training_regimes,
+    active_index_seed,
     build_paired_enrollment_plans,
     paired_subject_summary,
     phase_b_evaluation_source_fingerprint,
+    predictor_logits,
     summarize_protocol_capabilities,
 )
-from training.evidence.build_comparison_table import assert_matched_evaluation_provenance
+from training.evidence.build_comparison_table import (
+    assert_matched_cohorts,
+    assert_matched_evaluation_provenance,
+)
 from training.evidence.device import resolve_device
 
 
@@ -98,6 +109,36 @@ def _bank():
         "cfg_rate_hz": {0: 50.0, 1: 100.0},
         "patch": patch,
     }
+
+
+def _sensor_bank():
+    bank = _bank()
+    bank["schema_version"] = 5
+    bank["cfg_names"] = {0: "test/a", 1: "test/b"}
+    window = bank["patch"]["window"].clone()
+    bank["sensor_embed_probe"] = torch.zeros(1)
+    bank["sensor"] = {
+        "Z": torch.randn(len(window), 8).half(),
+        "window": window,
+        "slot": torch.zeros(len(window), dtype=torch.long),
+        "time": bank["patch"]["time"].clone(),
+        "duration": bank["patch"]["duration"].clone(),
+        "resolution": bank["patch"]["resolution"].clone(),
+        "y": bank["y"][window],
+        "subj": bank["subj"][window],
+        "cfg": bank["cfg"][window],
+        "event": bank["event"][window],
+        "gravity": torch.zeros(len(window), dtype=torch.long),
+        "modality": torch.zeros(len(window), dtype=torch.long),
+        "bias": torch.randn(len(window), 14),
+    }
+    from training.tokenizer.pretrain_data import stream_sensor_texts
+    bank["sensor_descriptions"] = {
+        config: [{"slot": 0, "modality": 0, "gravity": 0,
+                  "text": stream_sensor_texts("test", stream, has_gyro=False)[1][0]}]
+        for config, stream in ((0, "a"), (1, "b"))
+    }
+    return bank
 
 
 def _support_feasibility_bank(subjects):
@@ -282,6 +323,29 @@ def test_comparison_rejects_missing_or_mixed_evaluator_provenance():
         })
 
 
+def test_checkpoint_comparison_allows_embedding_controls_to_change_but_not_cohort():
+    cell = ("coherent", 1, "dataset/stream/cross_subject/full")
+
+    def arm(checkpoint, prototype, queries=10):
+        return {
+            "meta": {"checkpoint_fp": checkpoint},
+            "cells": {cell: {
+                "queries": queries,
+                "prototype_f1_macro": prototype,
+                "ridge_head_f1_macro": prototype,
+                "subject_results": {
+                    "subject": {"queries": queries, "candidate_count": 4},
+                },
+            }},
+        }
+
+    assert_matched_cohorts({"a": arm("a", 0.4), "b": arm("b", 0.7)}, {cell})
+    with pytest.raises(SystemExit, match="prototype_f1 differs"):
+        assert_matched_cohorts({"a": arm("a", 0.4), "b": arm("a", 0.7)}, {cell})
+    with pytest.raises(SystemExit, match="cohort differs"):
+        assert_matched_cohorts({"a": arm("a", 0.4), "b": arm("b", 0.7, 9)}, {cell})
+
+
 def test_protocol_capabilities_do_not_overclaim_unsupported_transfers():
     protocol = {
         "same": {
@@ -391,97 +455,67 @@ def test_adaptation_episode_removes_candidate_background_and_equalizes_support()
         )
 
 
-def test_episode_curriculum_covers_every_condition_it_is_evaluated_on():
-    """Sampling replaced scheduling, so coverage is statistical rather than exact.
-
-    What still has to hold is that nothing `eval_enrollment` grades can go unsampled, and that the
-    ranges are respected end to end — a silently truncated range would train a model that is
-    off-distribution on the very cells it is scored on.
-    """
-    curriculum = EpisodeCurriculum(np.random.default_rng(4))
+def test_episode_sampler_covers_the_declared_clean_ranges():
+    sampler = EpisodeSampler(np.random.default_rng(4))
     specs = [
-        spec for step in range(1, 201)
-        for spec in curriculum.sample_batch(8, step=step, total_steps=200)
+        spec for _ in range(1000)
+        for spec in sampler.sample_batch(8)
     ]
 
     assert set(spec.episode_type for spec in specs) == set(EPISODE_TYPES)
     assert set(spec.physical_view_mode for spec in specs) == set(PHYSICAL_VIEW_MODES)
-    assert set(spec.enrollment_shape for spec in specs) == {"zero", "partial", "full"}
-    assert set(spec.label_mode for spec in specs) == {"coherent", "random_alias"}
+    assert set(spec.enrollment_shape for spec in specs) == {"zero", "full"}
+    assert set(spec.label_mode for spec in specs) == set(LABEL_TEXT_MODES)
 
     candidate_counts = [spec.candidate_count for spec in specs]
-    support_counts = [spec.support_count for spec in specs if spec.support_count]
+    support_counts = [spec.support_count for spec in specs]
     assert (min(candidate_counts), max(candidate_counts)) == CANDIDATE_COUNT_RANGE
     assert (min(support_counts), max(support_counts)) == SUPPORT_COUNT_RANGE
 
 
-def test_episode_curriculum_invariants_hold_for_every_sampled_episode():
-    """The three conditions that make an episode answerable at all."""
-    curriculum = EpisodeCurriculum(np.random.default_rng(9))
+def test_episode_sampler_invariants_hold_for_every_sampled_episode():
+    sampler = EpisodeSampler(np.random.default_rng(9))
     specs = [
         spec for _ in range(200)
-        for spec in curriculum.sample_batch(
-            8, step=150, total_steps=200
-        )
+        for spec in sampler.sample_batch(8)
     ]
     for spec in specs:
-        if spec.episode_type == "semantic_zero_support":
-            # Nothing is enrolled, so a meaningless alias would leave no substrate to answer from.
-            assert spec.support_count == 0 and spec.label_mode == "coherent"
-        if spec.label_mode == "random_alias":
-            # An un-enrolled candidate under an alias carries no information at all.
-            assert spec.support_count > 0 and not spec.partially_enrolled
-        if spec.partially_enrolled:
-            assert 1 <= spec.enrolled_candidate_count < spec.candidate_count
+        assert spec.label_mode == (
+            "coherent" if spec.support_count == 0 else "random_alias"
+        )
+        assert spec.physical_view_mode == "clean"
+        assert (spec.episode_type == "semantic_zero_support") == (spec.support_count == 0)
 
 
-def test_episode_curriculum_is_deterministic_and_takes_any_positive_batch():
+def test_adaptation_episode_spec_prevents_semantic_shortcut_and_unanswerable_aliases():
+    with pytest.raises(ValueError, match="requires label_mode='random_alias'"):
+        AdaptationEpisodeSpec(
+            episode_type="ordinary_few_support", support_count=1,
+            candidate_count=4, label_mode="coherent",
+        )
+    with pytest.raises(ValueError, match="requires label_mode='coherent'"):
+        AdaptationEpisodeSpec(
+            episode_type="semantic_zero_support", support_count=0,
+            candidate_count=4, label_mode="random_alias",
+        )
+
+
+def test_episode_sampler_is_deterministic_and_takes_any_positive_batch():
     assert (
-        EpisodeCurriculum(np.random.default_rng(17)).sample_batch(8)
-        == EpisodeCurriculum(np.random.default_rng(17)).sample_batch(8)
+        EpisodeSampler(np.random.default_rng(17)).sample_batch(8)
+        == EpisodeSampler(np.random.default_rng(17)).sample_batch(8)
     )
-    # The old scheduler demanded a multiple of the four episode types; sampling does not.
-    assert len(EpisodeCurriculum(np.random.default_rng(1)).sample_batch(6)) == 6
+    assert len(EpisodeSampler(np.random.default_rng(1)).sample_batch(6)) == 6
     with pytest.raises(ValueError, match="positive"):
-        EpisodeCurriculum(np.random.default_rng(1)).sample_batch(0)
+        EpisodeSampler(np.random.default_rng(1)).sample_batch(0)
 
 
-def test_curriculum_builds_one_exact_counterfactual_pair_and_stages_difficulty():
-    curriculum = EpisodeCurriculum(np.random.default_rng(31))
-    early = curriculum.sample_batch(8, step=1, total_steps=100)
-    middle = curriculum.sample_batch(8, step=40, total_steps=100)
-    late = curriculum.sample_batch(8, step=100, total_steps=100)
-
-    for specs in (early, middle, late):
-        paired = [spec for spec in specs if spec.counterfactual_pair_id == 0]
-        assert {spec.counterfactual_role for spec in paired} == {"support", "zero"}
-        support = next(spec for spec in paired if spec.counterfactual_role == "support")
-        zero = next(spec for spec in paired if spec.counterfactual_role == "zero")
-        assert support.candidate_count == zero.candidate_count
-        assert support.physical_view_mode == zero.physical_view_mode
-        assert support.label_mode == zero.label_mode == "coherent"
-        assert support.partially_enrolled and zero.support_count == 0
-        assert any(spec.label_mode == "random_alias" for spec in specs)
-
-    assert all(2 <= spec.candidate_count <= 4 for spec in early)
-    assert all(4 <= spec.candidate_count <= 8 for spec in middle)
-    assert all(2 <= spec.candidate_count <= 16 for spec in late)
-    assert {spec.distractor_hard_fraction for spec in early} == {0.25}
-    assert {spec.distractor_hard_fraction for spec in middle} == {0.5}
-    assert {spec.distractor_hard_fraction for spec in late} == {0.75}
-
-
-def test_query_loss_groups_separate_zero_unenrolled_enrolled_and_alias_rows():
-    zero = AdaptationEpisodeSpec("semantic_zero_support", 0, 4, "coherent")
-    coherent = AdaptationEpisodeSpec(
-        "ordinary_few_support", 2, 4, "coherent", enrolled_candidate_count=2
-    )
-    alias = AdaptationEpisodeSpec("ordinary_few_support", 2, 4, "random_alias")
-    assert query_loss_group_ids(zero, torch.tensor([0, 0])).tolist() == [0, 0]
-    assert query_loss_group_ids(coherent, torch.tensor([0, 2, 0, 2])).tolist() == [1, 2, 1, 2]
-    assert query_loss_group_ids(alias, torch.tensor([2, 2])).tolist() == [3, 3]
-    with pytest.raises(ValueError, match="must all carry"):
-        query_loss_group_ids(alias, torch.tensor([2, 0]))
+def test_episode_sampler_has_no_step_dependent_curriculum():
+    first = EpisodeSampler(np.random.default_rng(31)).sample_batch(100)
+    second = EpisodeSampler(np.random.default_rng(31)).sample_batch(100)
+    assert first == second
+    assert {spec.support_count for spec in first} <= set(range(9))
+    assert all(2 <= spec.candidate_count <= 16 for spec in first)
 
 
 def test_partial_episode_query_draw_covers_enrolled_and_unenrolled_sides():
@@ -500,7 +534,7 @@ def test_partial_episode_query_draw_covers_enrolled_and_unenrolled_sides():
     assert {1, 6} <= set(y[selected].tolist())
 
 
-def test_episode_view_specs_clean_is_exact_identity_and_augmented_is_not():
+def test_episode_view_specs_are_clean_identity_only():
     bank = _bank()
     query = PatchTable(bank).gather_queries(torch.tensor([2]), "cpu")
     support_mask = torch.zeros(8, dtype=torch.bool)
@@ -522,16 +556,10 @@ def test_episode_view_specs_clean_is_exact_identity_and_augmented_is_not():
     )
     assert all(spec == PatchViewSpec() for spec in clean_query + clean_support)
 
-    augmented_query, augmented_support = _episode_view_specs(
-        query, view, rows, bank["patch"], np.random.default_rng(1),
-        physical_view_mode="augmented",
-    )
-    assert all(spec.subject_style is not None for spec in augmented_query + augmented_support)
-    assert all(spec.generic_seed is not None for spec in augmented_query + augmented_support)
-    with pytest.raises(ValueError, match="physical_view_mode"):
+    with pytest.raises(ValueError, match="only clean"):
         _episode_view_specs(
             query, view, rows, bank["patch"], np.random.default_rng(1),
-            physical_view_mode="obsolete",
+            physical_view_mode="augmented",
         )
 
 
@@ -758,6 +786,36 @@ def test_gradient_telemetry_is_zero_before_tokenizer_finetuning_activates():
     assert float(norm) == 0.0
 
 
+def test_gradient_statistics_are_size_normalized_and_report_disconnected_parameters():
+    connected = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    disconnected = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+    connected.grad = torch.tensor([3.0, 4.0])
+    statistics = parameter_gradient_statistics(
+        (connected, disconnected), torch.device("cpu")
+    )
+    assert statistics["norm"] == pytest.approx(5.0)
+    assert statistics["rms"] == pytest.approx(2.5)
+    assert statistics["coverage"] == pytest.approx(0.5)
+    assert statistics["nonzero_fraction"] == pytest.approx(0.5)
+
+
+def test_decoder_gradient_groups_are_disjoint_and_exhaustive():
+    from model.evidence.relational_decoder import (
+        RelationalDecoderConfig,
+        RelationalEvidenceDecoder,
+    )
+
+    decoder = RelationalEvidenceDecoder(RelationalDecoderConfig(d_model=32, n_heads=4))
+    groups = decoder_gradient_components(decoder)
+    grouped = [id(parameter) for parameters in groups.values() for parameter in parameters]
+    expected = [id(parameter) for parameter in decoder.parameters() if parameter.requires_grad]
+    assert len(grouped) == len(set(grouped))
+    assert set(grouped) == set(expected)
+    assert {
+        "time_projection", "acquisition_relation_embeddings", "input_layer_norm"
+    } <= set(groups)
+
+
 def test_source_patch_encoder_recovers_rows_once_and_preserves_gradients(tmp_path, monkeypatch):
     class TinyEncoder(torch.nn.Module):
         def __init__(self):
@@ -890,6 +948,48 @@ def test_patch_bank_guard_requires_valid_sensor_identity():
     with pytest.raises(SystemExit, match="nonnegative integer structural sensor ids"):
         assert_patch_bank(bank, context="test")
 
+
+def test_sensor_bank_guard_checks_parent_foreign_keys_and_column_lengths():
+    bank = _sensor_bank()
+    assert_sensor_bank(bank, context="test")
+
+    bank = _sensor_bank()
+    bank["sensor"]["event"][0] = 999
+    with pytest.raises(SystemExit, match="sensor.event disagrees"):
+        assert_sensor_bank(bank, context="test")
+
+    bank = _sensor_bank()
+    bank["sensor"]["bias"] = bank["sensor"]["bias"][:-1]
+    with pytest.raises(SystemExit, match="mismatched"):
+        assert_sensor_bank(bank, context="test")
+
+
+def test_sensor_bank_guard_accepts_a_gyro_only_slot_zero():
+    bank = _sensor_bank()
+    bank["sensor"]["modality"].fill_(1)
+    from training.tokenizer.pretrain_data import stream_sensor_texts
+    bank["sensor_descriptions"] = {
+        config: [{"slot": 0, "modality": 1, "gravity": 0,
+                  "text": stream_sensor_texts(
+                      "test", stream, has_accel=False, has_gyro=True
+                  )[1][0]}]
+        for config, stream in ((0, "a"), (1, "b"))
+    }
+    assert_sensor_bank(bank, context="test")
+
+
+def test_sensor_bank_guard_detects_descriptor_policy_drift(monkeypatch):
+    bank = _sensor_bank()
+    from training.tokenizer import pretrain_data
+    original = pretrain_data.stream_sensor_texts
+
+    def changed(*args, **kwargs):
+        roles, sensors, ids = original(*args, **kwargs)
+        return roles, [f"changed: {value}" for value in sensors], ids
+
+    monkeypatch.setattr(pretrain_data, "stream_sensor_texts", changed)
+    with pytest.raises(SystemExit, match="SENSOR DESCRIPTION PATH CHANGED"):
+        assert_sensor_bank(bank, context="test")
 
 def test_subspace_retrieval_is_independent_masked_and_differentiable():
     torch.manual_seed(3)
@@ -1280,36 +1380,6 @@ def test_partial_enrollment_rejects_meaningless_names_and_length_mismatch():
         )
 
 
-def test_curriculum_only_mixes_overlap_where_it_is_answerable():
-    from training.evidence.train_patch_decoder import (
-        EpisodeCurriculum, _partial_enrollment_plan,
-    )
-
-    curriculum = EpisodeCurriculum(np.random.default_rng(0))
-    specs = [
-        spec for step in range(1, 251)
-        for spec in curriculum.sample_batch(8, step=step, total_steps=250)
-    ]
-    mixed = [s for s in specs if s.partially_enrolled]
-    # Partial enrollment used to be an exact 1-in-4 stratum. It is now the outcome of three
-    # independent draws (supported, coherent, and fewer candidates enrolled than exist), so it is
-    # checked as a healthy share rather than a fixed fraction. Vanishing here would silently remove
-    # the only regime where retrieval over background memory is required at all.
-    assert 0.3 < len(mixed) / len(specs) < 0.55
-    for spec in mixed:
-        assert spec.label_mode == "coherent"          # aliases would be unanswerable
-        assert spec.support_count > 0
-        assert 0 < spec.enrolled_candidate_count < spec.candidate_count
-        plan = _partial_enrollment_plan(spec, spec.candidate_count, np.random.default_rng(1))
-        assert sum(1 for v in plan if v) == spec.enrolled_candidate_count
-        assert set(plan) == {0, spec.support_count}
-    # A spec without partial enrollment still returns the plain integer, so the uniform path and
-    # every fixed-k evaluation cell are byte-for-byte unchanged.
-    uniform = next(s for s in specs if not s.partially_enrolled)
-    assert _partial_enrollment_plan(uniform, uniform.candidate_count, np.random.default_rng(1)) \
-        == uniform.support_count
-
-
 def test_decoder_score_temperature_matches_the_retrieval_temperature():
     """The decoder divides the retrieval score by its own constant before using it as an attention
     bias, while `assemble_evidence` divides the same scores by `RETRIEVAL_TEMPERATURE` to form the
@@ -1324,40 +1394,90 @@ def test_decoder_score_temperature_matches_the_retrieval_temperature():
     assert RelationalDecoderConfig().score_temperature == RETRIEVAL_TEMPERATURE
 
 
-def test_training_retrieval_curriculum_converges_exactly_to_deployment_recipe():
-    from training.evidence.policy import (
-        RETRIEVAL_EXPLORATION_BUDGET_MULTIPLIER,
-        RETRIEVAL_EXPLORATION_TEMPERATURE,
-        RETRIEVAL_TEMPERATURE,
-    )
-
+def test_training_and_deployment_use_one_fixed_retrieval_recipe():
     policy = PhaseBPolicy(evidence_budget=64)
-    initial_budget, initial_temperature = policy.training_retrieval(1, 3000)
-    final_budget, final_temperature = policy.training_retrieval(3000, 3000)
-    assert initial_budget == 64 * RETRIEVAL_EXPLORATION_BUDGET_MULTIPLIER
-    assert initial_temperature == RETRIEVAL_EXPLORATION_TEMPERATURE
-    assert final_budget == policy.evidence_budget
-    assert final_temperature == pytest.approx(RETRIEVAL_TEMPERATURE)
+    assert policy.as_dict()["training_retrieval"] == "fixed_and_identical_to_deployment"
+    assert policy.topk_per_subspace(32) == policy.topk_per_subspace(
+        32, evidence_budget=64
+    )
+    with pytest.raises(ValueError, match="below the deployment"):
+        policy.topk_per_subspace(8, evidence_budget=32)
 
 
-def test_checkpoint_selection_never_promotes_a_zero_support_guard_failure():
-    fallback = {
-        "zero_support_guard_pass": False,
-        "adaptation_selection_score": 0.1,
+def test_checkpoint_selection_requires_mechanism_evidence_then_ranks_quality():
+    ineligible = {"adaptation_selection_score": 0.9, "checkpoint_eligible": False}
+    fallback = {"adaptation_selection_score": 0.1, "checkpoint_eligible": False}
+    worse = {"adaptation_selection_score": 0.05, "checkpoint_eligible": True}
+    better = {"adaptation_selection_score": 0.2, "checkpoint_eligible": True}
+    best = {"adaptation_selection_score": 0.3, "checkpoint_eligible": True}
+
+    assert not checkpoint_is_better(ineligible, fallback)
+    assert checkpoint_is_better(better, fallback)
+    assert checkpoint_is_better(best, better)
+    assert not checkpoint_is_better(worse, better)
+    assert not checkpoint_is_better(better, best)
+    assert not checkpoint_is_better(dict(better), better)
+
+    eligible, checks = checkpoint_eligibility({
+        "selection_low_k_adaptation_gain": 0.0,
+        "support_removal_true_probability_drop": 0.01,
+        "support_label_shuffle_true_probability_drop": 0.02,
+    })
+    assert eligible and all(checks.values())
+    failed, failed_checks = checkpoint_eligibility({
+        "selection_low_k_adaptation_gain": -0.01,
+        "support_removal_true_probability_drop": 0.01,
+        "support_label_shuffle_true_probability_drop": 0.02,
+    })
+    assert not failed and not failed_checks["matches_closed_form_low_k_control"]
+
+
+def test_artifact_predictor_mode_selects_the_declared_path():
+    learned = torch.tensor([[1.0, 0.0]])
+    control = torch.tensor([[0.0, 2.0]])
+    aux = {"identity_logits": control}
+    assert predictor_logits(learned, aux, "relational_decoder") is learned
+    assert predictor_logits(learned, aux, "closed_form_retrieval_vote") is control
+    with pytest.raises(ValueError, match="unknown predictor mode"):
+        predictor_logits(learned, aux, "invalid")
+
+
+def test_active_index_seed_uses_one_protocol_seed_for_every_predictor():
+    assert active_index_seed({"predictor_mode": "admissibility_gate"}, 101) == 103
+    assert active_index_seed({
+        "predictor_mode": "relational_decoder",
+        "retrieval_cfg": {"index_seed": 55},
+    }, 101) == 103
+    assert active_index_seed({"predictor_mode": "relational_decoder"}, 101) == 103
+
+
+def test_evaluator_accepts_both_current_admissibility_training_stages():
+    assert accepted_training_regimes("admissibility_gate") == {
+        "admissibility_gate_train_only_sensor_v1",
+        "admissibility_gate_stage2_soft_retrieval_v1",
     }
-    failed_but_higher = {
-        "zero_support_guard_pass": False,
-        "adaptation_selection_score": 0.9,
-    }
-    eligible = {
-        "zero_support_guard_pass": True,
-        "adaptation_selection_score": 0.2,
-    }
-    better_eligible = {
-        "zero_support_guard_pass": True,
-        "adaptation_selection_score": 0.3,
-    }
-    assert not checkpoint_is_better(failed_but_higher, fallback)
-    assert checkpoint_is_better(eligible, fallback)
-    assert checkpoint_is_better(better_eligible, eligible)
-    assert not checkpoint_is_better(eligible, better_eligible)
+
+
+def test_nested_support_views_are_subsets_and_derangement_has_no_fixed_binding():
+    bank = _bank()
+    support_mask = torch.tensor([True, True, False, False, True, True, False, False])
+    support_candidate = torch.tensor([0, 0, -1, -1, 1, 1, -1, -1])
+    full = EpisodeMemoryView(
+        allowed=torch.ones(1, 2, 8, dtype=torch.bool),
+        support_mask=support_mask,
+        support_candidate=support_candidate,
+        candidate_ids=torch.tensor([0, 1]),
+        query_label=torch.tensor([0]),
+        support_units_per_candidate=torch.tensor([1, 1]),
+        episode_type="ordinary_few_support",
+        label_mode="coherent",
+    )
+    zero = nested_support_view(full, bank["patch"], torch.arange(8), 0)
+    one = nested_support_view(full, bank["patch"], torch.arange(8), 1)
+    assert not bool(zero.support_mask.any())
+    assert torch.equal(one.support_mask, full.support_mask)
+    assert bool((zero.allowed & full.support_mask.view(1, 1, -1)).any()) is False
+    shuffled = deranged_support_view(one)
+    assert torch.equal(shuffled.support_mask, one.support_mask)
+    assert bool((shuffled.support_candidate[one.support_mask]
+                 != one.support_candidate[one.support_mask]).all())

@@ -54,8 +54,8 @@ FB_Q = 4.0
 #   is pure frequency-domain interpolation — it does NOT change the band-energy
 #   output (verified: S=256 vs 512 give band-cosine 1.000000 and identical Nyquist/
 #   resolution masks at 20/25/50/100 Hz). So S only trades compute vs headroom.
-#   Corpus worst case: 2.5 s (dsads) * 100 Hz = 250 samples; resample rounding adds
-#   <1. 256 (smallest power of two >= 250) covers it with margin and is ~2x cheaper
+#   Reference worst case: 1.0 s * 100 Hz = 100 samples. The retained multi-resolution
+#   ablation reaches 1.5 s * 100 Hz = 150 samples. 256 covers both with margin and is ~2x cheaper
 #   than 512 in the tokenizer hot path (rDFT is ~S log S: measured 1.1 ms vs 2.6 ms
 #   per batch). Overflow is a hard ValueError (never silent truncation), so if a
 #   future patch exceeds this the run fails loudly — raise S then. Keep it a power

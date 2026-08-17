@@ -200,9 +200,31 @@ def test_collate_handles_per_sample_rates(index):
     rates = {round(it["rate"], 1) for it in items}
     out = MultiScaleCollate(fixed_patch_seconds=1.0)(items)
     if len(rates) > 1:                      # rate aug fired at least once
-        assert len(set(out["patch_len"].tolist())) > 1, \
+        assert len(set(out["patch_len"][:, 0].tolist())) > 1, \
             "per-sample rates must yield per-sample patch lengths"
-    assert (out["patch_len"].float() - out["rates"] * 1.0).abs().max() < 1.0
+    real = out["patch_padding_mask"]
+    expected = out["rates"].unsqueeze(1).expand_as(out["patch_len"])
+    # Every full patch follows rate*duration; only an honest final partial patch may be shorter.
+    assert (out["patch_len"][real].float() <= expected[real] + 1.0).all()
+
+
+def test_noninteger_rate_uses_physical_boundaries_without_a_one_sample_remainder():
+    item = {
+        "data": torch.randn(307, 6), "rate": 51.2, "texts": ["x"] * 6,
+        "label_id": 0, "channel_mask": torch.ones(6, dtype=torch.bool),
+        "gravity_state": "present", "source": "synthetic",
+    }
+    out = MultiScaleCollate(fixed_patch_seconds=1.0)([item])
+    real = out["patch_padding_mask"][0]
+    lengths = out["patch_len"][0, real].tolist()
+    assert len(lengths) == 6
+    assert sum(lengths) == 307
+    assert min(lengths) == 51 and max(lengths) == 52
+    assert torch.allclose(
+        out["positions"][0, real],
+        torch.tensor([0.4980469, 1.4941406, 2.5, 3.5058594, 4.5019531, 5.4980469]),
+        atol=1e-5,
+    )
 
 
 def test_multiresolution_collate_covers_signal_and_retains_partial_tails():
@@ -351,7 +373,8 @@ def test_short_window_yields_at_least_one_patch(index):
         assert (real_per_win >= 1).all(), f"all-padding window at ps={ps}"
         assert torch.isfinite(out["patches"]).all()
         # every real patch's declared length fits inside the window it came from
-        assert (out["patch_len"] >= 1).all()
+        real = out["patch_padding_mask"]
+        assert (out["patch_len"][real] >= 1).all()
 
 
 def test_window_crop_varies_observation_length():
@@ -378,10 +401,15 @@ def test_window_crop_varies_observation_length():
     assert aug(short).data.shape[0] >= 32
 
 
-def test_window_crop_in_phase_a_is_enabled():
+def test_phase_a_reference_recipe_is_rotation_only():
     from data.scripts.augmentations import AugmentationConfig
-    assert AugmentationConfig.phase_a().window_crop.enabled
-    assert not AugmentationConfig.none().window_crop.enabled
+    cfg = AugmentationConfig.phase_a()
+    enabled = {name for name in cfg.ORDER if getattr(cfg, name).enabled}
+    assert enabled == {"rotation_3d"}
+    nuisance, config = cfg.split_by_group()
+    assert nuisance.rotation_3d.enabled
+    assert nuisance.rotation_3d.p == 1.0
+    assert not config.rotation_3d.enabled
 
 
 def test_gravity_align_primitive_respects_removed_state():
@@ -402,7 +430,7 @@ def test_collate_fallback_position_is_window_center():
     item = {"data": torch.randn(100, 6), "rate": 100.0, "texts": ["x"] * 6, "label_id": 0,
             "channel_mask": torch.ones(6, dtype=torch.bool), "gravity_state": "present"}
     out = MultiScaleCollate(fixed_patch_seconds=1.5)([item])   # 100 samples @100Hz = 1.0 s < 1.5 s patch
-    assert int(out["patch_len"][0]) == 100                     # whole window in one short patch
+    assert int(out["patch_len"][0, 0]) == 100                  # whole window in one short patch
     assert abs(float(out["positions"][0, 0]) - 0.5) < 1e-4     # 0.5 s (not the nominal 0.75)
 
 
@@ -437,7 +465,7 @@ def test_collate_default_does_not_rotate_gravity():
     item = {"data": w, "rate": 50.0, "texts": ["x"] * 6, "label_id": 0,
             "channel_mask": torch.ones(6, dtype=torch.bool), "gravity_state": "present"}
     d = MultiScaleCollate(fixed_patch_seconds=1.0)([item])
-    dc_d = d["patches"][0, 0, :int(d["patch_len"][0]), :3].mean(0)
+    dc_d = d["patches"][0, 0, :int(d["patch_len"][0, 0]), :3].mean(0)
     assert dc_d[0].abs() > 0.9 and dc_d[2].abs() < 0.1, dc_d
 
 

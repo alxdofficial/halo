@@ -2,23 +2,25 @@
 
 Assembly (build plan M3; EVIDENCE_ENGINE.md §5.2.1):
 
-    device-frame IMU patches ── PhysicalFilterbankTokenizer ──> sensor tokens (B,P,C,d)
+    device-frame IMU patches ── PhysicalFilterbankTokenizer ──> channel features (B,P,C,d)
+                                  └─ SensorFold(xyz) ─────────> sensor tokens (B,P,S,d)
                                                       │
-    channel descriptions ──frozen LM──> text embeddings ──ChannelTextFusion──> identity
+    sensor description ──frozen LM──> gated projection ──────> acquisition semantics
+    measured sensor bias ────────────> gated projection ──────> hardware statistics
                                                       │
-    JEPA token_mask ──> learned [MASK] token (BEFORE fusion, so the model knows WHICH
-                      channel is hidden — masked-channel modeling needs the identity
+    JEPA token_mask ──> learned [MASK] token (BEFORE conditioning, so the model knows WHICH
+                      sensor is hidden — masked-sensor modeling needs the identity
                       of the thing it must reconstruct)
                                                       │
     DualBranchTransformer: temporal attention with PHYSICAL-TIME RoPE (seconds, never
-    patch index) + cross-channel attention (channel-mask aware). Channels carry NO
-    positional index — identity is text, so channel count/order are free.
+    patch index) + cross-sensor attention (sensor-mask aware). Sensors carry no positional
+    index; identity is text, so sensor count/order are free.
                                                       ▼
-    {tokens (B,P,C,d) · per_patch (B,P,d) · pooled (B,d)}
+    {tokens (B,P,S,d) · per_patch (B,P,d) · pooled (B,d)}
 
-Config conditioning IS the channel text ("accelerometer x-axis at the wrist") — this
-replaces the M2 gate's per-stream config token and its UNKNOWN fallback: an unseen
-config arrives with its own text and generalizes through language space.
+Configuration conditioning is the sensor text (for example, "watch accelerometer on the left
+wrist") plus a measured sensor-bias vector. An unseen configuration therefore arrives with a
+semantic description even when no fitted stream-specific embedding exists.
 """
 
 from __future__ import annotations
@@ -35,8 +37,8 @@ from .filterbank import PhysicalFilterbankTokenizer
 from .sensor_tokens import ConditioningProjection, DescriptorHead, SensorFold
 from .transformer import DualBranchTransformer
 
-# RoPE periods in SECONDS: fastest = finest patch spacing we draw (0.5 s multi-scale
-# floor, §5.2.1); slowest comfortably above any session span we train on.
+# RoPE periods in seconds. The reference grid is one second; 0.5 seconds preserves headroom for
+# the retained multi-resolution ablation. The slowest period exceeds any training context.
 ROPE_MIN_PERIOD_S = 0.5
 ROPE_MAX_PERIOD_S = 600.0
 
@@ -105,6 +107,10 @@ class SetTokenizerEncoder(nn.Module):
             self.bias_proj = ConditioningProjection(self.sensor_bias_dim, d_model, dropout=dropout,
                                                     gate_bias_init=gate_bias_init)
             self.descriptor_head = DescriptorHead(d_model, text_dim=384, dropout=dropout)
+            # PipelineAModel disables this explicit ablation in the reference recipe. The module
+            # remains in the state dict for checkpoint compatibility, but an inactive head should
+            # not build an unused prediction graph on every encoder call.
+            self.descriptor_prediction_enabled = True
         if token_granularity == "sensor":
             # Sensor tokens receive their two conditioning paths after xyz folding below.  Keeping a
             # channel fusion module here would create trainable parameters that can never participate
@@ -270,11 +276,18 @@ class SetTokenizerEncoder(nn.Module):
         unique = list(dict.fromkeys(flat))
         descriptors = self.text_encoder.encode_pooled(unique, device=device)
         lookup = {text: i for i, text in enumerate(unique)}
-        sensor_text_ids = torch.full((B, n_max), -1, dtype=torch.long, device=device)
-        for b, texts in enumerate(sensor_texts):
-            sensor_text_ids[b, :len(texts)] = torch.tensor(
-                [lookup[text] for text in texts], dtype=torch.long, device=device,
-            )
+        # Build the small ragged inverse table on the host and transfer it once. Creating one CUDA
+        # tensor per sample generated 2*B pageable H2D copies on every two-view training step (515
+        # transfers at batch 256 in the operator trace), which became a launch bottleneck at the
+        # larger batches the 4090 can comfortably hold.
+        sensor_text_ids = torch.tensor(
+            [
+                [*(lookup[text] for text in texts), *([-1] * (n_max - len(texts)))]
+                for texts in sensor_texts
+            ],
+            dtype=torch.long,
+            device=device,
+        )
         return descriptors, sensor_text_ids
 
     def encode(
@@ -376,8 +389,11 @@ class SetTokenizerEncoder(nn.Module):
         per_patch = (h * weights.unsqueeze(-1)).sum(dim=2) / denom_c.squeeze(2).unsqueeze(-1)
         patch_w = weights.amax(dim=2)                                    # (B,P) patch validity
         if resolution_ids is None:
-            pooled = (per_patch * patch_w.unsqueeze(-1)).sum(dim=1) \
-                / patch_w.sum(dim=1, keepdim=True).clamp(min=1.0)
+            temporal_w = patch_w
+            if patch_durations is not None:
+                temporal_w = temporal_w * patch_durations.to(per_patch.dtype)
+            pooled = (per_patch * temporal_w.unsqueeze(-1)).sum(dim=1) \
+                / temporal_w.sum(dim=1, keepdim=True).clamp(min=1e-6)
         else:
             # Equal resolution weight: twelve short tokens must not outweigh four long
             # tokens merely because their temporal grid is denser.
@@ -483,8 +499,11 @@ class SetTokenizerEncoder(nn.Module):
         per_patch = (h * weights.unsqueeze(-1)).sum(dim=2) / denom.squeeze(2).unsqueeze(-1)
         patch_w = weights.amax(dim=2)
         if resolution_ids is None:
-            pooled = (per_patch * patch_w.unsqueeze(-1)).sum(dim=1) \
-                / patch_w.sum(dim=1, keepdim=True).clamp(min=1.0)
+            temporal_w = patch_w
+            if patch_durations is not None:
+                temporal_w = temporal_w * patch_durations.to(per_patch.dtype)
+            pooled = (per_patch * temporal_w.unsqueeze(-1)).sum(dim=1) \
+                / temporal_w.sum(dim=1, keepdim=True).clamp(min=1e-6)
         else:
             valid_r = (resolution_ids >= 0) & (resolution_ids < 2) & (patch_w > 0)
             one_hot = F.one_hot(resolution_ids.clamp(0, 1), num_classes=2).to(per_patch.dtype)
@@ -504,8 +523,11 @@ class SetTokenizerEncoder(nn.Module):
         pw = (patch_padding_mask.to(h.dtype) if patch_padding_mask is not None
               else h.new_ones(B, P))
         if resolution_ids is None:
-            sensor_context = (h * pw.view(B, P, 1, 1)).sum(dim=1) \
-                / pw.sum(dim=1).clamp(min=1.0).view(B, 1, 1)
+            context_w = pw
+            if patch_durations is not None:
+                context_w = context_w * patch_durations.to(h.dtype)
+            sensor_context = (h * context_w.view(B, P, 1, 1)).sum(dim=1) \
+                / context_w.sum(dim=1).clamp(min=1e-6).view(B, 1, 1)
         else:
             context_w = one_hot * (valid_r.to(h.dtype) * duration).unsqueeze(-1)
             context_denom = context_w.sum(dim=1)
@@ -516,17 +538,19 @@ class SetTokenizerEncoder(nn.Module):
                 context_by_resolution * active_context.view(B, 2, 1, 1)
             ).sum(dim=1) / active_context.sum(dim=1).clamp(min=1.0).view(B, 1, 1)
 
+        descriptor_pred = (self.descriptor_head(sensor_context)
+                           if self.descriptor_prediction_enabled else None)
         return {"tokens": h, "per_patch": per_patch, "pooled": pooled,
                 "sensor_context": sensor_context, "sensor_present": sensor_present,
                 "descriptor": descriptor,
-                "descriptor_pred": self.descriptor_head(sensor_context)}
+                "descriptor_pred": descriptor_pred}
 
     # ------------------------------------------------------------------------ forward
     def forward(
         self,
         patches: torch.Tensor,                       # (B, P, S, C) zero-padded native-rate
         sampling_rate_hz,                            # scalar | (B,)
-        patch_len_samples,                           # scalar | (B,) true N
+        patch_len_samples,                           # scalar | (B,) | (B,P) true N
         channel_texts: Sequence[Sequence[str]],      # per_channel: B lists of C descriptions;
                                                      # factored: B lists of C ROLE strings
         positions: torch.Tensor,                     # (B, P) patch-center times in SECONDS

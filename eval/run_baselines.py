@@ -51,6 +51,14 @@ REPO = Path(__file__).resolve().parents[1]
 RESULTS_DIR = REPO / "eval" / "results"
 
 
+def validate_quality_caches(alignment: str) -> None:
+    """Official scoring fails closed if either physical-quality cache is missing or stale."""
+    from data.scripts.scan_duplicates import load as load_duplicates
+    from data.scripts.scan_implausible import load as load_implausible
+    load_duplicates(alignment, require=True)
+    load_implausible(alignment, require=True)
+
+
 # =============================================================================
 # Cell enumeration (shared with assemble_table so the two agree exactly)
 # =============================================================================
@@ -289,6 +297,8 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default=None, help="torch device (default: auto)")
     ap.add_argument("--results-dir", default=str(RESULTS_DIR))
     args = ap.parse_args(argv)
+
+    validate_quality_caches(args.alignment)
 
     baselines = args.baselines if args.baselines is not None else sorted(B.REGISTRY)
     if not baselines:

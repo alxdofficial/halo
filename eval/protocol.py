@@ -7,10 +7,11 @@ harnet results sat in ``eval/results/`` looking exactly like post-fix ones, and
 ``assemble_table`` reproduced the old 47.3 mean without a word of warning. Add one post-fix row
 next to them and the published table silently mixes two protocols.
 
-Two things changed underneath every cached head and every score in 2026-07:
+Protocol-defining changes include:
 
-  * the global label vocabulary (59 → 93 labels, 11.48% of training windows recovered);
+  * the global label vocabulary (59 → 93, then 165 labels after the explicit expanded corpus);
   * the subject split manifest (per-dataset stratification; then ``hapt`` aliasing, 452 → 482).
+  * alignment-specific quality screening and the held-out dataset roster.
 
 Either one invalidates a result. The fingerprint below covers both, plus a manual
 ``PROTOCOL_VERSION`` for changes that are neither (a preprocessing fix, a metric change).
@@ -27,7 +28,7 @@ from typing import Optional
 
 # Bump MANUALLY when something changes that the vocabulary and split hashes do not capture:
 # a preprocessing contract, a metric definition, the ConSE bridge, the probe architecture.
-PROTOCOL_VERSION = 4        # 4 = current grids + anti-aliased UniMTS resampling + diagnostic guards
+PROTOCOL_VERSION = 5        # 5 = 165-label expanded corpus + screened non-harmonised eval + 10 datasets
 
 
 def protocol_fingerprint() -> dict:

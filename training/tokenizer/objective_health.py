@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from training.tokenizer.losses_repr import make_sensor_mask_plan
 from training.tokenizer.pretrain_data import (
     CorpusIndex,
-    MultiResolutionCollate,
+    MultiScaleCollate,
     PretrainDataset,
     SEED,
     TemperatureSampler,
@@ -74,7 +74,7 @@ def main() -> None:
         sampler=sampler,
         batch_size=BATCH_SIZE,
         drop_last=True,
-        collate_fn=MultiResolutionCollate(seed=0, two_view=True),
+        collate_fn=MultiScaleCollate(fixed_patch_seconds=1.0, seed=0, two_view=True),
         num_workers=0,
         worker_init_fn=_seed_worker,
     )
@@ -84,19 +84,16 @@ def main() -> None:
     dead_windows = 0
     source_counts: dict[str, int] = {}
 
-    per_resolution: dict[int, list[float]] = {0: [], 1: []}
     temporal_by_source: dict[str, list[int]] = {}
-    copyable_long, masked_long = 0, 0
     descriptor_events = 0
     config_pair_mismatches = 0
-    descriptor_target_pair_mismatches = 0
-    paraphrased_descriptor_rows = 0
-    descriptor_rows = 0
+    unexpected_augmentations = 0
+    ineligible_windows = 0
+    planner_failures = 0
 
     for batch in loader:
         batch_size, _, _, _ = batch["patches"].shape
         valid = batch["patch_padding_mask"]
-        rids = batch["resolution_ids"]
         n_sensors = batch["sensor_bias"].shape[1]
         present = torch.tensor([
             [sensor < len(texts) for sensor in range(n_sensors)]
@@ -105,45 +102,21 @@ def main() -> None:
         plan = make_sensor_mask_plan(
             batch_size, valid.shape[1], n_sensors, valid_patches=valid,
             sensor_present=present, sensor_placement=batch["sensor_placement"],
-        )
-        temporal_plan = make_sensor_mask_plan(
-            batch_size, valid.shape[1], n_sensors, sensor_event_p=0.0,
-            descriptor_event_p=0.0, valid_patches=valid,
-            sensor_present=present, sensor_placement=batch["sensor_placement"],
+            descriptor_event_p=0.0,
         )
         real = valid.unsqueeze(2) & present.unsqueeze(1)
         supervised = plan.token_mask & real
         counts = supervised.flatten(1).sum(1)
         totals = real.flatten(1).sum(1).clamp(min=1)
+        eligible = real.flatten(1).sum(1) > 1
         supervised_tokens.extend(counts.float().tolist())
         masked_fractions.extend((counts / totals).tolist())
         dead_windows += int(counts.eq(0).sum())
+        ineligible_windows += int((~eligible).sum())
+        planner_failures += int((counts.eq(0) & eligible).sum())
 
-        # Project the one physically ordered temporal block onto each resolution so scale-specific
-        # coverage remains visible. The sensor planner deliberately does not draw separate blocks.
-        token_masked = temporal_plan.token_mask.any(dim=2)
+        token_masked = plan.token_mask.any(dim=2)
         descriptor_events += int((plan.descriptor_mask & present).sum())
-        for group in (0, 1):
-            sel = valid & rids.eq(group)
-            n = sel.sum(dim=1)
-            hit = (token_masked & sel).sum(dim=1)
-            per_resolution[group].extend(
-                (hit[n > 0].float() / n[n > 0].float()).tolist()
-            )
-
-        # The cost 'per_resolution' knowingly accepts: a masked LONG token whose overlapping short
-        # tokens are ALL visible is close to copyable, because a coarse band summary of a
-        # quasi-stationary second is nearly its own fine summary. Track it rather than assume.
-        starts, ends = batch["patch_starts"], batch["patch_ends"]
-        for b in range(rids.shape[0]):
-            longs = torch.nonzero(valid[b] & rids[b].eq(1) & token_masked[b]).squeeze(1)
-            shorts = torch.nonzero(valid[b] & rids[b].eq(0)).squeeze(1)
-            for p in longs.tolist():
-                masked_long += 1
-                inside = shorts[(starts[b, shorts] >= starts[b, p] - 1e-6)
-                                & (ends[b, shorts] <= ends[b, p] + 1e-6)]
-                if inside.numel() and not bool(token_masked[b, inside].any()):
-                    copyable_long += 1
 
         for source, row in zip(batch["sources"], token_masked):
             source_counts[source] = source_counts.get(source, 0) + 1
@@ -162,14 +135,8 @@ def main() -> None:
             and torch.allclose(batch["rates"], batch["rates_b"])
             and torch.allclose(batch["source_rates"], batch["source_rates_b"])
         ))
-        descriptor_target_pair_mismatches += int(
-            batch["sensor_target_texts"] != batch["sensor_target_texts_b"]
-        )
-        for visible, target in zip(batch["sensor_texts"], batch["sensor_target_texts"]):
-            if len(visible) != len(target):
-                raise RuntimeError("visible and target sensor descriptors do not align")
-            descriptor_rows += len(target)
-            paraphrased_descriptor_rows += sum(a != b for a, b in zip(visible, target))
+        for traces in (batch["augmentations"], batch["augmentations_b"]):
+            unexpected_augmentations += sum(tuple(trace) != ("rotation_3d",) for trace in traces)
 
     windows = N_BATCHES * BATCH_SIZE
     report = {
@@ -181,16 +148,11 @@ def main() -> None:
             "masked_fraction_of_real_tokens": distribution(masked_fractions),
             "zero_supervision_windows": dead_windows,
             "zero_supervision_fraction": round(dead_windows / windows, 4),
-            "realised_masked_fraction_short": distribution(per_resolution[0]),
-            "realised_masked_fraction_long": distribution(per_resolution[1]),
-            # Accepted by design: cross-scale inference is the objective, not a leak. Reported so
-            # the trade stays visible if it ever grows.
-            "masked_long_tokens_with_all_short_visible": round(
-                copyable_long / max(masked_long, 1), 4
-            ),
+            "ineligible_one_token_windows": ineligible_windows,
+            "eligible_windows_without_target": planner_failures,
             "descriptor_events": descriptor_events,
             "descriptor_events_per_window": round(descriptor_events / windows, 4),
-            "mean_temporally_masked_tokens_by_source": {
+            "mean_masked_time_positions_by_source": {
                 source: round(float(np.mean(values)), 2)
                 for source, values in sorted(temporal_by_source.items())
             },
@@ -198,13 +160,7 @@ def main() -> None:
         "vicreg": {
             "augmentation_pairs_per_batch": BATCH_SIZE,
             "batches_with_config_mismatch_between_views": config_pair_mismatches,
-        },
-        "descriptor_target": {
-            "batches_with_target_mismatch_between_views": descriptor_target_pair_mismatches,
-            "visible_rows_using_a_paraphrase_fraction": round(
-                paraphrased_descriptor_rows / max(descriptor_rows, 1), 4
-            ),
-            "target_stage": "post_configuration_pre_paraphrase",
+            "views_with_non_rotation_augmentation": unexpected_augmentations,
         },
         "sampled_source_share": {
             source: round(count / windows, 4) for source, count in sorted(source_counts.items())

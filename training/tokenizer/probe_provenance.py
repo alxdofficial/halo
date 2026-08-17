@@ -192,16 +192,20 @@ def run(checkpoint: Path, device: str = "cuda", limit_streams: int | None = None
     sZ, sds, sact, ssubj, splace = [], [], [], [], []
     for ref in refs:
         data = ref.load_data()
+        lengths = np.asarray(ref.load_lengths())
         labels = np.asarray(ref.labels)
         subjects = np.asarray(ref.subjects)
         if data.shape[0] > MAX_WINDOWS_PER_STREAM:
             step = data.shape[0] // MAX_WINDOWS_PER_STREAM
-            data, labels, subjects = data[::step], labels[::step], subjects[::step]
+            data, labels, subjects, lengths = (
+                data[::step], labels[::step], subjects[::step], lengths[::step]
+            )
         try:
             encoded = encode_dataset_detailed(
                 enc, data, stream_channel_descriptions(ref.dataset, ref.stream),
                 dev, ref.rate_hz, _stream_gravity_state(ref.dataset, ref.stream),
                 channel_mask=ref.mask, dataset=ref.dataset, stream=ref.stream,
+                lengths=lengths,
                 export_sensor_rows=sensor_rows, _require_patches=sensor_rows)
         except Exception as exc:                              # noqa: BLE001
             print(f"  FAILED {ref.dataset}/{ref.stream}: {exc}", flush=True)

@@ -210,6 +210,31 @@ def test_mask_events_fire_at_roughly_the_configured_rate():
     assert 0.15 < descriptor_rate < 0.35
 
 
+def test_one_patch_two_modalities_always_gets_a_jepa_target():
+    """Temporal masking is impossible at T=1, so co-located accel/gyro is the fallback task."""
+    B = 512
+    plan = make_sensor_mask_plan(
+        B, 1, 2,
+        generator=torch.Generator().manual_seed(91),
+        sensor_present=torch.ones(B, 2, dtype=torch.bool),
+        sensor_placement=torch.zeros(B, 2, dtype=torch.long),
+        valid_patches=torch.ones(B, 1, dtype=torch.bool),
+    )
+    assert plan.token_mask.flatten(1).any(dim=1).all()
+    assert (~plan.token_mask.flatten(1).all(dim=1)).all()
+
+
+def test_one_patch_one_sensor_remains_honestly_ineligible_for_jepa():
+    plan = make_sensor_mask_plan(
+        32, 1, 1,
+        generator=torch.Generator().manual_seed(92),
+        sensor_present=torch.ones(32, 1, dtype=torch.bool),
+        sensor_placement=torch.zeros(32, 1, dtype=torch.long),
+        valid_patches=torch.ones(32, 1, dtype=torch.bool),
+    )
+    assert not plan.token_mask.any()
+
+
 # --------------------------------------------------------------------------- encoder wiring
 def test_sensor_encoder_forward_shapes_and_masking():
     from model.tokenizer.encoder import SetTokenizerEncoder

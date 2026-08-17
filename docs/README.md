@@ -17,16 +17,19 @@
 
 ## Zero-Shot Baseline Results
 
-Generated from `eval/results/` by `python -m eval.assemble_table`, which refuses to assemble a
-mixed-protocol table. **56 cells** (8 models × 7 zero-shot test sets), all **protocol v4 (93 labels)**,
-as of 2026-08-06.
+The last completed table was generated from `eval/results/` by `python -m eval.assemble_table`:
+**56 cells** (8 models × 7 zero-shot test sets), all **historical protocol v4 (93 labels)**, as of
+2026-08-06. The 18-source expansion defines protocol v5 (166 labels, 10 default evaluation datasets,
+alignment-specific quality screening); its baseline cells have not been rerun and must not be mixed
+with this completed v4 table.
 
 | harnet | halo_evidence | crosshar | unimts | halo | limubert | imagebind | normwear |
 |---:|---:|---:|---:|---:|---:|---:|---:|
 | **45.7** | 42.9 | 42.8 | 34.7 | 34.4 | 32.2 | 11.4 | 5.1 |
 
 **harnet (frozen UK-Biobank) is ahead in this completed zero-shot baseline protocol.** These numbers
-precede the current Phase-B adaptation run and must not be mixed with its enrollment tables. The
+precede the current Phase-B admissibility design and must not be mixed with its future enrollment
+tables. The
 current Phase-B empirical status is owned by
 [`results/PHASE_B_TRAINING_STATUS.md`](results/PHASE_B_TRAINING_STATUS.md).
 
@@ -52,17 +55,19 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   (device + placement + modality) plus intra-sensor axis role, as implemented.
 
 **The two phases, as built**
+- [**DESIGN_OF_RECORD.md**](design/DESIGN_OF_RECORD.md) — the current architecture decision record:
+  the three per-(patch, sensor) vectors, the front end, `sensor_bias`, the admissibility gate and
+  its three guards, the Phase-B prediction rule, and the build ledger with what is deleted and what
+  is still pending. When this and an older design doc disagree, this one wins.
 - [**PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md**](design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md) —
   Phase-A record and the handoff contract. Commands live in
   [`training/tokenizer/README.md`](../training/tokenizer/README.md).
 - [**PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — the sole Phase-B motivation
   and training contract. Commands live in
   [`training/evidence/README.md`](../training/evidence/README.md).
-- [**PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — historical results from the
-  superseded vote/soft-retrieval run, retained as the empirical motivation for the relational
-  design. Its §4
-  unweighted three-cell mean is retired; see the step-0 control below for the weighting that
-  replaces it.
+- [**PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the authoritative current
+  readiness and experiment ledger. Its completed tables are explicitly marked as parked relational
+  experiments and do not validate the active admissibility design.
 - [**PHASE_B_STEP0_CONTROL.md**](results/PHASE_B_STEP0_CONTROL.md) — what Phase-B training actually
   buys, measured against the system at initialisation. Training pushes zero-shot below its chance
   floor by destroying a ConSE-like bridge the untrained mechanism already had; at k=2 cross-subject
@@ -80,6 +85,8 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
 - [EVIDENCE_ENGINE_RESEARCH.md](design/EVIDENCE_ENGINE_RESEARCH.md) — dated July 2026 literature
   synthesis and decision input. It is not a design or configuration contract; current motivation
   and decisions live only in `MOTIVATION.md`, `POSITIONING.md`, and `PHASE_B_TRAINING_INTENT.md`.
+- [LITERATURE_HAR_LLM_2026-08.md](design/LITERATURE_HAR_LLM_2026-08.md) — August 2026 sweep of the
+  HAR + LLM/foundation-model literature. Same status: input, not contract.
 
 **Proposed — not decided, not built.** Do not describe these as part of the system.
 - [APPLICATIONS.md](design/APPLICATIONS.md) — what a HAR foundation model could make possible
@@ -89,9 +96,18 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
 ## `data/` — the corpus
 - [DATA_PIPELINE.md](data/DATA_PIPELINE.md) — source → curate → unit→g → resample → window → grids.
 - [DATA_HETEROGENEITY.md](data/DATA_HETEROGENEITY.md) — per-dataset normalization decisions and why.
-- [DATASET_EXPANSION_2026-08.md](data/DATASET_EXPANSION_2026-08.md) — **proposal, nothing acquired.**
-  Candidate training/eval datasets for the rehabilitation-tracking framing, with verified access and
-  disk cost. Its §6 records where it conflicts with `design/DATA_SCALING_PLAN.md`'s frozen-corpus rule.
+- [DATASET_EXPANSION_2026-08.md](data/DATASET_EXPANSION_2026-08.md) — implemented 2026-08 expansion:
+  six default training additions, KneE-PAD as an explicit short/stress source, and three held-out
+  evaluation sources, with verified converter decisions and the matched-versus-expanded rule.
+- [DATASET_EXPANSION_AUDIT_2026-08-11.md](data/DATASET_EXPANSION_AUDIT_2026-08-11.md) — the converter
+  audit behind that expansion. Every finding is fixed; read it before trusting any enrollment or
+  simultaneity claim about the ten new sources.
+
+## `results/` — the measured record
+- [RESULTS.md](results/RESULTS.md) — concise project-wide results index and next registered readout.
+- [PHASE_B_TRAINING_STATUS.md](results/PHASE_B_TRAINING_STATUS.md) and
+  [PHASE_B_STEP0_CONTROL.md](results/PHASE_B_STEP0_CONTROL.md) — the parked relational-decoder
+  history and the step-0 control that retired its headline. Also linked from `design/` above.
 
 ## `baselines/` — who we compare against
 - [BASELINES.md](baselines/BASELINES.md) — roster, verified input contracts, frozen-vs-self-train.

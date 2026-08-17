@@ -121,7 +121,10 @@ def main():
         ref = refs.get((dataset, stream))
         if ref is None:
             continue
-        data = ref.load_data(); labels = np.asarray(ref.labels); subj = np.asarray(ref.subjects)
+        full = np.asarray(ref.load_lengths()) == ref.shape[1]
+        data = ref.load_data()[full]
+        labels = np.asarray(ref.labels)[full]
+        subj = np.asarray(ref.subjects)[full]
         texts = stream_channel_descriptions(dataset, stream)
         gstate = _stream_gravity_state(dataset, stream)
         z = encode(enc, data, texts, device, rate=ref.rate_hz, gravity_state=gstate,
@@ -165,7 +168,10 @@ def main():
     # ---------- 2. invariance (drift + kNN-under-transform) ----------
     inv = {}
     ref = refs[("motionsense", "phone_front_pocket")]
-    data = ref.load_data(); labels = np.asarray(ref.labels); subj = np.asarray(ref.subjects)
+    full = np.asarray(ref.load_lengths()) == ref.shape[1]
+    data = ref.load_data()[full]
+    labels = np.asarray(ref.labels)[full]
+    subj = np.asarray(ref.subjects)[full]
     texts = stream_channel_descriptions("motionsense", "phone_front_pocket")
     z0 = encode(enc, data, texts, device, rate=ref.rate_hz,
                 channel_mask=ref.mask, dataset="motionsense", stream="phone_front_pocket")
@@ -189,13 +195,16 @@ def main():
     # ---------- 3. cross-placement (wisdm phone -> watch; TRAIN data, flagged) ----------
     try:
         rp = refs[("wisdm", "phone_pocket")]; rw = refs[("wisdm", "watch_wrist")]
-        zp = encode(enc, rp.load_data(), stream_channel_descriptions("wisdm", "phone_pocket"),
+        kp = np.asarray(rp.load_lengths()) == rp.shape[1]
+        kw = np.asarray(rw.load_lengths()) == rw.shape[1]
+        zp = encode(enc, rp.load_data()[kp], stream_channel_descriptions("wisdm", "phone_pocket"),
                     device, rate=rp.rate_hz, channel_mask=rp.mask,
                     dataset="wisdm", stream="phone_pocket")
-        zw = encode(enc, rw.load_data(), stream_channel_descriptions("wisdm", "watch_wrist"),
+        zw = encode(enc, rw.load_data()[kw], stream_channel_descriptions("wisdm", "watch_wrist"),
                     device, rate=rw.rate_hz, channel_mask=rw.mask,
                     dataset="wisdm", stream="watch_wrist")
-        yp, yw = list(map(str, rp.labels)), list(map(str, rw.labels))
+        yp = np.asarray(rp.labels)[kp].astype(str).tolist()
+        yw = np.asarray(rw.labels)[kw].astype(str).tolist()
         p2w = knn_balanced_acc(zp, yp, zw, yw)
         w2p = knn_balanced_acc(zw, yw, zp, yp)
         report["cross_placement_wisdm(train-data)"] = {"phone->watch": round(p2w, 3),

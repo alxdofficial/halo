@@ -1,9 +1,12 @@
-# Dataset expansion under the rehabilitation-tracking framing (2026-08-08)
+# Dataset expansion under the rehabilitation-tracking framing (implemented 2026-08-12)
 
-> **Status: proposal for review, nothing acquired.** This records candidate datasets, what each one
-> fixes, verified access, and the disk cost. It does **not** supersede
-> [`../design/DATA_SCALING_PLAN.md`](../design/DATA_SCALING_PLAN.md), which owns the frozen-corpus
-> experimental rule — see §6, where this proposal conflicts with it.
+> **Status:** ten sources were acquired, converted, gridded, and audited. Six are in the expanded
+> Phase-A recipe: DSADS, Forth-TRACE, Opportunity, REALDISP, MM-Fit, and PHYTMO. KneE-PAD is
+> converted but sits in `OPTIONAL_PHASE_A_DATASETS` — only 4.7% of its trials reach a six-second
+> window — so it is an explicit opt-in stress study, not part of the default corpus (§6, §10).
+> Monipar, SPAR, and Upper-Limb-Use remain held out and are part of the default evaluation roster.
+> [`../design/DATA_SCALING_PLAN.md`](../design/DATA_SCALING_PLAN.md) owns the experiment rule and
+> preserves the original 12-source corpus as `--corpus matched`.
 
 ## 1. Why
 
@@ -62,9 +65,10 @@ Highest return per unit of work: converter changes only.
 | **E6** | **KneE-PAD** | [Zenodo 12112951](https://zenodo.org/records/12112951) | **31 knee-pathology patients** × 3 exercises + 2 wrong variants each × ~10 trials (2,086 files) | 8 Delsys Trigno on leg muscles | acc+gyro, 148.15 Hz | CC-BY | real pathology, unsupervised in-clinic; placement does not match phone/watch deployment | ✔ |
 | **E7** | **upper-limb-use** | [GitHub](https://github.com/biorehab/upper-limb-use-assessment), ~172 MB | 10 controls + **5 hemiparetic** × 15 ADLs | 2 wrist bands (affected / unaffected) | acc+gyro+mag, 50 Hz | check | stroke patients, bilateral; labels are functional-use, not exercise identity | ✔ |
 
-**Proposed split** — dev: E1 + E4 · sealed test: E2 + E3, keep `usc_had` · optional: E5–E7.
-Demote `shoaib`, `inclusivehar`, `ut_complex`, `tnda_har` from the *enrollment* protocol only; they
-remain valid for the ZS-XD comparability table.
+**Implemented split:** the established development datasets remain MotionSense, RealWorld, and
+Shoaib. The sealed Phase-B test roster is InclusiveHAR, USC-HAD, TNDA-HAR, UT-Complex, Monipar,
+SPAR, and Upper-Limb-Use. MM-Fit, PHYTMO, and KneE-PAD were promoted to expanded training and are no
+longer valid unseen-dataset tests for that arm.
 
 ## 5. Considered and rejected
 
@@ -79,21 +83,21 @@ remain valid for the ZS-XD comparability table.
 | FDA smartphone-gait | gait only — but note 5 phone *orientations* × 2 placements; a possible controlled-orientation testbed for `MOTIVATION.md` §3 |
 | motionsense / realworld / shoaib / usc_had / tnda_har / ut_complex / inclusivehar | existing eval sets — **never train on these** |
 
-## 6. Conflict with the frozen-corpus experimental rule
+## 6. Resolution of the frozen-corpus experimental rule
 
 `../design/DATA_SCALING_PLAN.md` deliberately keeps ExtraSensory, NHANES and H-MOG **out** of the
 primary corpus so that the technique comparison argues method-over-data. They are already converted
 and gridded; their absence is policy, not an oversight.
 
-Promoting them (§2) or adding §3 breaks that rule. Two coherent options, and the choice is a claim
-decision rather than an engineering one:
+The implementation preserves both coherent options as named recipes:
 
-1. **Keep the frozen 12-source corpus as the matched technique arm** and report every expansion as a
-   separate data-scaling arm, exactly as that document prescribes.
-2. **Re-freeze a new primary corpus** for the rehabilitation framing, and re-run the corpus-matched
-   baselines against it so the comparison stays honest.
+1. `pretrain --corpus matched` keeps the frozen 12-source technique arm.
+2. `pretrain --corpus expanded` selects the 18-source design-of-record. A comparison against this arm
+   is corpus-matched only after each retrained baseline uses the same 18 sources. KneE-PAD is an
+   explicit short-window/clinical-stress ablation because only 4.7% of its trials reach six seconds.
 
-Option 2 costs a baseline re-fit. Option 1 costs an extra arm in every table. Do not silently mix.
+The resolved dataset tuple is serialized in every checkpoint. Do not mix results across the two
+recipes in one headline table without identifying the corpus.
 
 ## 7. Constraints for whoever implements this
 
@@ -230,9 +234,11 @@ correct series per exercise is the next-best structure and gives k = 1 across se
 
 ## 10. Conversion + verification results (2026-08-09)
 
-All ten downloaded sources are **converted, gridded and verified**. Nothing is integrated into
-training: none of them is in `PRIMARY_TRAIN_DATASETS`, and `dsads`, `opportunity` and `kneepad`
-carry `role="stress"` so no primary query can reach them.
+All ten downloaded sources are **converted, gridded and verified**. Six are in
+`EXPANDED_PHASE_A_TRAIN_DATASETS`; `dsads` and `opportunity` retain `role="stress"` to describe their
+off-deployment placements, but the default grid builder and expanded trainer include them
+deliberately. KneE-PAD is an explicit opt-in stress study. The remaining three are held-out
+evaluation datasets.
 
 Measured off the built `native` grids by `data/scripts/debug/sweep_new_datasets.py`:
 
@@ -245,7 +251,7 @@ Measured off the built `native` grids by `data/scripts/debug/sweep_new_datasets.
 | dsads | 5 | 35,480 | 11.83 | 19 | 8 | 25 | 0.997–1.002 | 2/15 | 0.56 |
 | opportunity | 5 | 10,835 | 3.61 | 4 | 4 | 30 | 1.000–1.005 | 30/234 | 1.00 |
 | phytmo | 8 | 24,684 | 5.14 | 14 | 30 | 100 | 0.966–1.014 | 2/2 | 0.99 |
-| mmfit | 4 | 7,196 | 3.00 | 10 | 21 | 100 | 1.006–1.022 | 3/4 | 0.99 |
+| mmfit | 4 | 6,280 | 2.62 | 10 | 21 workouts (10 people) | 100 | 1.006–1.022 | 3/4 | 0.99 |
 | kneepad | 8 | 1,344 | 0.28 | 5 | 28 | 148.15 | 1.010–1.034 | 1/2 | 0.27 |
 | upper_limb_use | 4 | 1,124 | 0.47 | 14 | 10 | 50 | 1.000–1.071 | 1/2 | 0.07 |
 
@@ -279,14 +285,14 @@ Section 9 withdrew SPAR's k=8 claim. The replacement is not a guess:
 | realdisp | `subject6_self`, `subject13_self`, `subject15_mutual4` are **placeholders** — all 117 sensor columns identically 0.0 on every row, with complete label tracks | logs skipped; those subjects lose their ideal-vs-self pair. Caught by the grid sweep at 6.6% zero windows per stream, not by the converter |
 | realdisp | every other log contains one **backwards clock jump** of 1300–2100 s | rate read from the median step, not the span; blocks straddling a reset dropped |
 | monipar | README says 50 Hz; the real clock is **bimodal 49.87–52.85 Hz** | each trial anti-alias resampled to a true 50 Hz — a 5.7% shift would move the tremor bands this dataset exists to measure |
-| forth_trace | `part4` and `part8` score **0.16 / 0.13** node-to-node label agreement (13 of 15 score 0.89–0.98); a ±3 s lag search does not rescue them | both excluded — emitting them would assert a simultaneity the data lacks |
+| forth_trace | `part4` remains at **0.147** node-to-node label agreement; part8's earlier 0.13 was caused by a 1,828 s dropout | part8 retained after gap splitting (0.974); only part4 excluded |
 | forth_trace | gyroscope is **deg/s**, undocumented | converted to rad/s, with a guard that fails if a future release ships rad/s |
 | dsads | **8.1%** of the distributed 5-second segment joins are genuine discontinuities (median join is indistinguishable from an interior step, so the ordering IS temporal) | sessions split at those joins; no window straddles a gap |
 | dsads | UCI's block names (T/RA/LA/RL/LL) read as torso/arms/legs; the **paper** puts the units on the chest, both **wrists** and the outer sides of both **knees** | placement text corrected — HALO conditions on it, and "the right arm" would have mis-described the only two watch-like placements here |
 | opportunity | gyroscope unit documented as "unknown" | resolved by measurement (forearm p99 during labelled walking = 3.15 rad/s after ÷1000; as deg/s that is physically impossible) |
 | opportunity | gesture instances are **median 2.6 s** against a 6 s window | Locomotion track used; the gesture cell reported unsupported |
 | phytmo | 8 of 4,520 CSVs contain all-NaN dropped-packet rows, all from subject C02's left-knee trials; the left-shin unit is **40% missing** | isolated single-sample holes interpolated; 4 trials with excessive dropout skipped rather than interpolated |
-| kneepad | only **98 of 2,086** trials (4.7%) reach a 6 s window; sensors are on muscle bellies | converted, `role="stress"`, both limits documented |
+| kneepad | only **98 of 2,086** trials (4.7%) reach a 6 s window; sensors are on muscle bellies | converted and `role="stress"`, but removed from default Phase A; explicit opt-in only |
 
 ### Not acquired
 

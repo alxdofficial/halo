@@ -29,6 +29,19 @@ from training.evidence.bank_guard import (
     assert_patch_bank,
     assert_embedding_path_current,
     assert_patch_embedding_path_current,
+    assert_sensor_bank,
+    assert_sensor_embedding_path_current,
+    assert_text_embedding_path_current,
+)
+from training.evidence.gate_predictor import (
+    ADMISSIBILITY_REFINEMENT_REGIME,
+    ADMISSIBILITY_TRAINING_REGIME,
+    BankRows,
+    concatenate_bank_rows,
+    load_gate,
+    predict_bank_grouped,
+    sensor_rows_from_encoded,
+    subset_bank_rows,
 )
 from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
 from training.evidence.device import resolve_device
@@ -59,6 +72,10 @@ _REPO = Path(__file__).resolve().parents[2]
 _OUT = Path(__file__).resolve().parent / "outputs"
 _EVALUATION_BEHAVIOR_PATHS = (
     "training/evidence/eval_enrollment.py",
+    "training/evidence/admissible_retrieval.py",
+    "training/evidence/admissibility_gate.py",
+    "training/evidence/gate_predictor.py",
+    "training/evidence/bank_guard.py",
     "training/evidence/runtime_memory.py",
     "training/evidence/patch_episodes.py",
     "training/evidence/policy.py",
@@ -71,6 +88,13 @@ _EVALUATION_BEHAVIOR_PATHS = (
     "data/scripts/curate/deployment_policy.py",
     "data/scripts/labels/canonical_labels.py",
 )
+
+
+def accepted_training_regimes(predictor_mode: str) -> set[str]:
+    """Current regimes that can be compared without an archival override."""
+    if predictor_mode == "admissibility_gate":
+        return {ADMISSIBILITY_TRAINING_REGIME, ADMISSIBILITY_REFINEMENT_REGIME}
+    return {PHASE_B_TRAINING_REGIME}
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -418,6 +442,113 @@ def _few_shot_baselines(
     return prototype, ridge
 
 
+PREDICTOR_MODES = ("relational_decoder", "closed_form_retrieval_vote", "admissibility_gate")
+
+
+def active_index_seed(predictor: dict, evaluation_seed: int) -> int:
+    """One protocol-owned archive draw shared by every predictor family being compared."""
+    return int(evaluation_seed) + 2
+
+
+def predictor_logits(logits: torch.Tensor, aux: dict, predictor_mode: str) -> torch.Tensor:
+    """Select an archived pooled episode path.
+
+    The sensor-row admissibility predictor has a separate evaluator path and never passes through the
+    parked relational decoder. Keeping that boundary explicit prevents a missing gate output from
+    silently falling back to an unrelated pooled prediction.
+    """
+    if predictor_mode == "relational_decoder":
+        return logits
+    if predictor_mode == "closed_form_retrieval_vote":
+        return aux["identity_logits"]
+    raise ValueError(f"unknown predictor mode {predictor_mode!r}")
+
+
+def _summarize_enrollment_predictions(
+    *,
+    all_true,
+    all_pred,
+    all_identity_pred,
+    all_removed_pred,
+    all_shuffled_pred,
+    all_prototype_pred,
+    all_ridge_pred,
+    all_enrolled_query,
+    subject_results,
+    base_bank,
+    phase_b_seen_labels,
+    plans,
+    seed,
+    support_count,
+):
+    """One result contract for the legacy and admissibility prediction paths."""
+    if not all_true:
+        return {
+            "status": "insufficient_independent_executions",
+            "queries": 0,
+            "subjects": 0,
+        }
+    metrics = classification_metrics(all_true, all_pred)
+    identity_metrics = classification_metrics(all_true, all_identity_pred)
+    removed_metrics = classification_metrics(all_true, all_removed_pred)
+    shuffled_metrics = classification_metrics(all_true, all_shuffled_pred)
+    bank_vocab = set(base_bank["vocab"])
+    exact_phase_a_mask = np.asarray([label in bank_vocab for label in all_true])
+    canonical_phase_a_mask = np.asarray([
+        canonicalize(label) in bank_vocab for label in all_true
+    ])
+    phase_b_mask = np.asarray([
+        canonicalize(label) in phase_b_seen_labels for label in all_true
+    ])
+    enrolled_mask = np.asarray(all_enrolled_query, dtype=bool)
+
+    def subset_f1(prediction, mask):
+        return float(classification_metrics(
+            np.asarray(all_true, dtype=object)[mask].tolist(),
+            np.asarray(prediction, dtype=object)[mask].tolist(),
+        )["f1_macro"]) if bool(mask.any()) else float("nan")
+
+    return {
+        "f1_macro": float(metrics["f1_macro"]),
+        "identity_f1_macro": float(identity_metrics["f1_macro"]),
+        "adaptation_f1_gain": float(metrics["f1_macro"] - identity_metrics["f1_macro"]),
+        "support_removed_f1_macro": float(removed_metrics["f1_macro"]),
+        "support_removal_f1_gain": float(metrics["f1_macro"] - removed_metrics["f1_macro"]),
+        "support_label_shuffled_f1_macro": float(shuffled_metrics["f1_macro"]),
+        "correct_support_label_f1_gain": float(metrics["f1_macro"] - shuffled_metrics["f1_macro"]),
+        "prototype_f1_macro": (
+            float(classification_metrics(all_true, all_prototype_pred)["f1_macro"])
+            if all_prototype_pred else None
+        ),
+        "ridge_head_f1_macro": (
+            float(classification_metrics(all_true, all_ridge_pred)["f1_macro"])
+            if all_ridge_pred else None
+        ),
+        "phase_a_exact_label_seen_f1_macro": subset_f1(all_pred, exact_phase_a_mask),
+        "phase_a_exact_label_unseen_f1_macro": subset_f1(all_pred, ~exact_phase_a_mask),
+        "phase_a_canonical_concept_seen_f1_macro": subset_f1(all_pred, canonical_phase_a_mask),
+        "phase_a_canonical_concept_unseen_f1_macro": subset_f1(all_pred, ~canonical_phase_a_mask),
+        "phase_b_candidate_seen_f1_macro": subset_f1(all_pred, phase_b_mask),
+        "phase_b_candidate_unseen_f1_macro": subset_f1(all_pred, ~phase_b_mask),
+        "phase_b_candidate_seen_queries": int(phase_b_mask.sum()),
+        "phase_b_candidate_unseen_queries": int((~phase_b_mask).sum()),
+        "enrolled_candidate_f1_macro": subset_f1(all_pred, enrolled_mask),
+        "unenrolled_candidate_f1_macro": subset_f1(all_pred, ~enrolled_mask),
+        "enrolled_candidate_queries": int(enrolled_mask.sum()),
+        "unenrolled_candidate_queries": int((~enrolled_mask).sum()),
+        "accuracy": float(np.mean(np.asarray(all_true) == np.asarray(all_pred)) * 100.0),
+        "identity_accuracy": float(
+            np.mean(np.asarray(all_true) == np.asarray(all_identity_pred)) * 100.0
+        ),
+        "queries": len(all_true),
+        "subjects": len(plans),
+        "subject_results": subject_results,
+        "subject_macro": paired_subject_summary(
+            subject_results, seed=seed + 700_001 + support_count
+        ),
+    }
+
+
 @torch.no_grad()
 def score_enrollment_cell(
     encoded,
@@ -445,6 +576,7 @@ def score_enrollment_cell(
     enrolled_candidate_count: int | None = None,
     phase_b_seen_labels: set[str] | None = None,
     same_configuration: bool = True,
+    predictor_mode: str = "relational_decoder",
 ):
     all_true, all_pred, all_identity_pred = [], [], []
     all_removed_pred, all_shuffled_pred = [], []
@@ -554,28 +686,33 @@ def score_enrollment_cell(
                 policy=policy,
                 rng=np.random.default_rng(seed + subject_index),
             )
+            logits = predictor_logits(logits, aux, predictor_mode)
             removed_view = removed.episode_view(
                 query, target_position, label_mode=label_mode
             )
-            removed_logits, _ = decode_adaptation_episode(
+            removed_logits, removed_aux = decode_adaptation_episode(
                 decoder, retriever, removed.bank, removed.index_rows,
                 removed.selector_z, removed_index, query, removed_view,
                 removed.canonical_text, removed.candidate_text,
                 policy=policy,
                 rng=np.random.default_rng(seed + subject_index),
             )
+            removed_logits = predictor_logits(removed_logits, removed_aux, predictor_mode)
             shuffled_logits = None
             if shuffled is not None:
                 shuffled_memory, shuffled_index = shuffled
                 shuffled_view = shuffled_memory.episode_view(
                     query, target_position, label_mode=label_mode
                 )
-                shuffled_logits, _ = decode_adaptation_episode(
+                shuffled_logits, shuffled_aux = decode_adaptation_episode(
                     decoder, retriever, shuffled_memory.bank, shuffled_memory.index_rows,
                     shuffled_memory.selector_z, shuffled_index, query, shuffled_view,
                     shuffled_memory.canonical_text, shuffled_memory.candidate_text,
                     policy=policy,
                     rng=np.random.default_rng(seed + subject_index),
+                )
+                shuffled_logits = predictor_logits(
+                    shuffled_logits, shuffled_aux, predictor_mode
                 )
             prediction = logits.argmax(1).cpu().tolist()
             identity_prediction = aux["identity_logits"].argmax(1).cpu().tolist()
@@ -631,88 +768,247 @@ def score_enrollment_cell(
             "candidate_count": len(candidate_names),
             "enrolled_candidate_count": len(enrolled_positions),
         }
-    if not all_true:
-        return {
-            "status": "insufficient_independent_executions",
-            "queries": 0,
-            "subjects": 0,
+    return _summarize_enrollment_predictions(
+        all_true=all_true,
+        all_pred=all_pred,
+        all_identity_pred=all_identity_pred,
+        all_removed_pred=all_removed_pred,
+        all_shuffled_pred=all_shuffled_pred,
+        all_prototype_pred=all_prototype_pred,
+        all_ridge_pred=all_ridge_pred,
+        all_enrolled_query=all_enrolled_query,
+        subject_results=subject_results,
+        base_bank=base_bank,
+        phase_b_seen_labels=phase_b_seen_labels,
+        plans=plans,
+        seed=seed,
+        support_count=support_count,
+    )
+
+
+@torch.no_grad()
+def score_admissibility_cell(
+    encoded,
+    labels,
+    subjects,
+    plans,
+    base_bank,
+    base_sensor_rows: BankRows,
+    gate,
+    canonical_text,
+    sbert,
+    alias_embeddings,
+    device,
+    *,
+    query_dataset: str,
+    query_stream: str,
+    query_mask,
+    support_count: int,
+    random_aliases: bool,
+    seed: int,
+    support_encoded=None,
+    support_subjects: np.ndarray | None = None,
+    support_dataset: str | None = None,
+    support_stream: str | None = None,
+    support_mask=None,
+    enrolled_candidate_count: int | None = None,
+    phase_b_seen_labels: set[str] | None = None,
+    top_k: int = 64,
+    batch_size: int = 16,
+):
+    """Evaluate the closed-form sensor-row path without invoking the parked relational decoder."""
+    all_true, all_pred, all_identity_pred = [], [], []
+    all_removed_pred, all_shuffled_pred = [], []
+    all_prototype_pred, all_ridge_pred = [], []
+    all_enrolled_query, subject_results = [], {}
+    gate_telemetry: list[dict[str, float]] = []
+    support_encoded = encoded if support_encoded is None else support_encoded
+    support_subjects = subjects if support_subjects is None else support_subjects
+    support_dataset = query_dataset if support_dataset is None else support_dataset
+    support_stream = query_stream if support_stream is None else support_stream
+    support_mask = query_mask if support_mask is None else support_mask
+    phase_b_seen_labels = phase_b_seen_labels or set()
+    vocab_position = {label: index for index, label in enumerate(base_bank["vocab"])}
+
+    for subject_index, plan in enumerate(plans):
+        candidate_names = list(plan.candidate_names)
+        query_rows = plan.query_rows
+        rng = np.random.default_rng(seed + 50_021 * subject_index)
+        if support_count == 0:
+            enrolled_positions = np.empty(0, dtype=np.int64)
+        elif enrolled_candidate_count is None:
+            enrolled_positions = np.arange(len(candidate_names), dtype=np.int64)
+        else:
+            requested = (
+                max(1, len(candidate_names) // 2)
+                if int(enrolled_candidate_count) == 0 else int(enrolled_candidate_count)
+            )
+            count = max(1, min(requested, len(candidate_names) - 1))
+            enrolled_positions = np.sort(
+                rng.choice(len(candidate_names), size=count, replace=False)
+            ).astype(np.int64, copy=False)
+        enrolled_set = set(enrolled_positions.tolist())
+        support = np.asarray([
+            row for position, rows in enumerate(plan.support_rows)
+            if position in enrolled_set for row in rows[:support_count]
+        ], dtype=np.int64)
+        support_position = np.asarray([
+            position for position, rows in enumerate(plan.support_rows)
+            if position in enrolled_set for _ in rows[:support_count]
+        ], dtype=np.int64)
+
+        excluded = torch.tensor(sorted({
+            vocab_position[canonicalize(label)]
+            for label in candidate_names if canonicalize(label) in vocab_position
+        }), device=device, dtype=torch.long)
+        keep = ~torch.isin(base_sensor_rows.rows.label, excluded)
+        corpus = subset_bank_rows(base_sensor_rows, keep)
+        coherent = ensemble_text(candidate_names, sbert, 1).to(device)
+        label_mode = "random_alias" if random_aliases else "coherent"
+        label_set = episode_label_set(
+            torch.arange(len(candidate_names), device=device), coherent,
+            mode=label_mode, rng=rng, alias_embeddings=alias_embeddings,
+            canonical_names=candidate_names,
+        )
+        semantic_labels = not random_aliases
+
+        def memory(position: np.ndarray) -> BankRows:
+            if not len(support):
+                return corpus
+            enrolled = sensor_rows_from_encoded(
+                support_encoded, torch.from_numpy(support), support_dataset, support_stream,
+                channel_mask=support_mask,
+                candidate_positions=torch.from_numpy(position),
+            ).to(device)
+            return concatenate_bank_rows(corpus, enrolled)
+
+        enrollment = memory(support_position)
+        removed = corpus
+        shuffled = (
+            memory((support_position + 1) % len(candidate_names))
+            if len(support_position) else None
+        )
+        position_by_name = {name: i for i, name in enumerate(candidate_names)}
+        subject_true, subject_pred, subject_identity = [], [], []
+        subject_removed, subject_shuffled = [], []
+
+        source_sensor_window = torch.as_tensor(encoded["sensor_window"]).long().cpu()
+        for start in range(0, len(query_rows), batch_size):
+            batch_rows = np.asarray(query_rows[start:start + batch_size], dtype=np.int64)
+            batch_tensor = torch.from_numpy(batch_rows)
+            selected_sensor_window = source_sensor_window[
+                torch.isin(source_sensor_window, batch_tensor)
+            ]
+            owner_of = {int(window): position for position, window in enumerate(batch_rows)}
+            query_group = torch.tensor([
+                owner_of[int(window)] for window in selected_sensor_window.tolist()
+            ], dtype=torch.long, device=device)
+            query = sensor_rows_from_encoded(
+                encoded, batch_tensor, query_dataset, query_stream,
+                channel_mask=query_mask,
+            ).to(device).rows
+            if len(query_group) != len(query.feature):
+                raise RuntimeError("query sensor ownership does not align with encoded sensor rows")
+
+            def run(memory_rows: BankRows):
+                return predict_bank_grouped(
+                    gate, memory_rows,
+                    query_feature=query.feature,
+                    query_bias=query.bias,
+                    query_descriptor=query.descriptor,
+                    query_modality=query.modality,
+                    query_gravity=query.gravity,
+                    candidate_text=label_set.embeddings,
+                    label_text=canonical_text,
+                    top_k=top_k,
+                    semantic_labels=semantic_labels,
+                    query_group=query_group,
+                    group_count=len(batch_rows),
+                )
+
+            logits, aux = run(enrollment)
+            removed_logits, _ = run(removed)
+            shuffled_logits = run(shuffled)[0] if shuffled is not None else removed_logits
+            gate_telemetry.append({
+                key: float(value) for key, value in aux.items()
+                if key.startswith(("gate/", "evidence/"))
+            })
+            predictions = logits.argmax(1).tolist()
+            identities = aux["identity_logits"].argmax(1).tolist()
+            removed_predictions = removed_logits.argmax(1).tolist()
+            shuffled_predictions = shuffled_logits.argmax(1).tolist()
+            for offset, row in enumerate(batch_rows):
+                truth = str(labels[row])
+                prediction = candidate_names[int(predictions[offset])]
+                identity = candidate_names[int(identities[offset])]
+                removed_name = candidate_names[int(removed_predictions[offset])]
+                shuffled_name = candidate_names[int(shuffled_predictions[offset])]
+                all_true.append(truth); subject_true.append(truth)
+                all_pred.append(prediction); subject_pred.append(prediction)
+                all_identity_pred.append(identity); subject_identity.append(identity)
+                all_removed_pred.append(removed_name); subject_removed.append(removed_name)
+                all_shuffled_pred.append(shuffled_name); subject_shuffled.append(shuffled_name)
+                all_enrolled_query.append(position_by_name[truth] in enrolled_set)
+
+        prototype, ridge = _few_shot_baselines(
+            encoded, support_encoded, support, support_position, query_rows,
+            len(candidate_names), device,
+        )
+        if prototype is not None:
+            prototype_names = [candidate_names[index] for index in prototype]
+            ridge_names = [candidate_names[index] for index in ridge]
+            all_prototype_pred.extend(prototype_names)
+            all_ridge_pred.extend(ridge_names)
+        else:
+            prototype_names = ridge_names = None
+        subject_results[str(plan.subject)] = {
+            "f1_macro": float(classification_metrics(subject_true, subject_pred)["f1_macro"]),
+            "identity_f1_macro": float(
+                classification_metrics(subject_true, subject_identity)["f1_macro"]
+            ),
+            "support_removed_f1_macro": float(
+                classification_metrics(subject_true, subject_removed)["f1_macro"]
+            ),
+            "support_label_shuffled_f1_macro": float(
+                classification_metrics(subject_true, subject_shuffled)["f1_macro"]
+            ),
+            "prototype_f1_macro": (
+                float(classification_metrics(subject_true, prototype_names)["f1_macro"])
+                if prototype_names is not None else None
+            ),
+            "ridge_head_f1_macro": (
+                float(classification_metrics(subject_true, ridge_names)["f1_macro"])
+                if ridge_names is not None else None
+            ),
+            "queries": len(subject_true),
+            "candidate_count": len(candidate_names),
+            "enrolled_candidate_count": len(enrolled_positions),
         }
-    metrics = classification_metrics(all_true, all_pred)
-    identity_metrics = classification_metrics(all_true, all_identity_pred)
-    removed_metrics = classification_metrics(all_true, all_removed_pred)
-    shuffled_metrics = classification_metrics(all_true, all_shuffled_pred)
-    bank_vocab = set(base_bank["vocab"])
-    exact_phase_a_mask = np.asarray([label in bank_vocab for label in all_true])
-    canonical_phase_a_mask = np.asarray([
-        canonicalize(label) in bank_vocab for label in all_true
-    ])
-    phase_b_mask = np.asarray([
-        canonicalize(label) in phase_b_seen_labels for label in all_true
-    ])
-    enrolled_mask = np.asarray(all_enrolled_query, dtype=bool)
 
-    def subset_f1(prediction, mask):
-        return float(classification_metrics(
-            np.asarray(all_true, dtype=object)[mask].tolist(),
-            np.asarray(prediction, dtype=object)[mask].tolist(),
-        )["f1_macro"]) if bool(mask.any()) else float("nan")
-
-    return {
-        "f1_macro": float(metrics["f1_macro"]),
-        "identity_f1_macro": float(identity_metrics["f1_macro"]),
-        "adaptation_f1_gain": float(metrics["f1_macro"] - identity_metrics["f1_macro"]),
-        "support_removed_f1_macro": float(removed_metrics["f1_macro"]),
-        "support_removal_f1_gain": float(
-            metrics["f1_macro"] - removed_metrics["f1_macro"]
-        ),
-        "support_label_shuffled_f1_macro": float(shuffled_metrics["f1_macro"]),
-        "correct_support_label_f1_gain": float(
-            metrics["f1_macro"] - shuffled_metrics["f1_macro"]
-        ),
-        "prototype_f1_macro": (
-            float(classification_metrics(all_true, all_prototype_pred)["f1_macro"])
-            if all_prototype_pred else None
-        ),
-        "ridge_head_f1_macro": (
-            float(classification_metrics(all_true, all_ridge_pred)["f1_macro"])
-            if all_ridge_pred else None
-        ),
-        "phase_a_exact_label_seen_f1_macro": subset_f1(all_pred, exact_phase_a_mask),
-        "phase_a_exact_label_unseen_f1_macro": subset_f1(all_pred, ~exact_phase_a_mask),
-        "phase_a_canonical_concept_seen_f1_macro": subset_f1(
-            all_pred, canonical_phase_a_mask
-        ),
-        "phase_a_canonical_concept_unseen_f1_macro": subset_f1(
-            all_pred, ~canonical_phase_a_mask
-        ),
-        "phase_b_candidate_seen_f1_macro": subset_f1(all_pred, phase_b_mask),
-        "phase_b_candidate_unseen_f1_macro": subset_f1(all_pred, ~phase_b_mask),
-        "phase_b_candidate_seen_queries": int(phase_b_mask.sum()),
-        "phase_b_candidate_unseen_queries": int((~phase_b_mask).sum()),
-        "enrolled_candidate_f1_macro": subset_f1(all_pred, enrolled_mask),
-        "unenrolled_candidate_f1_macro": subset_f1(all_pred, ~enrolled_mask),
-        "enrolled_candidate_queries": int(enrolled_mask.sum()),
-        "unenrolled_candidate_queries": int((~enrolled_mask).sum()),
-        "accuracy": float(np.mean(np.asarray(all_true) == np.asarray(all_pred)) * 100.0),
-        "identity_accuracy": float(
-            np.mean(np.asarray(all_true) == np.asarray(all_identity_pred)) * 100.0
-        ),
-        "queries": len(all_true),
-        "subjects": len(plans),
-        "subject_results": subject_results,
-        "subject_macro": paired_subject_summary(
-            subject_results, seed=seed + 700_001 + support_count
-        ),
-    }
+    result = _summarize_enrollment_predictions(
+        all_true=all_true, all_pred=all_pred, all_identity_pred=all_identity_pred,
+        all_removed_pred=all_removed_pred, all_shuffled_pred=all_shuffled_pred,
+        all_prototype_pred=all_prototype_pred, all_ridge_pred=all_ridge_pred,
+        all_enrolled_query=all_enrolled_query, subject_results=subject_results,
+        base_bank=base_bank, phase_b_seen_labels=phase_b_seen_labels, plans=plans,
+        seed=seed, support_count=support_count,
+    )
+    if gate_telemetry and "status" not in result:
+        result["admissibility"] = {
+            key: float(np.mean([row[key] for row in gate_telemetry if key in row]))
+            for key in gate_telemetry[0]
+        }
+    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=Path(os.environ.get(
-        "HALO_CKPT", _REPO / "training/tokenizer/outputs/phase_a_headline/best.pt"
+        "HALO_CKPT",
+        _REPO / "training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt",
     )))
     parser.add_argument("--bank", type=Path, default=_OUT / "memory_bank.pt")
-    parser.add_argument("--predictor", type=Path, default=_OUT / "patch_evidence_predictor.pt")
+    parser.add_argument("--predictor", type=Path, default=_OUT / "admissibility_gate.pt")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--datasets", nargs="*", default=None,
                         help="explicit override; otherwise --protocol-role selects the sealed roster")
@@ -732,14 +1028,16 @@ def main() -> None:
     )
     parser.add_argument("--random-aliases", action="store_true")
     parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--gate-top-k", type=int, default=64,
+                        help="evidence rows retrieved per query patch and candidate")
     parser.add_argument("--seed", type=int, default=20260808)
     parser.add_argument("--out", type=Path, default=None,
                         help="explicit result path; otherwise derived from the protocol role. "
                              "Use this to score several arms without clobbering each other.")
     parser.add_argument(
         "--accept-training-regime", default=None,
-        help="score a predictor recorded under this older regime instead of "
-             f"{PHASE_B_TRAINING_REGIME!r}. Required to re-score an archived checkpoint after a "
+        help="score a predictor recorded under an older regime. Required to re-score an archived "
+             "checkpoint after a "
              "training-only recipe change; the accepted regime is written into the result so the "
              "comparison stays auditable. Never use it to mix EVALUATION protocols.",
     )
@@ -757,28 +1055,51 @@ def main() -> None:
         }[args.protocol_role]
     if any(value < 0 for value in args.support):
         parser.error("support counts must be nonnegative")
+    if args.gate_top_k < 1:
+        parser.error("--gate-top-k must be positive")
+    if args.batch < 1:
+        parser.error("--batch must be positive")
     device = resolve_device(args.device)
 
     bank = torch.load(args.bank, map_location="cpu", weights_only=True)
     assert_bank_current(bank, context="eval_enrollment")
     assert_patch_bank(bank, context="eval_enrollment")
+    # Runtime candidate text is compared directly with stored label text in the active sensor-bank
+    # design. Schema-3 banks predate this probe and exist only for historical reproduction.
+    if int(bank.get("schema_version", 1)) >= 4:
+        assert_text_embedding_path_current(bank, context="eval_enrollment")
     predictor = torch.load(args.predictor, map_location="cpu", weights_only=True)
     predictor_fp = hashlib.sha256(args.predictor.read_bytes()).hexdigest()
     assert_artifact_matches_bank(
         predictor, bank, context="eval_enrollment", artifact_name="patch evidence predictor"
     )
+    predictor_mode = predictor.get("predictor_mode", "relational_decoder")
+    if predictor_mode not in set(PREDICTOR_MODES):
+        raise SystemExit(f"unsupported predictor mode {predictor_mode!r}")
+    if predictor_mode == "admissibility_gate" and bank.get("schema_version", 0) < 5:
+        # Fail before scoring rather than after: older banks do not bind sensor text semantics, and
+        # "which sensor produced this row" — the gate's entire input — is undefined for them.
+        raise SystemExit(
+            "predictor_mode='admissibility_gate' requires a schema-5 bank with per-sensor rows "
+            f"(this bank is schema {bank.get('schema_version', 0)}). Rebuild it with "
+            "`build_memory --sensor-rows` against a sensor-granularity checkpoint."
+        )
     recorded_regime = predictor.get("training_regime")
-    accepted = {PHASE_B_TRAINING_REGIME}
+    native_regimes = accepted_training_regimes(predictor_mode)
+    accepted = set(native_regimes)
     if args.accept_training_regime:
         accepted.add(args.accept_training_regime)
     if recorded_regime not in accepted:
         raise SystemExit(
-            f"enrollment evaluation requires regime {PHASE_B_TRAINING_REGIME!r}; the predictor "
+            f"enrollment evaluation requires one of {sorted(native_regimes)!r}; the predictor "
             f"records {recorded_regime!r}. Pass --accept-training-regime to score it anyway."
         )
-    current_source_fp = phase_b_source_fingerprint()
+    current_source_fp = (
+        None if predictor_mode == "admissibility_gate" else phase_b_source_fingerprint()
+    )
     recorded_source_fp = predictor.get("training_source_fp")
-    if recorded_source_fp != current_source_fp and not args.accept_training_source_fingerprint:
+    if predictor_mode != "admissibility_gate" and recorded_source_fp != current_source_fp \
+            and not args.accept_training_source_fingerprint:
         raise SystemExit(
             "Phase-B behavioral source differs from the predictor artifact. Re-train under the "
             "current regime, or pass --accept-training-source-fingerprint for an explicitly "
@@ -792,37 +1113,64 @@ def main() -> None:
     encoder = build_encoder(checkpoint, device)
     assert_embedding_path_current(bank, encoder, device, context="eval_enrollment")
     assert_patch_embedding_path_current(bank, encoder, device, context="eval_enrollment")
-    cfg = predictor["cfg"]
-    if cfg.get("tokenizer_mode") == "ema_finetune":
-        encoder.load_state_dict(predictor["tokenizer_ema"])
-    decoder = build_decoder(cfg).to(device)
-    decoder.load_state_dict(predictor["decoder"]); decoder.eval()
-    retriever = PatchSubspaceRetriever(
-        cfg["d_model"], cfg["n_subspaces"], cfg["subspace_dim"], cfg["subspace_ema"]
-    ).to(device)
-    retriever.load_state_dict(predictor["retriever"]); retriever.eval()
-    policy = PhaseBPolicy(
-        int(predictor["retrieval_cfg"]["evidence_budget"]),
-        cfg.get("tokenizer_mode", "frozen"),
-    )
+    gate = base_sensor_rows = None
+    decoder = retriever = policy = None
+    if predictor_mode == "admissibility_gate":
+        assert_sensor_bank(bank, context="eval_enrollment")
+        assert_sensor_embedding_path_current(bank, encoder, device, context="eval_enrollment")
+        gate = load_gate(args.predictor).to(device)
+    else:
+        cfg = predictor["cfg"]
+        if cfg.get("tokenizer_mode") == "ema_finetune":
+            encoder.load_state_dict(predictor["tokenizer_ema"])
+        decoder = build_decoder(cfg).to(device)
+        decoder.load_state_dict(predictor["decoder"]); decoder.eval()
+        retriever = PatchSubspaceRetriever(
+            cfg["d_model"], cfg["n_subspaces"], cfg["subspace_dim"], cfg["subspace_ema"]
+        ).to(device)
+        retriever.load_state_dict(predictor["retriever"]); retriever.eval()
+        policy = PhaseBPolicy(
+            int(predictor["retrieval_cfg"]["evidence_budget"]),
+            cfg.get("tokenizer_mode", "frozen"),
+        )
 
     table = PatchTable(bank)
     base_rows = table.sample_index_rows(
         torch.ones(len(bank["Z"]), dtype=torch.bool), ACTIVE_WINDOWS_PER_LABEL,
-        np.random.default_rng(predictor["retrieval_cfg"]["index_seed"]),
+        np.random.default_rng(active_index_seed(predictor, args.seed)),
     )
-    if policy.tokenizer_mode == "ema_finetune":
-        source = SourcePatchEncoder(bank, device)
-        base_selector_z = source.encode_patch_rows(
-            base_rows, encoder, requires_grad=False
+    base_selector_z = None
+    if predictor_mode != "admissibility_gate":
+        if policy is not None and policy.tokenizer_mode == "ema_finetune":
+            source = SourcePatchEncoder(bank, device)
+            base_selector_z = source.encode_patch_rows(
+                base_rows, encoder, requires_grad=False
+            ).to(device)
+        else:
+            base_selector_z = bank["patch"]["Z"][base_rows].float().to(device)
+        base_selector_z = F.normalize(base_selector_z, dim=-1)
+    if predictor_mode == "admissibility_gate":
+        # Use the same label-balanced active window archive as the legacy path, then take every
+        # per-sensor patch row belonging to those windows. This bounds retrieval cost without changing
+        # the archive population or introducing a second sampling policy.
+        active_windows = torch.unique(bank["patch"]["window"][base_rows].long())
+        sensor_row_index = torch.isin(
+            bank["sensor"]["window"].long(), active_windows
+        ).nonzero(as_tuple=False).flatten()
+        from training.evidence.gate_predictor import sensor_rows_from_bank
+
+        base_sensor_rows = sensor_rows_from_bank(
+            bank, row_indices=sensor_row_index
         ).to(device)
-    else:
-        base_selector_z = bank["patch"]["Z"][base_rows].float().to(device)
-    base_selector_z = F.normalize(base_selector_z, dim=-1)
     sbert = get_sbert_encoder()
-    canonical_text = ensemble_text(list(bank["vocab"]), sbert, 8, train_only=True).to(device)
+    # Predictor comparisons must differ in predictor mechanics, not in the text representation they
+    # receive. The bank stores the canonical MiniLM vectors used by the active Phase-B protocol.
+    canonical_text = F.normalize(bank["label_text"].float(), dim=-1).to(device)
     aliases = encode_neutral_aliases(sbert, device)
-    phase_b_seen_labels = set(predictor.get("phase_b_train_labels", ()))
+    phase_b_seen_labels = set(
+        predictor.get("phase_b_train_labels", ())
+        or (predictor.get("provenance") or {}).get("training_concepts", ())
+    )
     if not phase_b_seen_labels:
         held = set(int(value) for value in predictor.get("heldout_labels", ()))
         phase_b_seen_labels = {
@@ -832,7 +1180,10 @@ def main() -> None:
     phase_a_datasets = {
         str(name).split("/", 1)[0] for name in bank_config_names.values()
     }
-    phase_b_datasets = set(predictor.get("phase_b_train_datasets", ()))
+    phase_b_datasets = set(
+        predictor.get("phase_b_train_datasets", ())
+        or (predictor.get("provenance") or {}).get("training_datasets", ())
+    )
     phase_b_subject_names = set(predictor.get("phase_b_train_subject_names", ()))
 
     encoded_streams = {}
@@ -854,6 +1205,7 @@ def main() -> None:
             device, float(stream.rate_hz),
             _stream_gravity_state(stream.dataset, stream.stream),
             channel_mask=stream.mask, dataset=stream.dataset, stream=stream.stream,
+            export_sensor_rows=predictor_mode == "admissibility_gate",
         )
         value = {
             "stream": stream,
@@ -955,22 +1307,45 @@ def main() -> None:
                                 "queries": 0,
                             }
                         else:
-                            result = score_enrollment_cell(
-                                query_source["encoded"], query_source["labels"],
-                                query_source["subjects"], plans, bank,
-                                base_rows, base_selector_z, decoder, retriever,
-                                canonical_text, sbert, aliases, policy, device,
-                                support_count=support_count, mode=mode,
-                                random_aliases=args.random_aliases, batch_size=args.batch,
+                            common = dict(
+                                support_count=support_count,
+                                random_aliases=args.random_aliases,
                                 seed=relation_seed,
                                 support_encoded=support_source["encoded"],
                                 support_subjects=support_source["subjects"],
-                                enrolled_candidate_count=(0 if enrollment_shape == "partial" else None),
-                                phase_b_seen_labels=phase_b_seen_labels,
-                                same_configuration=(
-                                    configuration_relation == "same_configuration"
+                                enrolled_candidate_count=(
+                                    0 if enrollment_shape == "partial" else None
                                 ),
+                                phase_b_seen_labels=phase_b_seen_labels,
                             )
+                            if predictor_mode == "admissibility_gate":
+                                result = score_admissibility_cell(
+                                    query_source["encoded"], query_source["labels"],
+                                    query_source["subjects"], plans, bank,
+                                    base_sensor_rows, gate, canonical_text, sbert, aliases, device,
+                                    query_dataset=query_source["stream"].dataset,
+                                    query_stream=query_source["stream"].stream,
+                                    query_mask=query_source["stream"].mask,
+                                    support_dataset=support_source["stream"].dataset,
+                                    support_stream=support_source["stream"].stream,
+                                    support_mask=support_source["stream"].mask,
+                                    top_k=args.gate_top_k,
+                                    batch_size=args.batch,
+                                    **common,
+                                )
+                            else:
+                                result = score_enrollment_cell(
+                                    query_source["encoded"], query_source["labels"],
+                                    query_source["subjects"], plans, bank,
+                                    base_rows, base_selector_z, decoder, retriever,
+                                    canonical_text, sbert, aliases, policy, device,
+                                    mode=mode, batch_size=args.batch,
+                                    same_configuration=(
+                                        configuration_relation == "same_configuration"
+                                    ),
+                                    predictor_mode=predictor_mode,
+                                    **common,
+                                )
                             result["paired_protocol"] = coverage
                         result.update({
                             "query_stream": query_spec.stream_id,
@@ -1006,7 +1381,9 @@ def main() -> None:
                             )
     suffix = "_aliases" if args.random_aliases else ""
     protocol_tag = "custom" if explicit_datasets else args.protocol_role
-    out = args.out or _OUT / f"eval_enrollment_{protocol_tag}{suffix}.json"
+    out = args.out or _OUT / (
+        f"eval_enrollment_{protocol_tag}_{predictor_mode}{suffix}.json"
+    )
     evaluation_source_fp = phase_b_evaluation_source_fingerprint()
     evaluation_protocol = {
         "protocol_role": args.protocol_role,
@@ -1017,6 +1394,20 @@ def main() -> None:
         "configuration_modes": args.configuration_modes,
         "enrollment_shapes": args.enrollment_shapes,
         "seed": args.seed,
+        "gate_top_k": args.gate_top_k,
+        "active_windows_per_label": ACTIVE_WINDOWS_PER_LABEL,
+        "active_archive_patch_rows": int(len(base_rows)),
+        "active_archive_windows": int(
+            torch.unique(bank["patch"]["window"][base_rows].long()).numel()
+        ),
+        "archive_windows": int(len(bank["Z"])),
+        "archive_window_fraction_active": float(
+            torch.unique(bank["patch"]["window"][base_rows].long()).numel()
+            / max(len(bank["Z"]), 1)
+        ),
+        "active_sensor_rows": (
+            int(len(base_sensor_rows.rows.feature)) if base_sensor_rows is not None else None
+        ),
         "curve_policy": (
             "fixed_subject_candidate_query_cohort_with_nested_execution_support_"
             "and_fixed_half_candidate_partial_enrollment"
@@ -1038,6 +1429,21 @@ def main() -> None:
         "datasets": args.datasets,
         "seed": args.seed,
         "batch_size": args.batch,
+        "gate_top_k": args.gate_top_k,
+        "active_windows_per_label": ACTIVE_WINDOWS_PER_LABEL,
+        "active_archive_patch_rows": int(len(base_rows)),
+        "active_archive_windows": int(
+            torch.unique(bank["patch"]["window"][base_rows].long()).numel()
+        ),
+        "archive_windows": int(len(bank["Z"])),
+        "archive_window_fraction_active": float(
+            torch.unique(bank["patch"]["window"][base_rows].long()).numel()
+            / max(len(bank["Z"]), 1)
+        ),
+        "active_sensor_rows": (
+            int(len(base_sensor_rows.rows.feature)) if base_sensor_rows is not None else None
+        ),
+        "predictor_mode": predictor_mode,
         "protocol": protocol,
         "evaluation_regime": PHASE_B_EVALUATION_REGIME,
         "evaluation_source_fp": evaluation_source_fp,
@@ -1048,7 +1454,9 @@ def main() -> None:
             "and_fixed_half_candidate_partial_enrollment"
         ),
         "controls": [
-            "identity_decoder", "support_removed", "support_labels_cyclically_shifted",
+            ("admissibility_disabled" if predictor_mode == "admissibility_gate"
+             else "identity_decoder"),
+            "support_removed", "support_labels_cyclically_shifted",
             "prototype", "l2_ridge_head",
         ],
         "bank": str(args.bank),
@@ -1067,7 +1475,7 @@ def main() -> None:
             and args.accept_training_source_fingerprint
         ),
         "accepted_foreign_regime": (
-            recorded_regime if recorded_regime != PHASE_B_TRAINING_REGIME else None
+            recorded_regime if recorded_regime not in native_regimes else None
         ),
         "checkpoint": str(args.checkpoint),
         "checkpoint_fp": checkpoint_fp,

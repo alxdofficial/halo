@@ -56,6 +56,7 @@ from training.tokenizer.losses_repr import (
 from training.tokenizer.pretrain_data import (
     DFT_SIZE,
     LONG_PATCH_SECONDS_CHOICES,
+    PATCH_SECONDS,
     MIN_RESOLUTION_RATIO,
     SHORT_PATCH_SECONDS_CHOICES,
     VAL_RESOLUTION_PAIR,
@@ -94,11 +95,12 @@ class PretrainConfig:
     # CLI sets the design-of-record sensor path below.
     token_granularity: str = "channel"
     sensor_bias_dim: int = SENSOR_BIAS_DIM
-    descriptor_weight: float = 0.5        # weight on the descriptor-retrieval term
+    descriptor_weight: float = 0.0        # explicit ablation; default JEPA predicts signal latents only
     gate_bias_init: float = -2.0          # factored fusion identity-gate bias at init (sigma~=0.12)
-    # NB: the `pretrain` CLI defaults multiresolution=True (the diagnostic-confirmed winner); this
-    # dataclass default stays False so direct constructors (e.g. grad_check) get the single-res encoder.
+    # Multi-resolution is retained as an explicit ablation. The reference recipe uses one fixed
+    # one-second scale so every extra source of complexity can be evaluated separately.
     multiresolution: bool = False
+    patch_seconds: float = PATCH_SECONDS
     frontend_lr_scale: float = 0.1         # physical adaptation moves slower than the encoder
     frontend_reg_weight: float = 1e-3
     center_shift_fraction: float = 0.45
@@ -112,30 +114,28 @@ class PretrainConfig:
     long_patch_choices: tuple[float, ...] = LONG_PATCH_SECONDS_CHOICES
     min_resolution_ratio: float = MIN_RESOLUTION_RATIO
     val_resolution_pair: tuple[float, float] = VAL_RESOLUTION_PAIR
-    steps: int = 30_000                   # ~4.6 aggregate corpus passes at batch 256 (6,507
-                                          # steps/pass on the 1.666M-window expanded corpus). The previous
-                                          # '~10 passes at batch 512' note was written when
-                                          # batch_size was 512 and was not updated by fd3ae4d.
-    # Batch 256 uses the original 3e-4 reference LR. The stale 4.2e-4 default was the sqrt-scaled
-    # value for batch 512 and survived when the batch was halved; it remains an explicit sweep arm.
-    lr: float = 3e-4
-    weight_decay: float = 0.05
-    warmup_steps: int = 1_000
+    # The 1024 x 7,500 recipe draws the same 7.68M windows as the measured 256 x 30,000 reference
+    # while using the 4090 efficiently. Step-based schedules below are expressed at this batch size.
+    steps: int = 7_500                    # ~4.4 aggregate expanded-corpus equivalents
+    # Conservative square-root LR scaling from 3e-4 at batch 256. Doubling weight decay preserves
+    # approximately the same integrated AdamW shrink over one quarter as many optimizer updates.
+    lr: float = 6e-4
+    weight_decay: float = 0.1
+    warmup_steps: int = 250               # same 256k warmup windows as 1,000 steps at batch 256
     grad_clip: float = 1.0
     # Two fixed-weight objectives. ``jepa_weight=0`` gives the VICReg-only control.
     jepa_weight: float = 1.0
     vicreg_weight: float = 1.0
-    jepa_ema_decay: float = 0.996
+    # 0.996^4 preserves the EMA half-life in examples when batch 256 -> 1024 and updates divide by 4.
+    jepa_ema_decay: float = 0.984095744256
     # BYOL RAMPS the teacher decay rather than fixing it (cosine to exactly 1.0):
-    #     tau_k = 1 - (1 - tau_base) * (cos(pi*k/K) + 1) / 2,  tau_base=0.996 -> 1.0
+    #     tau_k = 1 - (1 - tau_base) * (cos(pi*k/K) + 1) / 2,  tau_base -> 1.0
     # data2vec also anneals but is NOT the source of this shape: it uses a LINEAR ramp for speech
     # and NLP, and a constant 0.9998 for vision. The 'cosine' arm here is BYOL's.
     # The trade-off is real -- early training wants a teacher that moves (the student has
     # nothing to learn from a frozen random target), late training wants one that is stable.
-    # Our 0.996 is exactly BYOL's STARTING value held constant for all 30k steps, i.e. pinned
-    # at the fast end throughout. Plausibly related to JEPA converging by ~step 500 and then
-    # contributing 0.7% of the encoder gradient. Off by default until measured on our data --
-    # three literature transfers already failed at our scale this session.
+    # The reference batch-256 momentum was 0.996. The batch-1024 value above is its exact
+    # example-time equivalent, not a claim that a lower-momentum teacher is intrinsically better.
     jepa_ema_schedule: str = "fixed"      # fixed | cosine (BYOL/data2vec ramp to 1.0)
     # Realised mask fraction is (L + patch)/W, so nominal 0.5 currently masks ~0.56 of short
     # tokens and ~0.63 of long ones. Comparable methods sit HIGHER: BEiT 40%, MAE 75%
@@ -168,15 +168,14 @@ class PretrainConfig:
     sampler_max_dataset_share: float = 0.25
     sampler_subject_alpha: float = 0.5
     homogeneous_sensor_batches: bool = True
-    batch_size: int = 256                 # measured peak: 5.0 GiB on a 24 GB RTX 4090
+    batch_size: int = 1_024               # measured peak: 4.75 GiB on a 24 GB RTX 4090
     calib_batches: int = 50               # frontend norm calibration pass
-    val_every: int = 1_000
+    val_every: int = 500                  # about every 43 s at the measured batch-1024 rate
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
     knn_k: int = 5
-    # Compile only the dual-branch transformer, leaving ragged text conditioning eager. Compiling
-    # encoder.encode specialized on each batch's changing unique-text cardinality and was 2.1x slower;
-    # transformer-only dynamic compilation handles P=12..22 and is checkpoint-neutral. The initial
-    # shapes take ~80 s to compile; the current production path then sustains ~15.6 step/s.
+    # Compile only the transformer, leaving ragged text conditioning eager. Compiling encoder.encode
+    # specialized on each batch's changing unique-text cardinality and was slower. Transformer-only
+    # compilation is checkpoint-neutral; fall back to eager if the backend cannot lower a shape.
     compile_encoder: bool = False
     num_workers: int = 12                 # re-profiled 2026-08-07 on the production two-view loader:
                                           # steady wait 38.8 ms (nw=8) -> 24.1 ms (nw=12), and the
@@ -249,6 +248,9 @@ class PipelineAModel(nn.Module):
             adaptive_gate_init=cfg.adaptive_gate_init,
         )
         self.encoder.multiresolution = cfg.multiresolution
+        if cfg.token_granularity == "sensor" and cfg.descriptor_weight <= 0:
+            self.encoder.descriptor_prediction_enabled = False
+            self.encoder.descriptor_head.requires_grad_(False)
         self.jepa_predictor = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
             nn.Linear(cfg.d_model, cfg.d_model),
@@ -941,11 +943,11 @@ def main() -> None:
                         help="stop and checkpoint at this step while retaining --steps as the full "
                              "LR/EMA schedule (for bounded trajectory monitors)")
     parser.add_argument("--lr", type=float, default=None,
-                        help="optimizer peak learning rate (default 3e-4)")
+                        help="optimizer peak learning rate (default 6e-4 at batch 1024)")
     parser.add_argument("--weight-decay", type=float, default=None,
-                        help="AdamW weight decay (default 0.05)")
+                        help="AdamW weight decay (default 0.1 at batch 1024)")
     parser.add_argument("--warmup-steps", type=int, default=None,
-                        help="linear LR warmup steps (default 1000)")
+                        help="linear LR warmup steps (default 250)")
     parser.add_argument("--grad-clip", type=float, default=None,
                         help="global gradient-norm clipping threshold (default 1.0)")
     parser.add_argument("--smoke", action="store_true",
@@ -967,10 +969,13 @@ def main() -> None:
     parser.add_argument("--token-granularity", choices=("channel", "sensor"), default=None,
                         help="token granularity (docs/design/DESIGN_OF_RECORD.md). 'channel' = one "
                              "token per channel (legacy); 'sensor' = fold each modality triad into "
-                             "one token and enable the sensor-mask + descriptor-mask objectives.")
+                             "one token and enable sensor-level JEPA masking.")
     parser.add_argument("--multiresolution", action=argparse.BooleanOptionalAction, default=None,
-                        help="override multiresolution (default ON); --no-multiresolution is the "
-                             "single-resolution ablation")
+                        help="enable the multi-resolution ablation (default OFF)")
+    parser.add_argument("--patch-seconds", type=float, default=None,
+                        help="single-resolution patch duration in seconds (default 1.0)")
+    parser.add_argument("--descriptor-weight", type=float, default=None,
+                        help="descriptor-reconstruction ablation weight (default 0=disabled)")
     parser.add_argument("--jepa-weight", type=float, default=None,
                         help="masked contextual prediction weight; 0 selects VICReg-only")
     parser.add_argument("--vicreg-weight", type=float, default=None,
@@ -986,7 +991,8 @@ def main() -> None:
                         help="Nominal JEPA temporal mask fraction (default 0.5 -> ~0.6 realised). "
                              "MAE/data2vec use 0.75-0.8.")
     parser.add_argument("--jepa-ema-decay", type=float, default=None,
-                        help="EMA teacher momentum (default 0.996).")
+                        help="EMA teacher momentum (default 0.984095744256 at batch 1024; "
+                             "example-time equivalent to 0.996 at batch 256).")
     parser.add_argument("--vicreg-proj-dim", type=int, default=None,
                         help="VICReg expander OUTPUT width (default 128); also the width of the "
                              "DxD covariance matrices, so memory grows quadratically. "
@@ -997,7 +1003,7 @@ def main() -> None:
                              "--vicreg-proj-dim so the default stays the historical control.")
     parser.add_argument("--calibrate-objectives-at", type=int, default=None,
                         help="collect post-warmup objective gradients ending at this step and "
-                             "resolve one frozen scalarization (real-run default: 2000; 0 disables)")
+                             "resolve one frozen scalarization (real-run default: 500; 0 disables)")
     parser.add_argument("--objective-calibration-batches", type=int, default=None,
                         help="number of consecutive post-warmup batches used by calibration "
                              "(default 50)")
@@ -1017,7 +1023,8 @@ def main() -> None:
                         help="within-dataset subject-size exponent: 1=proportional, 0=uniform over "
                              "subjects, 0.5=square-root tempering (default).")
     parser.add_argument("--batch", type=int, default=None,
-                        help="batch size for the temperature sampler (default 256)")
+                        help="batch size for the temperature sampler (default 1024 for the fixed "
+                             "one-second recipe)")
     parser.add_argument("--num-workers", type=int, default=None,
                         help="training DataLoader workers (default 12, profiled for a Ryzen 7900X + "
                              "RTX 4090; use 0 for in-process loading)")
@@ -1052,12 +1059,11 @@ def main() -> None:
         device=args.device,
         frontend=args.frontend,
         token_granularity="sensor",
-        multiresolution=True,          # new Phase-A default: multiresolution ON (diagnostic-confirmed
-                                       # winner, 0.835 held-out transfer); --no-multiresolution to ablate
+        multiresolution=False,
         text_conditioning="factored",  # PAPER default (F8): factored role+sensor conditioning is the
                                        # committed arm; --text-conditioning per_channel is the ablation.
                                        # (The dataclass default stays per_channel for direct/test ctors.)
-        objective_calibration_at=2_000,
+        objective_calibration_at=500,
         objective_calibration_mode="apply",
         compile_encoder=args.device.startswith("cuda") and not args.smoke,
         train_datasets=(TRAIN_DATASETS if args.corpus == "expanded"
@@ -1069,6 +1075,10 @@ def main() -> None:
         cfg.token_granularity = args.token_granularity
     if args.multiresolution is not None:
         cfg.multiresolution = args.multiresolution
+    if args.patch_seconds is not None:
+        cfg.patch_seconds = args.patch_seconds
+    if args.descriptor_weight is not None:
+        cfg.descriptor_weight = args.descriptor_weight
     if args.jepa_weight is not None:
         cfg.jepa_weight = args.jepa_weight
     if args.vicreg_weight is not None:
@@ -1135,7 +1145,28 @@ def main() -> None:
         cfg.warmup_steps = args.warmup_steps
     if args.grad_clip is not None:
         cfg.grad_clip = args.grad_clip
-    # The paper recipe calibrates by default. Tiny smoke runs cannot reach step 2,000, and the
+    # The dual-resolution ablation has up to 22 patches per six-second window, so batch 1024 would
+    # exceed its 12,288-token budget and silently leave only the coarsest resolution pair. Give the
+    # ablation its own sample-matched batch-512 schedule unless the caller explicitly overrides a
+    # field. An explicitly oversized batch is rejected below rather than changing the experiment.
+    if cfg.multiresolution:
+        if args.batch is None:
+            cfg.batch_size = 512
+        if args.steps is None:
+            cfg.steps = 15_000
+        if args.lr is None:
+            cfg.lr = 4.242640687119285e-4
+        if args.weight_decay is None:
+            cfg.weight_decay = 0.07071067811865475
+        if args.warmup_steps is None:
+            cfg.warmup_steps = 500
+        if args.calibrate_objectives_at is None:
+            cfg.objective_calibration_at = 1_000
+        if args.jepa_ema_decay is None:
+            cfg.jepa_ema_decay = 0.992016  # 0.996^2: batch-256 EMA half-life in examples
+        if cfg.batch_size > 512:
+            parser.error("--multiresolution requires --batch <= 512 to retain every resolution pair")
+    # The paper recipe calibrates by default. Tiny smoke runs cannot reach step 500, and the
     # VICReg-only control has no second objective to balance; disable only when the user did not
     # explicitly request a calibration experiment.
     if args.smoke and args.calibrate_objectives_at is None:
@@ -1151,6 +1182,8 @@ def main() -> None:
         parser.error("--mask-ratio-time must be in (0,1)")
     if cfg.vicreg_proj_dim <= 0 or cfg.vicreg_proj_hidden <= 0:
         parser.error("expander widths must be positive")
+    if cfg.patch_seconds <= 0:
+        parser.error("--patch-seconds must be positive")
     if cfg.vicreg_proj_dim > 2048:
         # VICReg materialises two dense DxD covariance matrices per step (losses_repr.vicreg), so
         # fp32 memory is 8*D^2 bytes before autograd: 128MiB at 4096, 512MiB at 8192.
@@ -1258,12 +1291,14 @@ def main() -> None:
         min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
         two_view=True,
     ) if cfg.multiresolution
-                     else MultiScaleCollate(seed=cfg.seed, two_view=True))
+                     else MultiScaleCollate(fixed_patch_seconds=cfg.patch_seconds,
+                                            seed=cfg.seed, two_view=True))
     calibration_collate = (MultiResolutionCollate(
         short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
         min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
         two_view=False,
-    ) if cfg.multiresolution else MultiScaleCollate(seed=cfg.seed, two_view=False))
+    ) if cfg.multiresolution else MultiScaleCollate(fixed_patch_seconds=cfg.patch_seconds,
+                                                     seed=cfg.seed, two_view=False))
     loader_kwargs = dict(
         collate_fn=train_collate, num_workers=cfg.num_workers, worker_init_fn=_seed_worker,
         persistent_workers=cfg.num_workers > 0, pin_memory=device.type == "cuda")
@@ -1320,7 +1355,7 @@ def main() -> None:
         MultiResolutionCollate(fixed_patch_seconds=cfg.val_resolution_pair,
                                min_resolution_ratio=cfg.min_resolution_ratio)
         if cfg.multiresolution else
-        MultiScaleCollate(fixed_patch_seconds=1.0)
+        MultiScaleCollate(fixed_patch_seconds=cfg.patch_seconds)
     )
     val_loader = DataLoader(val_ds, batch_size=256, shuffle=False, collate_fn=val_collate,
                             num_workers=val_workers, persistent_workers=val_workers > 0,
@@ -1385,6 +1420,8 @@ def main() -> None:
     }
     adaptive_params, base_params = [], []
     for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
         if name in adaptive_names:
             adaptive_params.append(parameter)
         else:
@@ -1645,10 +1682,13 @@ def main() -> None:
               "(dynamic, checkpoint-neutral) — step 1 pays the compile", flush=True)
 
     mask_description = (
-        "contiguous time + same-placement whole-sensor + descriptor"
+        "contiguous time + same-placement whole-sensor"
         if cfg.token_granularity == "sensor" else
-        "independent contiguous block per resolution"
+        ("independent contiguous block per resolution" if cfg.multiresolution
+         else "contiguous time + whole-channel")
     )
+    if cfg.descriptor_weight > 0:
+        mask_description += " + descriptor"
     if cfg.jepa_weight > 0:
         print(f"jepa mask: {mask_description}, ratio={cfg.mask_ratio_time:g}", flush=True)
     else:
@@ -1672,6 +1712,7 @@ def main() -> None:
     amp_skipped_total = 0
     amp_consecutive_skips = 0
     zero_target_count = torch.zeros((), device=device)
+    jepa_ineligible_count = torch.zeros((), device=device)
     zero_target_examples = 0
     descriptor_target_count = torch.zeros((), device=device)
     descriptor_target_windows = torch.zeros((), device=device)
@@ -1738,7 +1779,8 @@ def main() -> None:
                 plan = make_sensor_mask_plan(
                     B, P, n_sensors, device=device, time_ratio=cfg.mask_ratio_time,
                     valid_patches=patch_pad, sensor_present=present,
-                    sensor_placement=sensor_placement)
+                    sensor_placement=sensor_placement,
+                    descriptor_event_p=(0.25 if cfg.descriptor_weight > 0 else 0.0))
                 descriptor_mask = plan.descriptor_mask
                 descriptor_target_count = descriptor_target_count + descriptor_mask.sum()
                 descriptor_target_windows = (
@@ -1788,7 +1830,7 @@ def main() -> None:
             if sensor_granularity:
                 sensor_descriptors, sensor_text_ids = \
                     model.encoder.encode_sensor_descriptors_unique(batch["sensor_texts"], device)
-                if cfg.jepa_weight > 0:
+                if cfg.jepa_weight > 0 and cfg.descriptor_weight > 0:
                     descriptor_target_descriptors, descriptor_target_ids = \
                         model.encoder.encode_sensor_descriptors_unique(
                             batch["sensor_target_texts"], device,
@@ -1847,7 +1889,16 @@ def main() -> None:
                 jepa_mask = torch.zeros(clean["tokens"].shape[:3], dtype=torch.bool, device=device)
 
             if cfg.jepa_weight > 0:
-                zero_target_count = zero_target_count + jepa_mask.flatten(1).sum(dim=1).eq(0).sum()
+                if sensor_granularity:
+                    observable_tokens = (
+                        patch_pad.sum(dim=1) * masked["sensor_present"].sum(dim=1)
+                    )
+                else:
+                    observable_tokens = patch_pad.sum(dim=1) * enc_channel_mask.sum(dim=1)
+                jepa_eligible = observable_tokens > 1
+                targetless = jepa_mask.flatten(1).sum(dim=1).eq(0)
+                zero_target_count = zero_target_count + (targetless & jepa_eligible).sum()
+                jepa_ineligible_count = jepa_ineligible_count + (~jepa_eligible).sum()
                 zero_target_examples += B
 
             jepa_loss = clean["pooled"].new_zeros(())
@@ -1929,13 +1980,14 @@ def main() -> None:
                 target_std=cfg.vicreg_target_std,
             )
 
-            # Descriptor-mask objective (design of record). Only the sensors whose descriptor was
+            # Descriptor-mask ablation. Only the sensors whose descriptor was
             # actually hidden are scored — an unmasked sensor's descriptor was fed to the encoder,
             # so "reconstructing" it is a copy, not a prediction, and including those rows would
             # report a high accuracy that means nothing.
             descriptor_loss = jepa_loss.new_zeros(())
             descriptor_acc = jepa_loss.new_zeros(())
-            if sensor_granularity and descriptor_mask is not None:
+            if (cfg.descriptor_weight > 0 and sensor_granularity
+                    and descriptor_mask is not None and bool(descriptor_mask.any())):
                 score_rows = descriptor_mask & masked["sensor_present"]
                 target_descriptor = descriptor_target_descriptors.index_select(
                     0, descriptor_target_ids.clamp_min(0).reshape(-1),
@@ -2097,7 +2149,6 @@ def main() -> None:
             update_ema_encoder(model.encoder, jepa_teacher, ema_decay_at(step))
         if optimizer_stepped:
             sched.step()
-
         if do_log:
             lrs = sched.get_last_lr()
             log_wall = time.perf_counter()
@@ -2162,6 +2213,10 @@ def main() -> None:
                     float(zero_target_count) / max(zero_target_examples, 1)
                     if cfg.jepa_weight > 0 else 0.0
                 ),
+                "jepa_ineligible_frac_window": (
+                    float(jepa_ineligible_count) / max(zero_target_examples, 1)
+                    if cfg.jepa_weight > 0 else 0.0
+                ),
                 "descriptor/targets_window": int(descriptor_target_count),
                 "descriptor/target_window_fraction": (
                     float(descriptor_target_windows) / max(zero_target_examples, 1)
@@ -2188,13 +2243,16 @@ def main() -> None:
             if teacher_clean is not None and do_objective_grad_log:
                 rec.update(representation_health(teacher_clean["pooled"], "repr_teacher"))
             if cfg.jepa_weight > 0:
-                # Windows that get no masked token at all, per source. This should remain zero after
-                # the short-window mask-planning fix; keep it visible so future patch choices cannot
-                # silently remove JEPA supervision from a source.
+                # Separate planner failures from physically ineligible one-token windows. The former
+                # must remain zero; the latter legitimately receive VICReg but no JEPA loss.
                 with torch.no_grad():
-                    zero_target = (jepa_mask.flatten(1).sum(dim=1) == 0).float()
+                    zero_target = ((jepa_mask.flatten(1).sum(dim=1) == 0)
+                                   & jepa_eligible).float()
+                    ineligible = (~jepa_eligible).float()
                 rec["jepa_zero_target_frac_by_source"] = per_source_mean(
                     zero_target, batch["sources"])
+                rec["jepa_ineligible_frac_by_source"] = per_source_mean(
+                    ineligible, batch["sources"])
             if len(lrs) > 1:
                 rec["lr_frontend"] = lrs[1]
             if model.encoder.filterbank.learnable:
@@ -2223,6 +2281,7 @@ def main() -> None:
             observed_source_rates.clear()
             amp_skipped_since_log = 0
             zero_target_count.zero_()
+            jepa_ineligible_count.zero_()
             zero_target_examples = 0
             descriptor_target_count.zero_()
             descriptor_target_windows.zero_()

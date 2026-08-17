@@ -1,8 +1,8 @@
 """Activation and gradient-flow diagnostic for the canonical Phase-A sensor model.
 
-Runs one real CPU batch through sensor-granularity JEPA (including descriptor masking) and
-augmentation VICReg. It checks conditioning scale, per-module gradients, frozen text parameters,
-and dead trainable parameters.
+Runs one real CPU batch through fixed-one-second sensor-granularity JEPA and rotation VICReg. It
+checks conditioning scale, per-module gradients, frozen text parameters, and dead trainable
+parameters in the reference recipe.
 
 Run: /home/alex/code/HALO/legacy_code/.venv/bin/python -m training.tokenizer.grad_check
 """
@@ -23,10 +23,9 @@ from training.tokenizer.losses_repr import (
     phase_a_loss,
     vicreg,
 )
-from model.tokenizer.sensor_tokens import descriptor_retrieval_loss
 from training.tokenizer.pretrain import PipelineAModel, PretrainConfig
 from training.tokenizer.pretrain_data import (
-    SENSOR_BIAS_DIM, SEED, CorpusIndex, MultiResolutionCollate, PretrainDataset,
+    SENSOR_BIAS_DIM, SEED, CorpusIndex, MultiScaleCollate, PretrainDataset,
     validate_sensor_bias_training_corpus,
 )
 
@@ -53,7 +52,7 @@ def main() -> None:
     cfg = PretrainConfig(
         d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
         device=str(device), text_conditioning="factored", token_granularity="sensor",
-        sensor_bias_dim=SENSOR_BIAS_DIM, multiresolution=True,
+        sensor_bias_dim=SENSOR_BIAS_DIM, multiresolution=False, descriptor_weight=0.0,
     )
     index = CorpusIndex(max_per_stream=200, seed=SEED)
     validate_sensor_bias_training_corpus(index.refs, index.datasets, index.seed)
@@ -64,9 +63,7 @@ def main() -> None:
         0, len(index.train) - 1, 64, dtype=np.int64,
     )]
     dataset = PretrainDataset(index, diagnostic_keys, augment=True, two_view=True)
-    collate = MultiResolutionCollate(
-        fixed_patch_seconds=(0.5, 1.5), seed=SEED, two_view=True,
-    )
+    collate = MultiScaleCollate(fixed_patch_seconds=1.0, seed=SEED, two_view=True)
     batch = collate([dataset[i] for i in range(len(diagnostic_keys))])
 
     model = PipelineAModel(cfg).to(device)
@@ -89,7 +86,6 @@ def main() -> None:
         channel_mask = batch[f"channel_mask{suffix}"].to(device)
         patch_mask = batch[f"patch_padding_mask{suffix}"].to(device)
         patch_durations = batch[f"patch_durations{suffix}"].to(device)
-        resolution_ids = batch[f"resolution_ids{suffix}"].to(device)
         tokens = model.encoder.tokenize(
             patches, rates, lengths,
             source_rate_hz=batch[f"source_rates{suffix}"].to(device),
@@ -102,7 +98,7 @@ def main() -> None:
         sensor_bias = batch[f"sensor_bias{suffix}"].to(device)
         output = model.encoder.encode(
             tokens, text, text_mask, positions,
-            patch_durations=patch_durations, resolution_ids=resolution_ids,
+            patch_durations=patch_durations,
             token_mask=token_mask,
             channel_mask=channel_mask, patch_padding_mask=patch_mask,
             sensor_text_embs=sensor_text, sensor_text_masks=sensor_text_mask,
@@ -122,33 +118,19 @@ def main() -> None:
         sensor_present=clean["sensor_present"],
         sensor_placement=batch["sensor_placement"].to(device),
     )
-    *_, masked = encode(token_mask=plan.token_mask, descriptor_mask=plan.descriptor_mask)
+    *_, masked = encode(token_mask=plan.token_mask)
     *_, view_b = encode("_b")
     jepa_prediction = model.jepa_predictor(masked["tokens"])
     jepa_mask = (plan.token_mask & masked["sensor_present"].unsqueeze(1)
                  & batch["patch_padding_mask"].to(device).unsqueeze(2))
     jepa = masked_ema_latent_loss(
         jepa_prediction, clean["tokens"].detach(), jepa_mask,
-        token_groups=batch["resolution_ids"].to(device),
         token_durations=batch["patch_durations"].to(device),
     )
-    descriptor_rows = plan.descriptor_mask & masked["sensor_present"]
-    target_descriptors, target_ids = model.encoder.encode_sensor_descriptors_unique(
-        batch["sensor_target_texts"], device,
-    )
-    target_dense = target_descriptors.index_select(
-        0, target_ids.clamp_min(0).reshape(-1),
-    ).reshape(*target_ids.shape, -1)
-    descriptor, _ = descriptor_retrieval_loss(
-        masked["descriptor_pred"], target_dense,
-        target_ids=target_ids, candidate_descriptors=target_descriptors,
-        row_mask=descriptor_rows,
-    )
-    jepa_objective = jepa + cfg.descriptor_weight * descriptor
     z_a = model.vicreg_projector(clean["pooled"])
     z_b = model.vicreg_projector(view_b["pooled"])
     vicreg_result = vicreg(z_a, z_b)
-    loss = phase_a_loss(jepa_objective, vicreg_result.total)
+    loss = phase_a_loss(jepa, vicreg_result.total)
 
     model.zero_grad(set_to_none=True)
     loss.total.backward()
@@ -198,9 +180,7 @@ def main() -> None:
     report = {
         "device": str(device),
         "batch": [batch_size, patches, sensors],
-        "loss": {"jepa": float(jepa.detach()), "descriptor": float(descriptor.detach()),
-                 "jepa_family": float(jepa_objective.detach()),
-                 "vicreg": float(vicreg_result.total.detach())},
+        "loss": {"jepa": float(jepa.detach()), "vicreg": float(vicreg_result.total.detach())},
         "activation_rms": {key: round(value, 5) for key, value in magnitudes.items()},
         "conditioning_delta_ratio": round(conditioning_ratio, 5),
         "gradient_norms": gradients,

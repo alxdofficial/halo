@@ -1,8 +1,8 @@
 """``resolvability`` — can a given acquisition configuration witness a given concept?
 
 THE MEASUREMENT THE CONTRIBUTION RESTS ON (docs/design/DESIGN_OF_RECORD.md). The admissibility gate
-consumes a (source config, target config, candidate concept) function; ``training/evidence/
-admissible_retrieval.py`` accepts it as an argument and nothing produced it until this module.
+learns whether one physical sensor can witness one candidate concept. Runtime combines the query-side
+and evidence-side sensor scores; this module supplies the train-only per-sensor measurements.
 
 THE CLAIM, STATED SO IT CAN FAIL
 --------------------------------
@@ -13,9 +13,9 @@ across datasets with different subjects and protocols.
 
 Two estimators, in increasing order of how much they prove:
 
-1. ``per_stream_resolvability`` — for every (stream, label), how well does that stream separate that
-   label from the rest of its own protocol? One-vs-rest, subject-disjoint kNN, rescaled so 0 = chance
-   and 1 = perfect. This is "can this configuration witness this concept", measured directly.
+1. Per-sensor resolvability — for every (stream, modality, label), how well does that physical sensor
+   separate the label from the rest of its own protocol? One-vs-rest, subject-disjoint kNN, rescaled
+   so 0 = chance and 1 = perfect.
 
 2. ``paired_contrast`` — restricted to datasets where several streams record the SAME sessions
    simultaneously (sp_sw_har phone+watch, xrf_v2's six streams, opportunity, realdisp, mmfit). Same
@@ -40,6 +40,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -106,60 +107,210 @@ def _one_vs_rest_resolvability(
     return out
 
 
+def _pool_sensor_windows(encoded: dict, slot: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Duration-pool one sensor's patch rows to one vector per source window.
+
+    Multi-resolution rows are pooled within each resolution first, then the available resolutions are
+    averaged. This mirrors the encoder's equal treatment of resolutions and prevents the denser patch
+    grid from receiving more weight merely because it emits more rows.
+    """
+    row = encoded["sensor_slot"].long().eq(int(slot))
+    if not bool(row.any()):
+        return torch.empty((0, encoded["sensor_Z"].shape[-1])), torch.empty(0, dtype=torch.long)
+    z = encoded["sensor_Z"][row].float().cpu()
+    window = encoded["sensor_window"][row].long().cpu()
+    duration = encoded["sensor_duration"][row].float().cpu()
+    resolution = encoded["sensor_resolution"][row].long().cpu()
+    pooled, windows = [], []
+    for source_window in window.unique(sorted=True).tolist():
+        per_resolution = []
+        in_window = window.eq(source_window)
+        for value in resolution[in_window].unique(sorted=True).tolist():
+            selected = in_window & resolution.eq(value)
+            weight = duration[selected].clamp_min(1e-8)
+            per_resolution.append((z[selected] * weight.unsqueeze(1)).sum(0) / weight.sum())
+        pooled.append(torch.stack(per_resolution).mean(0))
+        windows.append(source_window)
+    return torch.stack(pooled), torch.tensor(windows, dtype=torch.long)
+
+
 def build(checkpoint: Path, device: str = "cuda", limit_streams: int | None = None) -> dict:
-    """Encode every stream with a frozen encoder and score per-(stream, label) resolvability."""
+    """Measure per-(sensor, concept) resolvability on Phase-A TRAINING subjects only."""
     from data.scripts.eda.grid_io import discover_grids
-    from training.tokenizer.eval_transfer import build_encoder, encode_dataset
-    from training.tokenizer.pretrain_data import (stream_channel_descriptions,
-                                                  _stream_gravity_state)
+    from data.scripts.scan_duplicates import load as load_duplicates
+    from data.scripts.scan_implausible import load as load_implausible
+    from training.tokenizer.eval_transfer import build_encoder, encode_dataset_detailed
+    from training.tokenizer.pretrain_data import (
+        SEED as PHASE_A_SEED,
+        _stream_gravity_state,
+        modalities_present,
+        stream_channel_descriptions,
+        stream_sensor_texts,
+        validation_subjects_for_refs,
+    )
 
     dev = torch.device(device if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(checkpoint, map_location="cpu", weights_only=False)
     enc = build_encoder(ckpt, dev)
+    if getattr(enc, "token_granularity", "channel") != "sensor":
+        raise ValueError(
+            "resolvability requires a sensor-granularity Phase-A checkpoint; pooled channel-era "
+            "embeddings cannot supervise a per-sensor admissibility gate"
+        )
     print(f"encoder: {checkpoint} step {ckpt.get('step')} git {ckpt.get('git')}", flush=True)
 
-    refs = sorted(discover_grids("native"), key=lambda r: (r.dataset, r.stream))
-    if limit_streams:
-        refs = refs[:limit_streams]
+    roster = tuple(ckpt.get("config", {}).get("train_datasets") or ())
+    if not roster:
+        raise ValueError(
+            "checkpoint does not record config.train_datasets; refusing to guess a roster for a "
+            "training-derived admissibility artifact"
+        )
+    all_refs = sorted(
+        (ref for ref in discover_grids("native") if ref.dataset in set(roster)),
+        key=lambda r: (r.dataset, r.stream),
+    )
+    represented = {ref.dataset for ref in all_refs if ref.n_windows > 0}
+    missing = sorted(set(roster) - represented)
+    if missing:
+        raise FileNotFoundError(f"checkpoint training datasets have no native grids: {missing}")
+    # Derive the Phase-A subject split from the full checkpoint roster. ``limit_streams`` is a debug
+    # work cap only and must not silently change which subjects count as training observations.
+    val_subjects = validation_subjects_for_refs(all_refs, seed=PHASE_A_SEED)
+    refs = all_refs[:limit_streams] if limit_streams else all_refs
+    val_payload = "\n".join(f"{d}\t{s}" for d, s in sorted(val_subjects))
+    val_hash = hashlib.sha256(val_payload.encode()).hexdigest()
+    bad_by_stream = load_implausible("native", require=True)
+    duplicate_by_stream = load_duplicates("native", require=True)
 
-    per_stream: dict[str, dict] = {}
-    for ref in refs:
-        data = ref.load_data()
-        labels = np.asarray(ref.labels)
+    def eligible_rows(ref) -> np.ndarray:
         subjects = np.asarray(ref.subjects)
-        if data.shape[0] > MAX_WINDOWS_PER_STREAM:
-            step = data.shape[0] // MAX_WINDOWS_PER_STREAM
-            data, labels, subjects = data[::step], labels[::step], subjects[::step]
+        excluded = bad_by_stream.get(ref.key, set()) | duplicate_by_stream.get(ref.key, set())
+        stale = sorted(index for index in excluded if index >= ref.n_windows)
+        if stale:
+            raise RuntimeError(
+                f"{ref.key}: quality cache indexes window {stale[-1]} but the grid has "
+                f"{ref.n_windows}; rebuild the quality scans"
+            )
+        return np.asarray([
+            i for i, subject in enumerate(subjects)
+            if (ref.dataset, str(subject)) not in val_subjects and i not in excluded
+        ], dtype=np.int64)
+
+    eligible_by_key = {ref.key: eligible_rows(ref) for ref in all_refs}
+    paired_event_subset: dict[str, set[str]] = {}
+    for dataset in PAIRED_DATASETS:
+        dataset_refs = [ref for ref in all_refs if ref.dataset == dataset]
+        if len(dataset_refs) < 2:
+            continue
+        if not all(ref.event_ids_explicit for ref in dataset_refs):
+            raise ValueError(
+                f"{dataset}: paired contrast requires explicit shared event identifiers"
+            )
+        event_maps = []
+        for ref in dataset_refs:
+            rows = eligible_by_key[ref.key]
+            events = np.asarray(ref.event_ids, dtype=object)
+            labels = np.asarray(ref.labels, dtype=object)
+            subjects = np.asarray(ref.subjects, dtype=object)
+            event_maps.append({
+                str(events[index]): (str(labels[index]), str(subjects[index])) for index in rows
+            })
+        common = set.intersection(*(set(mapping) for mapping in event_maps))
+        if not common:
+            raise ValueError(f"{dataset}: paired streams have no shared eligible event identifiers")
+        for event in common:
+            signatures = {mapping[event] for mapping in event_maps}
+            if len(signatures) != 1:
+                raise ValueError(
+                    f"{dataset}: simultaneous event {event!r} has inconsistent "
+                    f"(label, subject) metadata {sorted(signatures)}"
+                )
+        ordered = np.asarray(sorted(common), dtype=object)
+        if len(ordered) > MAX_WINDOWS_PER_STREAM:
+            event_seed = int(hashlib.sha256(
+                f"{SEED}:{dataset}:paired-events".encode()
+            ).hexdigest()[:16], 16)
+            selected = np.random.default_rng(event_seed).choice(
+                ordered, MAX_WINDOWS_PER_STREAM, replace=False
+            )
+            ordered = np.sort(selected)
+        paired_event_subset[dataset] = set(map(str, ordered.tolist()))
+
+    per_sensor: dict[str, dict] = {}
+    for ref in refs:
+        labels_all = np.asarray(ref.labels)
+        subjects_all = np.asarray(ref.subjects)
+        eligible = eligible_by_key[ref.key]
+        if ref.dataset in paired_event_subset:
+            events = np.asarray(ref.event_ids, dtype=object)
+            selected_events = paired_event_subset[ref.dataset]
+            eligible = eligible[
+                np.asarray([str(events[index]) in selected_events for index in eligible], dtype=bool)
+            ]
+        elif len(eligible) > MAX_WINDOWS_PER_STREAM:
+            stream_seed = int(hashlib.sha256(
+                f"{SEED}:{ref.key}".encode()
+            ).hexdigest()[:16], 16)
+            eligible = np.sort(np.random.default_rng(stream_seed).choice(
+                eligible, MAX_WINDOWS_PER_STREAM, replace=False
+            ))
+        data = np.asarray(ref.load_data()[eligible])
+        labels = labels_all[eligible]
+        subjects = subjects_all[eligible]
         if len(set(subjects.tolist())) < MIN_SUBJECTS:
             print(f"  skip {ref.dataset}/{ref.stream}: <{MIN_SUBJECTS} subjects", flush=True)
             continue
         try:
-            z = encode_dataset(enc, data, stream_channel_descriptions(ref.dataset, ref.stream),
-                               dev, ref.rate_hz, _stream_gravity_state(ref.dataset, ref.stream),
-                               channel_mask=ref.mask, dataset=ref.dataset, stream=ref.stream)
-        except Exception as exc:                             # noqa: BLE001 - report, never fabricate
-            print(f"  FAILED {ref.dataset}/{ref.stream}: {exc}", flush=True)
-            continue
-        scores = _one_vs_rest_resolvability(z.cpu().numpy(), labels, subjects)
-        if not scores:
-            continue
-        per_stream[f"{ref.dataset}/{ref.stream}"] = {
-            "dataset": ref.dataset, "stream": ref.stream,
-            "n_windows": int(data.shape[0]), "labels": scores,
-        }
-        mean = float(np.mean(list(scores.values())))
-        print(f"  {ref.dataset}/{ref.stream}: {len(scores)} labels, mean resolvability {mean:.3f}",
-              flush=True)
+            encoded = encode_dataset_detailed(
+                enc, data, stream_channel_descriptions(ref.dataset, ref.stream),
+                dev, ref.rate_hz, _stream_gravity_state(ref.dataset, ref.stream),
+                channel_mask=ref.mask, dataset=ref.dataset, stream=ref.stream,
+                lengths=np.asarray(ref.load_lengths())[eligible],
+                export_sensor_rows=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to encode required resolvability stream {ref.dataset}/{ref.stream}"
+            ) from exc
+        modalities = modalities_present(ref.mask)
+        _, sensor_texts, _ = stream_sensor_texts(
+            ref.dataset, ref.stream,
+            has_accel="accel" in modalities, has_gyro="gyro" in modalities,
+        )
+        for slot, (modality, sensor_text) in enumerate(zip(modalities, sensor_texts, strict=True)):
+            z, source_window = _pool_sensor_windows(encoded, slot)
+            scores = _one_vs_rest_resolvability(
+                z.numpy(), labels[source_window], subjects[source_window]
+            )
+            if not scores:
+                continue
+            key = f"{ref.dataset}/{ref.stream}::{modality}"
+            per_sensor[key] = {
+                "dataset": ref.dataset, "stream": ref.stream, "slot": slot,
+                "modality": modality, "sensor_text": sensor_text,
+                "n_windows": int(len(source_window)), "labels": scores,
+            }
+            mean = float(np.mean(list(scores.values())))
+            print(f"  {key}: {len(scores)} labels, mean resolvability {mean:.3f}", flush=True)
 
     return {
+        "schema_version": 2,
         "checkpoint": str(checkpoint),
+        "checkpoint_sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
         "checkpoint_step": ckpt.get("step"),
-        "per_stream": per_stream,
-        "paired_contrast": paired_contrast(per_stream),
+        "training_datasets": sorted(roster),
+        "phase_a_data_seed": PHASE_A_SEED,
+        "validation_subjects_sha256": val_hash,
+        "scope": "phase_a_training_subjects_only_per_sensor",
+        "paired_event_counts": {
+            dataset: len(events) for dataset, events in sorted(paired_event_subset.items())
+        },
+        "per_sensor": per_sensor,
+        "paired_contrast": paired_contrast(per_sensor),
     }
 
 
-def paired_contrast(per_stream: dict) -> dict:
+def paired_contrast(per_sensor: dict) -> dict:
     """Per-label spread across SIMULTANEOUS streams — the falsifiable half.
 
     Restricted to datasets whose streams record the same sessions at the same time, so subjects,
@@ -172,34 +323,37 @@ def paired_contrast(per_stream: dict) -> dict:
     """
     out: dict[str, dict] = {}
     for dataset in PAIRED_DATASETS:
-        streams = {k: v for k, v in per_stream.items() if v["dataset"] == dataset}
-        if len(streams) < 2:
-            continue
-        by_label: dict[str, dict[str, float]] = defaultdict(dict)
-        for key, payload in streams.items():
-            for label, score in payload["labels"].items():
-                by_label[label][payload["stream"]] = score
-        rows = {}
-        for label, scores in by_label.items():
-            if len(scores) < 2:
-                continue                                     # not observed by 2+ simultaneous streams
-            best = max(scores, key=scores.get)
-            worst = min(scores, key=scores.get)
-            rows[label] = {
-                "best_stream": best, "best": scores[best],
-                "worst_stream": worst, "worst": scores[worst],
-                "gap": round(scores[best] - scores[worst], 4),
-                "n_streams": len(scores),
-            }
-        if rows:
-            gaps = [r["gap"] for r in rows.values()]
-            out[dataset] = {
-                "n_labels": len(rows),
-                "mean_gap": round(float(np.mean(gaps)), 4),
-                "max_gap": round(float(np.max(gaps)), 4),
-                "concept_dependence": _concept_dependence(by_label),
-                "labels": rows,
-            }
+        sensors = {k: v for k, v in per_sensor.items() if v["dataset"] == dataset}
+        for modality in ("accel", "gyro"):
+            streams = {k: v for k, v in sensors.items() if v["modality"] == modality}
+            if len(streams) < 2:
+                continue
+            by_label: dict[str, dict[str, float]] = defaultdict(dict)
+            for key, payload in streams.items():
+                for label, score in payload["labels"].items():
+                    by_label[label][payload["stream"]] = score
+            rows = {}
+            for label, scores in by_label.items():
+                if len(scores) < 2:
+                    continue                                 # not observed by 2+ simultaneous streams
+                best = max(scores, key=scores.get)
+                worst = min(scores, key=scores.get)
+                rows[label] = {
+                    "best_stream": best, "best": scores[best],
+                    "worst_stream": worst, "worst": scores[worst],
+                    "gap": round(scores[best] - scores[worst], 4),
+                    "n_streams": len(scores),
+                }
+            if rows:
+                gaps = [r["gap"] for r in rows.values()]
+                out[f"{dataset}::{modality}"] = {
+                    "dataset": dataset, "modality": modality,
+                    "n_labels": len(rows),
+                    "mean_gap": round(float(np.mean(gaps)), 4),
+                    "max_gap": round(float(np.max(gaps)), 4),
+                    "concept_dependence": _concept_dependence(by_label),
+                    "labels": rows,
+                }
     return out
 
 
@@ -257,31 +411,34 @@ def load(path: Path = OUT_PATH) -> dict:
         raise FileNotFoundError(
             f"{path} is missing — build it with "
             "`python -m training.evidence.resolvability --build --checkpoint <ckpt>`")
-    return json.loads(path.read_text())
+    payload = json.loads(path.read_text())
+    if payload.get("schema_version") != 2 or payload.get("scope") != \
+            "phase_a_training_subjects_only_per_sensor" or "per_sensor" not in payload:
+        raise ValueError(
+            f"{path} is a legacy/leaky stream-level table. Rebuild it from a sensor-granularity "
+            "checkpoint; old tables may include evaluation datasets and cannot fit the gate."
+        )
+    roster = set(payload.get("training_datasets", ()))
+    measured = {value.get("dataset") for value in payload["per_sensor"].values()}
+    if None in measured or not measured.issubset(roster):
+        raise ValueError(
+            f"{path} contains sensor rows outside its recorded Phase-A roster: "
+            f"{sorted(value for value in measured - roster if value is not None)}"
+        )
+    return payload
 
 
-def gate_tensor(
-    row_stream: list[str],           # (R,) "dataset/stream" of each retrieved row
-    candidate_labels: list[str],     # (C,) candidate label strings
-    table: dict,
-    n_query_sensors: int = 1,
-    default: float = 0.5,
-) -> torch.Tensor:
-    """(Q, R, C) resolvability for ``admissible_retrieval.admissibility``.
-
-    Reads "can the ROW's configuration bear on this candidate concept" — the direction the thesis
-    states ("however similar its signal, a pocket phone must not vote on an arm gesture"). Unmeasured
-    (stream, label) pairs get ``default`` rather than 0 or 1: absent evidence must not silently
-    become either a veto or a licence.
-    """
-    per_stream = table["per_stream"]
-    values = np.full((len(row_stream), len(candidate_labels)), default, dtype=np.float32)
-    for r, key in enumerate(row_stream):
-        labels = per_stream.get(key, {}).get("labels", {})
-        for c, label in enumerate(candidate_labels):
-            if label in labels:
-                values[r, c] = labels[label]
-    return torch.from_numpy(values).unsqueeze(0).expand(n_query_sensors, -1, -1).contiguous()
+# ``gate_tensor`` LIVED HERE AND WAS DELETED 2026-08-12.
+#
+# It answered "can this configuration witness this concept" by a dictionary read keyed on the literal
+# "<dataset>/<stream>" string and an exact label match, with a neutral default on a miss. Against a
+# novel vocabulary every entry defaulted, the gate became a uniform multiplier, and it provably could
+# not change the argmax — no behaviour at all in exactly the open-vocabulary case it existed for.
+# `training/evidence/admissibility_gate.py` replaces it with a function of text.
+#
+# THIS TABLE IS STILL LOAD-BEARING as the gate's warm start (`gate_predictor.fit_from_table`). It is
+# not an independent validation set after fitting. Generalisation is measured with held-out folds in
+# `gate_extrapolation`; reporting fit-table correlation as independent evidence would be leakage.
 
 
 def main() -> None:
@@ -289,7 +446,9 @@ def main() -> None:
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--checkpoint", type=Path,
-                    default=Path("training/tokenizer/outputs/phase_a_headline/best.pt"))
+                    default=Path(
+                        "training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt"
+                    ))
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--limit-streams", type=int, default=None)
     ap.add_argument("--out", type=Path, default=OUT_PATH)
@@ -299,7 +458,7 @@ def main() -> None:
         payload = build(args.checkpoint, args.device, args.limit_streams)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(payload, indent=2))
-        print(f"\n-> {args.out}  ({len(payload['per_stream'])} streams)")
+        print(f"\n-> {args.out}  ({len(payload['per_sensor'])} sensors)")
         _print_report(payload)
     elif args.report:
         _print_report(load(args.out))

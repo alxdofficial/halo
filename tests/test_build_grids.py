@@ -50,6 +50,31 @@ def test_stream_grid_persists_session_event_identity():
     ]
 
 
+def test_native_grid_retains_final_partial_context_with_honest_length():
+    spec = get_stream_spec("hhar", "phone_waist")
+    frame = _session_frame("hhar", spec, 425, "walking")  # 8.5 seconds at 50 Hz
+    grid, subjects = stream_grid(
+        "hhar", spec, [(frame, 50.0, "s1")], alignment="native",
+        resample_to=None, canonical_labels=True, view="harmonised",
+    )
+    assert grid.data.shape == (2, 300, 6)
+    assert grid.lengths.tolist() == [300, 125]
+    assert np.count_nonzero(grid.data[1, 125:]) == 0
+    assert grid.labels == ["walking", "walking"]
+    assert subjects == ["s1", "s1"]
+
+
+def test_baseline_grids_still_drop_partial_contexts():
+    spec = get_stream_spec("hhar", "phone_waist")
+    frame = _session_frame("hhar", spec, 425, "walking")
+    grid, _ = stream_grid(
+        "hhar", spec, [(frame, 50.0, "s1")], alignment="non_harmonised",
+        resample_to=None, canonical_labels=False, view="non_harmonised",
+    )
+    assert grid.data.shape == (1, 300, 6)
+    assert grid.lengths.tolist() == [300]
+
+
 def test_stream_grid_prefers_shared_physical_event_over_device_session_id():
     spec = get_stream_spec("hhar", "phone_waist")
     grids = []

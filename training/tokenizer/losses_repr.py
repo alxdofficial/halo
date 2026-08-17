@@ -211,6 +211,19 @@ def make_sensor_mask_plan(
     sensor_event.scatter_(1, chosen.unsqueeze(1), event.unsqueeze(1))
     mask |= sensor_event.unsqueeze(1)
 
+    # A one-patch window has no temporal context to hide. When it contains two co-located
+    # modalities (normally accel + gyro), make cross-modality prediction the guaranteed fallback
+    # rather than leaving the example without a JEPA target merely because the optional sensor
+    # event did not fire. A genuinely single-token window has no honest JEPA task and remains
+    # VICReg-only; the trainer reports that case as ineligible.
+    no_signal_target = ~mask.flatten(1).any(dim=1)
+    fallback = no_signal_target & maskable.any(dim=1)
+    fallback_scores = rnd(B, S).masked_fill(~maskable, -1.0)
+    fallback_sensor = fallback_scores.argmax(dim=1)
+    fallback_event = torch.zeros(B, S, dtype=torch.bool, device=device)
+    fallback_event.scatter_(1, fallback_sensor.unsqueeze(1), fallback.unsqueeze(1))
+    mask |= fallback_event.unsqueeze(1)
+
     # --- 3. descriptor events, never on a sensor whose signal is fully hidden ---
     fully_hidden = (mask | ~valid.unsqueeze(2)).all(dim=1)                     # (B,S)
     d_eligible = present & ~fully_hidden

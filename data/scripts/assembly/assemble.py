@@ -42,6 +42,9 @@ class Grid:
     # Stable physical-event identity per window. Populated by stream_grid(), where the converted
     # session id and local window ordinal are available. It deliberately does not come from labels.
     event_ids: Optional[List[str]] = None
+    # True signal length for each row before right-padding. Native HALO grids retain the final
+    # partial context of a recording; fixed-layout baseline grids remain full-window only.
+    lengths: Optional[np.ndarray] = None
 
 
 def canonicalize_units(curated: pd.DataFrame, dataset: str, channels: Sequence[str]) -> np.ndarray:
@@ -100,27 +103,37 @@ def _majority(labels: np.ndarray):
     return vals[int(np.argmax(counts))]
 
 
-def fixed_windows(arr: np.ndarray, window: int, stride: int, labels: Optional[np.ndarray] = None):
+def fixed_windows(arr: np.ndarray, window: int, stride: int, labels: Optional[np.ndarray] = None,
+                  *, include_partial: bool = False):
     """Fixed-length windows (non-overlapping when stride == window).
 
-    Returns `(windows (N, window, C), win_labels)`. `win_labels` is a per-window majority vote when
-    `labels` is given, else an empty list. (Converters emit whole-recording sessions; the grids use
-    these simple fixed windows only — there is no activity-aware variable windowing.)
+    Returns `(windows (N, window, C), win_labels, lengths)`. When ``include_partial`` is true, the
+    final incomplete window is right-padded with zeros and its honest sample count is recorded in
+    ``lengths``. `win_labels` is a per-window majority vote over real samples when labels are given.
     """
     n = arr.shape[0]
     starts = list(range(0, n - window + 1, stride)) if n >= window else []
+    if include_partial and n > 0:
+        next_start = starts[-1] + stride if starts else 0
+        if next_start < n:
+            starts.append(next_start)
     if not starts:
-        return np.empty((0, window, arr.shape[1]), np.float32), []
-    windows = np.stack([arr[s:s + window] for s in starts]).astype(np.float32)
+        return (np.empty((0, window, arr.shape[1]), np.float32), [],
+                np.empty(0, dtype=np.int32))
+    lengths = np.asarray([min(window, n - start) for start in starts], dtype=np.int32)
+    windows = np.zeros((len(starts), window, arr.shape[1]), dtype=np.float32)
+    for index, (start, length) in enumerate(zip(starts, lengths.tolist())):
+        windows[index, :length] = arr[start:start + length]
     if labels is None:
-        return windows, []
+        return windows, [], lengths
     labels = np.asarray(labels)
-    return windows, [_majority(labels[s:s + window]) for s in starts]
+    return windows, [_majority(labels[s:s + length])
+                     for s, length in zip(starts, lengths.tolist())], lengths
 
 
 def assemble(raw: pd.DataFrame, dataset: str, spec: StreamSpec, *, alignment: str,
              window: int, rate_hz: float, resample_to: Optional[float] = None,
-             stride: Optional[int] = None) -> Grid:
+             stride: Optional[int] = None, include_partial: bool = False) -> Grid:
     """Run the full pipeline for one session frame and one channel alignment.
 
     `spec` is the deployment `StreamSpec` for the device stream
@@ -140,15 +153,17 @@ def assemble(raw: pd.DataFrame, dataset: str, spec: StreamSpec, *, alignment: st
         labels = resample_labels(labels, arr.shape[0])
         rate = float(resample_to)
 
-    windows, win_labels = fixed_windows(arr, window, stride or window, labels)
+    windows, win_labels, lengths = fixed_windows(
+        arr, window, stride or window, labels, include_partial=include_partial,
+    )
 
     if len(windows) == 0:
         _, out_channels, mask = baseline_view.to_view(
             np.zeros((0, len(meta.channels)), np.float32), meta.channels, alignment)
         data = np.zeros((0, window, len(out_channels)), np.float32)
-        return Grid(data, mask, out_channels, [], alignment, dataset, rate)
+        return Grid(data, mask, out_channels, [], alignment, dataset, rate, lengths=lengths)
 
     n, t, c = windows.shape
     flat, out_channels, mask = baseline_view.to_view(windows.reshape(n * t, c), meta.channels, alignment)
     data = flat.reshape(n, t, len(out_channels)).astype(np.float32)
-    return Grid(data, mask, out_channels, win_labels, alignment, dataset, rate)
+    return Grid(data, mask, out_channels, win_labels, alignment, dataset, rate, lengths=lengths)

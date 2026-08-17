@@ -255,6 +255,11 @@ def build(limit_streams: int | None = None, *, datasets: tuple[str, ...] | None 
         if excluded.get(ref.key):
             bad = np.fromiter(sorted(excluded[ref.key]), dtype=np.int64)
             indices = indices[~np.isin(indices, bad)]
+        # Descriptor estimators operate on dense equal-duration arrays. Exclude only the final partial
+        # contexts instead of letting right-padding masquerade as rest/low noise; full windows still
+        # provide effectively the entire corpus for these stream-level statistics.
+        lengths = np.asarray(ref.load_lengths())
+        indices = indices[lengths[indices] == ref.shape[1]]
         if indices.size > MAX_WINDOWS_PER_STREAM:
             positions = np.linspace(0, indices.size - 1, MAX_WINDOWS_PER_STREAM, dtype=np.int64)
             indices = indices[positions]

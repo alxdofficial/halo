@@ -46,11 +46,18 @@ class GridRef:
         # duration rather than raising ZeroDivisionError in every caller that sums hours.
         if self.rate_hz <= 0 or self.shape[0] == 0:
             return 0.0
-        return self.shape[0] * self.shape[1] / self.rate_hz
+        return float(self.load_lengths().sum()) / self.rate_hz
 
     def load_data(self) -> np.ndarray:
         """Memory-map the grid so callers read only selected windows."""
         return np.load(self.grid_dir / "data.npy", mmap_mode="r")
+
+    def load_lengths(self) -> np.ndarray:
+        """True samples per row; legacy grids without the sidecar are all full-length."""
+        path = self.grid_dir / "lengths.npy"
+        if path.exists():
+            return np.load(path, mmap_mode="r")
+        return np.full(self.shape[0], self.shape[1], dtype=np.int32)
 
 
 def discover_grids(
@@ -88,6 +95,13 @@ def discover_grids(
             raise ValueError(f"{grid_dir}: event_ids do not match window count")
         if len(channels) != data.shape[2] or mask.shape != (data.shape[2],):
             raise ValueError(f"{grid_dir}: channels/mask do not match channel dimension")
+        lengths_path = grid_dir / "lengths.npy"
+        if lengths_path.exists():
+            lengths = np.load(lengths_path, mmap_mode="r")
+            if lengths.shape != (data.shape[0],):
+                raise ValueError(f"{grid_dir}: lengths do not match window count")
+            if len(lengths) and (int(lengths.min()) < 1 or int(lengths.max()) > data.shape[1]):
+                raise ValueError(f"{grid_dir}: lengths must be in [1, {data.shape[1]}]")
 
         refs.append(GridRef(
             dataset=str(meta["dataset"]),
@@ -139,6 +153,11 @@ def grid_corpus_fingerprint(
         add(data_path.stat().st_size)
         sampled = np.ascontiguousarray(ref.load_data()[::97, ::13, :], dtype=np.float32)
         add(hashlib.sha256(sampled.tobytes()).hexdigest())
+        # Preserve fingerprints for legacy all-full grids. Once a real lengths sidecar exists, its
+        # content becomes part of the corpus identity so tail-boundary changes invalidate scans.
+        if (ref.grid_dir / "lengths.npy").exists():
+            lengths = np.ascontiguousarray(ref.load_lengths(), dtype=np.int32)
+            add(hashlib.sha256(lengths.tobytes()).hexdigest())
 
     return digest.hexdigest()
 

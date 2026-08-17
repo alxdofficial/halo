@@ -13,10 +13,9 @@ per-channel encoder:
    and closed-form statistics do not. If the statistics themselves were learned they would stop
    being measurements, and the declared-vs-measured audit property would die with them.
 
-3. ``DescriptorHead`` reconstructs a masked ``text_descriptor`` from the sensor's context. Scored
-   RETRIEVALLY by the caller (is the true descriptor nearest among the batch's?) rather than by MSE,
-   because regression to the corpus-mean text is a trivial solution when the corpus holds ~20
-   distinct sensor descriptions.
+3. The optional ``DescriptorHead`` ablation reconstructs a masked ``text_descriptor`` from the
+   sensor's context. It is disabled in the reference recipe. When enabled, the caller scores it by
+   retrieval rather than MSE because regression to corpus-mean text is a trivial solution.
 
 WHY FOLDING NEEDS AN AXIS VALIDITY MASK
 ---------------------------------------

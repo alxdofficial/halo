@@ -53,21 +53,27 @@ def scan(alignment: str = "native") -> dict:
         data = ref.load_data()
         over = np.zeros(ref.n_windows, dtype=bool)
         gyro_peak = accel_peak = 0.0
+        nonfinite_windows = 0
         # Block-wise so a multi-GB grid is never fully resident (capture24 is 1.5M windows).
         for start in range(0, ref.n_windows, 4096):
             block = np.asarray(data[start:start + 4096], dtype=np.float32)
-            a_peak = np.abs(block[:, :, :3]).max(axis=(1, 2))
+            finite = np.isfinite(block).all(axis=(1, 2))
+            nonfinite_windows += int((~finite).sum())
+            a_peak = np.where(np.isfinite(block[:, :, :3]),
+                              np.abs(block[:, :, :3]), 0.0).max(axis=(1, 2))
             accel_peak = max(accel_peak, float(a_peak.max()))
-            hit = a_peak > ACCEL_RAIL_G
+            hit = ~finite | (a_peak > ACCEL_RAIL_G)
             if mask[3:].any():                        # accel-only streams have no gyro to check
-                g_peak = np.abs(block[:, :, 3:]).max(axis=(1, 2))
+                g_peak = np.where(np.isfinite(block[:, :, 3:]),
+                                  np.abs(block[:, :, 3:]), 0.0).max(axis=(1, 2))
                 gyro_peak = max(gyro_peak, float(g_peak.max()))
                 hit |= g_peak > GYRO_RAIL_RAD_S
             over[start:start + len(hit)] = hit
         idx = np.nonzero(over)[0]
         if idx.size:
             bad[ref.key] = sorted(int(i) for i in idx)
-            stats.append((ref.key, int(idx.size), ref.n_windows, gyro_peak, accel_peak))
+            stats.append((ref.key, int(idx.size), ref.n_windows, gyro_peak, accel_peak,
+                          nonfinite_windows))
     return {"alignment": alignment, "grid_fingerprint": grid_corpus_fingerprint(alignment, refs),
             "stream_fingerprints": {
                 ref.key: grid_corpus_fingerprint(alignment, [ref]) for ref in refs
@@ -130,9 +136,10 @@ def main() -> None:
     path.write_text(json.dumps(blob, indent=2) + "\n")
     total = sum(len(v) for v in blob["windows"].values())
     print(f"gyro rail = {GYRO_RAIL_RAD_S:.3f} rad/s (2000 dps) · accel rail = {ACCEL_RAIL_G} g")
-    for key, n, tot, gyro_peak, accel_peak in blob["summary"]:
+    for key, n, tot, gyro_peak, accel_peak, nonfinite in blob["summary"]:
         print(f"  {key:28s} {n:5d}/{tot:6d} windows exceed a rail "
-              f"(peak gyro {gyro_peak:.2f} rad/s, peak |accel| {accel_peak:.2f} g)")
+              f"or are non-finite (non-finite {nonfinite}; peak gyro {gyro_peak:.2f} rad/s, "
+              f"peak |accel| {accel_peak:.2f} g)")
     print(f"-> {total} windows cached for exclusion in {path}")
 
 

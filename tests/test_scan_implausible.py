@@ -2,6 +2,7 @@
 
 import json
 
+import numpy as np
 import pytest
 
 
@@ -46,3 +47,21 @@ def test_implausible_cache_allows_absent_optional_cached_streams(tmp_path, monke
     monkeypatch.setattr(grid_io, "grid_corpus_fingerprint",
                         lambda alignment, refs=None: "ok")
     assert si.load("native", require=True) == {}
+
+
+def test_implausible_scan_excludes_nonfinite_windows(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from data.scripts import scan_implausible as si
+    from data.scripts.eda import grid_io
+
+    data = np.zeros((3, 8, 6), dtype=np.float32)
+    data[1, 2, 4] = np.nan
+    ref = SimpleNamespace(
+        key="example/watch", n_windows=3, mask=(True,) * 6,
+        load_data=lambda: data,
+    )
+    monkeypatch.setattr(grid_io, "discover_grids", lambda alignment: [ref])
+    monkeypatch.setattr(grid_io, "grid_corpus_fingerprint", lambda alignment, refs=None: "fp")
+    blob = si.scan("native")
+    assert blob["windows"] == {"example/watch": [1]}
+    assert blob["summary"][0][-1] == 1

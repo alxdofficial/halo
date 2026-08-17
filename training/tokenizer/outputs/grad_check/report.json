@@ -3,36 +3,41 @@
   "batch": [
     64,
     6,
-    6
+    2
   ],
   "loss": {
-    "jepa": 1.0587775707244873,
-    "vicreg": 23.812597274780273
+    "jepa": 1.100334644317627,
+    "vicreg": 23.594860076904297
   },
   "activation_rms": {
-    "sensor_tokens": 0.48773,
-    "text_embeddings": 0.48145,
-    "projected_text": 0.28763,
-    "fused_tokens": 0.48956,
-    "fusion_delta": 0.03545,
-    "pooled": 0.93635,
-    "vicreg_projection": 0.19755
+    "channel_tokens": 0.58737,
+    "sensor_tokens": 0.99968,
+    "text_descriptors": 0.05103,
+    "descriptor_conditioned": 0.98675,
+    "fully_conditioned": 0.98853,
+    "conditioning_delta": 0.17705,
+    "pooled": 0.90338,
+    "vicreg_projection": 0.16383
   },
-  "fusion_delta_ratio": 0.07268,
+  "conditioning_delta_ratio": 0.17711,
   "gradient_norms": {
-    "encoder": 4.32301664352417,
-    "jepa_predictor": 1.9501465559005737,
-    "vicreg_projector": 1.9258683919906616,
+    "encoder": 6.619474411010742,
+    "jepa_predictor": 1.659955620765686,
+    "vicreg_projector": 2.2348127365112305,
+    "sensor_fold": 5.1400370597839355,
+    "descriptor_projection": 0.7611435055732727,
+    "bias_projection": 0.6608432531356812,
+    "descriptor_head": 0.0,
     "transformer_layers": [
-      2.2923102378845215,
-      1.6577950716018677
+      2.079707622528076,
+      1.7694841623306274
     ]
   },
   "dead_parameters": [],
   "checks": {
     "text_encoder_frozen": true,
     "no_dead_trainable_parameters": true,
-    "fusion_scale_reasonable": true,
+    "conditioning_scale_reasonable": true,
     "finite_activations": true,
     "finite_loss": true
   }

@@ -83,9 +83,14 @@ Per-device totals over all 21 workouts:
 | eb_l acc | 4,175,310 | **1,163,923** | **601** | 3.66 s | 84.0 Hz |
 
 The earbud duplicates 27.9% of its timestamps (packetised delivery) and has 601 sub-second-plus
-gaps; `np.interp` draws a straight line through every one. **Additional to the prior report: the
-left smartwatch has a 74.5 s hole** that also gets interpolated. The 212 Hz → 100 Hz phone decimation
-has no anti-alias filter, which is a second-order issue next to the gaps.
+gaps. The duplicate rows are not redundant: 99.96% of duplicate earbud groups contain different
+sensor values, so direct `np.interp` silently discarded real samples. The left smartwatch also has a
+74.5 s hole, and the old 212 Hz to 100 Hz phone conversion lacked an anti-alias filter.
+
+**Resolution 2026-08-12.** Each gap-free block now receives a strictly increasing clock from its row
+order, is polyphase-resampled, and is then aligned to the shared wall clock. Every packet sample
+therefore contributes; high-rate streams are anti-aliased; grid points inside acquisition gaps remain
+unobserved and reject an overlapping labelled set.
 
 ### 1.3 MM-Fit subject identity — confirmed, with the source
 
@@ -102,6 +107,9 @@ released, but the paper states 21 workouts come from 10 people and names a perso
 **Consequence: the only honest cross-subject cell on MM-Fit is the paper's split boundary.** Because
 the full map is unrecoverable, any *other* workout-disjoint partition may put one person on both
 sides — including cross-subject enrollment, which could enrol and query the same person.
+
+**Resolution 2026-08-12.** Phase A holds out the complete published cross-subject set
+`(w00,w05,w12,w13,w20)` for MM-Fit validation. Generic workout-disjoint selection is no longer used.
 
 ### 1.4 Opportunity — confirmed exactly
 
@@ -171,6 +179,9 @@ stream. Subjects are `hc01–hc07` (healthy controls), `rem*`, `sup*`. The contr
 **4,069 of 12,079 windows = 33.7%**, and for them the text is simply false — the note two lines
 below even says so ("healthy controls wore it on the dominant hand"). Since HALO conditions on this
 text, a third of monipar's windows carry a wrong acquisition description.
+
+**Resolution.** Runtime conditioning and the converter manifest both use the cohort-neutral
+description `the wrist`; the patient/control placement detail remains explanatory metadata only.
 
 ### 1.8 Non-integer rate rounding — confirmed, negligible
 
@@ -361,10 +372,11 @@ Independent confirmations:
 ## 7. Still open
 
 - **Committing.** The ten converter directories and their references remain untracked.
-- **The ZS-XD table's alignment is unscreened.** `non_harmonised` grids have no
-  duplicate/implausible cache, so `load_eval_stream` reports `unavailable` there rather than
-  silently passing. Building the caches for that alignment would move published baseline numbers,
-  so it is a deliberate decision rather than a fix to slip in.
+- **Resolved 2026-08-12: non-harmonised quality screens are alignment-specific.** Native training
+  and non-harmonised evaluation now keep separate duplicate/implausible cache files, so generating
+  one cannot invalidate the other. The non-harmonised caches are materialized and default evaluation
+  reports `quality_screen="applied"`. Regenerating them also exposed stale USC-HAD harmonised and
+  non-harmonised grids from before its deg/s-to-rad/s converter fix; those two grids were rebuilt.
 - **§2.4 reporting structure.** phytmo and kneepad still carry flat text-degenerate vocabularies;
   splitting exercise identity from correct-vs-incorrect execution needs a harness change, and the
   `eval_labels.json` notes say so rather than faking it by dropping the incorrect variants.
