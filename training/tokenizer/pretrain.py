@@ -57,6 +57,7 @@ from training.tokenizer.losses_repr import (
 )
 from training.tokenizer.eval_transfer import (
     PHASE_A_SELECTION_DATASETS,
+    assert_selection_roster_is_untrained,
     development_transfer_score,
 )
 from training.tokenizer.pretrain_data import (
@@ -1002,6 +1003,11 @@ def main() -> None:
                         help="anti-aliased sampling-rate augmentation probability (default 0)")
     parser.add_argument("--channel-dropout-p", type=float, default=None,
                         help="whole-modality dropout probability (default 0)")
+    parser.add_argument("--val-every", type=int, default=None,
+                        help="steps between validation passes (selection can only fire on one)")
+    parser.add_argument("--selection-every", type=int, default=None,
+                        help="steps between held-out development-transfer selection scores; must be "
+                             "a multiple of --val-every to fire on schedule")
     parser.add_argument("--retrieval-vicreg-fraction", type=float, default=None,
                         help="fraction of VICReg assigned directly to the sensor rows stored in "
                              "the evidence bank (default 0.5)")
@@ -1118,6 +1124,10 @@ def main() -> None:
         cfg.channel_dropout_p = args.channel_dropout_p
     if args.retrieval_vicreg_fraction is not None:
         cfg.retrieval_vicreg_fraction = args.retrieval_vicreg_fraction
+    if args.val_every is not None:
+        cfg.val_every = args.val_every
+    if args.selection_every is not None:
+        cfg.selection_every = args.selection_every
     if args.jepa_weight is not None:
         cfg.jepa_weight = args.jepa_weight
     if args.vicreg_weight is not None:
@@ -1322,6 +1332,11 @@ def main() -> None:
     corpus_fp = corpus_fingerprint(index)
     print(f"corpus: {index.summary()}  (datasets={sorted(cfg.train_datasets or TRAIN_DATASETS)})",
           flush=True)
+    if cfg.selection_datasets:
+        # Selecting on a trained source turns held-out transfer into a training probe. Assert it.
+        assert_selection_roster_is_untrained(cfg.train_datasets or TRAIN_DATASETS)
+        print(f"selection: {list(cfg.selection_datasets)} every {cfg.selection_every} steps "
+              f"(held out; posture canaries reported per dataset)", flush=True)
     augmentation_cfg = AugmentationConfig.phase_a(
         rotation_p=cfg.rotation_p,
         rate_p=cfg.rate_augmentation_p,

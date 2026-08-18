@@ -46,7 +46,67 @@ EVAL_STREAMS = tuple(
 PATCH_SECONDS = 1.0
 KNN_K = 5
 SEED = 20260718
-PHASE_A_SELECTION_DATASETS = ("motionsense", "realworld", "shoaib")
+
+# Phase-A CHECKPOINT SELECTION roster — named explicitly as (dataset, stream) pairs rather than
+# derived from EVAL_STREAMS, because the selection sources are deliberately NOT the "primary"
+# deployment streams and must not drift when that policy changes.
+#
+# WHY WIDER THAN THE THREE PHONE COHORTS IT REPLACES. The 2026-08-17 regression was largest on
+# WRIST cells (SPAR -0.209, Upper Limb Use -0.178) and on RealWorld's static postures (-0.142),
+# while the phone-pocket cohorts moved least (MotionSense -0.070). A selection metric built only
+# from phone pockets is close to blind to the exact failure it exists to catch. ExtraSensory
+# contributes free-living wrist and in-hand cells at a 25 Hz acquisition clock stored at 50 Hz.
+#
+# EXCLUSIVITY. Every dataset here is development-only: never in a Phase-A training corpus, never in
+# the Phase-B test roster, never in the sealed confirmation roster. ExtraSensory is listed in
+# `OPTIONAL_PHASE_A_DATASETS` as a scale source; selecting on it forfeits that use, and
+# `assert_selection_roster_is_untrained` enforces the separation at run start rather than trusting
+# a comment.
+# `scored` decides whether a source enters the selection SCALAR. Unscored sources are still encoded
+# and reported, including their posture canary; they are diagnostics, not optimization targets.
+#
+# ExtraSensory is deliberately unscored. Measured 2026-08-18 across three encoders, its score is
+# MONOTONICALLY ANTI-CORRELATED with training: random init 0.307, failed 27k 0.274, old-good 4k
+# 0.251. Folding an anti-correlated term into the scalar biases selection toward undertrained
+# checkpoints, which is a worse defect than the phone-only blindness it was added to fix. Its
+# free-living self-reported labels are the likely cause. It is retained because its WRIST posture
+# canary is the orientation instrument this roster exists for, and that canary is read directly.
+PHASE_A_SELECTION_STREAMS = (
+    ("motionsense", "phone_front_pocket", True),
+    ("realworld", "phone_waist", True),
+    ("shoaib", "phone_right_pocket", True),
+    ("extrasensory", "watch_wrist", False),
+    ("extrasensory", "phone_hand", False),
+)
+PHASE_A_SELECTION_DATASETS = tuple(dict.fromkeys(d for d, _, _ in PHASE_A_SELECTION_STREAMS))
+PHASE_A_SCORED_SELECTION_DATASETS = tuple(
+    dict.fromkeys(d for d, _, scored in PHASE_A_SELECTION_STREAMS if scored)
+)
+
+# Measured floor for any Phase-A arm: a randomly initialised encoder of the reference architecture,
+# scored by this exact function through the isolated retrieval rows (2026-08-18, seed 20260718).
+# The fixed physical filterbank makes a random trunk a genuinely strong kNN baseline -- a random
+# projection roughly preserves the distances the tokenizer already encodes -- so an arm that does
+# not clear this floor has learned nothing usable for retrieval.
+#
+#   random init      0.8012          <- this floor
+#   old-good 4k      0.8577          (+0.057; the entire measured value of Phase-A SSL to date)
+#   rejected 27k     0.7161          (-0.085; training below random init)
+#
+# The margin is small. Treat "beat the floor" as necessary, not sufficient.
+PHASE_A_RANDOM_INIT_FLOOR = 0.8012
+
+# Selection runs every `selection_every` steps inside training, so it must stay cheap and stable.
+# ExtraSensory alone carries 659k windows across its three streams; encoding them all would cost
+# more than the training interval it is meant to score. The subsample is stratified by
+# (label, subject) and drawn from a fixed seed, so the metric is comparable across arms and steps.
+SELECTION_MAX_WINDOWS_PER_STREAM = 6_000
+
+# Static postures are separated ONLY by the gravity direction in the device frame: they carry no
+# distinguishing periodic content. A representation trained to be orientation-invariant collapses
+# them to chance while its overall score decays only gently, which is precisely how the 2026-08-17
+# failure hid. Tracking this subset turns that failure mode into a monitored metric.
+POSTURE_LABELS = ("lying", "sitting", "standing")
 
 
 def subject_holdout(subjects: np.ndarray, dataset: str) -> set:
@@ -456,6 +516,54 @@ def knn_balanced_acc(train_z, train_y, test_z, test_y, k=KNN_K) -> float:
     return float(np.mean(per_class))
 
 
+def assert_selection_roster_is_untrained(train_datasets) -> None:
+    """Fail loudly if a checkpoint-selection source is also being trained on.
+
+    Selecting on a trained source silently converts the metric from held-out transfer into a
+    training probe -- the exact defect that let the 2026-08-17 run report its best checkpoint while
+    external transfer degraded. A comment cannot enforce this; a start-of-run assertion can.
+    """
+    overlap = sorted(set(PHASE_A_SELECTION_DATASETS) & set(train_datasets or ()))
+    if overlap:
+        raise ValueError(
+            f"Phase-A selection datasets {overlap} are in the training corpus. Selection must be "
+            f"held out; either drop them from --datasets or edit PHASE_A_SELECTION_STREAMS."
+        )
+
+
+def _selection_subsample(labels: np.ndarray, subjects: np.ndarray, cap: int) -> np.ndarray:
+    """Deterministic (label, subject)-stratified row subsample, or all rows when already small.
+
+    Round-robin over strata rather than a proportional draw, so a rare posture class keeps enough
+    rows to be scored at all -- the canary below is worthless if `lying` gets three windows.
+    """
+    total = len(labels)
+    if total <= cap:
+        return np.arange(total)
+    rng = np.random.default_rng(SEED)
+    strata: dict[tuple, list[int]] = {}
+    for index, key in enumerate(zip(labels.tolist(), subjects.tolist())):
+        strata.setdefault(key, []).append(index)
+    for rows in strata.values():
+        rng.shuffle(rows)
+    order = sorted(strata)
+    chosen: list[int] = []
+    depth = 0
+    while len(chosen) < cap:
+        added = False
+        for key in order:
+            rows = strata[key]
+            if depth < len(rows):
+                chosen.append(rows[depth])
+                added = True
+                if len(chosen) >= cap:
+                    break
+        if not added:
+            break
+        depth += 1
+    return np.sort(np.asarray(chosen, dtype=np.int64))
+
+
 @torch.no_grad()
 def development_transfer_score(
     enc: SetTokenizerEncoder,
@@ -463,44 +571,57 @@ def development_transfer_score(
     datasets: tuple[str, ...] = PHASE_A_SELECTION_DATASETS,
     *,
     patching: str = "checkpoint",
+    max_windows_per_stream: int = SELECTION_MAX_WINDOWS_PER_STREAM,
 ) -> tuple[float, dict[str, float]]:
-    """Subject-disjoint kNN on development-only acquisition datasets.
+    """Subject-disjoint kNN on development-only acquisition sources.
 
     Phase A uses this to select checkpoints. Datasets are averaged equally, so a source with more
-    windows cannot dominate, and the sealed test roster remains untouched.
+    windows cannot dominate. Scored on the SENSOR ROWS Phase B actually stores, not on a pooled
+    embedding no downstream stage ever sees.
+
+    The returned dict carries per-dataset scores plus `posture/<dataset>` canaries for sources that
+    contain static postures. Those keys are diagnostics and are excluded from the scalar mean.
     """
     if not datasets:
         raise ValueError("development transfer selection requires at least one dataset")
     wanted = set(datasets)
-    unknown = wanted - set(PHASE_A_TRANSFER_DATASETS)
+    roster = {dataset for dataset, _, _ in PHASE_A_SELECTION_STREAMS}
+    unknown = wanted - roster
     if unknown:
         raise ValueError(
-            f"selection datasets are not in the Phase-A transfer roster: {sorted(unknown)}"
+            f"selection datasets are not in PHASE_A_SELECTION_STREAMS: {sorted(unknown)}"
         )
     refs = {(ref.dataset, ref.stream): ref for ref in discover_grids("native")}
     was_training = enc.training
     enc.eval()
     scores: dict[str, list[float]] = {dataset: [] for dataset in datasets}
+    posture: dict[str, list[float]] = {}
+    scored_datasets: set[str] = set()
     try:
-        for dataset, stream in EVAL_STREAMS:
+        for dataset, stream, scored in PHASE_A_SELECTION_STREAMS:
             if dataset not in wanted:
                 continue
+            if scored:
+                scored_datasets.add(dataset)
             ref = refs.get((dataset, stream))
             if ref is None:
                 raise FileNotFoundError(f"missing development grid {dataset}/{stream}")
-            labels = np.asarray(ref.labels)
-            subjects = np.asarray(ref.subjects)
+            labels_all = np.asarray(ref.labels)
+            subjects_all = np.asarray(ref.subjects)
+            take = _selection_subsample(labels_all, subjects_all, max_windows_per_stream)
+            labels = labels_all[take]
+            subjects = subjects_all[take]
             encoded = encode_dataset_detailed(
-                enc, ref.load_data(), stream_channel_descriptions(dataset, stream), device,
+                enc, ref.load_data()[take], stream_channel_descriptions(dataset, stream), device,
                 ref.rate_hz, _stream_gravity_state(dataset, stream), channel_mask=ref.mask,
-                dataset=dataset, stream=stream, lengths=ref.load_lengths(),
+                dataset=dataset, stream=stream, lengths=ref.load_lengths()[take],
                 eval_patching=patching, export_sensor_rows=True,
             )
             if encoded["sensor_Z"].numel():
                 rows = encoded["sensor_Z"].float()
                 owners = encoded["sensor_window"].long().to(rows.device)
-                z = rows.new_zeros((len(ref.labels), rows.shape[1]))
-                count = rows.new_zeros((len(ref.labels), 1))
+                z = rows.new_zeros((len(labels), rows.shape[1]))
+                count = rows.new_zeros((len(labels), 1))
                 z.index_add_(0, owners, rows)
                 count.index_add_(0, owners, rows.new_ones((len(rows), 1)))
                 z = (z / count.clamp_min(1.0)).cpu()
@@ -515,13 +636,34 @@ def development_transfer_score(
                 z[train_rows], labels[train_rows].tolist(),
                 z[test_rows], labels[test_rows].tolist(),
             ))
+            # Posture canary: rescore restricted to the gravity-defined static classes.
+            static = np.isin(labels, POSTURE_LABELS)
+            if static.sum() and len(set(labels[static].tolist())) >= 2:
+                train_static = train_rows & static
+                test_static = test_rows & static
+                if train_static.any() and test_static.any():
+                    value = knn_balanced_acc(
+                        z[train_static], labels[train_static].tolist(),
+                        z[test_static], labels[test_static].tolist(),
+                    )
+                    if value == value:                       # skip NaN (no shared static labels)
+                        posture.setdefault(dataset, []).append(value)
     finally:
         enc.train(was_training)
     missing = [dataset for dataset, rows in scores.items() if not rows]
     if missing:
         raise FileNotFoundError(f"no development streams found for {missing}")
     per_dataset = {dataset: float(np.mean(rows)) for dataset, rows in scores.items()}
-    return float(np.mean(list(per_dataset.values()))), per_dataset
+    scalar_terms = [value for dataset, value in per_dataset.items() if dataset in scored_datasets]
+    if not scalar_terms:
+        raise ValueError(
+            "no SCORED selection dataset was evaluated; the scalar would be undefined. Requested "
+            f"{sorted(wanted)}, of which none is marked scored in PHASE_A_SELECTION_STREAMS."
+        )
+    mean = float(np.mean(scalar_terms))
+    for dataset, rows in posture.items():
+        per_dataset[f"posture/{dataset}"] = float(np.mean(rows))
+    return mean, per_dataset
 
 
 def main() -> None:
