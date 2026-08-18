@@ -53,6 +53,8 @@ from training.tokenizer.losses_repr import (
     pair_contrast,
     phase_a_loss,
     vicreg,
+    fold_analysis_to_sensors,
+    masked_analysis_reconstruction_loss,
     VICRegOutput,
 )
 from training.tokenizer.eval_transfer import (
@@ -168,6 +170,11 @@ class PretrainConfig:
     rotation_pairing: str = "shared"
     rate_augmentation_p: float = 0.0
     channel_dropout_p: float = 0.0
+    jitter_p: float = 0.0
+    scale_p: float = 0.0
+    # Masked reconstruction of the PARAMETER-FREE filterbank analysis features. Set > 0 (with
+    # jepa_weight 0) to swap the self-referential EMA-latent target for a fixed physical one.
+    mae_weight: float = 0.0
     # Optional one-time post-warmup calibration. Report mode writes the recommendation and stops;
     # apply mode installs it after the calibration step, freezes it, and continues the same run.
     objective_calibration_at: int = 0       # 0 disables; recommended full pilot: 2_000
@@ -274,6 +281,15 @@ class PipelineAModel(nn.Module):
             nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
             nn.Linear(cfg.d_model, cfg.d_model),
         )
+        # MAE head: sensor token -> the three axes' physical analysis features concatenated.
+        # Built only when requested so the reference recipe's state_dict is unchanged.
+        self.mae_head = None
+        if cfg.mae_weight > 0:
+            analysis_dim = self.encoder.filterbank.proj.in_features
+            self.mae_head = nn.Sequential(
+                nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
+                nn.Linear(cfg.d_model, 3 * analysis_dim),
+            )
         # VICReg/Barlow-Twins expander. Width is a measured knob, not a detail: VICReg Table 12
         # reports ImageNet linear top-1 of 55.9 / 59.2 / 62.4 / 65.1 / 67.3 / 68.6 / 68.8 at
         # expander dims 256 / 512 / 1024 / 2048 / 4096 / 8192 / 16384 -- monotonic, +12.7 points
@@ -933,6 +949,8 @@ def module_grad_norms(model) -> dict:
 
     mods = [("encoder", model.encoder), ("jepa_predictor", model.jepa_predictor),
             ("vicreg_projector", model.vicreg_projector)]
+    if getattr(model, "mae_head", None) is not None:
+        mods.append(("mae_head", model.mae_head))
     if model.encoder.token_granularity == "sensor":
         mods.extend((
             ("sensor_fold", model.encoder.sensor_fold),
@@ -1001,6 +1019,19 @@ def main() -> None:
                              "trains rotation invariance")
     parser.add_argument("--rate-augmentation-p", type=float, default=None,
                         help="anti-aliased sampling-rate augmentation probability (default 0)")
+    parser.add_argument("--mae-weight", type=float, default=None,
+                        help="masked reconstruction of the parameter-free filterbank analysis "
+                             "features. Pair with --jepa-weight 0 to SWAP the self-referential "
+                             "EMA-latent target for a fixed physical one")
+    parser.add_argument("--jitter-p", type=float, default=None,
+                        help="per-view additive-noise probability; NUISANCE-group, suppresses "
+                             "subject/device idiosyncrasy without touching gravity orientation")
+    parser.add_argument("--scale-p", type=float, default=None,
+                        help="per-view amplitude-scaling probability; NUISANCE-group, same rationale")
+    parser.add_argument("--num-layers", type=int, default=None,
+                        help="trunk depth. Measured 2026-08-18: activity information peaks at "
+                             "depth 1-3 and decays 4-8 points by depth 6 in every trained arm, "
+                             "while a random-init trunk is flat")
     parser.add_argument("--channel-dropout-p", type=float, default=None,
                         help="whole-modality dropout probability (default 0)")
     parser.add_argument("--val-every", type=int, default=None,
@@ -1122,6 +1153,14 @@ def main() -> None:
         cfg.rate_augmentation_p = args.rate_augmentation_p
     if args.channel_dropout_p is not None:
         cfg.channel_dropout_p = args.channel_dropout_p
+    if args.mae_weight is not None:
+        cfg.mae_weight = args.mae_weight
+    if args.jitter_p is not None:
+        cfg.jitter_p = args.jitter_p
+    if args.scale_p is not None:
+        cfg.scale_p = args.scale_p
+    if args.num_layers is not None:
+        cfg.num_layers = args.num_layers
     if args.retrieval_vicreg_fraction is not None:
         cfg.retrieval_vicreg_fraction = args.retrieval_vicreg_fraction
     if args.val_every is not None:
@@ -1233,7 +1272,7 @@ def main() -> None:
         parser.error("expander widths must be positive")
     if not 0.0 <= cfg.retrieval_vicreg_fraction <= 1.0:
         parser.error("retrieval_vicreg_fraction must be in [0,1]")
-    for name in ("rotation_p", "rate_augmentation_p", "channel_dropout_p"):
+    for name in ("rotation_p", "rate_augmentation_p", "channel_dropout_p", "jitter_p", "scale_p"):
         if not 0.0 <= float(getattr(cfg, name)) <= 1.0:
             parser.error(f"{name} must be in [0,1]")
     if cfg.patch_seconds <= 0:
@@ -1341,6 +1380,8 @@ def main() -> None:
         rotation_p=cfg.rotation_p,
         rate_p=cfg.rate_augmentation_p,
         channel_dropout_p=cfg.channel_dropout_p,
+        jitter_p=cfg.jitter_p,
+        scale_p=cfg.scale_p,
     )
     train_ds = PretrainDataset(
         index, index.train, augment=True, two_view=True,
@@ -1762,7 +1803,7 @@ def main() -> None:
     )
     if cfg.descriptor_weight > 0:
         mask_description += " + descriptor"
-    if cfg.jepa_weight > 0:
+    if cfg.jepa_weight > 0 or cfg.mae_weight > 0:
         print(f"jepa mask: {mask_description}, ratio={cfg.mask_ratio_time:g}", flush=True)
     else:
         print("jepa: disabled (VICReg-only control)", flush=True)
@@ -1829,7 +1870,7 @@ def main() -> None:
             sensor_placement = sensor_placement.to(device, non_blocking=True)
         descriptor_mask = None
 
-        if cfg.jepa_weight > 0:
+        if cfg.jepa_weight > 0 or cfg.mae_weight > 0:
             if sensor_granularity:
                 # Sensor granularity: the mask grid is (B,P,S), and the planner also emits the
                 # descriptor mask. `sensor_present` is not known until the fold runs inside the
@@ -1929,7 +1970,7 @@ def main() -> None:
                               sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
                               sensor_text_ids=sensor_text_ids)
             z = model.vicreg_projector(clean["pooled"])
-            if cfg.jepa_weight > 0:
+            if cfg.jepa_weight > 0 or cfg.mae_weight > 0:
                 masked = encode_fn(sensor_tokens, text_embs, text_masks, positions,
                                    patch_durations=patch_durations,
                                    resolution_ids=resolution_ids,
@@ -1956,7 +1997,7 @@ def main() -> None:
                 masked = clean
                 jepa_mask = torch.zeros(clean["tokens"].shape[:3], dtype=torch.bool, device=device)
 
-            if cfg.jepa_weight > 0:
+            if cfg.jepa_weight > 0 or cfg.mae_weight > 0:
                 if sensor_granularity:
                     observable_tokens = (
                         patch_pad.sum(dim=1) * masked["sensor_present"].sum(dim=1)
@@ -2105,9 +2146,24 @@ def main() -> None:
             # Descriptor reconstruction is a JEPA mask strategy, not an independent objective. It is
             # folded into the JEPA family before top-level scalarization so objective calibration and
             # gradient telemetry measure the loss that is actually optimized.
+            # Masked reconstruction against the FIXED physical target. Folded into the JEPA
+            # family (not a third top-level term) so objective calibration keeps scalarizing two
+            # groups; with --jepa-weight 0 --mae-weight 1 this SWAPS the target rather than
+            # stacking objectives.
+            mae_loss = jepa_loss.new_zeros(())
+            if cfg.mae_weight > 0 and model.mae_head is not None and sensor_granularity:
+                mae_target, axis_valid = fold_analysis_to_sensors(
+                    student_analysis.detach(), enc_sensor_id, enc_channel_mask,
+                    n_sensors=masked["sensor_present"].shape[1],
+                )
+                mae_loss = masked_analysis_reconstruction_loss(
+                    model.mae_head(masked["tokens"]), mae_target, jepa_mask, axis_valid,
+                )
             jepa_objective = jepa_loss + cfg.descriptor_weight * descriptor_loss
             out = phase_a_loss(
                 jepa_objective, vicreg_result.total,
+                mae=(mae_loss if cfg.mae_weight > 0 else None),
+                mae_weight=cfg.mae_weight,
                 jepa_weight=cfg.jepa_weight,
                 vicreg_weight=cfg.vicreg_weight,
             )
@@ -2124,6 +2180,8 @@ def main() -> None:
                     "vicreg/variance": float(vicreg_result.variance.detach()),
                     "vicreg/covariance": float(vicreg_result.covariance.detach()),
                     "vicreg/min_std": float(vicreg_result.min_std.detach()),
+                    "mae/loss": float(mae_loss.detach()),
+                    "mae/loss_weighted": float((cfg.mae_weight * mae_loss).detach()),
                     "vicreg/pooled_total": float(pooled_vicreg.total.detach()),
                     "vicreg/retrieval_total": float(
                         retrieval_vicreg.total.detach() if retrieval_vicreg is not None
@@ -2352,7 +2410,7 @@ def main() -> None:
             rec.update(representation_health(z, "repr_projector"))
             if teacher_clean is not None and do_objective_grad_log:
                 rec.update(representation_health(teacher_clean["pooled"], "repr_teacher"))
-            if cfg.jepa_weight > 0:
+            if cfg.jepa_weight > 0 or cfg.mae_weight > 0:
                 # Separate planner failures from physically ineligible one-token windows. The former
                 # must remain zero; the latter legitimately receive VICReg but no JEPA loss.
                 with torch.no_grad():

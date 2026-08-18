@@ -509,17 +509,92 @@ def phase_a_loss(
     *,
     jepa_weight: float = 1.0,
     vicreg_weight: float = 1.0,
+    mae: torch.Tensor | None = None,
+    mae_weight: float = 0.0,
 ) -> PhaseALossOutput:
-    """Combine the fixed-weight JEPA and augmentation-VICReg objectives.
+    """Combine the JEPA, augmentation-VICReg and (optional) masked-reconstruction objectives.
 
-    Keeping exactly two named terms makes gradient telemetry and ablations unambiguous. Frontend
-    adaptation regularization is model regularization and is added by the trainer, not represented
-    as a third pretraining objective.
+    Each named term carries its OWN weight. `mae` is not folded into the JEPA family, because the
+    two differ in exactly the property under investigation: JEPA's target is an EMA copy of the
+    model (self-referential, can drift toward any consistently-reproduced factor) while MAE's is
+    the parameter-free filterbank analysis (fixed physics). Folding them would also make
+    `--jepa-weight 0 --mae-weight 1` -- the swap arm -- silently multiply the MAE term by zero.
+
+    Frontend adaptation regularization is model regularization and is added by the trainer, not
+    represented as a pretraining objective.
     """
-    if jepa_weight < 0 or vicreg_weight <= 0:
-        raise ValueError("jepa_weight must be nonnegative and vicreg_weight must be positive")
+    if jepa_weight < 0 or vicreg_weight <= 0 or mae_weight < 0:
+        raise ValueError("jepa/mae weights must be nonnegative and vicreg_weight must be positive")
+    if mae_weight > 0 and mae is None:
+        raise ValueError("mae_weight > 0 requires an mae term")
     terms = {
         "jepa": float(jepa_weight) * jepa,
         "vicreg": float(vicreg_weight) * vicreg_loss,
     }
-    return PhaseALossOutput(total=terms["jepa"] + terms["vicreg"], terms=terms)
+    if mae is not None:
+        terms["mae"] = float(mae_weight) * mae
+    return PhaseALossOutput(total=sum(terms.values()), terms=terms)
+
+
+def fold_analysis_to_sensors(
+    analysis: torch.Tensor,        # (B,P,C,in_dim) parameter-free physical features
+    sensor_id: torch.Tensor,       # (B,C) channel -> sensor index
+    channel_mask: torch.Tensor,    # (B,C) True = channel exists
+    n_sensors: int,
+    axes: int = 3,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Scatter per-CHANNEL physical features into per-SENSOR rows: (B,P,S,axes*in_dim).
+
+    Mirrors ``SensorFold``'s slot arithmetic exactly -- live-channel ordinal within the sensor,
+    dead channels routed to a trash slot that is sliced off -- so an MAE target lines up with the
+    sensor tokens the trunk actually produces. Returns ``(target, valid)`` where ``valid`` is
+    (B,S,axes) marking which axis slots carry a real channel, so the loss can ignore absent axes
+    instead of training the head to predict the zeros they were padded with.
+    """
+    B, P, C, in_dim = analysis.shape
+    S = int(n_sensors)
+    live = channel_mask.to(torch.int64)
+    member = F.one_hot(sensor_id, num_classes=S).to(torch.int64) * live.unsqueeze(-1)
+    ordinal = member.cumsum(dim=1) - member
+    axis_idx = (ordinal * member).sum(dim=2)
+    trash = S * axes
+    slot = torch.where(channel_mask, sensor_id * axes + axis_idx,
+                       torch.full_like(sensor_id, trash))
+    grid = analysis.new_zeros(B, P, trash + 1, in_dim)
+    valid = analysis.new_zeros(B, trash + 1)
+    masked = analysis * channel_mask.view(B, 1, C, 1).to(analysis.dtype)
+    grid.scatter_(2, slot.view(B, 1, C, 1).expand(B, P, C, in_dim), masked)
+    valid.scatter_(1, slot, channel_mask.to(analysis.dtype))
+    grid, valid = grid[:, :, :trash], valid[:, :trash]
+    return grid.reshape(B, P, S, axes * in_dim), valid.reshape(B, S, axes)
+
+
+def masked_analysis_reconstruction_loss(
+    prediction: torch.Tensor,      # (B,P,S,axes*in_dim) from the masked student
+    target: torch.Tensor,          # (B,P,S,axes*in_dim) frozen physical features
+    mask: torch.Tensor,            # (B,P,S) True where the position was hidden
+    axis_valid: torch.Tensor,      # (B,S,axes) True where the axis slot is a real channel
+    axes: int = 3,
+) -> torch.Tensor:
+    """MSE over hidden (patch, sensor) positions against a PARAMETER-FREE physical target.
+
+    Why this exists. JEPA's target is an EMA copy of the model itself, which is the only
+    self-referential objective among the baselines we compare with -- LiMU-BERT reconstructs the
+    input signal, UniMTS and ImageBind align to frozen text/other-modality embeddings, HARNet
+    predicts deterministic pretext labels. A self-referential target is satisfiable by encoding
+    ANY consistently-reproduced factor, including subject identity, which is what the 2026-08-18
+    subject probe measured rising monotonically with training. Reconstructing `filterbank.analyze`
+    output cannot be satisfied that way: the target is fixed physics, so it cannot drift toward
+    whatever the encoder finds convenient.
+
+    Absent axes are excluded via `axis_valid` -- an accel-only stream pads its gyro slots with
+    zeros, and scoring those would reward predicting padding.
+    """
+    if not bool(mask.any()):
+        return prediction.new_zeros(())
+    B, P, S, width = prediction.shape
+    in_dim = width // axes
+    weight = (mask.unsqueeze(-1).to(prediction.dtype)
+              * axis_valid.unsqueeze(1).repeat_interleave(in_dim, dim=-1).to(prediction.dtype))
+    error = (prediction.float() - target.float()).pow(2) * weight.float()
+    return error.sum() / weight.float().sum().clamp(min=1.0)

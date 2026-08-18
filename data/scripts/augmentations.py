@@ -275,12 +275,27 @@ class AugmentationConfig:
         rotation_p: float = 0.0,
         rate_p: float = 0.0,
         channel_dropout_p: float = 0.0,
+        jitter_p: float = 0.0,
+        scale_p: float = 0.0,
     ) -> "AugmentationConfig":
+        """Explicit controlled recipe: a transform is on exactly when its probability is nonzero.
+
+        `jitter_p`/`scale_p` are the NUISANCE-suppressing transforms. They are separated from
+        `rotation_p` deliberately. Measured 2026-08-18: with every augmentation off, the subject
+        probe on the deployed retrieval row rises monotonically with training (0.342 random init ->
+        0.525 at step 1k -> 0.584 at step 7.5k) while the fully-augmented 4k checkpoint held it at
+        0.315. Nothing was suppressing subject and device idiosyncrasy, so the encoder spent
+        capacity on who is wearing the device. Jitter and scale perturb amplitude and sensor noise
+        WITHOUT touching gravity-frame orientation, so they suppress that nuisance without repeating
+        the independent-SO(3) failure (which is a CONFIG transform, shared across views).
+        """
         cfg = cls()
-        # Explicit controlled recipe. A transform is enabled exactly when its recorded probability is
-        # nonzero; the reference run starts clean and adds one physical intervention at a time.
-        for value, name in ((rotation_p, "rotation_p"), (rate_p, "rate_p"),
-                            (channel_dropout_p, "channel_dropout_p")):
+        probabilities = (
+            (rotation_p, "rotation_p"), (rate_p, "rate_p"),
+            (channel_dropout_p, "channel_dropout_p"),
+            (jitter_p, "jitter_p"), (scale_p, "scale_p"),
+        )
+        for value, name in probabilities:
             if not 0.0 <= float(value) <= 1.0:
                 raise ValueError(f"{name} must be in [0,1]")
         cfg.rotation_3d.enabled = rotation_p > 0
@@ -289,6 +304,10 @@ class AugmentationConfig:
         cfg.rate.p = float(rate_p)
         cfg.channel_dropout.enabled = channel_dropout_p > 0
         cfg.channel_dropout.p = float(channel_dropout_p)
+        cfg.jitter.enabled = jitter_p > 0
+        cfg.jitter.p = float(jitter_p)
+        cfg.scale.enabled = scale_p > 0
+        cfg.scale.p = float(scale_p)
         return cfg
 
     def split_by_group(self) -> tuple["AugmentationConfig", "AugmentationConfig"]:
