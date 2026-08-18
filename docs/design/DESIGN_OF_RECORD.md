@@ -84,23 +84,51 @@ that is *absent*, not data that is *present but insufficient*.
 
 ## Trunk
 
-The encoder exposes two representations. `retrieval_tokens` apply the first temporal-attention layer
-independently to each sensor before descriptor conditioning or cross-sensor mixing. These are the
-rows stored by Phase B, so an accelerometer row is unchanged when a gyroscope is absent. The main
-`tokens` path uses all `DualBranchTransformer` layers with physical-time RoPE and cross-sensor
-attention; it supplies JEPA targets and pooled context. Sensors carry no positional index; identity
-is text, so sensor count and order are free.
+`DualBranchTransformer`, **3 layers** (measured 2026-08-18; was 6). Physical-time RoPE in seconds,
+never patch index. Sensors carry no positional index; identity is text, so sensor count and order
+are free.
+
+The encoder exposes two representations. `retrieval_tokens` apply the first layer's TEMPORAL
+sub-block only -- temporal attention plus its residual norm, applied independently per sensor,
+before descriptor conditioning and before any cross-sensor mixing. These are the rows stored by
+Phase B, so an accelerometer row is unchanged when a gyroscope is absent. The main `tokens` path
+uses all layers with cross-sensor attention; it supplies JEPA targets and pooled context.
+
+Two properties of the stored row are bundled in one flag and have very different standing:
+
+* **Sensor isolation is principled.** The bank must be queryable by an accel-only device against
+  rows built from six-channel streams; a cross-sensor-mixed row would carry gyroscope information
+  the query cannot have. `test_retrieval_rows_are_sensor_isolated` asserts it.
+* **Depth 1, and skipping the block's feed-forward network, are NOT design decisions.** They are
+  what `temporal_context` happens to compute. The stored path is ~816k of the encoder's 7.5M
+  parameters. It currently measures better than full depth (+0.071 on trained weights, -0.001 at
+  random init) but that gap is CREATED BY TRAINING, i.e. it reflects the objective shaping the deep
+  path wrongly rather than a virtue of shallowness. Retrieval depth 1 vs 2 vs 3, and whether to
+  include the FFN, are open ablations.
 
 Cross-sensor attention operates **within a placement** in Phase A. Cross-*placement* fusion is a
 Phase-B vote-merge, never an attention operation (constraint 1).
 
 ## Augmentations
 
-The minimal reference recipe is clean: no signal or text augmentation. SO(3) rotation, rate changes,
-channel dropout, multi-resolution patching, and descriptor reconstruction remain controlled,
-one-at-a-time ablations. When rotation is enabled it is shared across positive views by default;
-independent rotation is an explicit invariance control because it can erase gravity-frame posture and
-limb-orientation information.
+The reference recipe adds only **jitter and scale** (`--jitter-p`, `--scale-p`), which perturb
+amplitude and sensor noise without touching gravity-frame orientation. Every other transform is a
+controlled one-at-a-time ablation exposed on the CLI: `--rotation-p` / `--rotation-pairing`,
+`--rate-augmentation-p`, `--channel-dropout-p`, `--gravity-p`, `--channel-text-phrase-p`,
+`--channel-text-dropout-p`.
+
+Rotation is shared across positive views by default. Independent rotation is an explicit invariance
+control and is **known-harmful**: it trained the encoder 0.085 BELOW a random-init trunk, confirmed
+three ways (per-dataset regression pattern, one-variable pilots, and the posture canary, where
+Shoaib fell 1.000 -> 0.703). It erases the gravity-frame posture and limb-orientation information
+the signed DC feature exists to preserve.
+
+Measured 2026-08-18, and recorded so it is not re-litigated: adding the REST of the historical
+stack -- gravity, rate, channel dropout, channel-text paraphrase and dropout -- changed held-out
+transfer by less than the noise floor, and did NOT reduce subject leakage (~0.55 against the
+old-good checkpoint's 0.3146). Whatever gave that checkpoint its selectivity, it is not the
+augmentation stack, not multi-resolution, and not descriptor reconstruction; all three were tested
+and eliminated.
 
 The JEPA teacher consumes view A. In the clean reference, VICReg's invariance term is zero by
 construction and its variance/covariance terms act as collapse and redundancy controls.
@@ -117,7 +145,28 @@ construction and its variance/covariance terms act as collapse and redundancy co
    cross-placement objective deleted 2026-08-06 — that one was ill-posed by constraint 1; this one is
    rigid-body kinematics.
 Descriptor-mask retrieval remains available as an ablation but has zero probability and zero weight in
-the reference run. **VICReg** retains its variance and covariance terms for collapse prevention. It
+the reference run.
+
+**Masked physical reconstruction (MAE) — implemented, tested, NULL.** `--mae-weight` replaces JEPA's
+EMA-latent target with masked reconstruction of the parameter-free `filterbank.analyze` output
+(`losses_repr.masked_analysis_reconstruction_loss`). Motivation: HALO is the only model in our
+comparison set whose pretraining target is produced by the model itself, and a self-referential
+target is satisfiable by encoding any consistently-reproduced factor, including subject identity.
+
+The 2026-08-18 2x2 measured the main effect of MAE-vs-JEPA at **+0.0027**, against a 0.012 noise
+floor -- undetectable, in both the with-fixes and without-fixes cells.
+
+**Why it was a null experiment, measured afterwards:** the target is ~90% predictable for free. A
+masked patch's analysis features are recoverable from its neighbours by linear interpolation --
+averaging the two adjacent patches already achieves 91.2% of the variance reduction on MotionSense
+and 83.5% on RealWorld. Filterbank band energies over one second of human motion are slowly varying,
+so the objective asks the encoder to learn what a two-tap average does. Contrast LiMU-BERT, which
+reconstructs the normalised RAW waveform: not interpolable, because it requires phase.
+
+HALO cannot currently run raw-signal reconstruction -- the encoder's input is already magnitude-only
+(`analyze` discards phase), so the waveform is not recoverable from what it sees. Before concluding
+anything about masked reconstruction for HALO, mask contiguous RUNS of patches (2-4 s) so
+interpolation cannot bridge the gap, and re-measure the interpolation baseline at that span. **VICReg** retains its variance and covariance terms for collapse prevention. It
 is split equally between pooled contextual embeddings and the raw 256-dimensional retrieval rows;
 this prevents a healthy projector from hiding collapse in the representation Phase B stores.
 

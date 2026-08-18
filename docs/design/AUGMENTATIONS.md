@@ -1,7 +1,11 @@
 # Augmentation policy — what each model gets, and why
 
-> **Updated for the minimal Phase-A reference recipe.** VICReg receives two identical clean physical
-> views. Rotation and every other transform are explicit, one-at-a-time ablations.
+> **Updated 2026-08-18.** The reference recipe enables **jitter and scale** only; every other
+> transform is an explicit, one-at-a-time ablation with a CLI flag. Independent-SO(3) rotation is
+> known-harmful (trained 0.085 below a random-init trunk). Adding the rest of the historical stack
+> (gravity, rate, channel dropout, text) moved held-out transfer by less than the noise floor and
+> did not reduce subject leakage. Evidence:
+> [`docs/results/PHASE_A_RECOVERY_20260818.md`](../results/PHASE_A_RECOVERY_20260818.md).
 > The authoritative Phase-A recipe table is in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md).
 
@@ -21,12 +25,12 @@ Source of truth: `data/scripts/augmentations.py`. Applied per-sample in the load
 
 | Aug | Enabled | p | Params |
 |---|---|---|---|
-| `jitter` | ❌ | 0.5 | available as an ablation; disabled in the reference recipe |
-| `scale` | ❌ | 0.5 | available as an ablation |
-| `gravity` (remove gravity) | ❌ | 0.5 | available as an ablation |
+| `jitter` | ✅ | 0.5 | `--jitter-p`. In the reference recipe: perturbs sensor noise without touching gravity-frame orientation |
+| `scale` | ✅ | 0.5 | `--scale-p`. In the reference recipe, same rationale as jitter |
+| `gravity` (remove gravity) | ❌ | 0.5 | `--gravity-p`; CONFIG-group. Tested 2026-08-18: no effect beyond noise |
 | `rotation_3d` (SO(3)) | ❌ | 0.0 | explicit `--rotation-p`; shared across views unless `--rotation-pairing independent` is requested |
-| `rate` (resample) | ❌ | 0.5 | available as an ablation; native rates already provide real rate diversity |
-| `channel_dropout` | ❌ | 0.3 | available as an ablation |
+| `rate` (resample) | ❌ | 0.5 | `--rate-augmentation-p`; CONFIG-group. Tested: no effect beyond noise. Native rates already give real diversity |
+| `channel_dropout` | ❌ | 0.3 | `--channel-dropout-p`; CONFIG-group. Tested: no effect beyond noise |
 | `window_crop` | ❌ | 0.5 | available as an ablation |
 | text paraphrase/dropout | ❌ | varies | available as ablations |
 

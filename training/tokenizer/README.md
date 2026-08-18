@@ -135,7 +135,7 @@ upsampled 25 Hz signal from being treated as though it contains genuine 25 Hz sp
 
 | setting | value |
 |---|---:|
-| encoder | d=256, 6 layers, 8 heads (head dim 32) |
+| encoder | d=256, **3 layers**, 8 heads (head dim 32) -- `--num-layers`; see the depth note below |
 | VICReg expander | 256 -> 256 -> 128 |
 | JEPA temporal mask ratio | 0.5 of physically ordered tokens, up to rounding |
 | frontend | fixed physical filterbank |
@@ -147,7 +147,7 @@ upsampled 25 Hz signal from being treated as though it contains genuine 25 Hz sp
 | gradient clip | 1.0 |
 | CUDA precision | FP16 autocast + dynamic loss scaling; FP32 master weights/statistics |
 | JEPA EMA decay | 0.984095744256 (`0.996^4`, preserving half-life in examples) |
-| validation | internal subject-disjoint probes; `best.pt` selected every 2,000 steps on dataset-macro kNN over MotionSense, RealWorld, and Shoaib development data |
+| validation | internal subject-disjoint probes; `best.pt` selected every 500-2,000 steps on dataset-macro kNN over MotionSense, RealWorld and Shoaib. ExtraSensory wrist/hand are encoded and REPORTED but excluded from the scalar (measured anti-correlated with training). Posture canaries reported per source. |
 | objective calibration | 50 batches ending at step 500, apply once |
 | RTX 4090 loader | 12 workers (override with `--num-workers`) |
 
@@ -155,9 +155,29 @@ upsampled 25 Hz signal from being treated as though it contains genuine 25 Hz sp
 attributable pilot sweeps. The batch-1024 defaults use conservative square-root LR scaling; weight
 decay and EMA momentum are adjusted so their cumulative effect remains approximately constant per
 sample relative to the batch-256 reference.
-The batch-1,024 recipe has been throughput- and gradient-smoke-tested, but no completed 7,500-step
-checkpoint has been produced from it yet. The completed reference run used batch 256 for 30,000 steps;
-do not describe the 1,024 recipe as a validated training result until that run exists.
+Ten completed 7,500/15,000-step batch-1,024 arms now exist (2026-08-18); the recipe is no longer
+merely smoke-tested. Their results, and the reference points every future arm is measured against,
+are in [`docs/results/PHASE_A_RECOVERY_20260818.md`](../../docs/results/PHASE_A_RECOVERY_20260818.md).
+
+**Trunk depth: 3, and this is the only setting the 2026-08-18 sweep established.** Main effect of
+depth 3 + jitter + scale over the 6-layer no-augmentation control was **+0.0157** on held-out
+development transfer, above the 0.012 screening noise floor. It also removed the decay every
+6-layer arm showed: those peaked by step 1,000-4,000 and lost 3-6 points, while the depth-3 arms
+held their value for the full 7,500 steps. Probing every depth shows why -- activity information
+peaks at depth 1-3 and loses 4-8 points by depth 6 in every trained arm, while a random-init trunk
+is flat.
+
+**Calibrated reference points** (same metric, same seed):
+
+| | development transfer |
+|---|---:|
+| random-init encoder, same architecture | 0.8012 |
+| best 2026-08-18 arm (`h_mae_fixes`) | 0.8468 |
+| old-good 4k checkpoint | **0.8577** -- still unbeaten |
+| rejected `phase_a_fixed_1s_rotation_20260817` | 0.7161 (below random init) |
+
+Phase-A SSL is therefore worth about +0.057 over a random trunk; the fixed physical filterbank
+supplies the rest. Treat "beats the random-init floor" as necessary, not sufficient.
 `best.pt` is selected by a frozen readout of the actual sensor rows Phase B stores, evaluated on the
 three development datasets above. The sealed test roster is never used for checkpoint selection.
 

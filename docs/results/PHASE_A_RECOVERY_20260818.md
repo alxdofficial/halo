@@ -187,3 +187,59 @@ replace the EMA-latent JEPA target with masked reconstruction of the *filterbank
 of held-out patches. That target is a fixed physical quantity already computed every step, so it
 cannot collapse, and it is the objective class LiMU-BERT uses to beat us by 12 points at 1/120th
 the parameter count.
+
+## 8. The recipe sweep — ten arms, one confirmed cause
+
+All arms: 18-dataset corpus, seed 20260718, 7.68M sampled windows, selected on held-out development
+transfer. Screening noise floor ~0.012.
+
+| arm | recipe delta vs `a_clean` | best | @step | vs random-init floor |
+|---|---|---:|---:|---:|
+| h_mae_fixes | depth 3 + jitter/scale + MAE | **0.8468** | 2000 | +0.046 |
+| j_aug_full | depth 3 + the complete historical stack | 0.8446 | 7000 | +0.043 |
+| f_jepa_fixes | depth 3 + jitter/scale | 0.8390 | 2000 | +0.038 |
+| i_aug_physical | depth 3 + jitter/scale/gravity/rate/dropout | 0.8389 | 1500 | +0.038 |
+| b_sharedrot | shared SO(3) p=1 | 0.8348 | 1000 | +0.034 |
+| e_clean_long | 2x schedule | 0.8305 | 1000 | +0.029 |
+| a_clean | (reference) | 0.8284 | 1000 | +0.027 |
+| c_multires_desc | multiresolution + descriptor 0.5 | 0.8271 | 4000 | +0.026 |
+| g_mae_plain | MAE, no other change | 0.8260 | 500 | +0.025 |
+| d_sharedrot_mr_desc | shared rot + multires + descriptor | 0.8200 | 1500 | +0.019 |
+
+**2x2 main effects** (objective against the two diagnosed defects):
+
+| effect | value | verdict |
+|---|---:|---|
+| depth 3 + jitter/scale | **+0.0157** | real (above the 0.012 floor) |
+| MAE instead of JEPA | +0.0027 | undetectable |
+
+The depth-3 arms also removed the decay. Every 6-layer arm peaked by step 1,000-4,000 and then lost
+3-6 points; `f` and `h` held their value across all 7,500 steps. `j_aug_full` is the only arm of ten
+still RISING at step 7,000, so the full stack changes the dynamics from over- to under-trained --
+the one place more compute is plausibly worth spending.
+
+**What was eliminated.** Multi-resolution, descriptor reconstruction, and the complete historical
+augmentation stack were each tested and each moved transfer by less than the noise floor. None
+reduced subject leakage: the best new arm reaches 0.5281 against the old-good checkpoint's 0.3146.
+So old-good's advantage is explained by none of them, and the remaining untested structural
+difference is `sensor_bias` conditioning in the trunk, which only that checkpoint had.
+
+## 9. Why the MAE arm was a null experiment
+
+Measured after the fact, on the actual target tensor: a masked patch's `filterbank.analyze` features
+are recoverable from its neighbours almost for free.
+
+| source | MSE predicting the corpus mean | copy previous patch | average both neighbours |
+|---|---:|---:|---:|
+| MotionSense | 0.5068 | 0.0668 (86.8% solved) | 0.0445 (**91.2% solved**) |
+| RealWorld | 0.2908 | 0.0690 (76.3% solved) | 0.0480 (**83.5% solved**) |
+
+Linear interpolation between adjacent patches achieves ~85-91% of the available variance reduction
+with no model at all. Band energies over one second of human motion are slowly varying, so the
+objective asked the encoder to learn what a two-tap average already does.
+
+This does not settle whether masked reconstruction helps HALO -- it settles that THIS target does
+not. LiMU-BERT reconstructs the normalised raw waveform, which is not interpolable because it
+requires phase. HALO's encoder cannot currently do that: its input is already magnitude-only, since
+`analyze` discards phase. The honest next test is contiguous multi-patch masking (2-4 s spans) so
+interpolation cannot bridge the gap, with the interpolation baseline re-measured at that span first.
