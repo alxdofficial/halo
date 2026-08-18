@@ -112,7 +112,6 @@ def test_channel_dropout_prunes_all_sensor_metadata_atomically(index):
     item = ds[0]
     assert item["channel_mask"].tolist() == [True, True, True, False, False, False]
     assert len(item["sensor_texts"]) == 1
-    assert item["sensor_bias"].shape == (1, SENSOR_BIAS_DIM)
     assert item["sensor_placement"].shape == (1,)
 
 
@@ -120,7 +119,6 @@ def test_natively_accel_only_stream_has_no_phantom_gyro_metadata(index):
     key = next(key for key in index.train if not any(index.refs[key.stream_i].mask[3:]))
     item = PretrainDataset(index, [key], augment=False)[0]
     assert len(item["sensor_texts"]) == 1
-    assert item["sensor_bias"].shape == (1, SENSOR_BIAS_DIM)
     assert item["sensor_placement"].shape == (1,)
 
 
@@ -144,9 +142,30 @@ def test_two_views_share_every_acquisition_configuration(index):
         assert item["rate"] == other["rate"]
         assert item["source_rate"] == other["source_rate"]
         assert torch.equal(item["channel_mask"], other["channel_mask"])
-        assert torch.equal(item["sensor_bias"], other["sensor_bias"])
         assert torch.equal(item["sensor_placement"], other["sensor_placement"])
         assert item["sensor_target_texts"] == other["sensor_target_texts"]
+
+
+def test_rotation_pairing_is_explicit(index):
+    from data.scripts.augmentations import AugmentationConfig
+
+    cfg = AugmentationConfig.phase_a(rotation_p=1.0)
+    shared = PretrainDataset(
+        index, index.train[:8], augment=True, two_view=True,
+        augmentation_config=cfg, rotation_pairing="shared",
+    )
+    independent = PretrainDataset(
+        index, index.train[:8], augment=True, two_view=True,
+        augmentation_config=cfg, rotation_pairing="independent",
+    )
+    for i in range(8):
+        item = shared[i]
+        assert torch.equal(item["data"], item["view_b"]["data"])
+    differs = False
+    for i in range(8):
+        item = independent[i]
+        differs |= not torch.allclose(item["data"], item["view_b"]["data"])
+    assert differs
 
 
 def test_descriptor_target_is_stable_across_random_surface_paraphrases(index):
@@ -401,15 +420,16 @@ def test_window_crop_varies_observation_length():
     assert aug(short).data.shape[0] >= 32
 
 
-def test_phase_a_reference_recipe_is_rotation_only():
+def test_phase_a_reference_recipe_is_clean_and_rotation_is_an_explicit_shared_ablation():
     from data.scripts.augmentations import AugmentationConfig
     cfg = AugmentationConfig.phase_a()
     enabled = {name for name in cfg.ORDER if getattr(cfg, name).enabled}
-    assert enabled == {"rotation_3d"}
+    assert enabled == set()
+    cfg = AugmentationConfig.phase_a(rotation_p=1.0)
     nuisance, config = cfg.split_by_group()
-    assert nuisance.rotation_3d.enabled
-    assert nuisance.rotation_3d.p == 1.0
-    assert not config.rotation_3d.enabled
+    assert not nuisance.rotation_3d.enabled
+    assert config.rotation_3d.enabled
+    assert config.rotation_3d.p == 1.0
 
 
 def test_gravity_align_primitive_respects_removed_state():

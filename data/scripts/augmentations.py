@@ -258,24 +258,37 @@ class AugmentationConfig:
     # invariance pressure on it is what forces the model off memorising ~20 fixed strings and onto
     # text semantics — the only thing that can generalize to an unseen placement description.
     # ------------------------------------------------------------------------------------------
-    # Mounting orientation is deliberately a nuisance in the minimal recipe: independent rotations
-    # make the positive-pair objective teach orientation robustness directly.
-    NUISANCE_GROUP = ("window_crop", "scale", "jitter", "rotation_3d",
-                      "channel_text_phrase")
+    # Nuisance transforms may differ across positive views. Rotation is intentionally excluded:
+    # gravity-frame orientation can carry activity signal, so rotation invariance is an explicit
+    # ablation rather than an assumption in the reference recipe.
+    NUISANCE_GROUP = ("scale", "jitter", "channel_text_phrase")
     # sensor_text_dropout is listed here (rather than omitted) so the two groups partition ORDER: if
     # anyone re-enables it, it lands in the config group by default rather than silently reacquiring
     # VICReg invariance pressure — the failure this whole split exists to prevent.
-    CONFIG_GROUP = ("channel_dropout", "gravity", "rate", "channel_text_dropout",
-                    "sensor_text_dropout")
+    CONFIG_GROUP = ("channel_dropout", "rotation_3d", "gravity", "rate", "window_crop",
+                    "channel_text_dropout", "sensor_text_dropout")
 
     @classmethod
-    def phase_a(cls) -> "AugmentationConfig":
+    def phase_a(
+        cls,
+        *,
+        rotation_p: float = 0.0,
+        rate_p: float = 0.0,
+        channel_dropout_p: float = 0.0,
+    ) -> "AugmentationConfig":
         cfg = cls()
-        # Minimal reference recipe: the only positive-view difference is mounting orientation.
-        # Every other transform remains implemented for controlled ablations, but is not bundled into
-        # the first run where its individual value could not be identified.
-        cfg.rotation_3d.enabled = True
-        cfg.rotation_3d.p = 1.0
+        # Explicit controlled recipe. A transform is enabled exactly when its recorded probability is
+        # nonzero; the reference run starts clean and adds one physical intervention at a time.
+        for value, name in ((rotation_p, "rotation_p"), (rate_p, "rate_p"),
+                            (channel_dropout_p, "channel_dropout_p")):
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be in [0,1]")
+        cfg.rotation_3d.enabled = rotation_p > 0
+        cfg.rotation_3d.p = float(rotation_p)
+        cfg.rate.enabled = rate_p > 0
+        cfg.rate.p = float(rate_p)
+        cfg.channel_dropout.enabled = channel_dropout_p > 0
+        cfg.channel_dropout.p = float(channel_dropout_p)
         return cfg
 
     def split_by_group(self) -> tuple["AugmentationConfig", "AugmentationConfig"]:

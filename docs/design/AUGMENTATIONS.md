@@ -1,7 +1,7 @@
 # Augmentation policy — what each model gets, and why
 
-> **Updated for the minimal Phase-A reference recipe.** VICReg receives two independently rotated
-> views of the same clean context. Every other transform is an explicit ablation.
+> **Updated for the minimal Phase-A reference recipe.** VICReg receives two identical clean physical
+> views. Rotation and every other transform are explicit, one-at-a-time ablations.
 > The authoritative Phase-A recipe table is in
 > [`training/tokenizer/README.md`](../../training/tokenizer/README.md).
 
@@ -24,16 +24,18 @@ Source of truth: `data/scripts/augmentations.py`. Applied per-sample in the load
 | `jitter` | ❌ | 0.5 | available as an ablation; disabled in the reference recipe |
 | `scale` | ❌ | 0.5 | available as an ablation |
 | `gravity` (remove gravity) | ❌ | 0.5 | available as an ablation |
-| `rotation_3d` (SO(3)) | ✅ | 1.0 | independent per VICReg view; rotates co-located acc+gyro triads jointly |
+| `rotation_3d` (SO(3)) | ❌ | 0.0 | explicit `--rotation-p`; shared across views unless `--rotation-pairing independent` is requested |
 | `rate` (resample) | ❌ | 0.5 | available as an ablation; native rates already provide real rate diversity |
 | `channel_dropout` | ❌ | 0.3 | available as an ablation |
 | `window_crop` | ❌ | 0.5 | available as an ablation |
 | text paraphrase/dropout | ❌ | varies | available as ablations |
 
-The narrow recipe makes the first run interpretable. Rotation addresses the unavoidable mounting-axis
-nuisance without assuming that weak motion, gravity, sensor availability, rate, duration, or semantic
-metadata should be discarded. Each disabled transform can be added alone and retained only when a
-fixed downstream evaluation shows a repeatable gain. The objectives remain JEPA plus VICReg.
+The clean recipe makes the first run interpretable and preserves gravity-frame orientation, which is
+itself discriminative for posture and limb motion. Each transform is added alone and retained only
+when frozen downstream development evaluation shows a repeatable gain. A shared rotation changes the
+acquisition configuration without asking VICReg to erase it. Independent rotation is retained only
+as the explicit invariance control that reproduced the failed 2026-08-17 recipe. The objectives
+remain JEPA plus VICReg.
 
 **Rate/length diversity is now REAL, not synthetic (changed 2026-07-18).** HALO trains on the
 `native` grids (`build_grids._ALIGNMENTS`): the corpus's **native sampling rates** (20/50/100 Hz) and

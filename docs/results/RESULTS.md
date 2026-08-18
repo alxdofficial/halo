@@ -1,6 +1,6 @@
 # Results Index
 
-> Project-wide index of measured results. Last updated 2026-08-17.
+> Project-wide index of measured results. Last updated 2026-08-18.
 >
 > Phase-B design status, run history, and adaptation tables live only in
 > [`PHASE_B_TRAINING_STATUS.md`](PHASE_B_TRAINING_STATUS.md). The historical step-zero analysis is
@@ -12,16 +12,56 @@
 | area | artifact/protocol | result | status |
 |---|---|---|---|
 | zero-shot baselines | v4, 93 labels, 7 datasets | HARNet 45.7 mean macro F1; CrossHAR 42.8; UniMTS 34.7 | historical completed table; predates the 18-source/166-label protocol |
-| current Phase A | `phase_a_fixed_1s_rotation_20260817/best.pt` | selected step 27,000 | complete; sensor-granularity, fixed 1 s patches, rotation only |
+| historical Phase A | `phase_a_fixed_1s_rotation_20260817/best.pt` | selected step 27,000; seven-dataset fixed-1s transfer 0.509 versus old 0.617 | completed but rejected for the next Phase-B bank |
+| replacement Phase A | clean views, isolated retrieval rows, direct row VICReg, external-development selection | implementation complete; no trained result yet | pending training and controlled ablations |
 | parked relational Phase B | v22 and checkpoint study | learned adaptation exists, but usually trails identity/prototype/ridge | historical evidence only |
 | current admissibility Phase B | matched adaptation v1, rank-8 Stage-2 step 1,000, five seeds | ordinary coherent k=1: 44.79 versus identity 45.71; specialized k=1: 28.62 versus 28.58; arbitrary labels exactly identity | complete seven-dataset result; adaptation exists, but learned admissibility has no held-out advantage |
 
-The current Phase-A checkpoint is
+The Phase-B results below are bound to the historical Phase-A checkpoint
 `training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt`. It records 18 training
 datasets, `token_granularity='sensor'`, fixed one-second patches, and step 27,000. Its current
 rank-8 matched enrollment suite and controls are recorded in `PHASE_B_TRAINING_STATUS.md`. The corresponding
 `memory_bank.pt`, `resolvability.json`, and Stage-2 artifacts are bound to that checkpoint; older
 result JSON files remain historical and must not be mixed into the current table.
+
+The 2026-08-17 Phase-A regression is now diagnosed as a recipe and representation-path problem. Its
+only active augmentation independently rotated the two VICReg views, forcing invariance to
+gravity-frame orientation. Dataset regressions were largest on orientation-sensitive SPAR (-0.209),
+Upper Limb Use (-0.178), and RealWorld (-0.142). The final logged JEPA/VICReg gradient cosine was
+-0.901, but the complete 61-probe record is bimodal rather than uniformly conflicting (median
++0.563; 34.4% negative). Gradient clipping was nevertheless active on every logged probe (median
+coefficient 0.091). Late encoder effective rank had median 39.1/256; the final 23.0 was unusually low
+but not representative of every probe. These facts reject “one bad final batch” as the explanation
+while avoiding the stronger unsupported claim that the objectives always cancel.
+
+The replacement recipe removes source-fitted sensor statistics from the encoder trunk, exports
+sensor-isolated temporal rows before descriptor and cross-sensor mixing, applies half of VICReg
+directly to those rows, and starts with no augmentation. `best.pt` is selected every 2,000 steps by
+dataset-macro subject-disjoint kNN over MotionSense, RealWorld, and Shoaib development data using the
+actual rows Phase B stores. Rotation (shared and independent), rate, channel dropout,
+multi-resolution, and descriptor reconstruction are separate ablations.
+
+Bounded 1,000-step pilots use seed 20260718 and retain the full 7,500-step LR/EMA schedule. They are
+screening evidence, not final comparisons:
+
+| one-variable arm | development kNN BA | retrieval effective rank / 256 | JEPA/VICReg cosine at step 1,000 |
+|---|---:|---:|---:|
+| clean | 0.8244 | 87.4 | +0.455 |
+| shared SO(3), p=1 | **0.8297** | 84.4 | +0.401 |
+| independent SO(3), p=1 | **0.7392** | 57.7 | +0.564 |
+| shared rate augmentation, p=0.5 | 0.8216 | 90.5 | +0.622 |
+| shared channel dropout, p=0.3 | 0.8264 | 86.9 | +0.522 |
+| descriptor prediction, weight 0.5 | 0.8181 | 88.2 | +0.652 |
+| multi-resolution, batch 512 / step 2,000 | 0.8124 | **104.1** | +0.088 |
+
+The clean, shared-rotation, rate, and dropout values are too close to rank from one seed. Independent
+rotation is not: it loses 0.0852 BA against clean and 0.0905 against the matched shared-rotation arm.
+This directly identifies invariance across rotations, rather than rotated input itself, as harmful.
+The full next run should start clean; shared rotation is the first follow-up. Rate, dropout, and
+descriptor prediction have not earned default complexity from this screen.
+The multi-resolution arm uses 2,000 steps so its 1.024 million sampled windows match the other
+arms' batch-1,024/step-1,000 exposure. It raises retrieval rank but lowers the development score by
+0.012; this is a useful follow-up, not sufficient evidence to enable it by default.
 
 The matched suite uses manifest fingerprint `1bd89d35f5ae`, five fixed episode seeds, seven held-out
 datasets, and six external representations. HALO Stage 2 scores 23.75 ordinary and 9.81 specialized

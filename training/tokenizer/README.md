@@ -10,10 +10,13 @@ The live recipe has exactly two top-level objectives:
 | objective | supervision | default weight |
 |---|---|---:|
 | `jepa` | masked student predicts clean contextual sensor tokens from an EMA teacher | 1.0 initially |
-| `vicreg` | VICReg over two independently SO(3)-rotated views of every window | 1.0 initially |
+| `vicreg` | VICReg collapse control on pooled embeddings and the sensor rows used by Phase B | 1.0 initially |
 
-VICReg's published MSE invariance, variance, and covariance terms provide augmentation robustness,
-collapse prevention, and redundancy reduction for every sampled window. Phase A no longer contains
+VICReg's published MSE invariance, variance, and covariance terms provide collapse prevention and
+redundancy reduction for every sampled window. Half of its default value acts directly on the
+sensor-isolated retrieval rows; the other half acts on the pooled contextual representation through
+the projector. The clean reference uses identical physical views. Rotation, rate, and modality
+dropout are explicit one-at-a-time ablations. Phase A no longer contains
 a sparse synchronous cross-placement objective or a paired-source sampling quota. Cross-placement
 transfer remains an evaluation axis and Phase B can still use event metadata from the grids.
 
@@ -37,12 +40,12 @@ applies one solved scalarization, freezes it, and continues:
 
 ```bash
 python -m training.tokenizer.pretrain --device cuda \
-  --calibrate-objectives-at 2000 \
+  --calibrate-objectives-at 500 \
   --objective-calibration-mode apply \
   --out training/tokenizer/outputs/phase_a
 ```
 
-`--calibrate-objectives-at 2000 --objective-calibration-mode apply` is the real-run default. It is
+`--calibrate-objectives-at 500 --objective-calibration-mode apply` is the real-run default. It is
 written explicitly above so launch records remain self-explanatory. Smoke tests disable calibration
 unless requested, and `--jepa-weight 0` disables it for the VICReg-only control. A deliberately
 uncalibrated JEPA+VICReg run must pass `--calibrate-objectives-at 0`.
@@ -104,9 +107,8 @@ The design-of-record default is the **expanded 18-source native-rate corpus**: 5
 1,744,926 admitted training windows, 217,554 subject-disjoint validation windows, and 166 canonical
 activity names at data seed 20260718. The original 12-source recipe remains available as
 `--corpus matched`; use it for a technique-only comparison against baselines fitted on that corpus.
-Because sensor-bias standardization is corpus-fitted, rebuild `sensor_bias.json` for the exact
-12-source roster before launching that arm; the committed artifact is intentionally fitted to the
-expanded design-of-record run and the trainer fails closed on a mismatch.
+The offline `sensor_bias.json` artifact is bank metadata only. It does not enter Phase-A training and
+therefore does not need to be rebuilt when the Phase-A corpus changes.
 The sampler is hierarchical and label-free:
 
 ```text
@@ -139,13 +141,13 @@ upsampled 25 Hz signal from being treated as though it contains genuine 25 Hz sp
 | frontend | fixed physical filterbank |
 | temporal grid | one-second patches in non-overlapping contexts of at most six seconds |
 | token unit | one token per modality triad (accelerometer or gyroscope) |
-| conditioning | frozen sensor text descriptor + train-only measured sensor bias, each through a gated learnable projection |
+| conditioning | frozen sensor text descriptor through a gated learnable projection; measured sensor statistics are bank-only metadata |
 | batch / steps | 1,024 / 7,500 (7.68M sampled windows) |
 | LR / warmup / weight decay | 6e-4 / 250 / 0.10 |
 | gradient clip | 1.0 |
 | CUDA precision | FP16 autocast + dynamic loss scaling; FP32 master weights/statistics |
 | JEPA EMA decay | 0.984095744256 (`0.996^4`, preserving half-life in examples) |
-| validation | subject-disjoint, label/stream-covered kNN + ConSE probes |
+| validation | internal subject-disjoint probes; `best.pt` selected every 2,000 steps on dataset-macro kNN over MotionSense, RealWorld, and Shoaib development data |
 | objective calibration | 50 batches ending at step 500, apply once |
 | RTX 4090 loader | 12 workers (override with `--num-workers`) |
 
@@ -156,8 +158,8 @@ sample relative to the batch-256 reference.
 The batch-1,024 recipe has been throughput- and gradient-smoke-tested, but no completed 7,500-step
 checkpoint has been produced from it yet. The completed reference run used batch 256 for 30,000 steps;
 do not describe the 1,024 recipe as a validated training result until that run exists.
-`best.pt` is selected by kNN recall
-macro-averaged over observed `(label, stream)` cells rather than a source-dominated global average.
+`best.pt` is selected by a frozen readout of the actual sensor rows Phase B stores, evaluated on the
+three development datasets above. The sealed test roster is never used for checkpoint selection.
 
 The constrained-learnable frontend and multi-resolution path remain active tokenizer ablations:
 

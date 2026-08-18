@@ -6,7 +6,6 @@ Assembly (build plan M3; EVIDENCE_ENGINE.md §5.2.1):
                                   └─ SensorFold(xyz) ─────────> sensor tokens (B,P,S,d)
                                                       │
     sensor description ──frozen LM──> gated projection ──────> acquisition semantics
-    measured sensor bias ────────────> gated projection ──────> hardware statistics
                                                       │
     JEPA token_mask ──> learned [MASK] token (BEFORE conditioning, so the model knows WHICH
                       sensor is hidden — masked-sensor modeling needs the identity
@@ -19,8 +18,8 @@ Assembly (build plan M3; EVIDENCE_ENGINE.md §5.2.1):
     {tokens (B,P,S,d) · per_patch (B,P,d) · pooled (B,d)}
 
 Configuration conditioning is the sensor text (for example, "watch accelerometer on the left
-wrist") plus a measured sensor-bias vector. An unseen configuration therefore arrives with a
-semantic description even when no fitted stream-specific embedding exists.
+wrist"). Measured sensor statistics remain bank metadata, but are excluded from the representation
+trunk because held-out devices have no fitted statistics and the training values expose source ID.
 """
 
 from __future__ import annotations
@@ -63,6 +62,8 @@ class SetTokenizerEncoder(nn.Module):
         text_conditioning: str = "per_channel",  # 'per_channel' (legacy) | 'factored' (role+sensor)
         token_granularity: str = "channel",      # direct-constructor compatibility; CLI uses sensor
         sensor_bias_dim: int = 14,               # 7 standardized values + 7 support bits
+        use_sensor_bias_conditioning: bool = False,
+        use_sensor_isolated_retrieval: bool = False,
         gate_bias_init: float = -2.0,             # factored: negative => identity lightly injected @ init
         use_duration_embedding: bool = False,
         duration_min_seconds: float = 0.4,
@@ -90,6 +91,8 @@ class SetTokenizerEncoder(nn.Module):
                 "filterbank resolution flags, and duration-weighted pooling carry temporal scale"
             )
         self.sensor_bias_dim = int(sensor_bias_dim)
+        self.use_sensor_bias_conditioning = bool(use_sensor_bias_conditioning)
+        self.use_sensor_isolated_retrieval = bool(use_sensor_isolated_retrieval)
         if frontend not in {"fixed", "learnable"}:
             raise ValueError("frontend must be 'fixed' or 'learnable'")
         # Attribute stays named `filterbank` for checkpoint compatibility.
@@ -100,12 +103,15 @@ class SetTokenizerEncoder(nn.Module):
         if token_granularity == "sensor":
             # DESIGN OF RECORD: a sensor is one modality triad. Folding xyz into one token makes the
             # role text ("x"/"y"/"z") redundant — axis identity becomes positional inside the token —
-            # and the two conditioning artifacts get LEARNABLE projections over FROZEN inputs.
+            # and sensor descriptions get a learnable projection over frozen text embeddings.
             self.sensor_fold = SensorFold(d_model=d_model, dropout=dropout)
             self.descriptor_proj = ConditioningProjection(384, d_model, dropout=dropout,
                                                           gate_bias_init=gate_bias_init)
-            self.bias_proj = ConditioningProjection(self.sensor_bias_dim, d_model, dropout=dropout,
-                                                    gate_bias_init=gate_bias_init)
+            if self.use_sensor_bias_conditioning:
+                self.bias_proj = ConditioningProjection(
+                    self.sensor_bias_dim, d_model, dropout=dropout,
+                    gate_bias_init=gate_bias_init,
+                )
             self.descriptor_head = DescriptorHead(d_model, text_dim=384, dropout=dropout)
             # PipelineAModel disables this explicit ablation in the reference recipe. The module
             # remains in the state dict for checkpoint compatibility, but an inactive head should
@@ -311,6 +317,7 @@ class SetTokenizerEncoder(nn.Module):
         # --- sensor granularity (token_granularity='sensor') ---
         sensor_bias: Optional[torch.Tensor] = None,        # (B,N_sensors,sensor_bias_dim) frozen
         descriptor_mask: Optional[torch.Tensor] = None,    # (B,N_sensors) True = hide the descriptor
+        return_retrieval_tokens: bool = True,
     ) -> dict[str, torch.Tensor]:
         if self.token_granularity == "sensor":
             return self._encode_sensor(
@@ -322,6 +329,7 @@ class SetTokenizerEncoder(nn.Module):
                 sensor_descriptors=sensor_descriptors,
                 sensor_id=sensor_id, sensor_text_ids=sensor_text_ids,
                 sensor_bias=sensor_bias, descriptor_mask=descriptor_mask,
+                return_retrieval_tokens=return_retrieval_tokens,
             )
         B, P, C, _ = sensor_tokens.shape
 
@@ -434,6 +442,7 @@ class SetTokenizerEncoder(nn.Module):
         sensor_text_ids: Optional[torch.Tensor] = None,
         sensor_bias: Optional[torch.Tensor] = None,        # (B,N,sensor_bias_dim)
         descriptor_mask: Optional[torch.Tensor] = None,    # (B,N) True = hide the descriptor
+        return_retrieval_tokens: bool = True,
     ) -> dict[str, torch.Tensor]:
         """The design-of-record forward: fold to sensor tokens, condition, attend, pool.
 
@@ -465,6 +474,15 @@ class SetTokenizerEncoder(nn.Module):
             tokens = torch.where(token_mask.unsqueeze(-1),
                                  self.mask_token.expand_as(tokens), tokens)
 
+        # Retrieval rows are sensor-isolated and physical: one temporal-attention layer supplies
+        # local context before sensor-description conditioning and before any cross-sensor mixing.
+        # This makes an accelerometer row independent of whether a gyroscope happened to coexist.
+        retrieval_tokens = None
+        if return_retrieval_tokens and self.use_sensor_isolated_retrieval:
+            retrieval_tokens = self.transformer.retrieval_context(
+                tokens, patch_padding_mask=patch_padding_mask, positions=positions,
+            )
+
         if unique_text:
             # (U,384) -> (B,N,384). Padding slots (-1) clamp to row 0 and are zeroed by
             # `sensor_present` downstream, so they contribute nothing.
@@ -479,18 +497,20 @@ class SetTokenizerEncoder(nn.Module):
         if descriptor_mask is not None:
             descriptor_visible = descriptor_visible & ~descriptor_mask.to(sensor_present.device)
         tokens = self.descriptor_proj(tokens, descriptor, descriptor_visible)
-        if sensor_bias is None:
-            raise ValueError("sensor granularity requires sensor_bias; omitting it changes the "
-                             "representation and is not a supported fallback")
-        if sensor_bias.shape != (B, N, self.sensor_bias_dim):
-            raise ValueError(
-                f"sensor_bias must be {(B, N, self.sensor_bias_dim)}, got {tuple(sensor_bias.shape)}"
-            )
-        tokens = self.bias_proj(tokens, sensor_bias.to(tokens.dtype), sensor_present)
+        if self.use_sensor_bias_conditioning:
+            if sensor_bias is None:
+                raise ValueError("this legacy checkpoint requires sensor_bias conditioning")
+            if sensor_bias.shape != (B, N, self.sensor_bias_dim):
+                raise ValueError(
+                    f"sensor_bias must be {(B, N, self.sensor_bias_dim)}, got {tuple(sensor_bias.shape)}"
+                )
+            tokens = self.bias_proj(tokens, sensor_bias.to(tokens.dtype), sensor_present)
 
         transformer_forward = self._compiled_transformer_forward or self.transformer
         h = transformer_forward(tokens, channel_mask=sensor_present,
                                 patch_padding_mask=patch_padding_mask, positions=positions)
+        if return_retrieval_tokens and retrieval_tokens is None:
+            retrieval_tokens = h
 
         weights = h.new_ones(B, P, N) * sensor_present.view(B, 1, N).to(h.dtype)
         if patch_padding_mask is not None:
@@ -540,7 +560,8 @@ class SetTokenizerEncoder(nn.Module):
 
         descriptor_pred = (self.descriptor_head(sensor_context)
                            if self.descriptor_prediction_enabled else None)
-        return {"tokens": h, "per_patch": per_patch, "pooled": pooled,
+        return {"tokens": h, "retrieval_tokens": retrieval_tokens,
+                "per_patch": per_patch, "pooled": pooled,
                 "sensor_context": sensor_context, "sensor_present": sensor_present,
                 "descriptor": descriptor,
                 "descriptor_pred": descriptor_pred}
@@ -564,6 +585,7 @@ class SetTokenizerEncoder(nn.Module):
         source_rate_hz=None,                         # scalar | (B,) acquisition bandwidth bound
         sensor_bias: Optional[torch.Tensor] = None,  # sensor granularity: (B, N, sensor_bias_dim)
         descriptor_mask: Optional[torch.Tensor] = None,  # sensor granularity: (B, N)
+        return_retrieval_tokens: bool = True,
     ) -> dict[str, torch.Tensor]:
         sensor_tokens = self.tokenize(
             patches,
@@ -589,6 +611,7 @@ class SetTokenizerEncoder(nn.Module):
                 sensor_descriptors=sensor_descriptors,
                 sensor_id=sensor_id, sensor_text_ids=sensor_text_ids,
                 sensor_bias=sensor_bias, descriptor_mask=descriptor_mask,
+                return_retrieval_tokens=return_retrieval_tokens,
             )
         if self.text_conditioning == "factored":
             if sensor_texts is None or sensor_id is None:

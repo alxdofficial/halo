@@ -1,6 +1,6 @@
 # HALO — design of record
 
-Agreed 2026-08-11. Supersedes the Phase-A/B design in `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`
+Agreed 2026-08-11; Phase-A recipe updated 2026-08-18. Supersedes the Phase-A/B design in `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`
 and `EVIDENCE_ENGINE_*` for anything they disagree on. Written to be re-read at the start of a
 session; every non-obvious choice carries the reason it was made, because most of them were reached
 by eliminating an alternative that looked better.
@@ -47,18 +47,18 @@ Contribution statement (for MOTIVATION.md; describes the target, not the current
 A **sensor** = one modality triad at one placement (accel xyz, or gyro xyz). A 6-channel stream is
 **two sensors**. `sensor_id` (already in `pretrain_data.py`) is the grouping.
 
-Per (patch, sensor) the model carries three vectors:
+Per (patch, sensor) the system carries three records, but only the first two enter the encoder:
 
 | name | contents | provenance |
 |---|---|---|
 | `feature` | filterbank band energies + signed DC + amplitude + observability masks | per patch, computed |
 | `text_descriptor` | SBERT of "accelerometer of a smartwatch on the left wrist" | per sensor, frozen artifact |
-| `sensor_bias` | activity-invariant channel physics | per sensor, offline closed-form statistics |
+| `sensor_bias` | activity-invariant channel physics; Phase-B bank metadata only | per sensor, offline closed-form statistics |
 
-`text_descriptor` and `sensor_bias` each get a **learnable MLP projection** into `d_model`. The
-projections are learnable; the underlying artifacts are frozen. This is what keeps `sensor_bias` a
-*measurement* — the moment the statistics themselves are learned, the declared-vs-measured audit
-property dies.
+`text_descriptor` gets a learnable gated projection into `d_model`. `sensor_bias` is deliberately
+excluded from the Phase-A trunk: it is strongly predictive of source dataset and is unavailable for
+a truly novel device until statistics have been estimated. It remains an auditable Phase-B bank
+field whose retrieval weight defaults to zero.
 
 ## Front end — keep
 
@@ -84,23 +84,26 @@ that is *absent*, not data that is *present but insufficient*.
 
 ## Trunk
 
-`DualBranchTransformer`: temporal self-attention with **physical-time RoPE in seconds** (never patch
-index), plus cross-sensor attention. **Tokens are never merged** — attention makes accel and gyro
-mutually aware, which is what makes masked-sensor prediction possible. Sensors carry no positional
-index; identity is text, so sensor count and order are free.
+The encoder exposes two representations. `retrieval_tokens` apply the first temporal-attention layer
+independently to each sensor before descriptor conditioning or cross-sensor mixing. These are the
+rows stored by Phase B, so an accelerometer row is unchanged when a gyroscope is absent. The main
+`tokens` path uses all `DualBranchTransformer` layers with physical-time RoPE and cross-sensor
+attention; it supplies JEPA targets and pooled context. Sensors carry no positional index; identity
+is text, so sensor count and order are free.
 
 Cross-sensor attention operates **within a placement** in Phase A. Cross-*placement* fusion is a
 Phase-B vote-merge, never an attention operation (constraint 1).
 
 ## Augmentations
 
-The minimal reference recipe enables only SO(3) rotation. Each VICReg view draws an independent
-rotation, applied jointly to co-located accelerometer and gyroscope triads. Jitter, scaling, gravity
-removal, synthetic rate changes, channel dropout, temporal crop, and text augmentation are disabled.
-Their implementations remain controlled ablations, not hidden parts of the default recipe.
+The minimal reference recipe is clean: no signal or text augmentation. SO(3) rotation, rate changes,
+channel dropout, multi-resolution patching, and descriptor reconstruction remain controlled,
+one-at-a-time ablations. When rotation is enabled it is shared across positive views by default;
+independent rotation is an explicit invariance control because it can erase gravity-frame posture and
+limb-orientation information.
 
-The JEPA teacher consumes view A's signal. The two VICReg views differ only by their independent
-mounting rotations, making the invariance being learned direct and auditable.
+The JEPA teacher consumes view A. In the clean reference, VICReg's invariance term is zero by
+construction and its variance/covariance terms act as collapse and redundancy controls.
 
 ## Objectives
 
@@ -108,14 +111,15 @@ mounting rotations, making the invariance being learned direct and auditable.
 
 1. **Time-mask** (existing): mask physical-time intervals of `feature`.
 2. **Sensor-mask** (new): mask *all* of one sensor's channels; reconstruct from the other sensor plus
-   the masked sensor's `text_descriptor` + `sensor_bias`. `[MASK]` is applied **before** fusion so the
+   the masked sensor's `text_descriptor`. `[MASK]` is applied **before** fusion so the
    model knows *which* sensor it must reconstruct. **Restricted to same-placement pairs, enforced
    structurally in the mask planner, with a test.** This is the well-posed successor to the
    cross-placement objective deleted 2026-08-06 — that one was ill-posed by constraint 1; this one is
    rigid-body kinematics.
 Descriptor-mask retrieval remains available as an ablation but has zero probability and zero weight in
-the reference run. **VICReg** retains its variance and covariance terms for collapse prevention; its
-invariance MSE applies to the independently rotated positive views.
+the reference run. **VICReg** retains its variance and covariance terms for collapse prevention. It
+is split equally between pooled contextual embeddings and the raw 256-dimensional retrieval rows;
+this prevents a healthy projector from hiding collapse in the representation Phase B stores.
 
 ## `sensor_bias`
 
@@ -143,8 +147,8 @@ excluded before statistics are estimated.
 **BUILT 2026-08-12** — `data/scripts/curate/sensor_bias.py`, artifact
 `data/scripts/curate/sensor_bias.json`: **110 sensors across the 18-source expanded Phase-A corpus**.
 Normalisation uses training subjects only (58 validation subjects excluded), at most 4,000 valid
-windows per stream. The artifact persists the dataset roster, data seed, and validation-subject hash;
-the trainer rejects a mismatch rather than silently changing conditioning.
+windows per stream. The artifact persists the dataset roster, data seed, and validation-subject hash.
+It is validated by Phase-B artifact builders, not by the Phase-A trainer.
 
 **Guard status: INCONCLUSIVE, and it cannot be made conclusive on this corpus.**
 Nearest-neighbour dataset purity is 0.4211 against a 0.0833 chance. Restricting neighbours to
@@ -174,10 +178,9 @@ The decisive guards are downstream, where the confound does not apply:
    class-count-matched margin above (+0.20) is the honest number, roughly half the impression the
    ratio gave.
 
-   **Scope:** this is the CURRENT checkpoint, which does **not** carry `sensor_bias` in the trunk. So
-   provenance absorption is pre-existing, not caused by the redesign — but it means the sensor-
-   granularity retrain starts from an already-compromised position. Re-run after that retrain; if the
-   margin grows, `sensor_bias` comes out of the trunk and becomes a bank-only field.
+   **Decision:** source provenance already existed without the artifact. The next Phase-A recipe
+   removes `sensor_bias` from the trunk and makes retrieval rows sensor-isolated; rerun this probe on
+   every candidate checkpoint.
 2. **Phase-B retrieval-provenance guard** — does enabling the bias blend shift retrieval toward the
    query's own dataset, against a placement-matched baseline? Measures the harm directly rather than
    proxying it. **Not yet built.**
@@ -302,10 +305,9 @@ Rows are **per patch per sensor**: `[feature, text_descriptor, sensor_bias]` + l
 Provenance and construction metadata are **unchanged** — folds, execution leakage units, and episode
 sampling do not care how rows are keyed.
 
-Record **partner-sensor presence** in the descriptor. A row encoded alongside a gyro is not the same
-as one encoded alone (the trunk attended across sensors), and a query from an accel-only device has
-no gyro context. The gate must see this rather than absorb it. Sensor-dropout during pretraining is
-the other half of the mitigation.
+Retrieval rows are computed before cross-sensor attention, so partner-sensor presence is no longer a
+latent confound. Partner presence may remain provenance for analysis, but it does not need to be
+encoded into the sensor descriptor to explain a representation change.
 
 Payoff: capture24 (accel-only, the largest corpus source) now matches accel queries exactly instead
 of smearing a channel-set mismatch into the embedding.
@@ -431,14 +433,15 @@ fingerprint guard.
 **Trainer integration — built and smoke-tested 2026-08-12:**
 
 - shared config draw across views (`_shared_draw`, generalised `shared_config_seed`)
-- `sensor_bias` + `sensor_placement` emitted per batch, ragged-padded, carried to view B
+- `sensor_placement` emitted per batch for physically valid JEPA masking; `sensor_bias` omitted from
+  Phase-A batches and retained only for legacy-checkpoint evaluation and Phase-B bank metadata
 - `--token-granularity sensor` CLI flag, threaded into cfg and the encoder builder
-- `make_sensor_mask_plan` wired, with `descriptor_mask` and `sensor_bias` into both forwards and the
+- `make_sensor_mask_plan` wired, with `descriptor_mask` into both forwards and the
   teacher; `jepa_mask` and the per-resolution diagnostic switched to the sensor presence mask
 - descriptor-retrieval loss added to the objective, scored ONLY on sensors whose descriptor was
   actually hidden (an unmasked descriptor was fed to the encoder, so "reconstructing" it is a copy)
-- telemetry: descriptor loss/top-1/target rate and gradients for fold, descriptor projection, bias
-  projection, and descriptor head
+- telemetry: descriptor loss/top-1/target rate, gradients for active modules, and effective rank for
+  pooled, projector, teacher, and retrieval-row representations
 
 **300-step smoke, both arms, real corpus subset** (5 datasets, batch 16):
 
@@ -451,15 +454,15 @@ No persistent NaN (the step-1 value is AMP scaler startup). The sensor arm's val
 300 steps on a 5-dataset subset is far below the 3k-step screening noise floor (sd 0.0065) — it
 carries no signal and must not be read as an arm comparison.
 
-**Work after Phase-A training:**
+**Work after the replacement Phase-A training:**
 
-1. **Build the memory from the completed checkpoint.** `build_memory.py --sensor-rows` emits
-   `[feature, text_descriptor, sensor_bias]` per patch per sensor. The current output is still the
-   historical schema-3 bank and must be replaced.
+1. **Build memory only from the development-selected replacement checkpoint.**
+   `build_memory.py --sensor-rows` emits `[feature, text_descriptor, sensor_bias]` per patch per
+   sensor. Existing banks contain rows from the superseded representation path.
 2. **Build the current resolvability table.** The implementation produces train-only per-sensor
    measurements and paired contrasts. The current JSON is historical and intentionally rejected.
-3. **Re-run the encoder dataset-ID probe** on the new checkpoint. The probe is implemented, but its
-   existing result predates sensor bias in the trunk.
+3. **Re-run the encoder dataset-ID probe** on pooled and retrieval rows. The old result predates
+   sensor-isolated retrieval and direct row-level VICReg.
 
 **Unmeasured and load-bearing:** whether cross-config enrollment works at all; whether the bias term
 is physics or fingerprint; whether the redesign moves the parity number off +0.0086.

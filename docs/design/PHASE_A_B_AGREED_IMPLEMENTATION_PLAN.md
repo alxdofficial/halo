@@ -1,8 +1,10 @@
 # Phase-A Implementation Record and Phase-B Handoff
 
-Status: the sensor-granularity Phase-A run completed on 2026-08-17. The selected checkpoint is
-`training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt` at step 27,000. It can build
-the schema-5 bank required by the current Phase-B design. The older
+Status: the sensor-granularity Phase-A run completed on 2026-08-17, but it is now a historical failed
+arm: independent SO(3) invariance removed gravity-frame signal, retrieval rows remained
+cross-sensor-contextual, and checkpoint selection used an internal source probe. Do not build the
+next Phase-B bank from `phase_a_fixed_1s_rotation_20260817/best.pt`. The replacement clean recipe is
+implemented and awaits training. The older
 `training/tokenizer/outputs/phase_a_headline/best.pt` checkpoint is channel-granular and historical.
 
 This document records the final Phase-A recipe and the artifact contract at the boundary between
@@ -57,10 +59,11 @@ JEPA masked contextual prediction
 - Each resolution is reduced independently; partial tail patches are duration weighted.
 - The teacher updates only after an optimizer step and is checkpointed and restored.
 
-### Augmentation VICReg
+### VICReg collapse control
 
-- Two independently augmented views are available for every sampled window.
-- VICReg runs in float32 on raw projector outputs.
+- The clean reference uses identical physical views. Transformations are controlled ablations.
+- VICReg runs in float32 both on projected pooled embeddings and directly on the sensor-isolated
+  retrieval rows used by Phase B.
 - Its invariance, variance, and covariance terms provide a label-free relation objective without
   defining other windows as negatives.
 - Post-warmup JEPA/VICReg encoder-gradient geometry is measured once; solved scalar weights remain
@@ -106,9 +109,9 @@ Every Phase-B artifact must bind to:
 - candidate-text encoder/vocabulary provenance;
 - structural-metadata and event-pair policy.
 
-The existing schema-3 memory bank is obsolete for the current design because it has no per-sensor
-row table and carries the old 93-label vocabulary. Rebuild it from the completed sensor-granularity
-Phase-A checkpoint before the first real Phase-B run. From that point onward, use
+Existing memory banks are obsolete for the current design because their rows came from the old
+cross-sensor path. Rebuild only after the replacement Phase-A checkpoint passes development transfer,
+rank, provenance, and robustness gates. From that point onward, use
 `PHASE_B_TRAINING_INTENT.md` for the training contract and
 `training/evidence/README.md` for commands. This handoff document should not acquire another copy of
 the Phase-B recipe.

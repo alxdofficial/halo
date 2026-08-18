@@ -598,12 +598,21 @@ class PretrainDataset(Dataset):
     augmentation-consistent channel text). The collate patchifies it into the ``*_b`` keys."""
 
     def __init__(self, index: CorpusIndex, keys: list[WindowKey],
-                 augment: bool = True, two_view: bool = False):
+                 augment: bool = True, two_view: bool = False,
+                 augmentation_config: AugmentationConfig | None = None,
+                 rotation_pairing: str = "shared"):
         self.index = index
         self.keys = keys
         self.two_view = two_view
-        cfg = AugmentationConfig.phase_a() if augment else AugmentationConfig.none()
+        if rotation_pairing not in {"shared", "independent"}:
+            raise ValueError("rotation_pairing must be 'shared' or 'independent'")
+        cfg = (augmentation_config or AugmentationConfig.phase_a()) \
+            if augment else AugmentationConfig.none()
         nuisance_cfg, config_cfg = cfg.split_by_group()
+        if rotation_pairing == "independent" and cfg.rotation_3d.enabled:
+            nuisance_cfg.rotation_3d.enabled = True
+            nuisance_cfg.rotation_3d.p = cfg.rotation_3d.p
+            config_cfg.rotation_3d.enabled = False
         self.config_augmenter = IMUAugmenter(config_cfg)
         self.nuisance_augmenter = IMUAugmenter(nuisance_cfg)
         self._data_cache: dict[int, np.ndarray] = {}
@@ -715,16 +724,6 @@ class PretrainDataset(Dataset):
             "role_texts": role_texts6,
             "sensor_texts": sensor_texts_out,
             "sensor_id": sensor_id6,
-            # Third conditioning vector (design of record). Rows follow the SAME order as
-            # sensor_texts, which is [accel?, gyro?] — so the modality list is derived from which
-            # modalities the stream actually carries, not assumed.
-            # `mask6` is POST-augmentation: channel_dropout removes a modality's sensor outright
-            # and compacts `sensor_descriptions`, so deriving this from the stream's static
-            # `ref.mask` would emit two bias rows against one sensor text.
-            "sensor_bias": stream_sensor_bias(
-                ref.dataset, ref.stream,
-                modalities_present(mask6) or ["accel"],
-            ),
             # Placement group id per sensor. The sensor-mask JEPA objective uses this to refuse
             # cross-placement prediction; within one stream every sensor shares a placement, so
             # this is constant here and becomes meaningful when paired streams are fused.
@@ -1049,9 +1048,11 @@ class MultiScaleCollate:
             for k in ("patches", "patch_len", "rates", "source_rates", "positions",
                       "patch_durations", "texts",
                       "role_texts", "sensor_texts", "sensor_target_texts", "sensor_id",
-                      "sensor_bias", "sensor_placement",
+                      "sensor_placement",
                       "channel_mask", "patch_padding_mask", "augmentations"):
                 out[f"{k}_b"] = out_b[k]
+            if "sensor_bias" in out_b:
+                out["sensor_bias_b"] = out_b["sensor_bias"]
         return out
 
     def _collate_impl(self, batch: list[dict], ps: float) -> dict:
@@ -1089,7 +1090,7 @@ class MultiScaleCollate:
             patch_pad[b, :usable] = True
             rates[b] = rate
             source_rates[b] = float(item.get("source_rate", rate))
-        return {
+        out = {
             "patches": patches,
             "patch_len": patch_len,
             "rates": rates,
@@ -1108,8 +1109,7 @@ class MultiScaleCollate:
             ],
             "sensor_id": (torch.stack([item["sensor_id"] for item in batch])
                           if "sensor_id" in batch[0] else None),
-            # Sensor-granularity conditioning (design of record). Ragged in the sensor axis.
-            "sensor_bias": _pad_sensor_rows(batch, "sensor_bias"),
+            # Sensor-placement metadata is used only to constrain physically valid JEPA masks.
             "sensor_placement": _pad_sensor_rows(batch, "sensor_placement"),
             "labels": torch.tensor([item["label_id"] for item in batch]),
             "sources": [item.get("source", "?") for item in batch],   # per-window dataset (telemetry)
@@ -1120,6 +1120,11 @@ class MultiScaleCollate:
             "channel_mask": torch.stack([item["channel_mask"] for item in batch]),
             "patch_padding_mask": patch_pad,
         }
+        # Legacy checkpoint evaluation can inject the frozen artifact explicitly. New Phase-A
+        # datasets omit it, so no source-specific statistics enter or burden the training path.
+        if "sensor_bias" in batch[0]:
+            out["sensor_bias"] = _pad_sensor_rows(batch, "sensor_bias")
+        return out
 
 
 class MultiResolutionCollate:
@@ -1197,9 +1202,11 @@ class MultiResolutionCollate:
             for k in ("patches", "patch_len", "rates", "source_rates", "positions", "patch_durations",
                       "resolution_ids", "texts", "role_texts", "sensor_texts",
                       "sensor_target_texts", "sensor_id",
-                      "sensor_bias", "sensor_placement",
+                      "sensor_placement",
                       "channel_mask", "patch_padding_mask", "augmentations"):
                 out[f"{k}_b"] = out_b[k]
+            if "sensor_bias" in out_b:
+                out["sensor_bias_b"] = out_b["sensor_bias"]
         return out
 
     def _collate_impl(self, batch: list[dict], pair: tuple[float, float]) -> dict:
@@ -1265,7 +1272,7 @@ class MultiResolutionCollate:
                 patch_ends[b, p] = end
                 resolution_ids[b, p] = rid
 
-        return {
+        out = {
             "patches": patches,
             "patch_len": patch_len,
             "rates": rates,
@@ -1287,8 +1294,7 @@ class MultiResolutionCollate:
             ],
             "sensor_id": (torch.stack([item["sensor_id"] for item in batch])
                           if "sensor_id" in batch[0] else None),
-            # Sensor-granularity conditioning (design of record). Ragged in the sensor axis.
-            "sensor_bias": _pad_sensor_rows(batch, "sensor_bias"),
+            # Sensor-placement metadata is used only to constrain physically valid JEPA masks.
             "sensor_placement": _pad_sensor_rows(batch, "sensor_placement"),
             "labels": torch.tensor([item["label_id"] for item in batch]),
             "sources": [item.get("source", "?") for item in batch],
@@ -1299,3 +1305,6 @@ class MultiResolutionCollate:
             "channel_mask": channel_mask,
             "patch_padding_mask": patch_pad,
         }
+        if "sensor_bias" in batch[0]:
+            out["sensor_bias"] = _pad_sensor_rows(batch, "sensor_bias")
+        return out

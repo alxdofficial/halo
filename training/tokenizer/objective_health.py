@@ -25,7 +25,6 @@ from training.tokenizer.pretrain_data import (
     TemperatureSampler,
     _seed_worker,
     modalities_present,
-    validate_sensor_bias_training_corpus,
 )
 
 OUT = Path(__file__).resolve().parent / "outputs" / "objective_health"
@@ -52,7 +51,6 @@ def main() -> None:
     np.random.seed(0)
     random.seed(0)
     index = CorpusIndex(seed=SEED)
-    validate_sensor_bias_training_corpus(index.refs, index.datasets, index.seed)
     dataset = PretrainDataset(index, index.train, augment=True, two_view=True)
     sensor_batch_groups = [
         len(modalities_present(index.refs[key.stream_i].mask)) for key in index.train
@@ -94,7 +92,7 @@ def main() -> None:
     for batch in loader:
         batch_size, _, _, _ = batch["patches"].shape
         valid = batch["patch_padding_mask"]
-        n_sensors = batch["sensor_bias"].shape[1]
+        n_sensors = max(len(texts) for texts in batch["sensor_texts"])
         present = torch.tensor([
             [sensor < len(texts) for sensor in range(n_sensors)]
             for texts in batch["sensor_texts"]
@@ -130,13 +128,12 @@ def main() -> None:
             raise RuntimeError(f"VICReg view is missing collate fields {sorted(missing)}")
         config_pair_mismatches += int(not (
             torch.equal(batch["channel_mask"], batch["channel_mask_b"])
-            and torch.equal(batch["sensor_bias"], batch["sensor_bias_b"])
             and torch.equal(batch["sensor_placement"], batch["sensor_placement_b"])
             and torch.allclose(batch["rates"], batch["rates_b"])
             and torch.allclose(batch["source_rates"], batch["source_rates_b"])
         ))
         for traces in (batch["augmentations"], batch["augmentations_b"]):
-            unexpected_augmentations += sum(tuple(trace) != ("rotation_3d",) for trace in traces)
+            unexpected_augmentations += sum(bool(trace) for trace in traces)
 
     windows = N_BATCHES * BATCH_SIZE
     report = {
@@ -160,7 +157,7 @@ def main() -> None:
         "vicreg": {
             "augmentation_pairs_per_batch": BATCH_SIZE,
             "batches_with_config_mismatch_between_views": config_pair_mismatches,
-            "views_with_non_rotation_augmentation": unexpected_augmentations,
+            "views_with_unexpected_augmentation": unexpected_augmentations,
         },
         "sampled_source_share": {
             source: round(count / windows, 4) for source, count in sorted(source_counts.items())

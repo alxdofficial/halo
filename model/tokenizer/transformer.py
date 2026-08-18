@@ -497,6 +497,38 @@ class DualBranchTransformerBlock(nn.Module):
 
         return x
 
+    def temporal_context(
+        self,
+        x: torch.Tensor,
+        temporal_mask: Optional[torch.Tensor] = None,
+        patch_padding_mask: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Apply this block's temporal branch without cross-sensor mixing."""
+        batch_size, num_patches, num_channels, d_model = x.shape
+        temporal = x.permute(0, 2, 1, 3).reshape(
+            batch_size * num_channels, num_patches, d_model,
+        )
+        padding = None
+        if patch_padding_mask is not None:
+            padding = patch_padding_mask.unsqueeze(1).expand(
+                batch_size, num_channels, num_patches,
+            ).reshape(batch_size * num_channels, num_patches)
+        temporal_positions = None
+        if positions is not None:
+            temporal_positions = positions.unsqueeze(1).expand(
+                batch_size, num_channels, num_patches,
+            ).reshape(batch_size * num_channels, num_patches)
+        tmask = temporal_mask
+        if tmask is not None and tmask.dim() == 3:
+            tmask = tmask.unsqueeze(1).expand(
+                batch_size, num_channels, num_patches, num_patches,
+            ).reshape(batch_size * num_channels, num_patches, num_patches)
+        output = self.temporal_attn(
+            temporal, tmask, key_padding_mask=padding, positions=temporal_positions,
+        ).reshape(batch_size, num_channels, num_patches, d_model).permute(0, 2, 1, 3)
+        return self.norm1(x + self.dropout(output))
+
 
 class DualBranchTransformer(nn.Module):
     """
@@ -573,3 +605,18 @@ class DualBranchTransformer(nn.Module):
             x = layer(x, temporal_mask, channel_mask, patch_padding_mask, positions=positions)
 
         return x
+
+    def retrieval_context(
+        self,
+        x: torch.Tensor,
+        temporal_mask: Optional[torch.Tensor] = None,
+        patch_padding_mask: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Sensor-isolated temporal representation used by retrieval and its Phase-A loss."""
+        if not self.layers:
+            return x
+        return self.layers[0].temporal_context(
+            x, temporal_mask=temporal_mask,
+            patch_padding_mask=patch_padding_mask, positions=positions,
+        )

@@ -41,6 +41,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from data.scripts.augmentations import AugmentationConfig
 from model.tokenizer.encoder import SetTokenizerEncoder
 from model.tokenizer.sensor_tokens import descriptor_retrieval_loss
 from training.tokenizer.losses_repr import (
@@ -52,6 +53,11 @@ from training.tokenizer.losses_repr import (
     pair_contrast,
     phase_a_loss,
     vicreg,
+    VICRegOutput,
+)
+from training.tokenizer.eval_transfer import (
+    PHASE_A_SELECTION_DATASETS,
+    development_transfer_score,
 )
 from training.tokenizer.pretrain_data import (
     DFT_SIZE,
@@ -64,12 +70,10 @@ from training.tokenizer.pretrain_data import (
     MultiResolutionCollate,
     MultiScaleCollate,
     PretrainDataset,
-    SENSOR_BIAS_DIM,
     CORPUS_MATCHED_TRAIN_DATASETS,
     TRAIN_DATASETS,
     TemperatureSampler,
     modalities_present,
-    validate_sensor_bias_training_corpus,
     _seed_worker,
 )
 
@@ -94,7 +98,10 @@ class PretrainConfig:
     # Direct constructors retain the legacy channel path for explicit tests/ablations. The Phase-A
     # CLI sets the design-of-record sensor path below.
     token_granularity: str = "channel"
-    sensor_bias_dim: int = SENSOR_BIAS_DIM
+    # Retained in checkpoint metadata solely to reconstruct legacy encoders that used the artifact.
+    sensor_bias_dim: int = 14
+    use_sensor_bias_conditioning: bool = False
+    use_sensor_isolated_retrieval: bool = True
     descriptor_weight: float = 0.0        # explicit ablation; default JEPA predicts signal latents only
     gate_bias_init: float = -2.0          # factored fusion identity-gate bias at init (sigma~=0.12)
     # Multi-resolution is retained as an explicit ablation. The reference recipe uses one fixed
@@ -155,6 +162,11 @@ class PretrainConfig:
     # width, so they do not isolate which of the two widths mattered.
     vicreg_proj_hidden: int = 256
     vicreg_proj_dim: int = 128
+    retrieval_vicreg_fraction: float = 0.5
+    rotation_p: float = 0.0
+    rotation_pairing: str = "shared"
+    rate_augmentation_p: float = 0.0
+    channel_dropout_p: float = 0.0
     # Optional one-time post-warmup calibration. Report mode writes the recommendation and stops;
     # apply mode installs it after the calibration step, freezes it, and continues the same run.
     objective_calibration_at: int = 0       # 0 disables; recommended full pilot: 2_000
@@ -173,6 +185,8 @@ class PretrainConfig:
     val_every: int = 500                  # about every 43 s at the measured batch-1024 rate
     val_per_label: int = 40               # kNN val: windows PER LABEL (stratified, all classes scored)
     knn_k: int = 5
+    selection_datasets: tuple[str, ...] = PHASE_A_SELECTION_DATASETS
+    selection_every: int = 2_000
     # Compile only the transformer, leaving ragged text conditioning eager. Compiling encoder.encode
     # specialized on each batch's changing unique-text cardinality and was slower. Transformer-only
     # compilation is checkpoint-neutral; fall back to eager if the backend cannot lower a shape.
@@ -231,6 +245,8 @@ class PipelineAModel(nn.Module):
             text_conditioning=cfg.text_conditioning,  # 'per_channel' (default) | 'factored'
             token_granularity=cfg.token_granularity,
             sensor_bias_dim=cfg.sensor_bias_dim,
+            use_sensor_bias_conditioning=cfg.use_sensor_bias_conditioning,
+            use_sensor_isolated_retrieval=cfg.use_sensor_isolated_retrieval,
             gate_bias_init=cfg.gate_bias_init,
             # Sensor granularity deliberately retires the separate duration embedding. Patch
             # durations still reach pooling and JEPA weighting; physical-time RoPE and the
@@ -248,6 +264,8 @@ class PipelineAModel(nn.Module):
             adaptive_gate_init=cfg.adaptive_gate_init,
         )
         self.encoder.multiresolution = cfg.multiresolution
+        self.encoder.eval_resolution_pair = tuple(cfg.val_resolution_pair)
+        self.encoder.min_resolution_ratio = float(cfg.min_resolution_ratio)
         if cfg.token_granularity == "sensor" and cfg.descriptor_weight <= 0:
             self.encoder.descriptor_prediction_enabled = False
             self.encoder.descriptor_head.requires_grad_(False)
@@ -884,8 +902,6 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
                                if factored else None),
                     role_text_ids=role_text_ids,
                     sensor_text_ids=sensor_text_ids,
-                    sensor_bias=(batch["sensor_bias"].to(device, non_blocking=True)
-                                 if sensor_granularity else None),
                 )
             pooled = out["pooled"].float().cpu()
             zs.append(pooled[take])
@@ -920,9 +936,10 @@ def module_grad_norms(model) -> dict:
         mods.extend((
             ("sensor_fold", model.encoder.sensor_fold),
             ("descriptor_projection", model.encoder.descriptor_proj),
-            ("bias_projection", model.encoder.bias_proj),
             ("descriptor_head", model.encoder.descriptor_head),
         ))
+        if model.encoder.use_sensor_bias_conditioning:
+            mods.append(("bias_projection", model.encoder.bias_proj))
     return {f"grad/{name}": _gn(mod.parameters()) for name, mod in mods}
 
 
@@ -976,6 +993,18 @@ def main() -> None:
                         help="single-resolution patch duration in seconds (default 1.0)")
     parser.add_argument("--descriptor-weight", type=float, default=None,
                         help="descriptor-reconstruction ablation weight (default 0=disabled)")
+    parser.add_argument("--rotation-p", type=float, default=None,
+                        help="SO(3) rotation probability (default 0 for the clean reference)")
+    parser.add_argument("--rotation-pairing", choices=("shared", "independent"), default=None,
+                        help="shared rotates both VICReg views identically; independent explicitly "
+                             "trains rotation invariance")
+    parser.add_argument("--rate-augmentation-p", type=float, default=None,
+                        help="anti-aliased sampling-rate augmentation probability (default 0)")
+    parser.add_argument("--channel-dropout-p", type=float, default=None,
+                        help="whole-modality dropout probability (default 0)")
+    parser.add_argument("--retrieval-vicreg-fraction", type=float, default=None,
+                        help="fraction of VICReg assigned directly to the sensor rows stored in "
+                             "the evidence bank (default 0.5)")
     parser.add_argument("--jepa-weight", type=float, default=None,
                         help="masked contextual prediction weight; 0 selects VICReg-only")
     parser.add_argument("--vicreg-weight", type=float, default=None,
@@ -1079,6 +1108,16 @@ def main() -> None:
         cfg.patch_seconds = args.patch_seconds
     if args.descriptor_weight is not None:
         cfg.descriptor_weight = args.descriptor_weight
+    if args.rotation_p is not None:
+        cfg.rotation_p = args.rotation_p
+    if args.rotation_pairing is not None:
+        cfg.rotation_pairing = args.rotation_pairing
+    if args.rate_augmentation_p is not None:
+        cfg.rate_augmentation_p = args.rate_augmentation_p
+    if args.channel_dropout_p is not None:
+        cfg.channel_dropout_p = args.channel_dropout_p
+    if args.retrieval_vicreg_fraction is not None:
+        cfg.retrieval_vicreg_fraction = args.retrieval_vicreg_fraction
     if args.jepa_weight is not None:
         cfg.jepa_weight = args.jepa_weight
     if args.vicreg_weight is not None:
@@ -1182,8 +1221,15 @@ def main() -> None:
         parser.error("--mask-ratio-time must be in (0,1)")
     if cfg.vicreg_proj_dim <= 0 or cfg.vicreg_proj_hidden <= 0:
         parser.error("expander widths must be positive")
+    if not 0.0 <= cfg.retrieval_vicreg_fraction <= 1.0:
+        parser.error("retrieval_vicreg_fraction must be in [0,1]")
+    for name in ("rotation_p", "rate_augmentation_p", "channel_dropout_p"):
+        if not 0.0 <= float(getattr(cfg, name)) <= 1.0:
+            parser.error(f"{name} must be in [0,1]")
     if cfg.patch_seconds <= 0:
         parser.error("--patch-seconds must be positive")
+    if cfg.selection_every <= 0:
+        parser.error("selection_every must be positive")
     if cfg.vicreg_proj_dim > 2048:
         # VICReg materialises two dense DxD covariance matrices per step (losses_repr.vicreg), so
         # fp32 memory is 8*D^2 bytes before autograd: 128MiB at 4096, 512MiB at 8192.
@@ -1207,7 +1253,7 @@ def main() -> None:
                           else min(2, max((args.steps if args.steps is not None else 10) - 1, 0))),
             calib_batches=3,
             val_every=max(args.steps if args.steps is not None else 10, 5), val_per_label=10,
-            num_workers=0, max_per_stream=200,
+            num_workers=0, max_per_stream=200, selection_datasets=(),
         )
     if cfg.sampler_alpha < 0:
         parser.error("--sampler-alpha must be nonnegative")
@@ -1274,14 +1320,21 @@ def main() -> None:
     index = CorpusIndex(max_per_stream=cfg.max_per_stream, seed=cfg.data_seed,
                         datasets=cfg.train_datasets or TRAIN_DATASETS)
     corpus_fp = corpus_fingerprint(index)
-    if cfg.token_granularity == "sensor":
-        validate_sensor_bias_training_corpus(
-            index.refs, cfg.train_datasets or TRAIN_DATASETS, cfg.data_seed,
-        )
     print(f"corpus: {index.summary()}  (datasets={sorted(cfg.train_datasets or TRAIN_DATASETS)})",
           flush=True)
-    train_ds = PretrainDataset(index, index.train, augment=True, two_view=True)
-    calibration_ds = PretrainDataset(index, index.train, augment=True, two_view=False)
+    augmentation_cfg = AugmentationConfig.phase_a(
+        rotation_p=cfg.rotation_p,
+        rate_p=cfg.rate_augmentation_p,
+        channel_dropout_p=cfg.channel_dropout_p,
+    )
+    train_ds = PretrainDataset(
+        index, index.train, augment=True, two_view=True,
+        augmentation_config=augmentation_cfg, rotation_pairing=cfg.rotation_pairing,
+    )
+    calibration_ds = PretrainDataset(
+        index, index.train, augment=True, two_view=False,
+        augmentation_config=augmentation_cfg, rotation_pairing=cfg.rotation_pairing,
+    )
     # Preselecting keeps evaluation cheap. The helper covers every label/stream cell before filling
     # additional slots, preventing a large source from monopolizing a common label's cap.
     val_keys = stratified_eval_subset(index.val, cfg.val_per_label, cfg.data_seed)
@@ -1457,6 +1510,8 @@ def main() -> None:
 
     log_path = args.out / "log.jsonl"
     best_ba = -1.0
+    latest_selection_ba: float | None = None
+    latest_selection_step: int | None = None
     t0 = time.time()
     calibration_samples: list[dict[str, dict[str, float]]] = []
     calibration_steps: list[int] = []
@@ -1474,8 +1529,12 @@ def main() -> None:
             "jepa_teacher": (jepa_teacher.state_dict() if jepa_teacher is not None else None),
             "label_ids": index.label_ids,
             "step": step, "val_ba": val_ba,
-            "selection_metric": "val_knn_label_stream_ba",
-            "best_ba": max(best_ba, val_ba),   # running best so a resume can't overwrite a better best.pt (#6)
+            "selection_metric": ("development_transfer_knn_ba"
+                                 if cfg.selection_datasets else "val_knn_label_stream_ba"),
+            "selection_value": latest_selection_ba,
+            "selection_step": latest_selection_step,
+            "selection_datasets": list(cfg.selection_datasets),
+            "best_ba": max(best_ba, latest_selection_ba if latest_selection_ba is not None else -1.0),
             "git": source_provenance["git"],
             "source_provenance": source_provenance,
             "runtime_provenance": runtime_provenance,
@@ -1587,7 +1646,9 @@ def main() -> None:
         start_step = saved_step
         # Restore the RUNNING best, not this checkpoint's own val_ba (#6): resuming from last.pt
         # (whose val_ba is the latest, not the best) must not let a later worse val overwrite best.pt.
-        best_ba = float(rk.get("best_ba", rk["val_ba"]))
+        best_ba = float(rk.get("best_ba", rk.get("selection_value", rk["val_ba"])))
+        latest_selection_ba = rk.get("selection_value")
+        latest_selection_step = rk.get("selection_step")
         # Draw FRESH windows for the remaining steps instead of REPLAYING the sampler prefix (audit F1):
         # advance the temperature sampler's epoch so the resumed run's training draw differs from the
         # interrupted run's. Not bit-exact (the design accepts a fresh epoch for the remaining steps),
@@ -1649,10 +1710,7 @@ def main() -> None:
                                     sensor_text_embs=ste_b, sensor_text_masks=stm_b,
                                     sensor_descriptors=sensor_descriptors_b,
                                     sensor_id=sid_b, role_text_ids=role_ids_b,
-                                    sensor_text_ids=sensor_text_ids_b,
-                                    **({"sensor_bias": batch["sensor_bias_b"].to(
-                                        device, non_blocking=True)}
-                                       if sensor_granularity else {}))
+                                    sensor_text_ids=sensor_text_ids_b)
 
     # Keep conditioning/folding eager and compile the stable transformer core. Install runtime
     # callables rather than wrapping modules so state_dict keys remain identical.
@@ -1751,10 +1809,7 @@ def main() -> None:
                 augmentation_counts.update(names)
 
         sensor_granularity = cfg.token_granularity == "sensor"
-        sensor_bias = batch.get("sensor_bias")
         sensor_placement = batch.get("sensor_placement")
-        if sensor_bias is not None:
-            sensor_bias = sensor_bias.to(device, non_blocking=True)
         if sensor_placement is not None:
             sensor_placement = sensor_placement.to(device, non_blocking=True)
         descriptor_mask = None
@@ -1848,7 +1903,6 @@ def main() -> None:
                 text_embs, text_masks = model.encoder.encode_texts(enc_texts, device)
                 sensor_text_embs = sensor_text_masks = enc_sensor_id = None
                 role_text_ids = sensor_text_ids = None
-            granularity_kw = ({"sensor_bias": sensor_bias} if sensor_granularity else {})
             clean = encode_fn(sensor_tokens, text_embs, text_masks, positions,
                               patch_durations=patch_durations,
                               resolution_ids=resolution_ids,
@@ -1858,8 +1912,7 @@ def main() -> None:
                               sensor_text_masks=sensor_text_masks,
                               sensor_descriptors=sensor_descriptors,
                               sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
-                              sensor_text_ids=sensor_text_ids,
-                              **granularity_kw)
+                              sensor_text_ids=sensor_text_ids)
             z = model.vicreg_projector(clean["pooled"])
             if cfg.jepa_weight > 0:
                 masked = encode_fn(sensor_tokens, text_embs, text_masks, positions,
@@ -1873,7 +1926,7 @@ def main() -> None:
                                    sensor_descriptors=sensor_descriptors,
                                    sensor_id=enc_sensor_id, role_text_ids=role_text_ids,
                                    sensor_text_ids=sensor_text_ids,
-                                   **granularity_kw,
+                                   return_retrieval_tokens=False,
                                    **({"descriptor_mask": descriptor_mask}
                                       if sensor_granularity else {}))
                 if sensor_granularity:
@@ -1932,12 +1985,12 @@ def main() -> None:
                         sensor_id=enc_sensor_id,
                         role_text_ids=role_text_ids,
                         sensor_text_ids=sensor_text_ids,
+                        return_retrieval_tokens=False,
                         # The teacher consumes the SAME `patches` as view A, so it inherits view A's
                         # acquisition config automatically — no separate config draw exists here.
                         # It sees the descriptor unmasked: the target must be the fully-informed
                         # representation, or the student would be chasing a teacher handicapped the
                         # same way it is.
-                        **granularity_kw,
                     )
                 jepa_prediction = model.jepa_predictor(masked["tokens"])
                 jepa_loss = masked_ema_latent_loss(
@@ -1971,14 +2024,49 @@ def main() -> None:
                                     token_durations=patch_durations,
                                 ))
 
-            z_b = model.vicreg_projector(encode_clean_view_b(batch)["pooled"])
-            vicreg_result = vicreg(
+            clean_b = encode_clean_view_b(batch)
+            z_b = model.vicreg_projector(clean_b["pooled"])
+            pooled_vicreg = vicreg(
                 z, z_b,
                 invariance_weight=cfg.vicreg_invariance_weight,
                 variance_weight=cfg.vicreg_variance_weight,
                 covariance_weight=cfg.vicreg_covariance_weight,
                 target_std=cfg.vicreg_target_std,
             )
+            vicreg_result = pooled_vicreg
+            retrieval_vicreg = None
+            retrieval_health_rows = None
+            if sensor_granularity and cfg.retrieval_vicreg_fraction > 0:
+                ra = clean.get("retrieval_tokens")
+                rb = clean_b.get("retrieval_tokens")
+                if ra is None or rb is None or ra.shape != rb.shape:
+                    raise RuntimeError("aligned sensor-row VICReg requires matching retrieval tokens")
+                patch_pad_b = batch["patch_padding_mask_b"].to(device, non_blocking=True).bool()
+                if patch_pad.shape != patch_pad_b.shape:
+                    raise RuntimeError("sensor-row VICReg requires aligned patch grids")
+                sensor_valid = clean["sensor_present"] & clean_b["sensor_present"]
+                row_valid = patch_pad.unsqueeze(2) & patch_pad_b.unsqueeze(2) \
+                    & sensor_valid.unsqueeze(1)
+                retrieval_vicreg = vicreg(
+                    ra[row_valid], rb[row_valid],
+                    invariance_weight=cfg.vicreg_invariance_weight,
+                    variance_weight=cfg.vicreg_variance_weight,
+                    covariance_weight=cfg.vicreg_covariance_weight,
+                    target_std=cfg.vicreg_target_std,
+                )
+                retrieval_health_rows = ra[row_valid]
+                fraction = float(cfg.retrieval_vicreg_fraction)
+                vicreg_result = VICRegOutput(
+                    total=(1.0 - fraction) * pooled_vicreg.total
+                          + fraction * retrieval_vicreg.total,
+                    invariance=(1.0 - fraction) * pooled_vicreg.invariance
+                               + fraction * retrieval_vicreg.invariance,
+                    variance=(1.0 - fraction) * pooled_vicreg.variance
+                             + fraction * retrieval_vicreg.variance,
+                    covariance=(1.0 - fraction) * pooled_vicreg.covariance
+                               + fraction * retrieval_vicreg.covariance,
+                    min_std=torch.minimum(pooled_vicreg.min_std, retrieval_vicreg.min_std),
+                )
 
             # Descriptor-mask ablation. Only the sensors whose descriptor was
             # actually hidden are scored — an unmasked sensor's descriptor was fed to the encoder,
@@ -2021,6 +2109,11 @@ def main() -> None:
                     "vicreg/variance": float(vicreg_result.variance.detach()),
                     "vicreg/covariance": float(vicreg_result.covariance.detach()),
                     "vicreg/min_std": float(vicreg_result.min_std.detach()),
+                    "vicreg/pooled_total": float(pooled_vicreg.total.detach()),
+                    "vicreg/retrieval_total": float(
+                        retrieval_vicreg.total.detach() if retrieval_vicreg is not None
+                        else pooled_vicreg.total.new_zeros(())
+                    ),
                     "frontend_reg": float(frontend_reg.detach()),
                     "frontend_reg_weighted": float(
                         (cfg.frontend_reg_weight * frontend_reg).detach()),
@@ -2239,6 +2332,8 @@ def main() -> None:
             rec["grad/clipped"] = float(clip_coefficient < 1.0)
             rec.update(objective_grad_norms)
             rec.update(representation_health(clean["pooled"], "repr_encoder"))
+            if retrieval_health_rows is not None:
+                rec.update(representation_health(retrieval_health_rows, "repr_retrieval"))
             rec.update(representation_health(z, "repr_projector"))
             if teacher_clean is not None and do_objective_grad_log:
                 rec.update(representation_health(teacher_clean["pooled"], "repr_teacher"))
@@ -2349,6 +2444,26 @@ def main() -> None:
             conse_pred = conse_probe_predict(train_z, train_y, val_z, val_y, label_protos)
             conse_ba = balanced_acc(conse_pred, val_y)
             conse_hetero_ba = label_group_balanced_acc(conse_pred, val_y, val_stream)
+            run_selection = bool(cfg.selection_datasets) and (
+                step % cfg.selection_every == 0 or step == run_until_step
+            )
+            if run_selection:
+                compiled_transformer = model.encoder._compiled_transformer_forward
+                model.encoder._compiled_transformer_forward = None
+                try:
+                    selection_ba, selection_by_dataset = development_transfer_score(
+                        model.encoder, device, tuple(cfg.selection_datasets), patching="checkpoint",
+                    )
+                finally:
+                    model.encoder._compiled_transformer_forward = compiled_transformer
+                latest_selection_ba = selection_ba
+                latest_selection_step = step
+            elif not cfg.selection_datasets:
+                selection_ba, selection_by_dataset = hetero_ba, {}
+                latest_selection_ba = selection_ba
+                latest_selection_step = step
+            else:
+                selection_ba, selection_by_dataset = latest_selection_ba, {}
             # per-source val BA — which datasets cluster (kNN) / align to text (conse) well
             vs = np.asarray(val_src)
             ba_by_src, conse_by_src = {}, {}
@@ -2361,6 +2476,13 @@ def main() -> None:
                    "val_knn_label_stream_ba": round(hetero_ba, 4),
                    "val_conse_ba": round(conse_ba, 4),
                    "val_conse_label_stream_ba": round(conse_hetero_ba, 4),
+                   "development_transfer_knn_ba": (
+                       round(selection_ba, 4) if selection_ba is not None else None
+                   ),
+                   "development_transfer_step": latest_selection_step,
+                   "development_transfer_by_dataset": {
+                       key: round(value, 4) for key, value in selection_by_dataset.items()
+                   },
                    "val_ba_by_source": ba_by_src, "val_conse_by_source": conse_by_src}
             if device.type == "cuda":
                 # peak so far (train step + val embedding) — memory telemetry.
@@ -2369,8 +2491,8 @@ def main() -> None:
             with log_path.open("a") as f:
                 f.write(json.dumps(rec) + "\n")
             checkpoint("last.pt", step, hetero_ba)
-            if hetero_ba > best_ba:
-                best_ba = hetero_ba
+            if (run_selection or not cfg.selection_datasets) and selection_ba > best_ba:
+                best_ba = selection_ba
                 checkpoint("best.pt", step, hetero_ba)
             # The next throughput window measures training only, not this deliberately expensive
             # validation/checkpoint interval.
@@ -2385,8 +2507,9 @@ def main() -> None:
         if run_until_step < cfg.steps:
             print(f"bounded monitor stopped at step {run_until_step}; full schedule remains "
                   f"{cfg.steps} steps and this checkpoint can be resumed", flush=True)
-        print(f"done: best val label/stream-macro kNN {best_ba:.3f} · checkpoints in {args.out}",
-              flush=True)
+        metric = ("development transfer kNN" if cfg.selection_datasets
+                  else "val label/stream-macro kNN")
+        print(f"done: best {metric} {best_ba:.3f} · checkpoints in {args.out}", flush=True)
 
 
 if __name__ == "__main__":

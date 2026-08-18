@@ -46,6 +46,7 @@ EVAL_STREAMS = tuple(
 PATCH_SECONDS = 1.0
 KNN_K = 5
 SEED = 20260718
+PHASE_A_SELECTION_DATASETS = ("motionsense", "realworld", "shoaib")
 
 
 def subject_holdout(subjects: np.ndarray, dataset: str) -> set:
@@ -66,6 +67,13 @@ def build_encoder(ckpt: dict, device, *, training: bool = False) -> SetTokenizer
         # serialized. Infer the exact historical input width instead of guessing and failing load.
         bias_weight = ckpt.get("encoder", {}).get("bias_proj.mlp.0.weight")
         sensor_bias_dim = int(bias_weight.shape[1]) if bias_weight is not None else 14
+    use_sensor_bias_conditioning = c.get("use_sensor_bias_conditioning")
+    if use_sensor_bias_conditioning is None:
+        # Historical sensor-granularity checkpoints always carried this projection. New checkpoints
+        # serialize the flag and leave measured stream statistics outside the encoder trunk.
+        use_sensor_bias_conditioning = any(
+            key.startswith("bias_proj.") for key in ckpt.get("encoder", {})
+        )
     kw = dict(
         d_model=c["d_model"], num_layers=c["num_layers"], num_heads=c["num_heads"],
         dim_feedforward=c["dim_feedforward"],
@@ -81,6 +89,8 @@ def build_encoder(ckpt: dict, device, *, training: bool = False) -> SetTokenizer
         text_conditioning=c.get("text_conditioning", "per_channel"),  # reconstruct the ACTUAL arm
         token_granularity=c.get("token_granularity", "channel"),
         sensor_bias_dim=int(sensor_bias_dim),
+        use_sensor_bias_conditioning=bool(use_sensor_bias_conditioning),
+        use_sensor_isolated_retrieval=bool(c.get("use_sensor_isolated_retrieval", False)),
         gate_bias_init=c.get("gate_bias_init", -2.0),
     )
     kw.update(                                              # fixed / learnable filterbank hyperparams
@@ -321,12 +331,13 @@ def encode_dataset_detailed(enc, data, texts, device, rate: float, gravity_state
             patch_duration_parts.append(durations[valid].to(metadata_device))
             patch_resolution_parts.append(resolutions[valid].to(metadata_device))
 
-            # PER-SENSOR rows (design of record bank layout). Only available at sensor granularity,
-            # where out["tokens"] is (B,P,S,d) and each slot is one modality triad. Emitting these
-            # is what lets an accel-only query match accel rows exactly instead of comparing against
-            # an embedding with a channel-set mismatch smeared into it.
+            # PER-SENSOR rows (design-of-record bank layout). New checkpoints expose a
+            # sensor-isolated temporal representation here; legacy checkpoints explicitly retain
+            # their historical post-cross-sensor rows through their serialized architecture flag.
             if export_sensor_rows and "sensor_present" in out:
-                tokens = out["tokens"]                                # (B,P,S,d)
+                tokens = out.get("retrieval_tokens")                  # (B,P,S,d)
+                if tokens is None:
+                    raise KeyError("sensor-row export requires out['retrieval_tokens']")
                 present = out["sensor_present"]                       # (B,S)
                 keep = valid_on_output.unsqueeze(2) & present.unsqueeze(1)   # (B,P,S)
                 b_idx, p_idx, s_idx = keep.nonzero(as_tuple=True)
@@ -414,16 +425,103 @@ def encode_dataset(enc, data, texts, device, rate: float, gravity_state=None,
 
 def knn_balanced_acc(train_z, train_y, test_z, test_y, k=KNN_K) -> float:
     labels = sorted(set(train_y) & set(test_y))
-    per_class = []
-    for label in labels:
-        idx = [i for i, y in enumerate(test_y) if y == label]
-        hits = 0
-        for i in idx:
-            d = (train_z - test_z[i]).norm(dim=1)
-            nn = [train_y[j] for j in d.argsort()[:k].tolist()]
-            hits += max(set(nn), key=nn.count) == label
-        per_class.append(hits / len(idx))
-    return float(np.mean(per_class)) if per_class else float("nan")
+    if not labels:
+        return float("nan")
+    label_to_id = {label: index for index, label in enumerate(labels)}
+    keep_train = [index for index, label in enumerate(train_y) if label in label_to_id]
+    keep_test = [index for index, label in enumerate(test_y) if label in label_to_id]
+    train = train_z[keep_train].float()
+    test = test_z[keep_test].float()
+    train_ids = torch.tensor([label_to_id[train_y[index]] for index in keep_train])
+    test_ids = torch.tensor([label_to_id[test_y[index]] for index in keep_test])
+    k = min(int(k), len(train))
+    if k < 1:
+        return float("nan")
+    predictions = []
+    train_norm = train.square().sum(dim=1).unsqueeze(0)
+    for start in range(0, len(test), 512):
+        query = test[start:start + 512]
+        distances = query.square().sum(dim=1, keepdim=True) + train_norm - 2 * query @ train.T
+        neighbors = distances.topk(k, dim=1, largest=False).indices
+        votes = torch.nn.functional.one_hot(
+            train_ids[neighbors], num_classes=len(labels),
+        ).sum(dim=1)
+        # argmax gives a deterministic sorted-label tie break, unlike max(set(...), key=count).
+        predictions.append(votes.argmax(dim=1))
+    predicted = torch.cat(predictions)
+    per_class = [
+        float((predicted[test_ids == label_id] == label_id).float().mean())
+        for label_id in range(len(labels)) if bool((test_ids == label_id).any())
+    ]
+    return float(np.mean(per_class))
+
+
+@torch.no_grad()
+def development_transfer_score(
+    enc: SetTokenizerEncoder,
+    device: torch.device,
+    datasets: tuple[str, ...] = PHASE_A_SELECTION_DATASETS,
+    *,
+    patching: str = "checkpoint",
+) -> tuple[float, dict[str, float]]:
+    """Subject-disjoint kNN on development-only acquisition datasets.
+
+    Phase A uses this to select checkpoints. Datasets are averaged equally, so a source with more
+    windows cannot dominate, and the sealed test roster remains untouched.
+    """
+    if not datasets:
+        raise ValueError("development transfer selection requires at least one dataset")
+    wanted = set(datasets)
+    unknown = wanted - set(PHASE_A_TRANSFER_DATASETS)
+    if unknown:
+        raise ValueError(
+            f"selection datasets are not in the Phase-A transfer roster: {sorted(unknown)}"
+        )
+    refs = {(ref.dataset, ref.stream): ref for ref in discover_grids("native")}
+    was_training = enc.training
+    enc.eval()
+    scores: dict[str, list[float]] = {dataset: [] for dataset in datasets}
+    try:
+        for dataset, stream in EVAL_STREAMS:
+            if dataset not in wanted:
+                continue
+            ref = refs.get((dataset, stream))
+            if ref is None:
+                raise FileNotFoundError(f"missing development grid {dataset}/{stream}")
+            labels = np.asarray(ref.labels)
+            subjects = np.asarray(ref.subjects)
+            encoded = encode_dataset_detailed(
+                enc, ref.load_data(), stream_channel_descriptions(dataset, stream), device,
+                ref.rate_hz, _stream_gravity_state(dataset, stream), channel_mask=ref.mask,
+                dataset=dataset, stream=stream, lengths=ref.load_lengths(),
+                eval_patching=patching, export_sensor_rows=True,
+            )
+            if encoded["sensor_Z"].numel():
+                rows = encoded["sensor_Z"].float()
+                owners = encoded["sensor_window"].long().to(rows.device)
+                z = rows.new_zeros((len(ref.labels), rows.shape[1]))
+                count = rows.new_zeros((len(ref.labels), 1))
+                z.index_add_(0, owners, rows)
+                count.index_add_(0, owners, rows.new_ones((len(rows), 1)))
+                z = (z / count.clamp_min(1.0)).cpu()
+            else:
+                z = encoded["pooled"]
+            hold = subject_holdout(subjects, dataset)
+            train_rows = np.asarray([subject not in hold for subject in subjects])
+            test_rows = ~train_rows
+            if not train_rows.any() or not test_rows.any():
+                raise ValueError(f"{dataset}/{stream} cannot form a subject-disjoint split")
+            scores[dataset].append(knn_balanced_acc(
+                z[train_rows], labels[train_rows].tolist(),
+                z[test_rows], labels[test_rows].tolist(),
+            ))
+    finally:
+        enc.train(was_training)
+    missing = [dataset for dataset, rows in scores.items() if not rows]
+    if missing:
+        raise FileNotFoundError(f"no development streams found for {missing}")
+    per_dataset = {dataset: float(np.mean(rows)) for dataset, rows in scores.items()}
+    return float(np.mean(list(per_dataset.values()))), per_dataset
 
 
 def main() -> None:

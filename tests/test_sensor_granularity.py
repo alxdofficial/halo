@@ -343,6 +343,51 @@ def test_sensor_encoder_handles_accel_only_streams():
     assert out["sensor_present"].all()
 
 
+def test_retrieval_rows_are_sensor_isolated():
+    """Adding a co-located gyroscope must not rewrite the accelerometer evidence row."""
+    from model.tokenizer.encoder import SetTokenizerEncoder
+
+    torch.manual_seed(18)
+    enc = SetTokenizerEncoder(
+        d_model=64, num_layers=2, num_heads=4, dim_feedforward=128, dropout=0.0,
+        token_granularity="sensor", use_sensor_isolated_retrieval=True,
+    ).eval()
+    patches = torch.randn(2, 4, 256, 6)
+    positions = torch.arange(4).float().expand(2, 4)
+    sensor_id = torch.tensor([[0, 0, 0, 1, 1, 1]] * 2)
+    common = dict(
+        sampling_rate_hz=50.0, patch_len_samples=64,
+        channel_texts=[["x", "y", "z", "x", "y", "z"]] * 2,
+        positions=positions,
+        patch_padding_mask=torch.ones(2, 4, dtype=torch.bool),
+    )
+    with torch.no_grad():
+        both = enc(
+            patches, channel_mask=torch.ones(2, 6, dtype=torch.bool),
+            sensor_texts=[["accelerometer at wrist", "gyroscope at wrist"]] * 2,
+            sensor_id=sensor_id,
+            **common,
+        )
+        accel = enc(
+            patches, channel_mask=torch.tensor([[1, 1, 1, 0, 0, 0]] * 2).bool(),
+            sensor_texts=[["accelerometer at wrist"]] * 2,
+            sensor_id=torch.zeros(2, 6, dtype=torch.long),
+            **common,
+        )
+    assert torch.allclose(
+        both["retrieval_tokens"][:, :, 0], accel["retrieval_tokens"][:, :, 0],
+        atol=1e-6, rtol=1e-6,
+    )
+
+
+def test_new_sensor_encoder_has_no_source_statistics_projection():
+    from model.tokenizer.encoder import SetTokenizerEncoder
+
+    enc = SetTokenizerEncoder(token_granularity="sensor")
+    assert not enc.use_sensor_bias_conditioning
+    assert not hasattr(enc, "bias_proj")
+
+
 def test_multiresolution_sensor_pooling_is_duration_weighted():
     """A short tail patch must contribute in proportion to physical time, not as a full patch."""
     from model.tokenizer.encoder import SetTokenizerEncoder

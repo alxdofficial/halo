@@ -7,6 +7,7 @@ import torch
 
 import training.tokenizer.pretrain as pretrain_module
 from training.tokenizer.pretrain import (
+    PipelineAModel,
     PretrainConfig,
     capture_source_provenance,
     hydrate_calibrated_objective_weights,
@@ -27,6 +28,17 @@ def test_batch_1024_recipe_preserves_reference_sample_budget_and_ema_timebase():
     assert cfg.weight_decay == pytest.approx(0.1)
     assert cfg.jepa_ema_decay == pytest.approx(0.996 ** 4)
     assert cfg.val_every == 500
+
+
+def test_live_encoder_carries_checkpoint_evaluation_grid():
+    cfg = PretrainConfig(
+        d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
+        token_granularity="sensor", multiresolution=True,
+    )
+    enc = PipelineAModel(cfg).encoder
+    assert enc.multiresolution is True
+    assert enc.eval_resolution_pair == tuple(cfg.val_resolution_pair)
+    assert enc.min_resolution_ratio == cfg.min_resolution_ratio
 
 
 def test_eval_subset_covers_streams_before_refilling_large_source():

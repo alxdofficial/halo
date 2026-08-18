@@ -24,10 +24,7 @@ from training.tokenizer.losses_repr import (
     vicreg,
 )
 from training.tokenizer.pretrain import PipelineAModel, PretrainConfig
-from training.tokenizer.pretrain_data import (
-    SENSOR_BIAS_DIM, SEED, CorpusIndex, MultiScaleCollate, PretrainDataset,
-    validate_sensor_bias_training_corpus,
-)
+from training.tokenizer.pretrain_data import SEED, CorpusIndex, MultiScaleCollate, PretrainDataset
 
 OUT = Path(__file__).resolve().parent / "outputs" / "grad_check"
 
@@ -52,10 +49,9 @@ def main() -> None:
     cfg = PretrainConfig(
         d_model=64, num_layers=2, num_heads=4, dim_feedforward=128,
         device=str(device), text_conditioning="factored", token_granularity="sensor",
-        sensor_bias_dim=SENSOR_BIAS_DIM, multiresolution=False, descriptor_weight=0.0,
+        multiresolution=False, descriptor_weight=0.0,
     )
     index = CorpusIndex(max_per_stream=200, seed=SEED)
-    validate_sensor_bias_training_corpus(index.refs, index.datasets, index.seed)
     # CorpusIndex is stream-ordered. Taking rows 0..63 would inspect Capture-24 accelerometer only,
     # making cross-sensor attention and descriptor retrieval structurally inactive. Stratify across
     # the whole index so every canonical module receives a meaningful opportunity for gradient.
@@ -95,7 +91,6 @@ def main() -> None:
         )
         text = text_mask = role_ids = sensor_text = sensor_text_mask = None
         sensor_id = batch[f"sensor_id{suffix}"].to(device)
-        sensor_bias = batch[f"sensor_bias{suffix}"].to(device)
         output = model.encoder.encode(
             tokens, text, text_mask, positions,
             patch_durations=patch_durations,
@@ -104,13 +99,13 @@ def main() -> None:
             sensor_text_embs=sensor_text, sensor_text_masks=sensor_text_mask,
             sensor_descriptors=sensor_descriptors,
             sensor_id=sensor_id, role_text_ids=role_ids, sensor_text_ids=sensor_text_ids,
-            sensor_bias=sensor_bias, descriptor_mask=descriptor_mask,
+            descriptor_mask=descriptor_mask,
         )
         return (tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id,
-                sensor_text_ids, sensor_bias, output)
+                sensor_text_ids, output)
 
     (tokens, text, text_mask, sensor_text, sensor_text_mask, sensor_id,
-     sensor_text_ids, sensor_bias, clean) = encode()
+     sensor_text_ids, clean) = encode()
     batch_size, patches, sensors = clean["tokens"].shape[:3]
     plan = make_sensor_mask_plan(
         batch_size, patches, sensors, device=device,
@@ -129,8 +124,15 @@ def main() -> None:
     )
     z_a = model.vicreg_projector(clean["pooled"])
     z_b = model.vicreg_projector(view_b["pooled"])
-    vicreg_result = vicreg(z_a, z_b)
-    loss = phase_a_loss(jepa, vicreg_result.total)
+    pooled_vicreg = vicreg(z_a, z_b)
+    row_valid = (batch["patch_padding_mask"].to(device).unsqueeze(2)
+                 & batch["patch_padding_mask_b"].to(device).unsqueeze(2)
+                 & clean["sensor_present"].unsqueeze(1)
+                 & view_b["sensor_present"].unsqueeze(1))
+    row_vicreg = vicreg(clean["retrieval_tokens"][row_valid],
+                        view_b["retrieval_tokens"][row_valid])
+    vicreg_total = 0.5 * (pooled_vicreg.total + row_vicreg.total)
+    loss = phase_a_loss(jepa, vicreg_total)
 
     model.zero_grad(set_to_none=True)
     loss.total.backward()
@@ -140,14 +142,13 @@ def main() -> None:
         tokens, sensor_id, batch["channel_mask"].to(device), n_sensors=sensors,
     )
     descriptor_conditioned = encoder.descriptor_proj(folded, clean["descriptor"], present)
-    conditioned = encoder.bias_proj(descriptor_conditioned, sensor_bias, present)
     magnitudes = {
         "channel_tokens": rms(tokens),
         "sensor_tokens": rms(folded),
         "text_descriptors": rms(clean["descriptor"]),
         "descriptor_conditioned": rms(descriptor_conditioned),
-        "fully_conditioned": rms(conditioned),
-        "conditioning_delta": rms(conditioned - folded),
+        "fully_conditioned": rms(descriptor_conditioned),
+        "conditioning_delta": rms(descriptor_conditioned - folded),
         "pooled": rms(clean["pooled"]),
         "vicreg_projection": rms(z_a),
     }
@@ -160,7 +161,6 @@ def main() -> None:
         "vicreg_projector": module_grad_norm(model.vicreg_projector),
         "sensor_fold": module_grad_norm(encoder.sensor_fold),
         "descriptor_projection": module_grad_norm(encoder.descriptor_proj),
-        "bias_projection": module_grad_norm(encoder.bias_proj),
         "descriptor_head": module_grad_norm(encoder.descriptor_head),
         "transformer_layers": [module_grad_norm(layer) for layer in encoder.transformer.layers],
     }
@@ -180,7 +180,9 @@ def main() -> None:
     report = {
         "device": str(device),
         "batch": [batch_size, patches, sensors],
-        "loss": {"jepa": float(jepa.detach()), "vicreg": float(vicreg_result.total.detach())},
+        "loss": {"jepa": float(jepa.detach()), "vicreg": float(vicreg_total.detach()),
+                 "vicreg_pooled": float(pooled_vicreg.total.detach()),
+                 "vicreg_retrieval": float(row_vicreg.total.detach())},
         "activation_rms": {key: round(value, 5) for key, value in magnitudes.items()},
         "conditioning_delta_ratio": round(conditioning_ratio, 5),
         "gradient_norms": gradients,

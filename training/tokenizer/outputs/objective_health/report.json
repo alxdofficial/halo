@@ -51,7 +51,7 @@
   "vicreg": {
     "augmentation_pairs_per_batch": 256,
     "batches_with_config_mismatch_between_views": 0,
-    "views_with_non_rotation_augmentation": 0
+    "views_with_unexpected_augmentation": 0
   },
   "sampled_source_share": {
     "capture24": 0.0795,
