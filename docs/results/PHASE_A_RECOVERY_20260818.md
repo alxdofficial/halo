@@ -100,7 +100,77 @@ at k=4**, with no gate, no text and no semantics involved. LiMU-BERT is ~62K par
 self-pretrained on *our own corpus* (`docs/baselines/BASELINES.md`), which eliminates data scale,
 compute and capacity as explanations and leaves the objective and the tokenizer.
 
-## 6. Consequence for the plan
+## 6. Depth and selectivity probes — what Phase A is doing suboptimally
+
+Same closed-form multiclass ridge probe applied to the frozen representation at every trunk depth,
+for ACTIVITY (subject-disjoint split) and for SUBJECT identity (random split, since subject is the
+target). Same estimator for both, so the numbers are commensurable. Mean over the three scored
+development cohorts. `training/tokenizer/diagnose_representation.py`.
+
+### 6a. Activity information peaks at depth 1–3 and decays through the trunk
+
+| depth | random init | old-good 4k | clean @1k | shared-rot @1k | clean @7.5k | rejected 27k |
+|---|---:|---:|---:|---:|---:|---:|
+| retrieval_row | 0.8112 | 0.8290 | 0.8665 | 0.8758 | 0.8572 | 0.6913 |
+| depth1 | 0.8080 | 0.8616 | **0.8799** | **0.8759** | 0.8673 | 0.6916 |
+| depth2 | 0.8217 | 0.8654 | 0.8754 | 0.8657 | 0.8710 | 0.6967 |
+| depth3 | 0.8187 | **0.8708** | 0.8671 | 0.8497 | **0.8744** | 0.7038 |
+| depth4 | 0.8188 | 0.8660 | 0.8542 | 0.8318 | 0.8662 | 0.7003 |
+| depth5 | 0.8084 | 0.8549 | 0.8322 | 0.8083 | 0.8494 | 0.6993 |
+| depth6 | 0.8045 | 0.8243 | 0.8098 | 0.7927 | 0.8320 | 0.6912 |
+| **peak → depth6** | −0.017 | **−0.047** | **−0.070** | **−0.083** | **−0.042** | −0.013 |
+
+At random init the trunk is nearly information-preserving (−0.017, within noise). **Every trained
+model destroys 4–8 points of linearly decodable activity information in its upper layers.** Training
+creates the decay; depth does not.
+
+Two things make this worse than it looks. Phase B stores only the layer-0 retrieval row, so layers
+2–6 are trained and then discarded. And the loss is computed on `pooled`, which is the *worst*
+representation in every column.
+
+### 6b. The augmentation-free recipe trains a subject encoder
+
+Subject-identity probe at the deployed retrieval row, and the activity-minus-subject margin:
+
+| checkpoint | activity | subject | margin |
+|---|---:|---:|---:|
+| random init | 0.8112 | 0.3415 | +0.470 |
+| old-good 4k (jitter/scale/gravity/rate/dropout/text aug) | 0.8290 | **0.3146** | **+0.514** |
+| clean @ step 1,000 | 0.8665 | 0.5254 | +0.341 |
+| clean @ step 7,500 | 0.8572 | **0.5835** | **+0.274** |
+| shared-rotation @ step 1,000 | 0.8758 | 0.5071 | +0.369 |
+
+Subject leakage rises **monotonically with training** under the minimal recipe: 0.342 → 0.525 →
+0.584. The fully-augmented old recipe instead held subject encoding at random-init level (0.315 vs
+0.342) while raising activity. This is not a training-amount effect — the step-1,000 and step-7,500
+clean checkpoints bracket old-good's step 4,000 and both are far worse.
+
+The `phase_a()` rewrite disabled jitter, scale, gravity, rate, channel dropout and text
+augmentation. Those were the only pressure suppressing subject and device idiosyncrasy, and without
+them the encoder spends capacity on *who is wearing it* rather than *what they are doing*. This also
+explains the readout-insensitivity in §5: when a large share of embedding variance is nuisance,
+prototype and ridge extract the same diluted class signal, which is exactly the 0.4-point spread
+HALO shows against LiMU-BERT's 8.9.
+
+### 6c. The rotation damage is uniform, not depth-dependent
+
+The rejected arm sits at ~0.69 activity at *every* depth including the retrieval row, and its
+subject probe is the lowest of any model (0.238). Independent-SO(3) invariance destroyed information
+at the input/tokenizer level rather than progressively through the trunk — consistent with erasing
+the gravity direction the signed DC feature encodes.
+
+### 6d. What this implies for Phase A
+
+1. **The trunk is roughly four layers too deep** for what is deployed. Cut to 2–3 layers, or apply
+   the objective to the retrieval row rather than to `pooled`.
+2. **Restore nuisance-suppressing augmentation.** The minimal recipe removed it wholesale. This is
+   NOT an argument for rotation-as-nuisance — that failure is separately established in §1 and §6c —
+   but for the transforms that suppress subject and device idiosyncrasy without touching
+   gravity-frame orientation.
+3. **Selectivity, not raw activity accuracy, is the metric to select on.** The clean arm has the
+   higher activity probe and the worse representation.
+
+## 7. Consequence for the plan
 
 The augmentation fleet can at best recover the old-good checkpoint (0.8577), which was already
 12 points behind LiMU-BERT downstream. Two structural facts point past augmentation tuning:
