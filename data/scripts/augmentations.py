@@ -277,6 +277,9 @@ class AugmentationConfig:
         channel_dropout_p: float = 0.0,
         jitter_p: float = 0.0,
         scale_p: float = 0.0,
+        gravity_p: float = 0.0,
+        channel_text_phrase_p: float = 0.0,
+        channel_text_dropout_p: float = 0.0,
     ) -> "AugmentationConfig":
         """Explicit controlled recipe: a transform is on exactly when its probability is nonzero.
 
@@ -293,7 +296,9 @@ class AugmentationConfig:
         probabilities = (
             (rotation_p, "rotation_p"), (rate_p, "rate_p"),
             (channel_dropout_p, "channel_dropout_p"),
-            (jitter_p, "jitter_p"), (scale_p, "scale_p"),
+            (jitter_p, "jitter_p"), (scale_p, "scale_p"), (gravity_p, "gravity_p"),
+            (channel_text_phrase_p, "channel_text_phrase_p"),
+            (channel_text_dropout_p, "channel_text_dropout_p"),
         )
         for value, name in probabilities:
             if not 0.0 <= float(value) <= 1.0:
@@ -308,6 +313,16 @@ class AugmentationConfig:
         cfg.jitter.p = float(jitter_p)
         cfg.scale.enabled = scale_p > 0
         cfg.scale.p = float(scale_p)
+        # gravity/channel_text_dropout are CONFIG-group: one draw per window, shared across every
+        # view, so they widen the ACQUISITION distribution the model sees rather than demanding
+        # invariance to it. channel_text_phrase is NUISANCE-group by design -- paraphrase pressure
+        # is what forces text semantics instead of memorising ~20 fixed description strings.
+        cfg.gravity.enabled = gravity_p > 0
+        cfg.gravity.p = float(gravity_p)
+        cfg.channel_text_phrase.enabled = channel_text_phrase_p > 0
+        cfg.channel_text_phrase.p = float(channel_text_phrase_p)
+        cfg.channel_text_dropout.enabled = channel_text_dropout_p > 0
+        cfg.channel_text_dropout.p = float(channel_text_dropout_p)
         return cfg
 
     def split_by_group(self) -> tuple["AugmentationConfig", "AugmentationConfig"]:

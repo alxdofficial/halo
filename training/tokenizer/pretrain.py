@@ -172,6 +172,9 @@ class PretrainConfig:
     channel_dropout_p: float = 0.0
     jitter_p: float = 0.0
     scale_p: float = 0.0
+    gravity_p: float = 0.0
+    channel_text_phrase_p: float = 0.0
+    channel_text_dropout_p: float = 0.0
     # Masked reconstruction of the PARAMETER-FREE filterbank analysis features. Set > 0 (with
     # jepa_weight 0) to swap the self-referential EMA-latent target for a fixed physical one.
     mae_weight: float = 0.0
@@ -1023,6 +1026,13 @@ def main() -> None:
                         help="masked reconstruction of the parameter-free filterbank analysis "
                              "features. Pair with --jepa-weight 0 to SWAP the self-referential "
                              "EMA-latent target for a fixed physical one")
+    parser.add_argument("--gravity-p", type=float, default=None,
+                        help="gravity-removal probability; CONFIG-group, widens the acquisition "
+                             "distribution (does not demand invariance)")
+    parser.add_argument("--channel-text-phrase-p", type=float, default=None,
+                        help="channel-text paraphrase probability; NUISANCE-group")
+    parser.add_argument("--channel-text-dropout-p", type=float, default=None,
+                        help="channel-text dropout probability; CONFIG-group")
     parser.add_argument("--jitter-p", type=float, default=None,
                         help="per-view additive-noise probability; NUISANCE-group, suppresses "
                              "subject/device idiosyncrasy without touching gravity orientation")
@@ -1155,6 +1165,12 @@ def main() -> None:
         cfg.channel_dropout_p = args.channel_dropout_p
     if args.mae_weight is not None:
         cfg.mae_weight = args.mae_weight
+    if args.gravity_p is not None:
+        cfg.gravity_p = args.gravity_p
+    if args.channel_text_phrase_p is not None:
+        cfg.channel_text_phrase_p = args.channel_text_phrase_p
+    if args.channel_text_dropout_p is not None:
+        cfg.channel_text_dropout_p = args.channel_text_dropout_p
     if args.jitter_p is not None:
         cfg.jitter_p = args.jitter_p
     if args.scale_p is not None:
@@ -1272,7 +1288,8 @@ def main() -> None:
         parser.error("expander widths must be positive")
     if not 0.0 <= cfg.retrieval_vicreg_fraction <= 1.0:
         parser.error("retrieval_vicreg_fraction must be in [0,1]")
-    for name in ("rotation_p", "rate_augmentation_p", "channel_dropout_p", "jitter_p", "scale_p"):
+    for name in ("rotation_p", "rate_augmentation_p", "channel_dropout_p", "jitter_p", "scale_p",
+                 "gravity_p", "channel_text_phrase_p", "channel_text_dropout_p"):
         if not 0.0 <= float(getattr(cfg, name)) <= 1.0:
             parser.error(f"{name} must be in [0,1]")
     if cfg.patch_seconds <= 0:
@@ -1382,6 +1399,9 @@ def main() -> None:
         channel_dropout_p=cfg.channel_dropout_p,
         jitter_p=cfg.jitter_p,
         scale_p=cfg.scale_p,
+        gravity_p=cfg.gravity_p,
+        channel_text_phrase_p=cfg.channel_text_phrase_p,
+        channel_text_dropout_p=cfg.channel_text_dropout_p,
     )
     train_ds = PretrainDataset(
         index, index.train, augment=True, two_view=True,
