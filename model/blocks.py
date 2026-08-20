@@ -132,6 +132,30 @@ class SetAttentionStack(nn.Module):
         ])
         self.dropout = nn.Dropout(spec.dropout)
         self.out_norm = nn.LayerNorm(spec.d_model)
+        self._scale_residual_branches()
+
+    def _scale_residual_branches(self) -> None:
+        """Shrink each residual branch's output projection by 1/sqrt(2 * n_layers) at init.
+
+        Standard transformer practice (GPT-2 onward), and it was missing. Without it the variance
+        added to the residual stream grows with depth and the FIRST block dominates: measured on
+        real episode tokens, layer 0's attention update was |dx|/|x| = 2.55, i.e. it overwrote the
+        representation it was supposed to refine, after which layer 1 sat at 99% of uniform
+        attention entropy with nothing left to discriminate.
+
+        Scaling the two output projections -- attention `proj` and the second FFN linear, the two
+        places whose output is added back -- starts every block as a small perturbation of
+        identity and lets depth accumulate gradually.
+        """
+        if not self.n_layers:
+            return
+        scale = (2.0 * self.n_layers) ** -0.5
+        with torch.no_grad():
+            for layer in range(self.n_layers):
+                self.proj[layer].weight.mul_(scale)
+                self.proj[layer].bias.zero_()
+                self.ffn[layer][-1].weight.mul_(scale)
+                self.ffn[layer][-1].bias.zero_()
 
     def forward(
         self,

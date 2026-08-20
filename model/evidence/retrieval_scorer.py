@@ -74,6 +74,10 @@ class PairScorerConfig:
     pair_head_hidden: int = 32
     base_gain_init: float = 1.0 / DEPLOYED_TEMPERATURE
     residual_gain_init: float = 0.02
+    #: False replaces the whole learned head with the plain feature cosine at a FIXED temperature
+    #: and registers no parameters at all. This is the stand-in the ablation ladder substitutes
+    #: when isolating which stage of the model is failing to learn.
+    learned: bool = True
 
 
 class PairScorer(nn.Module):
@@ -85,6 +89,11 @@ class PairScorer(nn.Module):
         self.cfg = cfg or PairScorerConfig()
         d = spec.d_model
         width = self.cfg.n_interaction_heads * self.cfg.interaction_dim
+        if not self.cfg.learned:
+            # A buffer, not a Parameter: the fixed stand-in must contribute no gradient anywhere,
+            # so that a ladder rung which "disables retrieval learning" really does.
+            self.register_buffer("fixed_gain", torch.tensor(float(self.cfg.base_gain_init)))
+            return
 
         # One shared description projection: a description means the same thing on either side of
         # the comparison, so learning it twice would only let the two copies drift apart.
@@ -165,6 +174,9 @@ class PairScorer(nn.Module):
         cosine matmuls, one pointwise MLP. There is no Python loop over queries, rows or heads, so
         the whole (Q, M) grid is one wavefront of GPU work.
         """
+        if not self.cfg.learned:
+            return self.fixed_gain * (F.normalize(query_feature.float(), dim=-1)
+                                      @ F.normalize(memory_feature.float(), dim=-1).t())
         query_heads = self._joint_heads(query_feature, query_descriptor, self.query_proj)
         memory_heads = self._joint_heads(memory_feature, memory_descriptor, self.memory_proj)
         # (H, Q, dh) x (H, dh, M) -> (H, Q, M): one batched matmul over the interaction heads,

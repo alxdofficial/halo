@@ -755,3 +755,43 @@ def test_retrieval_alignment_loss_reaches_the_scorer():
     touched = [n for n, p in engine.scorer.named_parameters()
                if p.grad is not None and float(p.grad.abs().sum()) > 0]
     assert len(touched) >= 5
+
+
+def test_residual_branches_start_as_small_perturbations():
+    """Standard transformer init, and it was missing.
+
+    Without scaling the residual-branch output projections by 1/sqrt(2*n_layers), the first block
+    dominates the residual stream: measured on real episode tokens, layer 0's attention update was
+    |dx|/|x| = 2.55 — it overwrote the representation it was meant to refine — and layer 1 then sat
+    at 99% of uniform attention entropy with nothing left to discriminate.
+    """
+    torch.manual_seed(0)
+    spec = AttentionSpec(d_model=128, n_heads=4, ffn_mult=2, dropout=0.0)
+    for n_layers in (2, 4):
+        stack = SetAttentionStack(spec, n_layers).eval()
+        # tokens shaped like the mixer's: unit-norm content plus three unit-norm identity vectors
+        x = sum(F.normalize(torch.randn(8, 128, 128), dim=-1) for _ in range(4))
+        normed = stack.attn_norm[0](x)
+        qkv = stack.qkv[0](normed).view(8, 128, 3, spec.n_heads, spec.head_dim)
+        q, k, v = (t.transpose(1, 2) for t in qkv.unbind(dim=2))
+        attended = F.scaled_dot_product_attention(q, k, v)
+        attended = attended.transpose(1, 2).reshape(8, 128, spec.d_model)
+        ratio = float(stack.proj[0](attended).norm(dim=-1).mean() / x.norm(dim=-1).mean())
+        assert ratio < 0.5, (n_layers, ratio)
+
+
+def test_the_fixed_retrieval_stand_in_has_no_parameters():
+    """A ladder rung that disables retrieval learning must really disable it, not merely shrink it."""
+    from model.evidence.retrieval_scorer import PairScorerConfig
+
+    engine = EvidenceEngine(None, EngineConfig(
+        spec=AttentionSpec(d_model=64, n_heads=4), top_k=8, mixing="off",
+        scorer=PairScorerConfig(learned=False),
+    ))
+    assert sum(p.numel() for p in engine.parameters() if p.requires_grad) == 0
+    query, memory, candidate_text, label_text = _episode()
+    out = engine(query, memory, candidate_text, label_text)
+    # with no mixer the weight is the retrieval score alone, identical across candidates
+    lw = out["log_weight"]
+    assert torch.isfinite(out["logits"]).all()
+    assert float((lw - lw.mean(dim=2, keepdim=True)).abs().max()) < 1e-6

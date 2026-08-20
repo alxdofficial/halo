@@ -29,6 +29,7 @@ from data.scripts.augmentations import AugmentationConfig
 from model.blocks import AttentionSpec
 from model.evidence.engine import EngineConfig, EvidenceEngine
 from model.evidence.evidence_mixer import EvidenceMixerConfig
+from model.evidence.retrieval_scorer import PairScorerConfig
 from model.tokenizer.encoder import SetTokenizerEncoder
 from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
 from training.tokenizer.episodic import (
@@ -518,6 +519,16 @@ def main() -> None:
     parser.add_argument("--holdout-label-fraction", type=float, default=0.2)
     parser.add_argument("--top-k", type=int, default=64)
     parser.add_argument("--readout", choices=("weights", "semantic"), default="weights")
+    # --- ablation ladder: substitute a fixed stand-in for one learnable stage at a time
+    parser.add_argument("--retrieval", choices=("learned", "cosine"), default="learned",
+                        help="'cosine' replaces the learned pair scorer with the plain feature "
+                             "cosine at a fixed temperature, registering no parameters")
+    parser.add_argument("--mixing", choices=("attention", "off"), default="attention",
+                        help="'off' removes the evidence mixer entirely: the weight is the "
+                             "retrieval score and the label vectors are the frozen row text")
+    parser.add_argument("--mixer-layers", type=int, default=2,
+                        help="0 keeps the readout but gives it uncontextualized tokens, which "
+                             "separates 'the readout helps' from 'attention helps'")
     parser.add_argument("--encoder-lr", type=float, default=1e-4)
     parser.add_argument("--engine-lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
@@ -711,7 +722,10 @@ def main() -> None:
         spec=spec,
         trunk_layers=int(encoder.transformer.num_layers),
         top_k=args.top_k,
-        mixer=EvidenceMixerConfig(n_groups=max(96, args.top_k + 2), readout=args.readout),
+        mixing=args.mixing,
+        scorer=PairScorerConfig(learned=args.retrieval == "learned"),
+        mixer=EvidenceMixerConfig(n_groups=max(96, args.top_k + 2), readout=args.readout,
+                                  n_layers=args.mixer_layers),
     )
     engine = EvidenceEngine(encoder, engine_config).to(device).train()
     if args.freeze_encoder:
@@ -724,15 +738,16 @@ def main() -> None:
     )
 
     encoder_params = [p for p in encoder.parameters() if p.requires_grad]
-    scorer_params = list(engine.scorer.parameters())
-    mixer_params = list(engine.mixer.parameters())
-    groups = []
-    if encoder_params:
-        groups.append({"params": encoder_params, "lr": args.encoder_lr})
-    groups.extend((
-        {"params": scorer_params, "lr": args.engine_lr},
-        {"params": mixer_params, "lr": args.engine_lr},
-    ))
+    scorer_params = [p for p in engine.scorer.parameters() if p.requires_grad]
+    mixer_params = ([p for p in engine.mixer.parameters() if p.requires_grad]
+                    if engine.mixer is not None else [])
+    # A ladder rung that substitutes a fixed stand-in leaves a stage with no parameters at all;
+    # AdamW rejects an empty group, so only non-empty ones are handed over.
+    groups = [{"params": params, "lr": lr} for params, lr in
+              ((encoder_params, args.encoder_lr), (scorer_params, args.engine_lr),
+               (mixer_params, args.engine_lr)) if params]
+    if not groups:
+        raise SystemExit("every stage is frozen; there is nothing to train")
     optimizer = torch.optim.AdamW(groups, weight_decay=args.weight_decay)
 
     def lr_factor(step: int) -> float:

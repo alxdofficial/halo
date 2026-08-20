@@ -61,10 +61,19 @@ class EngineConfig:
     top_k: int = 64
     scorer: PairScorerConfig = field(default_factory=PairScorerConfig)
     mixer: EvidenceMixerConfig = field(default_factory=EvidenceMixerConfig)
+    #: "off" removes the mixer entirely: the evidence weight is the retrieval score alone and the
+    #: label vectors are the frozen row text. With scorer.learned=False as well, the whole model
+    #: reduces to the closed-form cosine-retrieval ConSE rule and nothing is learned downstream of
+    #: the encoder. The ablation ladder walks this back one stage at a time.
+    mixing: str = "attention"                   # attention | off
 
     def __post_init__(self) -> None:
         if self.top_k <= 0:
             raise ValueError("top_k must be positive")
+        if self.mixing not in ("attention", "off"):
+            raise ValueError("mixing must be 'attention' or 'off'")
+        if self.mixing == "off":
+            return                              # no mixer, so no group vocabulary to check
         # Every retrieved row can be its own recording. Group 0 means "no recording" (candidate
         # labels), group 1 is the query recording, and evidence groups start at 2.
         # Checking here means a bad combination fails at construction rather than on the first
@@ -133,7 +142,8 @@ class EvidenceEngine(nn.Module):
         self.cfg = cfg or EngineConfig()
         self.encoder = encoder
         self.scorer = PairScorer(self.cfg.spec, self.cfg.scorer)
-        self.mixer = EvidenceMixer(self.cfg.spec, self.cfg.mixer)
+        self.mixer = (EvidenceMixer(self.cfg.spec, self.cfg.mixer)
+                      if self.cfg.mixing == "attention" else None)
 
     # ---------------------------------------------------------------- identity channels
     def _identity_channels(
@@ -219,10 +229,23 @@ class EvidenceEngine(nn.Module):
         selected = PairScorer.select(scores, k)                               # (Q, k)
         picked_score = scores.gather(1, selected)
 
+        row_label_text = evidence_label_tokens(memory, candidate_text, label_text)
+        if self.mixer is None:
+            bound = memory.enrolled_candidate.to(selected.device)[selected]
+            mixed = {
+                "log_weight": picked_score.unsqueeze(-1).expand(-1, -1, candidate_text.shape[0]),
+                "label_vector": row_label_text[selected],
+            }
+            logits = vote(mixed["log_weight"], mixed["label_vector"], candidate_text, bound)
+            result = {"logits": logits, "scores": scores, "selected": selected,
+                      "log_weight": mixed["log_weight"]}
+            if collect_stats:
+                result["stats"] = self._stats(query, memory, scores, selected, bound, mixed)
+            return result
+
         candidate_slot, evidence_slot, evidence_group, bound = self._identity_channels(
             memory, selected, candidate_text.shape[0], generator,
         )
-        row_label_text = evidence_label_tokens(memory, candidate_text, label_text)
         mixed = self.mixer(
             retrieval_score=picked_score,
             candidate_text=candidate_text,
@@ -245,9 +268,12 @@ class EvidenceEngine(nn.Module):
 
     def _stats(self, query, memory, scores, selected, bound, mixed) -> dict[str, float]:
         with torch.no_grad():
-            stats = dict(self.mixer.telemetry())
-            stats["retrieval/base_gain"] = float(self.scorer.base_gain)
-            stats["retrieval/residual_gain"] = float(self.scorer.residual_gain)
+            stats = dict(self.mixer.telemetry()) if self.mixer is not None else {}
+            if self.cfg.scorer.learned:
+                stats["retrieval/base_gain"] = float(self.scorer.base_gain)
+                stats["retrieval/residual_gain"] = float(self.scorer.residual_gain)
+            else:
+                stats["retrieval/fixed_gain"] = float(self.scorer.fixed_gain)
             stats["retrieval/enrolled_share"] = float(bound.ge(0).float().mean())
             reached = torch.zeros(len(memory.feature), dtype=torch.bool, device=selected.device)
             reached[selected.reshape(-1)] = True
@@ -279,7 +305,8 @@ class EvidenceEngine(nn.Module):
             if loose:
                 report["encoder.<direct>"] = loose
         report["scorer"] = sum(p.numel() for p in self.scorer.parameters() if p.requires_grad)
-        report["mixer"] = sum(p.numel() for p in self.mixer.parameters() if p.requires_grad)
+        report["mixer"] = (sum(p.numel() for p in self.mixer.parameters() if p.requires_grad)
+                           if self.mixer is not None else 0)
         report["TOTAL"] = sum(v for k, v in report.items() if k != "TOTAL")
         return report
 
