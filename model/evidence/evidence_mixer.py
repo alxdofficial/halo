@@ -116,6 +116,9 @@ class EvidenceMixerConfig:
     semantic_gain_init: float = 0.05
     #: Scale of the standardised retrieval score as an additive attention bias.
     score_bias_init: float = 1.0
+    #: Initial gain on the role/slot/group identity channels, relative to content at 1.0. See
+    #: :class:`~model.blocks.ScaledSum` — at 1.0 the content is only a quarter of every token.
+    identity_gain_init: float = 1.0
 
 
 class _LowRankForm(nn.Module):
@@ -149,7 +152,7 @@ class EvidenceMixer(nn.Module):
         self.slot_emb = nn.Embedding(self.cfg.n_slots, d)
         self.group_emb = nn.Embedding(self.cfg.n_groups, d)
         # Content + role + slot + group, each normalised to a direction with its own learned gain.
-        self.compose = ScaledSum(4)
+        self.compose = ScaledSum(4, init=[1.0] + [self.cfg.identity_gain_init] * 3)
         self.stack = SetAttentionStack(spec, self.cfg.n_layers)
 
         self.score_bias_gain = nn.Parameter(torch.tensor(float(self.cfg.score_bias_init)))

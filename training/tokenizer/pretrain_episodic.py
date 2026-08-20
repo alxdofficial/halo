@@ -526,6 +526,9 @@ def main() -> None:
     parser.add_argument("--mixing", choices=("attention", "off"), default="attention",
                         help="'off' removes the evidence mixer entirely: the weight is the "
                              "retrieval score and the label vectors are the frozen row text")
+    parser.add_argument("--identity-gain", type=float, default=1.0,
+                        help="initial gain on the mixer's role/slot/group channels relative to "
+                             "content at 1.0; at 1.0 content is only a quarter of every token")
     parser.add_argument("--mixer-layers", type=int, default=2,
                         help="0 keeps the readout but gives it uncontextualized tokens, which "
                              "separates 'the readout helps' from 'attention helps'")
@@ -725,7 +728,8 @@ def main() -> None:
         mixing=args.mixing,
         scorer=PairScorerConfig(learned=args.retrieval == "learned"),
         mixer=EvidenceMixerConfig(n_groups=max(96, args.top_k + 2), readout=args.readout,
-                                  n_layers=args.mixer_layers),
+                                  n_layers=args.mixer_layers,
+                                  identity_gain_init=args.identity_gain),
     )
     engine = EvidenceEngine(encoder, engine_config).to(device).train()
     if args.freeze_encoder:

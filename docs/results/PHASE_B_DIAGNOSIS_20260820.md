@@ -169,3 +169,65 @@ training alone would show it, which is exactly what the grids found (top-k 16 gi
 any 1,500-step arm, 0.344 vs 0.285, but its advantage is inside the band at that budget).
 
 `gridD` tests the compound directly: top-k 16 at 6,000 and 12,000 steps.
+
+
+## Ablation ladder — which learnable stage is failing?
+
+Working backwards from the loss, one learnable stage enabled at a time, everything else replaced by
+a fixed stand-in (retrieval → plain feature cosine at fixed temperature, no parameters; mixing →
+removed; encoder → random init, frozen). 1,500 steps, one seed, paired gain over each run's own
+step-0 (noise sd 0.0069, so a marginal effect above ~0.014 is real).
+
+| rung | step-0 | paired gain | k=0 | k=4 | alias | marginal |
+|---|---:|---:|---:|---:|---:|---:|
+| 1. readout only, no attention | 0.3391 | +0.0915 | −0.0072 | +0.0917 | +0.1139 | |
+| 2. + attention | 0.3389 | +0.1068 | +0.0008 | +0.1001 | +0.1443 | **+0.0153** |
+| 3. + learned retrieval | 0.3573 | **+0.1153** | −0.0033 | +0.1375 | +0.1462 | +0.0085 |
+| 4. + encoder (FULL model) | 0.3573 | +0.0895 | +0.0101 | +0.1169 | +0.0878 | **−0.0258** |
+| isolation: retrieval alone | 0.3578 | **+0.0000** | +0.0000 | +0.0000 | +0.0000 | |
+| isolation: encoder alone | 0.3390 | +0.0329 | +0.0125 | +0.0583 | +0.0267 | |
+| depth: 4 attention layers | 0.3389 | +0.1084 | +0.0020 | +0.0904 | +0.1504 | |
+
+Four things fall out, and they answer the question directly.
+
+**The readout carries almost all of the learning.** Rung 1 — a frozen random encoder, a fixed cosine
+retrieval, no attention at all, and only the step-6 low-rank forms learnable — already gets +0.0915
+of the +0.1153 the best rung reaches. Everything else in the model is fighting over the last 20%.
+
+**Attention adds a little; depth adds nothing.** +0.0153 for two layers (2.2 sd, real but small),
+and four layers is +0.1084 against two layers' +0.1068, i.e. no gain from depth.
+
+**Learned retrieval in isolation contributes exactly nothing** (+0.0000: no validation ever beat
+step-0). Its only path to the loss is a softmax that is a near-uniform average over 64 rows, and
+the gradient through that is too weak to move it. Inside the full stack it is worth +0.0085, which
+is inside the noise. This is the same conclusion the post-hoc analysis reached from the other side —
+uniform weights over the retrieved set beat the trained weights.
+
+**Training the encoder end to end makes things WORSE**: −0.0258, −3.7 sd, when added on top of
+rung 3. The encoder in isolation helps a little (+0.0329), so it is not that encoder gradients are
+useless — it is that training it jointly with the rest, at this scale and objective, is
+counterproductive. That is the single most actionable result here.
+
+**No learnable stage improves k=0.** Gains there run −0.007 to +0.013 across every rung, against
++0.09 to +0.15 for k=4 and alias. Learning buys adaptation and buys nothing at all for zero-shot,
+which is exactly what the r = 0.11 name-signal measurement predicts.
+
+## Numerical defects found by the audit
+
+**Fixed — residual branches were not scaled at init.** On real episode tokens, layer 0's attention
+update was **|Δx|/|x| = 2.55**: it overwrote the residual stream it was meant to refine, and layer 1
+then sat at **99% of uniform attention entropy** with nothing left to discriminate. Scaling the two
+residual output projections by `1/sqrt(2 * n_layers)` — standard practice from GPT-2 onward, and
+simply missing here — brings layer 0 to 0.11. The ladder above was run with this fix in place.
+
+**Found, configurable, not yet defaulted — the identity channels are as loud as the content.**
+`ScaledSum` normalises content and the role/slot/group channels to unit norm with equal gain, so
+**content is 24.3% of every token** and the slot and group ids, which are redrawn every episode, are
+half of it: from attention's point of view half of each token is per-episode noise. The gains stayed
+within 5% of 1.0 through training, so the model does not correct this on its own.
+`EvidenceMixerConfig.identity_gain_init` (and `--identity-gain`) exposes it; 0.3 puts content at
+52.6%. Default is unchanged pending the measurement.
+
+Audited and clean: the pre-norm stack does not grow activations with depth; the attention bias is
+standardised to a scale comparable to the content logits, so it neither vanishes nor saturates; the
+vote is finite under all-enrolled, no-enrolled, and log-weights scaled by 1e-6 and 1e3.

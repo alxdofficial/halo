@@ -205,14 +205,26 @@ class ScaledSum(nn.Module):
     """Sum unit-norm ingredients, each scaled by its own learned positive weight.
 
     Adding a raw ``nn.Embedding`` (norm about ``sqrt(d)``) to a projection of a unit-norm text
-    vector lets the embedding drown the content. Normalising each ingredient to a direction and
-    giving it a learned gain starting at one makes every additive channel start on equal footing
-    and lets the model decide the mixture.
+    vector lets the embedding drown the content, so each ingredient enters as a direction.
+
+    ``init`` matters more than it looks. Starting every channel at gain 1 sounds neutral but is
+    not: with one content channel and three identity channels the content is only 25% of the
+    token, and two of those identity channels — coreference slot and co-membership group — are
+    REDRAWN EVERY EPISODE, so half of each token is per-episode noise from attention's point of
+    view. Measured on the first end-to-end run, the gains stayed within 5% of 1.0 throughout
+    training, so the model does not fix this by itself. Pass a smaller init for the identity
+    channels to let content lead.
     """
 
-    def __init__(self, n_terms: int):
+    def __init__(self, n_terms: int, init: float | list[float] = 1.0):
         super().__init__()
-        self.log_gain = nn.Parameter(torch.zeros(n_terms))
+        gains = torch.full((n_terms,), float(init)) if isinstance(init, (int, float)) \
+            else torch.tensor([float(v) for v in init])
+        if gains.numel() != n_terms:
+            raise ValueError(f"expected {n_terms} initial gains, got {gains.numel()}")
+        if bool((gains <= 0).any()):
+            raise ValueError("initial gains must be positive")
+        self.log_gain = nn.Parameter(gains.log())
 
     def forward(self, *terms: torch.Tensor) -> torch.Tensor:
         if len(terms) != self.log_gain.numel():
