@@ -203,10 +203,11 @@ the gradient through that is too weak to move it. Inside the full stack it is wo
 is inside the noise. This is the same conclusion the post-hoc analysis reached from the other side —
 uniform weights over the retrieved set beat the trained weights.
 
-**Training the encoder end to end makes things WORSE**: −0.0258, −3.7 sd, when added on top of
-rung 3. The encoder in isolation helps a little (+0.0329), so it is not that encoder gradients are
-useless — it is that training it jointly with the rest, at this scale and objective, is
-counterproductive. That is the single most actionable result here.
+**Training the encoder end to end is, at best, not helping.** Adding it on top of rung 3 costs
+−0.0258 at this seed, and the encoder in isolation is worth only +0.0329 against +0.0915 for the
+readout alone. A replication at a second seed gives −0.0098: same sign, but well inside the noise,
+so the honest statement is "joint encoder training is neutral to mildly harmful here", not the
+strong claim the single seed suggested.
 
 **No learnable stage improves k=0.** Gains there run −0.007 to +0.013 across every rung, against
 +0.09 to +0.15 for k=4 and alias. Learning buys adaptation and buys nothing at all for zero-shot,
@@ -231,3 +232,35 @@ within 5% of 1.0 through training, so the model does not correct this on its own
 Audited and clean: the pre-norm stack does not grow activations with depth; the attention bias is
 standardised to a scale comparable to the content logits, so it neither vanishes nor saturates; the
 vote is finite under all-enrolled, no-enrolled, and log-weights scaled by 1e-6 and 1e3.
+
+
+## Two confirmations, both negative — and a caveat that limits everything above
+
+| check | seed 1 | seed 2 | verdict |
+|---|---:|---:|---|
+| encoder trained vs frozen | −0.0258 | −0.0098 | same sign, does **not** replicate as significant |
+| identity gain 0.3 vs 1.0 (content 53% vs 25%) | +0.0980 vs +0.1153 | — | the "fix" is **worse** by 2.5 sd |
+
+Making content dominate the mixer token — the change the audit's second finding pointed at — makes
+things worse, not better. The equal-gain composition is doing something useful that the norm
+argument did not anticipate. Default stays at 1.0; the finding is recorded, the remedy is not
+adopted, and `--identity-gain` remains available.
+
+**The caveat.** The paired-gain noise of 0.0069 was measured on four replicates of ONE configuration
+at 1,500 steps. It does not transfer: the frozen-encoder configuration scores +0.1153 at seed 1 and
++0.0426 at seed 2, a spread of 0.073 — ten times that estimate. So the paired statistic removes the
+validation-draw variance *within* a configuration but not the interaction between the draw and the
+configuration.
+
+What that leaves standing, and what it does not:
+
+* **Sound** — comparisons *within one seed*, where the validation draw is literally identical. The
+  ladder was run entirely at seed 20260818, so its ordering is a paired comparison and the ranking
+  (readout ≫ attention > retrieval, retrieval-alone exactly zero, k=0 flat everywhere) holds.
+* **Not sound** — treating 0.0069 as a universal error bar, and any cross-seed comparison of single
+  runs. Effects of interest here are ~0.01–0.03 against a cross-seed spread of ~0.07, so a
+  conclusive arm comparison needs several seeds per arm, roughly 4 × 4 min per arm.
+
+That is the real methodological cost of this corpus's 22-concept held-out split, and it should be
+fixed at the protocol level — a fixed validation draw shared across every run, decoupled from the
+training seed — before any further arm comparison is attempted.
