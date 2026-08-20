@@ -42,6 +42,11 @@ from data.scripts.labels.canonical_labels import canonicalize
 
 # Pre-registered protocol constants (do not tune post-hoc).
 CONSE_TOP_T = 10
+# Subtract the training-vocabulary mean from the ConSE query vector before the cosine. This is a
+# property of the SHARED bridge, not of any one model, so it must be enabled or disabled for every
+# ConSE-tier model at once or the comparison is invalid. Default False preserves every published
+# number; flip it only alongside a full re-score of all ConSE-tier baselines.
+CONSE_CENTRE_QUERY = False
 BOOTSTRAP_B = 1000
 BOOTSTRAP_SEED = 3431
 SMALL_COHORT_MAX_SUBJECTS = 12   # below this, the subject bootstrap is jagged (few distinct subject
@@ -661,6 +666,7 @@ def conse_predict(
     target_labels: Sequence[str],
     encode: Optional[Callable[[Sequence[str]], np.ndarray]] = None,
     top_T: int = CONSE_TOP_T,
+    centre_query: bool = CONSE_CENTRE_QUERY,
 ) -> Tuple[List[str], Dict[str, object]]:
     """Full ConSE bridge: classifier softmax over the train vocab -> predictions
     over the target dataset's label strings, plus reachability stats.
@@ -681,6 +687,15 @@ def conse_predict(
     target_embs = encode(target_labels)
 
     v = conse_embeddings(probs, train_embs, top_T=top_T)             # (N, D)
+    if centre_query:
+        # A ConSE vector is a CONVEX COMBINATION of training-label embeddings, so it inherits the
+        # training vocabulary's mean — a large common-mode direction shared by every query. Measured
+        # on this vocabulary the mean off-diagonal label-label cosine is 0.34, i.e. a third of every
+        # similarity is that pedestal rather than anything about the activity. Subtracting the mean
+        # leaves the informative deviation. It uses ONLY the training vocabulary, so no target-label
+        # information enters, and it adds no parameters.
+        v = v - train_embs.mean(axis=0, keepdims=True)
+        v = v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
     sims = v @ target_embs.T                                         # (N, L)
     preds = [target_labels[i] for i in sims.argmax(axis=1)]
 

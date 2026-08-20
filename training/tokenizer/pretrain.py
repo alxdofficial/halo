@@ -93,6 +93,10 @@ class PretrainConfig:
     dim_feedforward: int = 1024
     dropout: float = 0.1
     frontend: str = "fixed"               # fixed | constrained-learnable filterbank
+    trunk: str = "dual"                   # dual (checkpoint-compatible) | temporal (compact engine)
+    # Omit the Phase-A-only descriptor head unless its explicit objective is enabled. Serialize this
+    # shape decision so strict reconstruction never has to infer it from state-dict prefixes.
+    descriptor_prediction: bool = False
     # Config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). 'per_channel' (default) is the
     # legacy one-description-per-channel path; 'factored' splits it into per-channel ROLE text +
     # per-sensor IDENTITY text. Default MUST stay 'per_channel' (do-no-harm). asdict(cfg) serializes
@@ -253,6 +257,8 @@ class PipelineAModel(nn.Module):
             d_model=cfg.d_model, num_layers=cfg.num_layers, num_heads=cfg.num_heads,
             dim_feedforward=cfg.dim_feedforward, dropout=cfg.dropout, dft_size=DFT_SIZE,
             frontend=cfg.frontend,                # 'fixed' (default) | 'learnable'
+            trunk=cfg.trunk,
+            descriptor_prediction=cfg.descriptor_prediction,
             text_conditioning=cfg.text_conditioning,  # 'per_channel' (default) | 'factored'
             token_granularity=cfg.token_granularity,
             sensor_bias_dim=cfg.sensor_bias_dim,
@@ -279,7 +285,8 @@ class PipelineAModel(nn.Module):
         self.encoder.min_resolution_ratio = float(cfg.min_resolution_ratio)
         if cfg.token_granularity == "sensor" and cfg.descriptor_weight <= 0:
             self.encoder.descriptor_prediction_enabled = False
-            self.encoder.descriptor_head.requires_grad_(False)
+            if self.encoder.descriptor_head is not None:
+                self.encoder.descriptor_head.requires_grad_(False)
         self.jepa_predictor = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_model), nn.GELU(),
             nn.Linear(cfg.d_model, cfg.d_model),
@@ -343,23 +350,27 @@ def update_ema_encoder(student: nn.Module, teacher: nn.Module, decay: float) -> 
 @torch.no_grad()
 def representation_health(z: torch.Tensor, prefix: str = "repr") -> dict[str, float]:
     """Small-batch collapse diagnostics over an embedding matrix."""
-    x = z.detach().float()
-    std = x.std(dim=0, unbiased=False)
-    centered = x - x.mean(0)
-    cov = centered.T @ centered / max(len(x) - 1, 1)
-    eig = torch.linalg.eigvalsh(cov).clamp_min(0)
-    probs = eig / eig.sum().clamp_min(1e-12)
-    effective_rank = torch.exp(-(probs * probs.clamp_min(1e-12).log()).sum())
-    offdiag = cov - torch.diag_embed(torch.diagonal(cov))
-    names = tuple(f"{prefix}/{name}" for name in (
-        "min_std", "mean_std", "effective_rank", "mean_norm",
-        "cov_offdiag_abs_mean", "cov_max_eigenvalue",
-    ))
-    # One device-to-host synchronization for the whole diagnostic instead of one per scalar.
-    values = torch.stack((
-        std.min(), std.mean(), effective_rank, x.norm(dim=1).mean(),
-        offdiag.abs().mean(), eig.max(),
-    )).cpu().tolist()
+    # Collapse diagnostics are an FP32 island. Merely calling `.float()` is insufficient inside a
+    # surrounding CUDA autocast region: the covariance matmul is cast back to BF16, whose symmetric
+    # eigensolver is not implemented and whose spectrum would be too coarse for effective rank.
+    with torch.autocast(device_type=z.device.type, enabled=False):
+        x = z.detach().float()
+        std = x.std(dim=0, unbiased=False)
+        centered = x - x.mean(0)
+        cov = centered.T @ centered / max(len(x) - 1, 1)
+        eig = torch.linalg.eigvalsh(cov).clamp_min(0)
+        probs = eig / eig.sum().clamp_min(1e-12)
+        effective_rank = torch.exp(-(probs * probs.clamp_min(1e-12).log()).sum())
+        offdiag = cov - torch.diag_embed(torch.diagonal(cov))
+        names = tuple(f"{prefix}/{name}" for name in (
+            "min_std", "mean_std", "effective_rank", "mean_norm",
+            "cov_offdiag_abs_mean", "cov_max_eigenvalue",
+        ))
+        # One device-to-host synchronization for the whole diagnostic instead of one per scalar.
+        values = torch.stack((
+            std.min(), std.mean(), effective_rank, x.norm(dim=1).mean(),
+            offdiag.abs().mean(), eig.max(),
+        )).cpu().tolist()
     return dict(zip(names, values))
 
 
@@ -571,11 +582,16 @@ def _git(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     )
 
 
-def capture_source_provenance(out: Path, *, write: bool = True) -> dict:
+def capture_source_provenance(
+    out: Path,
+    *,
+    write: bool = True,
+    roots: tuple[str, ...] = _PHASE_A_SOURCE_ROOTS,
+) -> dict:
     """Persist a reconstructable patch for tracked and untracked source files."""
     head = _git(["rev-parse", "HEAD"]).stdout.decode().strip()
     tracked = _git([
-        "diff", "HEAD", "--binary", "--", *_PHASE_A_SOURCE_ROOTS,
+        "diff", "HEAD", "--binary", "--", *roots,
         # Results from Phase A, Phase B, and diagnostics are runtime artifacts, not source. Including
         # another job's changing JSON here made an otherwise faithful Phase-A resume fail its source
         # fingerprint check and inflated the snapshot by several megabytes in a shared worktree.
@@ -591,7 +607,7 @@ def capture_source_provenance(out: Path, *, write: bool = True) -> dict:
         path = _repo_root() / rel
         in_phase_a_source = any(
             rel == root or rel.startswith(root.rstrip("/") + "/")
-            for root in _PHASE_A_SOURCE_ROOTS
+            for root in roots
         )
         if (not in_phase_a_source or "outputs" in Path(rel).parts
                 or path.suffix.lower() not in _SOURCE_SUFFIXES):
@@ -958,8 +974,9 @@ def module_grad_norms(model) -> dict:
         mods.extend((
             ("sensor_fold", model.encoder.sensor_fold),
             ("descriptor_projection", model.encoder.descriptor_proj),
-            ("descriptor_head", model.encoder.descriptor_head),
         ))
+        if model.encoder.descriptor_head is not None:
+            mods.append(("descriptor_head", model.encoder.descriptor_head))
         if model.encoder.use_sensor_bias_conditioning:
             mods.append(("bias_projection", model.encoder.bias_proj))
     return {f"grad/{name}": _gn(mod.parameters()) for name, mod in mods}
@@ -1042,6 +1059,13 @@ def main() -> None:
                         help="trunk depth. Measured 2026-08-18: activity information peaks at "
                              "depth 1-3 and decays 4-8 points by depth 6 in every trained arm, "
                              "while a random-init trunk is flat")
+    parser.add_argument("--trunk", choices=("dual", "temporal"), default=None,
+                        help="dual = historical cross-sensor trunk; temporal = compact sensor-"
+                             "isolated trunk used by the compact evidence engine")
+    parser.add_argument("--d-model", type=int, default=None,
+                        help="encoder width (compact small uses 128; historical reference uses 256)")
+    parser.add_argument("--dim-feedforward", type=int, default=None,
+                        help="trunk feed-forward width (compact small uses 256)")
     parser.add_argument("--channel-dropout-p", type=float, default=None,
                         help="whole-modality dropout probability (default 0)")
     parser.add_argument("--val-every", type=int, default=None,
@@ -1155,6 +1179,7 @@ def main() -> None:
         cfg.patch_seconds = args.patch_seconds
     if args.descriptor_weight is not None:
         cfg.descriptor_weight = args.descriptor_weight
+    cfg.descriptor_prediction = cfg.descriptor_weight > 0
     if args.rotation_p is not None:
         cfg.rotation_p = args.rotation_p
     if args.rotation_pairing is not None:
@@ -1177,6 +1202,12 @@ def main() -> None:
         cfg.scale_p = args.scale_p
     if args.num_layers is not None:
         cfg.num_layers = args.num_layers
+    if args.trunk is not None:
+        cfg.trunk = args.trunk
+    if args.d_model is not None:
+        cfg.d_model = args.d_model
+    if args.dim_feedforward is not None:
+        cfg.dim_feedforward = args.dim_feedforward
     if args.retrieval_vicreg_fraction is not None:
         cfg.retrieval_vicreg_fraction = args.retrieval_vicreg_fraction
     if args.val_every is not None:

@@ -134,12 +134,19 @@ def build_encoder(ckpt: dict, device, *, training: bool = False) -> SetTokenizer
         use_sensor_bias_conditioning = any(
             key.startswith("bias_proj.") for key in ckpt.get("encoder", {})
         )
+    descriptor_prediction = c.get("descriptor_prediction")
+    if descriptor_prediction is None:
+        descriptor_prediction = any(
+            key.startswith("descriptor_head.") for key in ckpt.get("encoder", {})
+        )
     kw = dict(
         d_model=c["d_model"], num_layers=c["num_layers"], num_heads=c["num_heads"],
         dim_feedforward=c["dim_feedforward"],
         dropout=float(c.get("dropout", 0.1)) if training else 0.0,
         dft_size=DFT_SIZE,
         frontend=frontend,                                  # reconstruct the ACTUAL arm (was: always filterbank)
+        trunk=c.get("trunk", "dual"),
+        descriptor_prediction=bool(descriptor_prediction),
         use_duration_embedding=(c.get("multiresolution", False)
                                 and c.get("token_granularity", "channel") == "channel"),
         duration_min_seconds=min(c.get("short_patch_choices", (0.4,))),

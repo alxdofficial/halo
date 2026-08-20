@@ -243,48 +243,36 @@ class HALOAdapter(ConSEAdapter):
     def window_features(self, stream, state, device) -> np.ndarray:
         """Frozen per-window representation for the matched enrollment/probe protocol.
 
-        Pools the DEPLOYED sensor rows -- the same `retrieval_tokens` Phase B stores -- rather than
-        the session `pooled` vector. Two reasons. It is the representation immediately before
-        HALO's native rule, which is what the contract asks for; and it is what every other number
-        in the 2026-08-18 Phase-A analysis is measured on, so the probe stays commensurable with
-        the selection metric and the depth/selectivity diagnostics.
+        Returns the session `pooled` vector -- the representation HALO's published ConSE head is
+        fitted on. This MUST match the head: `predict_candidates_from_features` runs that head over
+        whatever this returns, so exposing the Phase-B `retrieval_tokens` here would silently feed
+        the head vectors from a different space. It also keeps these rows comparable with the
+        v1_d85761d_stage2 HALO prototype/ridge rows, which pool `encoded["pooled"]` too.
 
-        NOTE for anyone comparing against the v1_d85761d_stage2 table: HALO's prototype/ridge rows
-        there came from `eval_enrollment._few_shot_baselines`, which pools `encoded["pooled"]`.
-        Those are a different representation and the two must not be mixed in one column.
+        The retrieval-row representation is what Phase B stores and what the Phase-A selection
+        metric scores. It is deliberately NOT what this method exposes, and the two must never be
+        mixed in one column.
         """
-        from training.tokenizer.eval_transfer import encode_dataset_detailed
         from training.tokenizer.pretrain_data import (_stream_gravity_state,
                                                       stream_channel_descriptions)  # lazy
-
-        # Same text/gravity resolution the ConSE path uses, so features are produced identically.
         texts = (stream.channel_descriptions
                  if getattr(stream, "channel_descriptions", None) is not None
                  else stream_channel_descriptions(stream.dataset, stream.stream))
         gs = (stream.gravity_state if getattr(stream, "gravity_state", None) is not None
               else _stream_gravity_state(stream.dataset, stream.stream))
-        enc = state["encoder"]
-        was_isolated = enc.use_sensor_isolated_retrieval
-        enc.use_sensor_isolated_retrieval = True
-        try:
-            encoded = encode_dataset_detailed(
-                enc, np.asarray(stream.windows), texts, device, float(stream.rate_hz), gs,
-                channel_mask=stream.mask, dataset=stream.dataset, stream=stream.stream,
-                eval_patching="checkpoint", export_sensor_rows=True,
-            )
-        finally:
-            enc.use_sensor_isolated_retrieval = was_isolated
+        return _encode(state["encoder"], np.asarray(stream.windows), texts, stream.rate_hz, gs,
+                       stream.mask, device, stream.dataset, stream.stream)
 
-        rows = encoded["sensor_Z"].float()
-        if not rows.numel():
-            return encoded["pooled"].float().cpu().numpy().astype(np.float32)
-        owners = encoded["sensor_window"].long().to(rows.device)
-        n = int(stream.windows.shape[0])
-        acc = rows.new_zeros((n, rows.shape[1]))
-        count = rows.new_zeros((n, 1))
-        acc.index_add_(0, owners, rows)
-        count.index_add_(0, owners, rows.new_ones((len(rows), 1)))
-        return (acc / count.clamp_min(1.0)).cpu().numpy().astype(np.float32)
+    def predict_candidates_from_features(self, features, candidates, state, device):
+        """ConSE over cached `window_features`, without re-encoding the signal."""
+        head = state["head"]
+        temperature = float(state.get("temperature", 1.0))
+        probs = []
+        with torch.no_grad():
+            for start in range(0, len(features), EMBED_BATCH):
+                batch = torch.from_numpy(features[start:start + EMBED_BATCH]).float().to(device)
+                probs.append(F.softmax(head(batch) / temperature, dim=1).cpu().numpy())
+        return scoring.conse_predict(np.concatenate(probs), global_labels(), list(candidates))
 
     def window_probs(self, stream, state, device) -> np.ndarray:
         from training.tokenizer.pretrain_data import (_stream_gravity_state,

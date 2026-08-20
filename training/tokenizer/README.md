@@ -303,3 +303,13 @@ label-free Phase A and is excluded from semantic validation and Phase B. Pass th
 roster with `--datasets`; the roster is persisted in `run_config.json`. Before such a run, rebuild
 `sensor_bias.json` with the identical ordered roster and `--data-seed`. Dataset publications and
 protocol documents are under `references/datasets/`.
+
+## Phase B: compact end-to-end episodic training
+
+`pretrain_episodic.py` trains the current compact evidence engine through its deployment rule. Four
+independent episodes share one encoder forward but retain separate fixed-size memory banks,
+candidate sets, support, aliases, retrieval, and attention. The compact temporal sensor encoder,
+learned pair scorer, hard top-k selector, evidence mixer, and text vote are optimized together.
+Inputs are clean by default; `--augment` is an explicit ablation. Coherent-label and random-alias
+adaptation are validated separately. The single design of record is
+`docs/design/COMPACT_EVIDENCE_ENGINE.md`.

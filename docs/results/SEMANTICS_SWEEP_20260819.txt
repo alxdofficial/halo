@@ -1,0 +1,21 @@
+arm                 hard mean   Δ ctrl     k=0     k=1     k=2     k=4  transfer    gain    corr    min
+-------------------------------------------------------------------------------------------------------
+forms_textonly         0.5194      n/a  0.5279  0.5218  0.5184  0.5096    0.8326  0.0525   3.662    4.8
+forms_qmc              0.4882      n/a  0.4948  0.4824  0.4924  0.4830    0.8223  0.0646   4.254    4.8
+forms_mc               0.4801      n/a  0.4752  0.4759  0.4842  0.4849    0.8035  0.0525   2.498    4.7
+forms_qm               0.4495      n/a  0.3579  0.4792  0.4711  0.4898    0.8061  0.0341   1.892    4.7
+scrambled              0.3641      n/a  0.3445  0.3615  0.3520  0.3983    0.8246  0.0462   3.189    4.9
+
+what each arm actually ran (decoded from run_config.json, not from the name):
+  forms_textonly     (predates run_config.json — see the name)
+  forms_qmc          (predates run_config.json — see the name)
+  forms_mc           (predates run_config.json — see the name)
+  forms_qm           (predates run_config.json — see the name)
+  scrambled          (predates run_config.json — see the name)
+
+dead path (last diagnostic step of each arm that trained a mixer):
+  forms_mc           pool    256 rows · memory reached 0.918 · top-k gradient share 0.714 · soft/hard agreement 1.000
+  forms_qm           pool    256 rows · memory reached 0.918 · top-k gradient share 0.685 · soft/hard agreement 1.000
+  forms_qmc          pool    256 rows · memory reached 0.918 · top-k gradient share 0.724 · soft/hard agreement 0.984
+  forms_textonly     pool    256 rows · memory reached 0.918 · top-k gradient share 0.681 · soft/hard agreement 1.000
+  scrambled          pool    256 rows · memory reached 0.918 · top-k gradient share 0.684 · soft/hard agreement 0.938

@@ -13,6 +13,7 @@ The properties that matter here are contract properties, not numerics:
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -22,8 +23,9 @@ from training.evidence.admissible_retrieval import (
 from training.evidence.admissibility_gate import AdmissibilityGate
 from training.evidence.gate_predictor import (
     BankRows, SensorBankStore, _SENSOR_DESCRIPTOR_EMBEDDINGS,
-    _sensor_descriptor_embeddings, _stream_sensor_descriptions, load_gate, predict_bank,
-    predict_bank_grouped, save_gate, sensor_rows_from_bank,
+    _sensor_descriptor_embeddings, _stream_sensor_descriptions, concatenate_bank_rows,
+    load_evidence_engine, load_gate, predict_bank, predict_bank_grouped, save_gate,
+    sensor_rows_from_bank,
 )
 from training.evidence import bank_guard
 from training.evidence.admissible_retrieval import SensorRows
@@ -63,6 +65,62 @@ def _texts(C: int = 3, V: int = 4):
     g = torch.Generator().manual_seed(SEED + 1)
     return (F.normalize(torch.randn(C, TEXT, generator=g), dim=-1),
             F.normalize(torch.randn(V, TEXT, generator=g), dim=-1))
+
+
+def test_enrollment_concatenation_preserves_distinct_recording_groups():
+    from dataclasses import replace
+
+    left, right = _bank_rows(6, 2), _bank_rows(4, 2)
+    left = BankRows(replace(left.rows, source_window=torch.tensor([0, 0, 1, 1, 2, 2])),
+                    left.unique_descriptor, left.descriptor_id)
+    right = BankRows(replace(right.rows, source_window=torch.tensor([0, 0, 8, 8])),
+                     right.unique_descriptor, right.descriptor_id)
+    combined = concatenate_bank_rows(left, right)
+    assert combined.rows.source_window.tolist() == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+
+
+def test_engine_checkpoint_round_trips_its_full_configuration(tmp_path):
+    """Every field, not a hand-listed subset. A checkpoint rebuilt at the wrong shape reports the
+    wrong model under the right name, and that is worse than failing to load."""
+    from dataclasses import asdict
+    from model.blocks import AttentionSpec
+    from model.evidence.engine import EngineConfig, EvidenceEngine
+
+    cfg = EngineConfig(spec=AttentionSpec(d_model=16, n_heads=4, ffn_mult=3, dropout=0.05),
+                       trunk_layers=2, top_k=5)
+    cfg = cfg.with_readout("semantic")
+    source = EvidenceEngine(None, cfg)
+    path = tmp_path / "engine.pt"
+    torch.save({"evidence_engine": source.state_dict(),
+                "config": {"engine_config": asdict(cfg)}}, path)
+    loaded = load_evidence_engine(path)
+    assert loaded.cfg == cfg
+    for name, value in source.state_dict().items():
+        assert torch.equal(value, loaded.state_dict()[name]), name
+
+
+def test_an_engine_checkpoint_without_its_config_refuses_to_load(tmp_path):
+    from model.evidence.engine import EvidenceEngine
+
+    path = tmp_path / "engine.pt"
+    torch.save({"evidence_engine": EvidenceEngine(None).state_dict(), "config": {}}, path)
+    with pytest.raises(ValueError, match="engine_config"):
+        load_evidence_engine(path)
+
+
+def test_an_engine_checkpoint_with_missing_model_weights_refuses_to_load(tmp_path):
+    """`strict=False` is allowed only to omit an unattached encoder, not engine parameters."""
+    from dataclasses import asdict
+    from model.evidence.engine import EvidenceEngine
+
+    engine = EvidenceEngine(None)
+    state = engine.state_dict()
+    state.pop(next(key for key in state if key.startswith("scorer.")))
+    path = tmp_path / "broken_engine.pt"
+    torch.save({"evidence_engine": state,
+                "config": {"engine_config": asdict(engine.cfg)}}, path)
+    with pytest.raises(RuntimeError, match="missing"):
+        load_evidence_engine(path)
 
 
 def _schema_five_bank() -> dict:
@@ -212,7 +270,12 @@ def test_gpu_row_store_matches_the_existing_bank_adapter(monkeypatch):
     expected = sensor_rows_from_bank(bank, row_indices=selected)
     actual = SensorBankStore.from_bank(bank, "cpu").select(selected)
     for name in expected.rows.__dataclass_fields__:
-        assert torch.equal(getattr(actual.rows, name), getattr(expected.rows, name)), name
+        got, want = getattr(actual.rows, name), getattr(expected.rows, name)
+        if got is None or want is None:
+            # `source_window` is optional provenance; both paths must agree on having it or not.
+            assert got is want, f"{name}: one path carries provenance and the other does not"
+            continue
+        assert torch.equal(got, want), name
     assert torch.equal(
         actual.unique_descriptor.index_select(0, actual.descriptor_id),
         expected.unique_descriptor.index_select(0, expected.descriptor_id),
@@ -348,3 +411,85 @@ def test_topk_path_backpropagates_into_both_gate_projections():
         ("coupling", gate.coupling),
     ):
         assert parameter.grad is not None and float(parameter.grad.norm()) > 0.0, name
+
+
+def test_the_identity_control_stays_closed_form_under_a_trained_engine():
+    """`identity_logits` is the control the learned path is measured against. An engine that could
+    reach it would be scored against itself."""
+    import torch.nn.functional as F
+    from model.blocks import AttentionSpec
+    from model.evidence.engine import EngineConfig, EvidenceEngine
+    from training.evidence.admissibility_gate import AdmissibilityGate
+    from training.evidence.admissible_retrieval import SensorRows
+    from training.evidence.gate_predictor import BankRows, predict_bank_grouped
+
+    torch.manual_seed(1)
+    S, R, C, V, d = 2, 24, 3, 7, 16
+    descriptor_id = torch.arange(R) % 2
+    unique_descriptor = F.normalize(torch.randn(2, 384), dim=-1)
+    rows = SensorRows(
+        feature=F.normalize(torch.randn(R, d), dim=-1),
+        descriptor=unique_descriptor[descriptor_id], bias=torch.zeros(R, 1),
+        modality=torch.zeros(R, dtype=torch.long), gravity=torch.zeros(R, dtype=torch.long),
+        label=torch.randint(0, V, (R,)), dataset=torch.zeros(R, dtype=torch.long),
+        enrolled_candidate=torch.full((R,), -1, dtype=torch.long),
+        source_window=torch.arange(R) // 3,
+    )
+    bank_rows = BankRows(rows=rows, unique_descriptor=unique_descriptor,
+                         descriptor_id=descriptor_id)
+    common = dict(
+        gate=AdmissibilityGate(rank=4, text_dim=384).eval(), bank_rows=bank_rows,
+        query_feature=F.normalize(torch.randn(S, d), dim=-1), query_bias=torch.zeros(S, 1),
+        query_descriptor=F.normalize(torch.randn(S, 384), dim=-1),
+        query_modality=torch.zeros(S, dtype=torch.long),
+        query_gravity=torch.zeros(S, dtype=torch.long),
+        candidate_text=F.normalize(torch.randn(C, 384), dim=-1),
+        label_text=F.normalize(torch.randn(V, 384), dim=-1), top_k=8,
+    )
+    engine = EvidenceEngine(None, EngineConfig(
+        spec=AttentionSpec(d_model=d, n_heads=4), top_k=8,
+    )).eval()
+    with torch.no_grad():
+        _, plain = predict_bank_grouped(**common)
+        learned, engined = predict_bank_grouped(
+            **common, engine=engine, engine_generator=torch.Generator().manual_seed(0),
+        )
+    assert torch.allclose(plain["identity_logits"], engined["identity_logits"], atol=1e-6)
+    assert learned.shape == plain["identity_logits"].shape
+    assert torch.isfinite(learned).all()
+
+
+def test_a_bank_without_recording_provenance_is_refused_by_the_engine_path():
+    import torch.nn.functional as F
+    from dataclasses import replace
+    from model.blocks import AttentionSpec
+    from model.evidence.engine import EngineConfig, EvidenceEngine
+    from training.evidence.admissibility_gate import AdmissibilityGate
+    from training.evidence.admissible_retrieval import SensorRows
+    from training.evidence.gate_predictor import BankRows, predict_bank_grouped
+
+    torch.manual_seed(2)
+    S, R, C, V, d = 2, 16, 3, 5, 16
+    descriptor_id = torch.zeros(R, dtype=torch.long)
+    unique_descriptor = F.normalize(torch.randn(1, 384), dim=-1)
+    rows = SensorRows(
+        feature=F.normalize(torch.randn(R, d), dim=-1),
+        descriptor=unique_descriptor[descriptor_id], bias=torch.zeros(R, 1),
+        modality=torch.zeros(R, dtype=torch.long), gravity=torch.zeros(R, dtype=torch.long),
+        label=torch.randint(0, V, (R,)), dataset=torch.zeros(R, dtype=torch.long),
+        enrolled_candidate=torch.full((R,), -1, dtype=torch.long), source_window=None,
+    )
+    engine = EvidenceEngine(None, EngineConfig(spec=AttentionSpec(d_model=d, n_heads=4),
+                                               top_k=4)).eval()
+    with pytest.raises(ValueError, match="source-window provenance"):
+        predict_bank_grouped(
+            gate=AdmissibilityGate(rank=4, text_dim=384).eval(),
+            bank_rows=BankRows(rows=rows, unique_descriptor=unique_descriptor,
+                               descriptor_id=descriptor_id),
+            query_feature=F.normalize(torch.randn(S, d), dim=-1), query_bias=torch.zeros(S, 1),
+            query_descriptor=F.normalize(torch.randn(S, 384), dim=-1),
+            query_modality=torch.zeros(S, dtype=torch.long),
+            query_gravity=torch.zeros(S, dtype=torch.long),
+            candidate_text=F.normalize(torch.randn(C, 384), dim=-1),
+            label_text=F.normalize(torch.randn(V, 384), dim=-1), top_k=4, engine=engine,
+        )

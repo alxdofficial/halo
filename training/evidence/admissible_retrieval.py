@@ -51,38 +51,16 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
+# Relocated to model/evidence/rows.py: the row type is part of the MODEL's input contract,
+# not of this scoring module. Re-exported so existing importers keep working.
+from model.evidence.rows import SensorRows, evidence_label_tokens  # noqa: F401
+
 # Additive weight on sensor_bias similarity when ranking. DEFAULT ZERO: the provenance probe reads
 # dataset identity out of the pooled feature at BA 0.702, so a bias-similarity term pulls toward
 # same-dataset retrieval, inflating every number while looking like the mechanism working. Enable it
 # only alongside a reported `retrieval_provenance` with the blend on and off.
 BIAS_BLEND_WEIGHT = 0.0
 
-@dataclass(frozen=True)
-class SensorRows:
-    """A bank slice, keyed per patch per sensor. All tensors share a leading row dimension R."""
-
-    feature: torch.Tensor          # (R, d)   signal embedding
-    descriptor: torch.Tensor       # (R, 384) frozen SBERT of the sensor text
-    bias: torch.Tensor             # (R, F)   sensor_bias
-    modality: torch.Tensor         # (R,)     0=accel, 1=gyro
-    gravity: torch.Tensor          # (R,)     0=present, 1=removed
-    label: torch.Tensor            # (R,)     vocab index, -1 = unlabelled corpus row
-    dataset: torch.Tensor          # (R,)     provenance only, never scored
-    enrolled_candidate: torch.Tensor  # (R,)  candidate slot this row is bound to, -1 = corpus row
-
-    def __post_init__(self) -> None:
-        R = self.feature.shape[0]
-        for name in ("descriptor", "bias", "modality", "gravity", "label", "dataset",
-                     "enrolled_candidate"):
-            got = getattr(self, name).shape[0]
-            if got != R:
-                raise ValueError(f"{name} has {got} rows, expected {R}")
-
-    def to(self, device) -> "SensorRows":
-        return SensorRows(**{
-            name: getattr(self, name).to(device)
-            for name in self.__dataclass_fields__
-        })
 
 
 def compatibility_mask(
@@ -255,11 +233,16 @@ def soft_vote_all(
     entropy = -(normalized_weights * normalized_weights.clamp_min(1e-12).log()).sum(dim=1)
     valid_count = finite.flatten(1).sum(dim=1).clamp_min(1)
     normalized = entropy / valid_count.clamp_min(2).float().log()
+    enrolled_mass = (weights * enrolled_vote).sum()
+    text_mass = (weights * text_vote).sum()
+    total_vote_mass = (enrolled_mass + text_mass).clamp_min(1e-12)
     return result, {
         "retrieval/normalized_entropy": normalized.mean().detach(),
         "retrieval/effective_rows": entropy.exp().mean().detach(),
         "retrieval/available_rows": valid_count.float().mean().detach(),
         "retrieval/max_weight": normalized_weights.max(dim=1).values.mean().detach(),
+        "retrieval/enrolled_vote_mass_share": (enrolled_mass / total_vote_mass).detach(),
+        "retrieval/text_vote_mass_share": (text_mass / total_vote_mass).detach(),
     }
 
 
@@ -379,6 +362,8 @@ def predict(
     sensor_weight: torch.Tensor | None = None,
     gate=None,
     semantic_labels: bool = True,
+    engine=None,                      # EvidenceEngine; None = the closed-form rule
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """(C,) candidate logits for one query window.
 
@@ -395,7 +380,52 @@ def predict(
         admissibility = admissibility_from_gate(
             gate, rows, candidate_text, query_descriptor, semantic_labels=semantic_labels
         )
-    per_sensor = vote(scores, rows, candidate_text, label_text, admissibility,
-                      top_k=top_k, temperature=temperature,
-                      allow_corpus_text_vote=semantic_labels)
+    if engine is not None:
+        if query_descriptor is None:
+            raise ValueError("the evidence engine needs query_descriptor for its QDESC tokens")
+        query_rows = SensorRows(
+            feature=query_feature, descriptor=query_descriptor, bias=query_bias,
+            modality=query_modality, gravity=query_gravity,
+            label=torch.full_like(query_modality, -1),
+            dataset=torch.zeros_like(query_modality),
+            enrolled_candidate=torch.full_like(query_modality, -1),
+            source_window=torch.zeros_like(query_modality),
+        )
+        per_sensor = engine_vote(
+            engine, query_rows, rows, candidate_text, label_text,
+            top_k=top_k, generator=generator,
+        )
+    else:
+        per_sensor = vote(scores, rows, candidate_text, label_text, admissibility,
+                          top_k=top_k, temperature=temperature,
+                          allow_corpus_text_vote=semantic_labels)
     return merge_sensors(per_sensor, sensor_weight)
+
+
+def engine_vote(
+    engine,                           # EvidenceEngine
+    query: SensorRows,                # the query window's own sensor rows
+    rows: SensorRows,                 # the memory bank
+    candidate_text: torch.Tensor,     # (C, 384)
+    label_text: torch.Tensor,         # (V, 384)
+    *,
+    top_k: int | None = None,
+    generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """(S, C) candidate logits, one row per query sensor, from the trained engine.
+
+    Deployment is the ordinary forward pass. The engine retrieves top-k from the bank, mixes that
+    shortlist and votes, exactly as it did on every training step — there is no deployment-only
+    rule to keep in sync, which is what the previous design had and kept getting wrong.
+
+    Requires ``rows.source_window``: the co-membership channel says which rows came from the same
+    recording, and a bank that cannot answer that would silently present every row as its own.
+    """
+    if rows.source_window is None:
+        raise ValueError(
+            "the evidence engine needs per-row source-window provenance; this bank predates the "
+            "field and must be rebuilt"
+        )
+    with torch.no_grad():
+        return engine(query, rows, candidate_text, label_text,
+                      top_k=top_k, generator=generator)["logits"]

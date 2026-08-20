@@ -34,7 +34,8 @@ import torch.nn.functional as F
 from .channel_text import ChannelTextFusion, FactoredChannelTextFusion, TokenTextEncoder
 from .filterbank import PhysicalFilterbankTokenizer
 from .sensor_tokens import ConditioningProjection, DescriptorHead, SensorFold
-from .transformer import DualBranchTransformer
+from ..blocks import AttentionSpec
+from .transformer import DualBranchTransformer, TemporalTrunk
 
 # RoPE periods in seconds. The reference grid is one second; 0.5 seconds preserves headroom for
 # the retained multi-resolution ablation. The slowest period exceeds any training context.
@@ -59,6 +60,8 @@ class SetTokenizerEncoder(nn.Module):
         dropout: float = 0.1,
         text_model: str = "all-MiniLM-L6-v2",
         frontend: str = "fixed",                  # tokenizer front end: 'fixed'|'learnable'
+        trunk: str = "dual",                     # representation trunk: 'dual'|'temporal'
+        descriptor_prediction: bool = True,      # build the Phase-A descriptor-prediction head
         text_conditioning: str = "per_channel",  # 'per_channel' (legacy) | 'factored' (role+sensor)
         token_granularity: str = "channel",      # direct-constructor compatibility; CLI uses sensor
         sensor_bias_dim: int = 14,               # 7 standardized values + 7 support bits
@@ -92,7 +95,16 @@ class SetTokenizerEncoder(nn.Module):
             )
         self.sensor_bias_dim = int(sensor_bias_dim)
         self.use_sensor_bias_conditioning = bool(use_sensor_bias_conditioning)
-        self.use_sensor_isolated_retrieval = bool(use_sensor_isolated_retrieval)
+        if trunk not in ("dual", "temporal"):
+            raise ValueError("trunk must be 'dual' or 'temporal'")
+        self.trunk = trunk
+        # A temporal trunk never mixes sensors, so its FINAL layer is already the
+        # sensor-isolated representation retrieval wants. Reading a shallow prefix instead —
+        # which is all `use_sensor_isolated_retrieval` ever bought — would now cost depth for
+        # an isolation the architecture already guarantees.
+        self.use_sensor_isolated_retrieval = (
+            False if trunk == "temporal" else bool(use_sensor_isolated_retrieval)
+        )
         if frontend not in {"fixed", "learnable"}:
             raise ValueError("frontend must be 'fixed' or 'learnable'")
         # Attribute stays named `filterbank` for checkpoint compatibility.
@@ -112,11 +124,18 @@ class SetTokenizerEncoder(nn.Module):
                     self.sensor_bias_dim, d_model, dropout=dropout,
                     gate_bias_init=gate_bias_init,
                 )
-            self.descriptor_head = DescriptorHead(d_model, text_dim=384, dropout=dropout)
+            # PipelineAModel disables and freezes this head in the reference recipe, so building
+            # it unconditionally put ~132k parameters with no path to any loss into every
+            # checkpoint. It stays default-on so existing checkpoints load strictly; a model
+            # that will never run the ablation should pass descriptor_prediction=False.
+            self.descriptor_head = (
+                DescriptorHead(d_model, text_dim=384, dropout=dropout)
+                if descriptor_prediction else None
+            )
             # PipelineAModel disables this explicit ablation in the reference recipe. The module
             # remains in the state dict for checkpoint compatibility, but an inactive head should
             # not build an unused prediction graph on every encoder call.
-            self.descriptor_prediction_enabled = True
+            self.descriptor_prediction_enabled = bool(descriptor_prediction)
         if token_granularity == "sensor":
             # Sensor tokens receive their two conditioning paths after xyz folding below.  Keeping a
             # channel fusion module here would create trainable parameters that can never participate
@@ -139,16 +158,33 @@ class SetTokenizerEncoder(nn.Module):
         # MAE-style small-random init (NOT zeros: a zero mask token is symmetric across
         # masked positions and starts with no signal to distinguish "hidden here").
         self.mask_token = nn.Parameter(torch.randn(d_model) * 0.02)
-        self.transformer = DualBranchTransformer(
-            d_model=d_model,
-            num_layers=num_layers,
-            num_heads=num_heads,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            use_rope=True,
-            rope_min_period=rope_min_period,
-            rope_max_period=ROPE_MAX_PERIOD_S,
-        )
+        if trunk == "temporal":
+            if dim_feedforward % d_model:
+                raise ValueError(
+                    "a temporal trunk states its width as one AttentionSpec, so "
+                    f"dim_feedforward ({dim_feedforward}) must be a multiple of d_model "
+                    f"({d_model})"
+                )
+            self.attention_spec = AttentionSpec(
+                d_model=d_model, n_heads=num_heads,
+                ffn_mult=dim_feedforward // d_model, dropout=dropout,
+            )
+            self.transformer = TemporalTrunk(
+                self.attention_spec, num_layers=num_layers, use_rope=True,
+                rope_min_period=rope_min_period, rope_max_period=ROPE_MAX_PERIOD_S,
+            )
+        else:
+            self.attention_spec = None
+            self.transformer = DualBranchTransformer(
+                d_model=d_model,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                use_rope=True,
+                rope_min_period=rope_min_period,
+                rope_max_period=ROPE_MAX_PERIOD_S,
+            )
         # Runtime-only acceleration hook. The trainer may install a compiled bound ``forward`` here;
         # keeping the actual module untouched preserves ordinary state_dict keys and eager eval loads.
         self._compiled_transformer_forward = None
@@ -260,11 +296,14 @@ class SetTokenizerEncoder(nn.Module):
         unique = list(dict.fromkeys(flat))
         sensor_embs, sensor_masks = self.text_encoder.encode(unique, device=device)
         lookup = {text: i for i, text in enumerate(unique)}
-        sensor_text_ids = torch.full((B, n_max), -1, dtype=torch.long, device=device)
+        # Build the whole table on CPU, then ONE host-to-device copy. The previous form issued a
+        # separate `torch.tensor(..., device=device)` per batch row — about 144 tiny transfers per
+        # episode on this corpus, and a visible share of the `aten::copy_` calls in the profile.
+        ids_cpu = torch.full((B, n_max), -1, dtype=torch.long)
         for b, texts in enumerate(sensor_texts):
-            sensor_text_ids[b, :len(texts)] = torch.tensor(
-                [lookup[text] for text in texts], dtype=torch.long, device=device
-            )
+            ids_cpu[b, :len(texts)] = torch.tensor([lookup[text] for text in texts],
+                                                   dtype=torch.long)
+        sensor_text_ids = ids_cpu.to(device, non_blocking=True)
         return (role_embs, role_masks, role_ids,
                 sensor_embs, sensor_masks, sensor_text_ids)
 
@@ -318,6 +357,7 @@ class SetTokenizerEncoder(nn.Module):
         sensor_bias: Optional[torch.Tensor] = None,        # (B,N_sensors,sensor_bias_dim) frozen
         descriptor_mask: Optional[torch.Tensor] = None,    # (B,N_sensors) True = hide the descriptor
         return_retrieval_tokens: bool = True,
+        retrieval_only: bool = False,
     ) -> dict[str, torch.Tensor]:
         if self.token_granularity == "sensor":
             return self._encode_sensor(
@@ -330,7 +370,10 @@ class SetTokenizerEncoder(nn.Module):
                 sensor_id=sensor_id, sensor_text_ids=sensor_text_ids,
                 sensor_bias=sensor_bias, descriptor_mask=descriptor_mask,
                 return_retrieval_tokens=return_retrieval_tokens,
+                retrieval_only=retrieval_only,
             )
+        if retrieval_only:
+            raise ValueError("retrieval_only is implemented only for sensor-granularity tokens")
         B, P, C, _ = sensor_tokens.shape
 
         # JEPA masking BEFORE fusion: the [MASK] token then receives its channel's text
@@ -443,6 +486,7 @@ class SetTokenizerEncoder(nn.Module):
         sensor_bias: Optional[torch.Tensor] = None,        # (B,N,sensor_bias_dim)
         descriptor_mask: Optional[torch.Tensor] = None,    # (B,N) True = hide the descriptor
         return_retrieval_tokens: bool = True,
+        retrieval_only: bool = False,
     ) -> dict[str, torch.Tensor]:
         """The design-of-record forward: fold to sensor tokens, condition, attend, pool.
 
@@ -492,6 +536,21 @@ class SetTokenizerEncoder(nn.Module):
             descriptor = descriptor.reshape(B, N, -1)
         else:
             descriptor = sensor_descriptors                                      # (B,N,384)
+
+        if retrieval_only:
+            if not self.use_sensor_isolated_retrieval or retrieval_tokens is None:
+                raise ValueError(
+                    "retrieval_only requires use_sensor_isolated_retrieval=True"
+                )
+            # Phase B stores this layer-0 temporal row. Descriptor conditioning, cross-sensor
+            # attention, later temporal layers, pooling, and the Phase-A descriptor head cannot
+            # affect it, so running them only burns compute and advertises parameters with no path
+            # to the loss. Return exactly the metadata live_sensor_rows consumes.
+            return {
+                "retrieval_tokens": retrieval_tokens,
+                "sensor_present": sensor_present,
+                "descriptor": descriptor,
+            }
 
         descriptor_visible = sensor_present
         if descriptor_mask is not None:
@@ -559,7 +618,8 @@ class SetTokenizerEncoder(nn.Module):
             ).sum(dim=1) / active_context.sum(dim=1).clamp(min=1.0).view(B, 1, 1)
 
         descriptor_pred = (self.descriptor_head(sensor_context)
-                           if self.descriptor_prediction_enabled else None)
+                           if self.descriptor_prediction_enabled
+                           and self.descriptor_head is not None else None)
         return {"tokens": h, "retrieval_tokens": retrieval_tokens,
                 "per_patch": per_patch, "pooled": pooled,
                 "sensor_context": sensor_context, "sensor_present": sensor_present,
@@ -586,6 +646,7 @@ class SetTokenizerEncoder(nn.Module):
         sensor_bias: Optional[torch.Tensor] = None,  # sensor granularity: (B, N, sensor_bias_dim)
         descriptor_mask: Optional[torch.Tensor] = None,  # sensor granularity: (B, N)
         return_retrieval_tokens: bool = True,
+        retrieval_only: bool = False,
     ) -> dict[str, torch.Tensor]:
         sensor_tokens = self.tokenize(
             patches,
@@ -612,7 +673,10 @@ class SetTokenizerEncoder(nn.Module):
                 sensor_id=sensor_id, sensor_text_ids=sensor_text_ids,
                 sensor_bias=sensor_bias, descriptor_mask=descriptor_mask,
                 return_retrieval_tokens=return_retrieval_tokens,
+                retrieval_only=retrieval_only,
             )
+        if retrieval_only:
+            raise ValueError("retrieval_only is implemented only for sensor-granularity tokens")
         if self.text_conditioning == "factored":
             if sensor_texts is None or sensor_id is None:
                 raise ValueError("factored text_conditioning requires sensor_texts and sensor_id")

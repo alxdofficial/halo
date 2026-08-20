@@ -38,6 +38,7 @@ import numpy as np
 import torch
 
 from training.evidence.admissible_retrieval import (
+    engine_vote,
     BIAS_BLEND_WEIGHT, SensorRows, admissibility_from_unique,
     compatibility_mask, rank_scores, vote,
 )
@@ -49,6 +50,7 @@ GATE_PATH = Path("training/evidence/outputs/admissibility_gate.pt")
 GATE_ARTIFACT_VERSION = 4
 ADMISSIBILITY_TRAINING_REGIME = "admissibility_gate_train_only_sensor_v1"
 ADMISSIBILITY_REFINEMENT_REGIME = "admissibility_gate_stage2_soft_retrieval_v1"
+NATIVE_JOINT_EPISODIC_REGIME = "admissibility_gate_native_joint_episodic_e2e_v1"
 _SENSOR_DESCRIPTOR_EMBEDDINGS: dict[str, torch.Tensor] = {}
 
 
@@ -108,6 +110,51 @@ def save_gate(
         })
     torch.save(payload, path)
     return path
+
+
+def load_evidence_engine(path, encoder=None, device="cpu"):
+    """The trained evidence engine from a Phase-B checkpoint, or None if it has none.
+
+    Returning None rather than raising is deliberate: a checkpoint written before the engine
+    existed is still legitimately scoreable under the closed-form rule. A checkpoint that DOES
+    carry engine weights but cannot be reconstructed is an error, because silently dropping to the
+    closed-form path would report the wrong model under the right name.
+    """
+    from model.blocks import AttentionSpec
+    from model.evidence.engine import EngineConfig, EvidenceEngine
+    from model.evidence.evidence_mixer import EvidenceMixerConfig
+    from model.evidence.retrieval_scorer import PairScorerConfig
+
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    state = blob.get("evidence_engine")
+    if state is None:
+        return None
+    saved = dict(blob.get("config", {}).get("engine_config") or {})
+    if not saved:
+        raise ValueError(
+            "checkpoint carries engine weights but no engine_config; it cannot be rebuilt without "
+            "guessing its shape, and a guess would report the wrong model under the right name"
+        )
+    cfg = EngineConfig(
+        spec=AttentionSpec(**saved["spec"]),
+        trunk_layers=int(saved.get("trunk_layers", 3)),
+        top_k=int(saved["top_k"]),
+        scorer=PairScorerConfig(**saved.get("scorer", {})),
+        mixer=EvidenceMixerConfig(**saved.get("mixer", {})),
+    )
+    engine = EvidenceEngine(encoder, cfg)
+    if encoder is not None:
+        engine.load_state_dict(state, strict=True)
+    else:
+        incompatible = engine.load_state_dict(state, strict=False)
+        unexpected = [key for key in incompatible.unexpected_keys
+                      if not key.startswith("encoder.")]
+        if incompatible.missing_keys or unexpected:
+            raise RuntimeError(
+                "evidence-engine checkpoint does not match its saved configuration: "
+                f"missing={incompatible.missing_keys}, unexpected={unexpected}"
+            )
+    return engine.to(device).eval()
 
 
 def load_gate(path: Path = GATE_PATH) -> AdmissibilityGate:
@@ -237,6 +284,7 @@ class SensorBankStore:
     dataset: torch.Tensor
     unique_descriptor: torch.Tensor
     descriptor_id: torch.Tensor
+    source_window: torch.Tensor | None = None   # which recording each row came from
 
     @classmethod
     def from_bank(cls, bank: dict, device: torch.device | str) -> "SensorBankStore":
@@ -287,6 +335,8 @@ class SensorBankStore:
             dataset=dataset.to(device),
             unique_descriptor=unique_descriptor.to(device),
             descriptor_id=descriptor_id.to(device),
+            source_window=(table["window"].to(device=device, dtype=torch.long)
+                           if "window" in table else None),
         )
 
     def select(
@@ -320,6 +370,8 @@ class SensorBankStore:
             label=self.label.index_select(0, selected),
             dataset=self.dataset.index_select(0, selected),
             enrolled_candidate=enrolled,
+            source_window=(None if self.source_window is None
+                           else self.source_window.index_select(0, selected)),
         )
         return BankRows(rows, self.unique_descriptor, descriptor_id)
 
@@ -334,7 +386,8 @@ def subset_bank_rows(bank_rows: BankRows, index: torch.Tensor) -> BankRows:
         index = index.long()
     return BankRows(
         rows=SensorRows(**{
-            name: getattr(bank_rows.rows, name)[index]
+            name: None if getattr(bank_rows.rows, name) is None
+            else getattr(bank_rows.rows, name)[index]
             for name in bank_rows.rows.__dataclass_fields__
         }),
         unique_descriptor=bank_rows.unique_descriptor,
@@ -347,11 +400,23 @@ def concatenate_bank_rows(left: BankRows, right: BankRows) -> BankRows:
     if left.rows.feature.device != right.rows.feature.device:
         raise ValueError("both evidence tables must be on the same device")
     offset = len(left.unique_descriptor)
-    return BankRows(
-        rows=SensorRows(**{
-            name: torch.cat((getattr(left.rows, name), getattr(right.rows, name)), dim=0)
+    fields = {
+            # Provenance survives only if BOTH sides carry it; a half-populated column would let
+            # enrolled rows claim co-membership with whichever corpus rows happened to share an id.
+            name: None
+            if getattr(left.rows, name) is None or getattr(right.rows, name) is None
+            else torch.cat((getattr(left.rows, name), getattr(right.rows, name)), dim=0)
             for name in left.rows.__dataclass_fields__
-        }),
+        }
+    if left.rows.source_window is not None and right.rows.source_window is not None:
+        # Runtime ids are local to their encoded stream. Offset a compact copy so equality continues
+        # to mean co-recording after it is appended to the archive's global namespace.
+        _, right_local = torch.unique(right.rows.source_window, return_inverse=True)
+        fields["source_window"] = torch.cat(
+            (left.rows.source_window, right_local + int(left.rows.source_window.max()) + 1), dim=0,
+        )
+    return BankRows(
+        rows=SensorRows(**fields),
         unique_descriptor=torch.cat((left.unique_descriptor, right.unique_descriptor), dim=0),
         descriptor_id=torch.cat((left.descriptor_id, right.descriptor_id + offset), dim=0),
     )
@@ -470,6 +535,11 @@ def sensor_rows_from_bank(
         dataset=torch.tensor(dataset_row, dtype=torch.long),
         enrolled_candidate=(torch.full((n_rows,), -1, dtype=torch.long)
                             if enrolled_candidate is None else enrolled_candidate.to(torch.long)),
+        # Which recording each row came from. The bank already tracks this per sensor row; it was
+        # simply never surfaced, which is why the evidence mixer had no co-membership channel to
+        # read at deployment.
+        source_window=(table["window"].index_select(0, selected).to(torch.long)
+                       if "window" in table else None),
     )
     return BankRows(rows=rows, unique_descriptor=uniq_emb, descriptor_id=descriptor_id)
 
@@ -543,6 +613,7 @@ def sensor_rows_from_encoded(
             label=torch.full((len(source_row),), -1, dtype=torch.long),
             dataset=torch.full((len(source_row),), -1, dtype=torch.long),
             enrolled_candidate=enrolled,
+            source_window=source_row,
         ),
         unique_descriptor=descriptors,
         descriptor_id=slot,
@@ -567,8 +638,16 @@ def predict_bank_grouped(
     semantic_labels: bool = True,
     query_group: torch.Tensor | None = None,
     group_count: int | None = None,
+    engine=None,                      # EvidenceEngine; None keeps the closed-form rule
+    engine_generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, dict]:
-    """(W,C) logits for grouped query sensors. No learned decoder anywhere."""
+    """(W,C) logits for grouped query sensors.
+
+    With ``engine=None`` this is the closed-form rule and there is no learned component anywhere.
+    With an engine it is the deployed form of the trained model — the same forward pass it was
+    trained with. ``identity_logits`` stays closed-form either way, because it is the control the
+    learned path is measured against.
+    """
     rows = bank_rows.rows
     if query_group is None:
         query_group = torch.zeros(
@@ -597,9 +676,23 @@ def predict_bank_grouped(
                                     semantic_labels=semantic_labels)
     compatible = compatibility_mask(query_modality, query_gravity, rows)
     scores = rank_scores(query_feature, query_bias, rows, compatible, bias_weight=bias_weight)
-    per_sensor = vote(scores, rows, candidate_text, label_text, adm,
-                      top_k=top_k, temperature=temperature,
-                      allow_corpus_text_vote=semantic_labels)
+    if engine is None:
+        per_sensor = vote(scores, rows, candidate_text, label_text, adm,
+                          top_k=top_k, temperature=temperature,
+                          allow_corpus_text_vote=semantic_labels)
+    else:
+        query_rows = SensorRows(
+            feature=query_feature, descriptor=query_descriptor, bias=query_bias,
+            modality=query_modality, gravity=query_gravity,
+            label=torch.full_like(query_modality, -1),
+            dataset=torch.zeros_like(query_modality),
+            enrolled_candidate=torch.full_like(query_modality, -1),
+            source_window=query_group,
+        )
+        per_sensor = engine_vote(
+            engine, query_rows, rows, candidate_text, label_text,
+            top_k=top_k, generator=engine_generator,
+        )
     logits = grouped_sum(per_sensor)
     # Arbitrary aliases intentionally disable semantic admissibility, so the learned and disabled
     # paths are identical by definition. Reusing the result avoids a redundant full retrieval pass

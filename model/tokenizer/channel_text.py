@@ -120,7 +120,13 @@ class TokenTextEncoder(nn.Module):
                 self._cache[text] = (token_embeddings[i].detach().to(device),
                                      attention_mask[i].detach().to(device))
 
-        # Assemble full batch from cache (moving if a cached entry is on another device)
+        # Assemble full batch from cache (moving if a cached entry is on another device).
+        #
+        # Caching the assembled (padded batch, mask) by text tuple was tried and MEASURED: it saved
+        # nothing (61.2 vs 61.8 ms/step, inside noise), because the language-model forward above is
+        # already cached per string and the assembly is a small share of the step's ~870 kernel
+        # launches. It also would have handed out frozen tensors by reference. Not worth the
+        # aliasing risk for no gain.
         cached_embs = [self._cache[t][0].to(device) for t in texts]
         cached_masks = [self._cache[t][1].to(device) for t in texts]
 

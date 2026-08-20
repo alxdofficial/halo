@@ -12,11 +12,12 @@ Asserts the behaviours the contribution claims, not shapes:
 
 from __future__ import annotations
 
+import pytest
 import torch
 import torch.nn.functional as F
 
 from training.evidence.admissible_retrieval import (
-    SensorRows, compatibility_mask, merge_sensors, predict,
+    SensorRows, compatibility_mask, evidence_label_tokens, merge_sensors, predict,
     rank_scores, retrieval_provenance, soft_vote_all, vote,
 )
 
@@ -42,6 +43,19 @@ def _texts(seed=SEED):
     g = torch.Generator().manual_seed(seed + 1)
     return (F.normalize(torch.randn(C_CAND, TEXT, generator=g), dim=-1),
             F.normalize(torch.randn(V, TEXT, generator=g), dim=-1))
+
+
+def test_enrolled_evidence_uses_episode_local_candidate_text():
+    rows = _rows()
+    candidate, labels = _texts()
+    binding = rows.enrolled_candidate.clone()
+    binding[:2] = torch.tensor([2, 0])
+    rows = SensorRows(**{**rows.__dict__, "label": torch.tensor([-1, -1, *rows.label[2:].tolist()]),
+                         "enrolled_candidate": binding})
+    tokens = evidence_label_tokens(rows, candidate, labels)
+    assert torch.equal(tokens[0], candidate[2])
+    assert torch.equal(tokens[1], candidate[0])
+    assert torch.equal(tokens[2], labels[rows.label[2]])
 
 
 # ------------------------------------------------------------------- compatibility (hard)
@@ -291,3 +305,109 @@ def test_predict_is_deterministic():
               rows=rows, candidate_text=cand, label_text=lab,
               admissibility=torch.ones(1, R, C_CAND), top_k=6)
     assert torch.allclose(predict(**kw), predict(**kw))
+
+
+# --------------------------------------------------------------------------------------------
+# DEPLOYMENT MIXER BRANCH — the path that lets the trained model be scored on the eval harness
+# --------------------------------------------------------------------------------------------
+def _mixer_rows(R=40, C=4, V=9, d=16, seed=0):
+    import torch.nn.functional as F
+    torch.manual_seed(seed)
+    bound = torch.full((R,), -1, dtype=torch.long)
+    bound[: R // 4] = torch.randint(0, C, (R // 4,))
+    return SensorRows(
+        feature=F.normalize(torch.randn(R, d), dim=-1),
+        descriptor=F.normalize(torch.randn(R, 384), dim=-1),
+        bias=torch.zeros(R, 1),
+        modality=torch.zeros(R, dtype=torch.long),
+        gravity=torch.zeros(R, dtype=torch.long),
+        label=torch.randint(0, V, (R,)),
+        dataset=torch.zeros(R, dtype=torch.long),
+        enrolled_candidate=bound,
+        source_window=torch.arange(R) // 4,     # 4 rows per recording, as a real bank has
+    )
+
+
+def test_predict_routes_through_the_engine_when_given_one():
+    """The deployment entry point must run the trained forward pass, not a re-derivation of it.
+
+    There is deliberately no "starts at the closed-form rule" assertion here any more: the engine
+    replaces the hand-written retrieval rule rather than correcting it, so agreement at init would
+    be a coincidence to preserve rather than a property to check. What must hold is that the engine
+    is what produced the numbers.
+    """
+    import torch.nn.functional as F
+    from model.blocks import AttentionSpec
+    from model.evidence.engine import EngineConfig, EvidenceEngine
+
+    torch.manual_seed(0)
+    S, R, C, V, d = 3, 40, 4, 9, 16
+    rows = _mixer_rows(R, C, V, d)
+    engine = EvidenceEngine(None, EngineConfig(
+        spec=AttentionSpec(d_model=d, n_heads=4), top_k=8,
+    )).eval()
+    query_feature = F.normalize(torch.randn(S, d), dim=-1)
+    query_descriptor = F.normalize(torch.randn(S, 384), dim=-1)
+    candidate_text = F.normalize(torch.randn(C, 384), dim=-1)
+    label_text = F.normalize(torch.randn(V, 384), dim=-1)
+    common = dict(
+        query_feature=query_feature, query_bias=torch.zeros(S, 1),
+        query_modality=torch.zeros(S, dtype=torch.long),
+        query_gravity=torch.zeros(S, dtype=torch.long),
+        rows=rows, candidate_text=candidate_text, label_text=label_text,
+        admissibility=torch.ones(S, R, C), query_descriptor=query_descriptor, top_k=8,
+    )
+    with torch.no_grad():
+        through_predict = predict(**common, engine=engine,
+                                  generator=torch.Generator().manual_seed(0))
+        direct = engine(
+            SensorRows(feature=query_feature, descriptor=query_descriptor,
+                       bias=torch.zeros(S, 1),
+                       modality=torch.zeros(S, dtype=torch.long),
+                       gravity=torch.zeros(S, dtype=torch.long),
+                       label=torch.full((S,), -1), dataset=torch.zeros(S, dtype=torch.long),
+                       enrolled_candidate=torch.full((S,), -1),
+                       source_window=torch.zeros(S, dtype=torch.long)),
+            rows, candidate_text, label_text, top_k=8,
+            generator=torch.Generator().manual_seed(0),
+        )["logits"]
+    assert torch.allclose(through_predict, merge_sensors(direct, None), atol=1e-6)
+
+
+def test_predict_refuses_a_bank_without_source_window_provenance():
+    """Without it every row looks like its own recording, and the co-membership channel that
+    relates an accelerometer to the gyroscope beside it silently says nothing."""
+    import torch.nn.functional as F
+    from dataclasses import replace
+    from model.blocks import AttentionSpec
+    from model.evidence.engine import EngineConfig, EvidenceEngine
+
+    torch.manual_seed(0)
+    S, R, C, V, d = 2, 24, 3, 7, 16
+    rows = replace(_mixer_rows(R, C, V, d), source_window=None)
+    engine = EvidenceEngine(None, EngineConfig(
+        spec=AttentionSpec(d_model=d, n_heads=4), top_k=4,
+    )).eval()
+    with pytest.raises(ValueError, match="source-window provenance"):
+        predict(
+            query_feature=F.normalize(torch.randn(S, d), dim=-1), query_bias=torch.zeros(S, 1),
+            query_modality=torch.zeros(S, dtype=torch.long),
+            query_gravity=torch.zeros(S, dtype=torch.long),
+            rows=rows, candidate_text=F.normalize(torch.randn(C, 384), dim=-1),
+            label_text=F.normalize(torch.randn(V, 384), dim=-1),
+            admissibility=torch.ones(S, R, C),
+            query_descriptor=F.normalize(torch.randn(S, 384), dim=-1), engine=engine,
+        )
+
+
+def test_a_top_k_wider_than_the_group_vocabulary_is_refused_at_construction():
+    """Wrapping would alias two distinct recordings onto one co-membership id — a wrong answer that
+    looks like a working one. The check sits in the config so it fires before a run starts rather
+    than on the first forward, halfway in."""
+    from model.blocks import AttentionSpec
+    from model.evidence.engine import EngineConfig
+    from model.evidence.evidence_mixer import EvidenceMixerConfig
+
+    with pytest.raises(ValueError, match="co-membership groups"):
+        EngineConfig(spec=AttentionSpec(d_model=16, n_heads=4), top_k=16,
+                     mixer=EvidenceMixerConfig(n_groups=4))

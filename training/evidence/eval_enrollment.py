@@ -41,6 +41,7 @@ from training.evidence.gate_predictor import (
     ADMISSIBILITY_TRAINING_REGIME,
     BankRows,
     concatenate_bank_rows,
+    load_evidence_engine,
     load_gate,
     predict_bank_grouped,
     sensor_rows_from_encoded,
@@ -906,8 +907,15 @@ def score_admissibility_cell(
     batch_size: int = 64,
     fixed_aliases: dict[str, str] | None = None,
     counterfactual_controls: bool = True,
+    engine=None,
 ):
-    """Evaluate the closed-form sensor-row path without invoking the parked relational decoder."""
+    """Evaluate the sensor-row path. The parked relational decoder is never invoked.
+
+    With ``engine=None`` this is the closed-form rule. With a trained evidence engine it is the
+    deployed form of the end-to-end model: the learned weight replaces ``exp(cos/tau)*admissibility``
+    on the pooled rows and nothing else moves. The identity/prototype/ridge comparators stay
+    closed-form in both cases, because they are what the learned path is measured against.
+    """
     all_true, all_pred, all_identity_pred = [], [], []
     all_removed_pred, all_shuffled_pred = [], []
     all_prototype_pred, all_ridge_pred = [], []
@@ -1026,6 +1034,7 @@ def score_admissibility_cell(
                     semantic_labels=semantic_labels,
                     query_group=query_group,
                     group_count=len(batch_rows),
+                    engine=engine,
                 )
 
             logits, aux = run(enrollment)
@@ -1153,6 +1162,13 @@ def main() -> None:
              "predictor layout, and evaluation source",
     )
     parser.add_argument("--no-encoded-cache", action="store_true")
+    parser.add_argument("--no-engine", dest="use_engine", action="store_false",
+                        help="score the closed-form rule even when the checkpoint carries a "
+                             "trained evidence engine (the closed-form comparison)")
+    parser.add_argument("--engine-checkpoint", type=Path, default=None,
+                        help="Phase-B episodic checkpoint carrying the trained evidence engine. The "
+                             "memory bank must be built from this same checkpoint's encoder, since "
+                             "the engine was trained against rows that encoder produced")
     parser.add_argument("--gate-top-k", type=int, default=64,
                         help="evidence rows retrieved per query patch and candidate")
     parser.add_argument("--seed", type=int, default=20260808)
@@ -1269,11 +1285,26 @@ def main() -> None:
     assert_embedding_path_current(bank, encoder, device, context="eval_enrollment")
     assert_patch_embedding_path_current(bank, encoder, device, context="eval_enrollment")
     gate = base_sensor_rows = None
+    engine = None
     decoder = retriever = policy = None
     if predictor_mode == "admissibility_gate":
         assert_sensor_bank(bank, context="eval_enrollment")
         assert_sensor_embedding_path_current(bank, encoder, device, context="eval_enrollment")
         gate = load_gate(args.predictor).to(device)
+        if args.use_engine and args.engine_checkpoint is not None:
+            engine = load_evidence_engine(args.engine_checkpoint, device=device)
+            if engine is None:
+                parser.error(
+                    f"{args.engine_checkpoint} carries no evidence engine; it predates the module. "
+                    "Pass a Phase-B episodic checkpoint or drop --engine-checkpoint."
+                )
+            # The engine was trained against rows from ITS OWN encoder. The bank guard above already
+            # refuses a mismatched encoder, but say why plainly rather than leaving the operator to
+            # decode an embedding-path assertion.
+            print(f"[eval_enrollment] evidence engine loaded from {args.engine_checkpoint} "
+                  f"(top-k {engine.cfg.top_k}, readout "
+                  f"{engine.cfg.mixer.readout}); the bank must have been built from the "
+                  f"SAME checkpoint's encoder")
     else:
         cfg = predictor["cfg"]
         if cfg.get("tokenizer_mode") == "ema_finetune":
@@ -1572,6 +1603,7 @@ def main() -> None:
                                     support_stream=support_source["stream"].stream,
                                     support_mask=support_source["stream"].mask,
                                     top_k=args.gate_top_k,
+                                    engine=engine,
                                     batch_size=args.batch,
                                     counterfactual_controls=(
                                         args.counterfactual_controls == "full"

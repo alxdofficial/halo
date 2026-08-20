@@ -15,6 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
+from ..blocks import AttentionSpec
+
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     d = x.shape[-1] // 2
@@ -617,6 +619,131 @@ class DualBranchTransformer(nn.Module):
         if not self.layers:
             return x
         return self.layers[0].temporal_context(
+            x, temporal_mask=temporal_mask,
+            patch_padding_mask=patch_padding_mask, positions=positions,
+        )
+
+
+class TemporalTrunk(nn.Module):
+    """Temporal-only representation trunk: a few pre-norm self-attention layers per sensor.
+
+    WHAT CHANGED FROM :class:`DualBranchTransformer`, AND WHY
+    ---------------------------------------------------------
+    The dual-branch trunk interleaves a cross-sensor branch so an accelerometer token can read its
+    companion gyroscope. That branch is ~40% of the trunk's parameters, and it fuses sensors at a
+    point where the model knows nothing about the sensors beyond their descriptions.
+
+    In the evidence engine that fusion happens later and better: the mixer attends over every
+    retrieved row, and rows from the same recording share a co-membership group id, so cross-sensor
+    relations are formed there — alongside the labels and descriptions that give them meaning. The
+    trunk's job is narrower: turn one sensor's patch sequence into one comparable vector. Temporal
+    attention is what that needs.
+
+    Consequences worth stating plainly. Each sensor is encoded in isolation, so the retrieval
+    feature for a wrist accelerometer is identical whether or not a gyroscope was present on the
+    same device — which is the invariance the cross-configuration claim wants, and which the
+    dual-branch trunk did not have. It also means a sensor pair carries no joint representation
+    until the mixer sees it.
+
+    Input/output ``(batch, patches, sensors, d_model)``, matching the dual-branch trunk so the
+    encoder can hold either.
+    """
+
+    def __init__(
+        self,
+        spec: AttentionSpec,
+        num_layers: int = 3,
+        use_rope: bool = True,
+        rope_min_period: float = 1.0,
+        rope_max_period: float = 1000.0,
+    ):
+        super().__init__()
+        self.spec = spec
+        self.num_layers = int(num_layers)
+        self.attn_norm = nn.ModuleList(
+            [nn.LayerNorm(spec.d_model) for _ in range(num_layers)]
+        )
+        self.attn = nn.ModuleList([
+            TemporalSelfAttention(
+                d_model=spec.d_model,
+                num_heads=spec.n_heads,
+                dropout=spec.dropout,
+                use_rope=use_rope,
+                rope_min_period=rope_min_period,
+                rope_max_period=rope_max_period,
+            )
+            for _ in range(num_layers)
+        ])
+        self.ffn_norm = nn.ModuleList(
+            [nn.LayerNorm(spec.d_model) for _ in range(num_layers)]
+        )
+        self.ffn = nn.ModuleList([
+            FeedForward(spec.d_model, spec.dim_feedforward, spec.dropout)
+            for _ in range(num_layers)
+        ])
+        self.dropout = nn.Dropout(spec.dropout)
+        self.out_norm = nn.LayerNorm(spec.d_model)
+
+    def _flatten(self, x: torch.Tensor):
+        batch, patches, sensors, dim = x.shape
+        flat = x.permute(0, 2, 1, 3).reshape(batch * sensors, patches, dim)
+        return flat, (batch, patches, sensors, dim)
+
+    @staticmethod
+    def _expand(per_sample: Optional[torch.Tensor], sensors: int) -> Optional[torch.Tensor]:
+        """(B, P[, P]) -> (B*S, P[, P]); sensors share the patch grid of their window."""
+        if per_sample is None:
+            return None
+        batch, patches = per_sample.shape[0], per_sample.shape[1]
+        trailing = per_sample.shape[2:]
+        return (per_sample.unsqueeze(1)
+                .expand(batch, sensors, patches, *trailing)
+                .reshape(batch * sensors, patches, *trailing))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        temporal_mask: Optional[torch.Tensor] = None,
+        channel_mask: Optional[torch.Tensor] = None,
+        patch_padding_mask: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
+        stop_after: Optional[int] = None,
+    ) -> torch.Tensor:
+        """``channel_mask`` is accepted and ignored: sensors never mix in this trunk.
+
+        ``stop_after`` runs a prefix of the stack, which is how the retrieval representation is
+        read out at a chosen depth without a second forward pass.
+        """
+        flat, (batch, patches, sensors, dim) = self._flatten(x)
+        padding = self._expand(patch_padding_mask, sensors)
+        pos = self._expand(positions, sensors)
+        mask = temporal_mask
+        if mask is not None and mask.dim() == 3:
+            mask = self._expand(mask, sensors)
+
+        depth = self.num_layers if stop_after is None else min(int(stop_after), self.num_layers)
+        for layer in range(depth):
+            attended = self.attn[layer](
+                self.attn_norm[layer](flat), mask, key_padding_mask=padding, positions=pos,
+            )
+            flat = flat + self.dropout(attended)
+            flat = flat + self.dropout(self.ffn[layer](self.ffn_norm[layer](flat)))
+        flat = self.out_norm(flat)
+        return flat.reshape(batch, sensors, patches, dim).permute(0, 2, 1, 3)
+
+    def retrieval_context(
+        self,
+        x: torch.Tensor,
+        temporal_mask: Optional[torch.Tensor] = None,
+        patch_padding_mask: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Kept for interface parity with the dual-branch trunk.
+
+        There, retrieval had to read a shallow prefix to stay sensor-isolated. Here the whole trunk
+        is sensor-isolated, so retrieval reads the full depth and this is the ordinary forward.
+        """
+        return self.forward(
             x, temporal_mask=temporal_mask,
             patch_padding_mask=patch_padding_mask, positions=positions,
         )

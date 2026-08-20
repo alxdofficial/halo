@@ -380,6 +380,36 @@ def test_retrieval_rows_are_sensor_isolated():
     )
 
 
+def test_retrieval_only_shortcut_matches_full_forward_rows():
+    """Skipping the Phase-A trunk must be an exact compute optimization, not a new representation."""
+    from model.tokenizer.encoder import SetTokenizerEncoder
+
+    torch.manual_seed(23)
+    enc = SetTokenizerEncoder(
+        d_model=32, num_layers=2, num_heads=4, dim_feedforward=64, dropout=0.0,
+        token_granularity="sensor", use_sensor_isolated_retrieval=True,
+    ).eval()
+    patches = torch.randn(2, 3, 256, 6)
+    kwargs = dict(
+        sampling_rate_hz=50.0, patch_len_samples=64,
+        channel_texts=[["x", "y", "z", "x", "y", "z"]] * 2,
+        positions=torch.arange(3).float().expand(2, 3),
+        channel_mask=torch.ones(2, 6, dtype=torch.bool),
+        patch_padding_mask=torch.ones(2, 3, dtype=torch.bool),
+        sensor_texts=[["accelerometer at wrist", "gyroscope at wrist"]] * 2,
+        sensor_id=torch.tensor([[0, 0, 0, 1, 1, 1]] * 2),
+    )
+    with torch.no_grad():
+        full = enc(patches, **kwargs)
+        short = enc(patches, retrieval_only=True, **kwargs)
+    assert set(short) == {"retrieval_tokens", "sensor_present", "descriptor"}
+    assert torch.equal(short["sensor_present"], full["sensor_present"])
+    assert torch.allclose(short["descriptor"], full["descriptor"], atol=0, rtol=0)
+    assert torch.allclose(
+        short["retrieval_tokens"], full["retrieval_tokens"], atol=1e-6, rtol=1e-6,
+    )
+
+
 def test_new_sensor_encoder_has_no_source_statistics_projection():
     from model.tokenizer.encoder import SetTokenizerEncoder
 

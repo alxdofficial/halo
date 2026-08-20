@@ -244,6 +244,9 @@ def main() -> None:
     ap.add_argument("--archive-budget-windows", type=int, default=ARCHIVE_BUDGET_WINDOWS,
                     help="one balanced archive-size budget; rare labels are retained first")
     ap.add_argument("--out", type=Path, default=_DEFAULT_OUT)
+    ap.add_argument("--gate-out", type=Path, default=None,
+                    help="where to bind a gate embedded in an episodic checkpoint; defaults beside "
+                         "the bank as admissibility_gate.pt")
     ap.add_argument("--sensor-rows", action="store_true",
                     help="emit one row per (patch, SENSOR) instead of per patch (design of record "
                          "bank layout). Requires a sensor-granularity encoder; roughly doubles the "
@@ -274,8 +277,14 @@ def main() -> None:
     for p in enc.parameters():
         p.requires_grad_(False)
     d_model = int(ckpt["config"]["d_model"])
-    print(f"[memory] encoder {args.checkpoint.name}: step {ckpt['step']}, val_ba "
-          f"{ckpt['val_ba']:.3f}, git {ckpt['git']}, frontend={ckpt['config'].get('frontend')}, "
+    selection_value = ckpt.get("selection_value", ckpt.get("val_ba"))
+    if selection_value is None:
+        raise ValueError("checkpoint records neither selection_value nor val_ba")
+    selection_metric = ckpt.get("selection_metric", "val_ba")
+    git_revision = ckpt.get("git", "unknown")
+    print(f"[memory] encoder {args.checkpoint.name}: step {ckpt['step']}, "
+          f"{selection_metric} {float(selection_value):.3f}, git {git_revision}, "
+          f"frontend={ckpt['config'].get('frontend')}, "
           f"MR={ckpt['config'].get('multiresolution')}, d={d_model}", flush=True)
 
     vocab = _load_vocab()
@@ -558,7 +567,9 @@ def main() -> None:
         "event_names": {v: k for k, v in event_names.items()},
         "d_model": d_model,
         "backbone": {"checkpoint": str(args.checkpoint), "step": int(ckpt["step"]),
-                     "val_ba": float(ckpt["val_ba"]), "git": ckpt["git"],
+                     "val_ba": float(selection_value), "git": git_revision,
+                     "selection_metric": selection_metric,
+                     "selection_value": float(selection_value),
                      "fingerprint": _backbone_fp(args.checkpoint),
                      "frontend": ckpt["config"].get("frontend"),
                      "multiresolution": ckpt["config"].get("multiresolution")},
@@ -593,6 +604,39 @@ def main() -> None:
     payload["bank_fp"] = bank_fingerprint(payload)
     torch.save(payload, str(args.out))
     print(f"-> {args.out}", flush=True)
+    gate_state = ckpt.get("admissibility_gate")
+    if gate_state is not None:
+        from training.evidence.admissibility_gate import AdmissibilityGate
+        from training.evidence.gate_predictor import (
+            NATIVE_JOINT_EPISODIC_REGIME,
+            save_gate,
+        )
+
+        gate = AdmissibilityGate(
+            rank=int(ckpt.get("gate_rank") or ckpt["config"].get("gate_rank", 8)),
+            text_dim=int(gate_state["sensor_proj.weight"].shape[1]),
+        )
+        for name in ("known_sensors", "known_concepts"):
+            known = gate_state.get(name)
+            if known is not None:
+                setattr(gate, name, torch.zeros_like(known))
+        gate.load_state_dict(gate_state)
+        gate_path = args.gate_out or args.out.with_name("admissibility_gate.pt")
+        save_gate(
+            gate,
+            gate_path,
+            provenance={
+                "resolvability_checkpoint_sha256": payload["backbone"]["fingerprint"],
+                "joint_checkpoint": str(args.checkpoint),
+                "joint_checkpoint_step": int(ckpt["step"]),
+                "selection_metric": selection_metric,
+                "selection_value": float(selection_value),
+                "training_datasets": list(roster),
+            },
+            bank=payload,
+            training_regime=NATIVE_JOINT_EPISODIC_REGIME,
+        )
+        print(f"-> {gate_path} (joint gate bound to this bank)", flush=True)
 
 
 if __name__ == "__main__":

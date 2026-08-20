@@ -1,6 +1,6 @@
 # Results Index
 
-> Project-wide index of measured results. Last updated 2026-08-18.
+> Project-wide index of measured results. Last updated 2026-08-19.
 >
 > Phase-B design status, run history, and adaptation tables live only in
 > [`PHASE_B_TRAINING_STATUS.md`](PHASE_B_TRAINING_STATUS.md). The historical step-zero analysis is
@@ -15,6 +15,7 @@
 | historical Phase A | `phase_a_fixed_1s_rotation_20260817/best.pt` | selected step 27,000; seven-dataset fixed-1s transfer 0.509 versus old 0.617 | completed but rejected for the next Phase-B bank |
 | replacement Phase A | clean views, isolated retrieval rows, direct row VICReg, external-development selection | implementation complete; no trained result yet | pending training and controlled ablations |
 | parked relational Phase B | v22 and checkpoint study | learned adaptation exists, but usually trails identity/prototype/ridge | historical evidence only |
+| **current Phase B (evidence mixer)** | `PHASE_B_MIXER_20260819.md`, held-out concepts + subjects, 3k steps | **0.5247 hard-mean macro-F1 vs 0.4053 frozen control (+0.119); k=0 0.3916 -> 0.5351** | first learned Phase-B component with a real gain; a scrambled-vocabulary control inverts it, so the gain is semantic. NOT yet scored through the eval harness |
 | current admissibility Phase B | matched adaptation v1, rank-8 Stage-2 step 1,000, five seeds | ordinary coherent k=1: 44.79 versus identity 45.71; specialized k=1: 28.62 versus 28.58; arbitrary labels exactly identity | complete seven-dataset result; adaptation exists, but learned admissibility has no held-out advantage |
 
 The Phase-B results below are bound to the historical Phase-A checkpoint
