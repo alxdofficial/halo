@@ -5,14 +5,27 @@ Branch `phase-b-diagnostics`. Every number below is measured; the scripts are
 
 ## Summary
 
-The first end-to-end run reaches selection 0.424 ± 0.013 by **step 250** and never improves over
-the following 23,000 episodes. Eight interventions (retrieval alignment loss at three weights,
-top-k 8/16, encoder LR, and combinations) all land inside that noise band.
+Two findings, and the second corrects the first.
 
-The cause is not the trainer, the vote, the optimizer, or the step budget. It is that **the
-encoder's retrieval feature encodes acquisition configuration, not activity** — and, underneath
-that, that on this corpus **activity names and activity signals are nearly unrelated**, which caps
-the zero-shot bridge no matter how well retrieval is trained.
+**Mechanism.** The encoder's retrieval feature encodes **acquisition configuration, not activity**
+(×7.0 lift for same-config rows; same-activity support rows sit at the 39th percentile), and
+underneath that, **activity names and activity signals are nearly unrelated on this corpus**
+(r = 0.11 across 105 labels), which caps any signal-based zero-shot bridge. These are measurements
+on fixed checkpoints and they stand.
+
+**Methodology — and this invalidates the first pass of arm comparisons.** Four replicates of one
+identical configuration, differing only in seed, give selection scores of 0.4499 / **0.5881** /
+0.4545 / 0.4519 — **between-run sd 0.068**, five times the ±0.013 within-run scatter I had been
+using as the noise band. Every "this intervention does nothing" conclusion drawn against ±0.013 was
+underpowered and is withdrawn.
+
+Almost all of that variance is the **validation draw**, not training: the seed selects which
+concepts are held out (16 to 23 of them across the four runs), and the step-0 baseline alone has
+sd 0.073. Pairing each run against its own step-0 score removes it — the **paired gain has
+sd 0.0069**, a tenfold tighter statistic, and it shows training clearly works: **+0.0656 ± 0.0035,
+p = 0.0003**.
+
+**Every future Phase-B comparison must use the paired gain, not the raw score.**
 
 ## What was ruled out, with the measurement that ruled it out
 
@@ -75,6 +88,32 @@ all. The measured curve matches: coherent k=0 **0.324**, k=4 **0.521**, alias k=
 
 All at 1,500 steps, random init, held-out concepts. Noise band ±0.013.
 
+Re-scored with the paired statistic (gain over each run's own step-0, noise sd 0.0069):
+
+| arm | paired gain | z vs replicates | gain k=0 | gain k=4 | gain alias |
+|---|---:|---:|---:|---:|---:|
+| **augment** | **+0.1075** | **+6.0** | +0.0350 | +0.1615 | +0.1176 |
+| augment, 3000 steps | +0.0989 | +4.8 | −0.0318 | +0.1016 | +0.1278 |
+| top-k 16, 6000 steps | +0.0962 | +4.4 | +0.0665 | +0.1785 | +0.0638 |
+| k=64, 6000 steps (reference) | +0.0946 | +4.2 | +0.0266 | +0.1812 | +0.0685 |
+| aux 0.05 | +0.0891 | +3.4 | −0.0355 | +0.1073 | +0.1149 |
+| top-k 16 | +0.0867 | +3.0 | +0.0792 | +0.1298 | +0.0581 |
+| control (1500 steps) | +0.0753 | +1.4 | −0.0121 | +0.1340 | +0.0656 |
+| replicate mean (n=4) | +0.0656 | 0.0 | +0.0147 | +0.0406 | +0.0959 |
+| encoder LR 5e-4 | +0.0658 | +0.0 | +0.0030 | +0.1595 | +0.0433 |
+| aux 0.2 | +0.0536 | −1.7 | +0.0343 | +0.0559 | +0.0722 |
+| top-k 8 | +0.0522 | −1.9 | +0.0125 | +0.1229 | +0.0247 |
+| aux 1.0 | +0.0506 | −2.2 | +0.0470 | +0.0546 | +0.0728 |
+| top-k 8 + encoder LR | +0.0455 | −2.9 | +0.0107 | +0.1048 | +0.0285 |
+
+Two things the first pass got wrong. **Augmentation is the best intervention tested**, not a null
+one — it is what teaches invariance to acquisition configuration, which is the measured defect, and
+it lands 6 sd above the replicate mean. **Longer training also helps**: every 6,000-step arm sits at
++0.095 against +0.066–0.075 for 1,500 steps, so the model was never converged at step 250; the raw
+metric was simply too noisy to show it.
+
+The raw scores that produced the withdrawn conclusion, kept for the record:
+
 | arm | selection | coherent | alias | k=0 | k=4 | support selected |
 |---|---:|---:|---:|---:|---:|---:|
 | control | 0.4321 | 0.4104 | 0.4539 | 0.2851 | 0.4739 | 0.0120 |
@@ -86,7 +125,8 @@ All at 1,500 steps, random init, held-out concepts. Noise band ±0.013.
 | encoder LR 5e-4 | 0.4226 | 0.4136 | 0.4316 | 0.3003 | 0.4995 | 0.0100 |
 | top-k 8 + encoder LR | 0.3902 | 0.3622 | 0.4183 | 0.2775 | 0.4346 | 0.0070 |
 
-Nothing clears the noise band. The aux loss is the informative failure: it **worked mechanically** —
+Against the *raw* score nothing cleared the band — which is exactly the underpowered comparison
+described above. The aux loss remains an informative case: it **worked mechanically** —
 support retrieval rose 3.5× (0.012 → 0.042) and alias rose 0.454 → 0.503 — but coherent fell by the
 same amount, netting zero. It is not adopted; it stays behind `--retrieval-aux-weight 0.0` as a
 diagnostic probe, since the finding is that the two objectives trade against each other rather than
