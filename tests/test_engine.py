@@ -726,3 +726,32 @@ def test_a_cpu_generator_works_with_cuda_rows():
     out = engine(to_cuda(query), to_cuda(memory), candidate_text.cuda(), label_text.cuda(),
                  generator=torch.Generator().manual_seed(0))
     assert torch.isfinite(out["logits"]).all()
+
+
+def test_retrieval_alignment_loss_prefers_semantically_near_labels():
+    """The aux loss must be minimized when the score ranks rows by LABEL-TEXT relevance, which is
+    the property the measured bottleneck needs. Checked against a deliberately wrong ranking."""
+    from training.tokenizer.episodic import retrieval_alignment_loss
+
+    torch.manual_seed(0)
+    label_text = F.normalize(torch.randn(10, TEXT_DIM), dim=-1)
+    query_label = torch.tensor([0, 1])
+    memory_label = torch.arange(10)
+    relevance = label_text[query_label] @ label_text[memory_label].t()
+    aligned = retrieval_alignment_loss(relevance * 10, query_label, memory_label, label_text)
+    inverted = retrieval_alignment_loss(-relevance * 10, query_label, memory_label, label_text)
+    uniform = retrieval_alignment_loss(torch.zeros(2, 10), query_label, memory_label, label_text)
+    assert float(aligned) < float(uniform) < float(inverted)
+    assert float(aligned) > 0                      # it is a cross-entropy, never negative
+
+
+def test_retrieval_alignment_loss_reaches_the_scorer():
+    from training.tokenizer.episodic import retrieval_alignment_loss
+
+    engine = _engine().train()
+    query, memory, candidate_text, label_text = _episode()
+    scores = engine.scorer(query.feature, query.descriptor, memory.feature, memory.descriptor)
+    retrieval_alignment_loss(scores, query.label, memory.label, label_text).backward()
+    touched = [n for n, p in engine.scorer.named_parameters()
+               if p.grad is not None and float(p.grad.abs().sum()) > 0]
+    assert len(touched) >= 5

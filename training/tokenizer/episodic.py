@@ -985,6 +985,41 @@ def episode_identity_ids(
     }
 
 
+def retrieval_alignment_loss(
+    scores: torch.Tensor,          # (Q, M) retrieval scores
+    query_label: torch.Tensor,     # (Q,) canonical vocabulary id of each query row
+    memory_label: torch.Tensor,    # (M,) canonical vocabulary id of each bank row
+    label_text: torch.Tensor,      # (V, 384) L2-normalised frozen label text
+    temperature: float = 0.1,
+) -> torch.Tensor:
+    """Teach retrieval that similar SIGNAL should mean semantically similar LABEL.
+
+    WHY THIS EXISTS
+    ---------------
+    Measured on the first end-to-end run: retrieval already finds rows whose labels are nearer the
+    query's true label than the bank average (+0.049, p=4e-15), and that weak preference is where
+    ALL of the model's accuracy comes from — uniform weights over the retrieved set score 0.365
+    against 0.271 for ignoring the query entirely. But it is weak, and within the retrieved set the
+    score carries almost nothing (corr 0.028 with label relevance), because retrieval's only
+    training signal is the vote gradient, diluted across a 57-effective-row average.
+
+    This supplies the missing direct signal. The target is the frozen text similarity between the
+    query's label and each bank row's label — a quantity the model never sees at inference, used
+    here exactly as the episodic target is: supervision on TRAINING concepts only. What it teaches
+    is a mapping from signal to semantic neighbourhood, which is the mechanism that has to
+    generalize to unseen labels, not a lookup table of the labels it was trained on.
+
+    It also, for free, teaches support retrieval: an enrolled row carries its candidate's canonical
+    label, so it is the most relevant row in the bank by construction.
+    """
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    with torch.no_grad():
+        relevance = label_text[query_label] @ label_text[memory_label].t()
+        target = torch.softmax(relevance / temperature, dim=1)
+    return -(target * torch.log_softmax(scores.float(), dim=1)).sum(dim=1).mean()
+
+
 def episode_cross_entropy(votes: torch.Tensor, target_slot: torch.Tensor) -> torch.Tensor:
     """Cross-entropy over candidate slots, matching the Stage-2 gate trainer exactly.
 

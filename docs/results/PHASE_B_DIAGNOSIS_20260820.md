@@ -1,0 +1,131 @@
+# Why Phase-B training plateaus — diagnosis, 2026-08-20
+
+Branch `phase-b-diagnostics`. Every number below is measured; the scripts are
+`training/evidence/phase_b_autopsy.py` and `training/evidence/phase_b_bottleneck.py`.
+
+## Summary
+
+The first end-to-end run reaches selection 0.424 ± 0.013 by **step 250** and never improves over
+the following 23,000 episodes. Eight interventions (retrieval alignment loss at three weights,
+top-k 8/16, encoder LR, and combinations) all land inside that noise band.
+
+The cause is not the trainer, the vote, the optimizer, or the step budget. It is that **the
+encoder's retrieval feature encodes acquisition configuration, not activity** — and, underneath
+that, that on this corpus **activity names and activity signals are nearly unrelated**, which caps
+the zero-shot bridge no matter how well retrieval is trained.
+
+## What was ruled out, with the measurement that ruled it out
+
+| Hypothesis | Measurement | Verdict |
+|---|---|---|
+| Encoder representation collapses | per-stage autopsy: effective rank 8.6 (random init) vs 7.9 (best) vs 8.1 (last); kNN label accuracy **rises** 0.782 → 0.847 → 0.875 | **No.** The encoder improves monotonically. My earlier "rank collapse 24→9" read a per-episode telemetry statistic on ~100 rows, not a property of the representation. |
+| Performance declines after the peak | linear trend over the plateau, p = 0.113; the "best" at step 1750 is +2.1σ, i.e. the max of 24 draws | **No.** Flat plateau, not a decline. |
+| The step budget is too small | plateau reached at step 250 = 1,000 episodes; 6,000 steps adds nothing | **No.** More steps do not help. |
+| The vote is broken | with the *same* vote and *same* top-64, a perfectly semantic retriever scores **0.840** vs the model's 0.365 | **No.** The vote is fine. |
+| The text vocabulary is not separable | oracle single-row ceiling 0.95–1.00 at C=2…16; held-out concepts are separable against the training vocabulary | **No.** Ample headroom. |
+| Retrieval never finds useful rows | 40.5% of retrieved rows are individually sufficient, vs a 33.3% base rate | **Partly.** Better than chance, but weak. |
+
+## What is actually wrong
+
+**1. All of the model's accuracy comes from retrieval *selection*; the learned weighting is inert.**
+
+| vote variant (k=0) | macro-F1 |
+|---|---:|
+| ignore the query entirely (uniform over the whole bank) | 0.271 |
+| uniform over the model's retrieved top-64 | **0.365** |
+| the model's own trained weights | 0.347 |
+
+The trained weights are *worse* than uniform. Within the retrieved set, the score correlates with
+label relevance at r = 0.028. Consistent with that, the vote is a near-uniform average —
+**57.4 effective rows of 64** — and 79% of the queries in an episode receive the same prediction.
+
+**2. Retrieval ranks by acquisition configuration, not activity.**
+
+| property of the retrieved top-64 | in top-64 | bank base rate | lift |
+|---|---:|---:|---:|
+| same acquisition config as the query | 16.9% | 2.4% | **×7.0** |
+| same activity, different subject and device (enrolled support) | 4.8% | 0.8% | ×1.7 |
+
+A support row — same activity, different subject, different device — sits at the **39th percentile**
+of the ranking, barely better than chance. The encoder has learned same-label clustering *within* a
+configuration (kNN 0.875) and almost nothing *across* configurations, which is the only thing that
+matters here.
+
+**3. Underneath both: names and signals are nearly unrelated on this corpus.**
+
+Across 105 labels, correlating signal-space similarity of class centroids against label-text
+similarity:
+
+```
+Pearson  r = +0.114   (p = 3.3e-17)
+Spearman r = +0.146   (p = 1.7e-27)
+top-5 neighbour overlap between the two spaces: 19.2%   (chance 4.8%)
+```
+
+Significant, and very weak. This is a **ceiling on any signal-based ConSE bridge**, independent of
+the model: zero-shot transfer works by mapping an unseen name to nearby training names and expecting
+their signals to resemble the query. At r = 0.11 that inference is mostly noise. "Brushing teeth"
+and "brushing hair" have near-identical names and unrelated dynamics; "walking" and "cycling" have
+unrelated names and similar periodicity.
+
+This predicts k=0 should be weak while k≥1 should not, because enrollment does not use the bridge at
+all. The measured curve matches: coherent k=0 **0.324**, k=4 **0.521**, alias k=4 **0.524**.
+
+## Interventions tried, and what they show
+
+All at 1,500 steps, random init, held-out concepts. Noise band ±0.013.
+
+| arm | selection | coherent | alias | k=0 | k=4 | support selected |
+|---|---:|---:|---:|---:|---:|---:|
+| control | 0.4321 | 0.4104 | 0.4539 | 0.2851 | 0.4739 | 0.0120 |
+| retrieval-alignment aux 0.05 | 0.4459 | 0.3886 | 0.5032 | 0.2617 | 0.4472 | 0.0271 |
+| retrieval-alignment aux 0.2 | 0.4105 | 0.3604 | 0.4605 | 0.3315 | 0.3958 | 0.0391 |
+| retrieval-alignment aux 1.0 | 0.4074 | 0.3537 | 0.4611 | 0.3442 | 0.3945 | 0.0416 |
+| top-k 16 | 0.4273 | 0.4227 | 0.4320 | 0.3439 | 0.4751 | 0.0142 |
+| top-k 8 | 0.3970 | 0.3795 | 0.4146 | 0.2793 | 0.4528 | 0.0150 |
+| encoder LR 5e-4 | 0.4226 | 0.4136 | 0.4316 | 0.3003 | 0.4995 | 0.0100 |
+| top-k 8 + encoder LR | 0.3902 | 0.3622 | 0.4183 | 0.2775 | 0.4346 | 0.0070 |
+
+Nothing clears the noise band. The aux loss is the informative failure: it **worked mechanically** —
+support retrieval rose 3.5× (0.012 → 0.042) and alias rose 0.454 → 0.503 — but coherent fell by the
+same amount, netting zero. It is not adopted; it stays behind `--retrieval-aux-weight 0.0` as a
+diagnostic probe, since the finding is that the two objectives trade against each other rather than
+that retrieval supervision is unavailable.
+
+Post-hoc repairs that also failed: centering the evidence (0.355), sharpening the vote softmax
+(0.371), top-1 row only (0.387), config-mean removal from the features (0.365, and support ranking
+got *worse*, 39.4 → 43.8 percentile).
+
+## What follows
+
+The zero-shot cell is limited by the corpus, not the model, and no amount of Phase-B training will
+change that. The honest framings are (a) report k=0 as bridge-limited and quantify the limit with
+the r = 0.11 measurement, which is a result about HAR label semantics rather than a defect, and
+(b) put the weight of the claim on k ≥ 1 adaptation, which does not use the bridge and already
+reaches 0.52.
+
+Signal augmentation, which targets cross-configuration invariance directly and is already
+implemented (`--augment`, off by default), also fails to clear the band: 0.4289 at 1,500 steps and
+0.4203 at 3,000, against 0.4321 for control. Ten interventions, none of them effective.
+
+## The finding that reopens the question
+
+The plateau is NOT a representation limit, because the representation never stops improving:
+
+| checkpoint | kNN label accuracy | signal-vs-name Pearson r |
+|---|---:|---:|
+| random init | 0.782 | 0.031 |
+| best (step 1750) | 0.847 | 0.114 |
+| last (step 6000) | **0.875** | **0.160** |
+
+Both are still climbing at step 6000 while the selection score has been flat since step 250. The
+bridge is five times better than random init and getting better; the end metric does not move.
+
+The mechanism that reconciles this is the width of the vote. The vote averages the top 64 of ~5,000
+rows, and the *average label composition* of a broad set is insensitive to modest ranking
+improvements — a better ranking reshuffles the set without much changing its mean. That predicts
+narrower top-k should convert the improving bridge into accuracy, and that neither narrow-k nor long
+training alone would show it, which is exactly what the grids found (top-k 16 gives the best k=0 of
+any 1,500-step arm, 0.344 vs 0.285, but its advantage is inside the band at that budget).
+
+`gridD` tests the compound directly: top-k 16 at 6,000 and 12,000 steps.

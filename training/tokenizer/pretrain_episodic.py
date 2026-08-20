@@ -47,6 +47,7 @@ from training.tokenizer.episodic import (
     live_sensor_rows,
     macro_f1,
     matched_support_variants,
+    retrieval_alignment_loss,
     provenance_lift,
     sample_bank_positions,
     stream_label_table,
@@ -233,6 +234,8 @@ def run_episode(
     row_offset: int = 0,
     seed: int = 0,
     collect_stats: bool = False,
+    aux_weight: float = 0.0,
+    aux_temperature: float = 0.1,
 ) -> dict:
     """Run one independent episode through the exact compact deployment rule."""
     if engine.encoder is None:
@@ -275,9 +278,21 @@ def run_episode(
     mass = window_mass[query_i.to(device)]
     target = torch.tensor(plan.query_slot, dtype=torch.long, device=device)
     loss = F.cross_entropy((mass + 1e-8).log(), target)
+    aux = loss.new_zeros(())
+    if aux_weight:
+        # Supervises RETRIEVAL directly. The vote gradient alone reaches the scorer only through a
+        # near-uniform average over 64 rows, which measurement showed carries almost no ranking
+        # information; this is the signal that makes retrieval semantic rather than merely similar.
+        aux = retrieval_alignment_loss(
+            result["scores"], query.rows.label, memory.rows.label, label_text,
+            temperature=aux_temperature,
+        )
+        loss = loss + aux_weight * aux
     prediction = mass.argmax(dim=1)
     out = {
         "loss": loss,
+        "task_loss": float(F.cross_entropy((mass + 1e-8).log(), target).detach()),
+        "aux_loss": float(aux.detach()),
         "truth": target.detach().cpu().tolist(),
         "prediction": prediction.detach().cpu().tolist(),
         "truth_label": [plan.candidates[int(slot)] for slot in target.detach().cpu()],
@@ -508,6 +523,9 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--retrieval-aux-weight", type=float, default=0.0,
+                        help="weight on the retrieval alignment loss (0 = the measured baseline)")
+    parser.add_argument("--retrieval-aux-temperature", type=float, default=0.1)
     parser.add_argument("--freeze-encoder", action="store_true")
     parser.add_argument("--augment", action="store_true")
     parser.add_argument("--calib-batches", type=int, default=5,
@@ -806,6 +824,8 @@ def main() -> None:
                     encoded_out=encoded, row_offset=int(offset),
                     seed=args.seed + step * 10_000 + episode,
                     collect_stats=(step == 1 or step % args.telemetry_every == 0),
+                    aux_weight=args.retrieval_aux_weight,
+                    aux_temperature=args.retrieval_aux_temperature,
                 )
                 for episode, (plan, offset) in enumerate(zip(plans, offsets))
             ]
@@ -827,6 +847,8 @@ def main() -> None:
                 "step": step,
                 "kind": "train",
                 "loss": float(loss.detach()),
+                "task_loss": float(np.mean([r["task_loss"] for r in results])),
+                "aux_loss": float(np.mean([r["aux_loss"] for r in results])),
                 "accuracy": float(np.mean([
                     np.mean(np.equal(result["truth"], result["prediction"])) for result in results
                 ])),
