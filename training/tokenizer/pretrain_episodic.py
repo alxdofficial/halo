@@ -475,14 +475,14 @@ def profile_training(
     print(prof.key_averages().table(sort_by=sort, row_limit=14))
 
 
-def _random_encoder(device: torch.device) -> tuple[SetTokenizerEncoder, dict]:
+def _random_encoder(device: torch.device, frontend: str = "fixed") -> tuple[SetTokenizerEncoder, dict]:
     config = {
+        "frontend": frontend,
         "d_model": 128,
         "num_layers": 3,
         "num_heads": 4,
         "dim_feedforward": 256,
         "dropout": 0.1,
-        "frontend": "fixed",
         "trunk": "temporal",
         "descriptor_prediction": False,
         "text_conditioning": "factored",
@@ -500,7 +500,7 @@ def _random_encoder(device: torch.device) -> tuple[SetTokenizerEncoder, dict]:
     }
     encoder = SetTokenizerEncoder(
         d_model=128, num_layers=3, num_heads=4, dim_feedforward=256, dropout=0.1,
-        dft_size=DFT_SIZE, frontend="fixed", trunk="temporal",
+        dft_size=DFT_SIZE, frontend=frontend, trunk="temporal",
         descriptor_prediction=False, text_conditioning="factored",
         token_granularity="sensor", use_sensor_bias_conditioning=False,
     ).to(device)
@@ -536,6 +536,9 @@ def main() -> None:
     parser.add_argument("--mixing", choices=("attention", "off"), default="attention",
                         help="'off' removes the evidence mixer entirely: the weight is the "
                              "retrieval score and the label vectors are the frozen row text")
+    parser.add_argument("--frontend", choices=("fixed", "learnable"), default="fixed",
+                        help="'learnable' lets the filterbank's filter parameters train instead of "
+                             "staying at their physical initialisation (random-init runs only)")
     parser.add_argument("--identity-gain", type=float, default=1.0,
                         help="initial gain on the mixer's role/slot/group channels relative to "
                              "content at 1.0; at 1.0 content is only a quarter of every token")
@@ -711,7 +714,7 @@ def main() -> None:
         config = dict(checkpoint["config"])
         source = str(args.checkpoint)
     else:
-        encoder, config = _random_encoder(device)
+        encoder, config = _random_encoder(device, frontend=args.frontend)
         source = "random-init"
     if encoder.trunk != "temporal" or encoder.token_granularity != "sensor":
         raise SystemExit(

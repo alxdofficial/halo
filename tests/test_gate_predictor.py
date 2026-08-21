@@ -493,3 +493,24 @@ def test_a_bank_without_recording_provenance_is_refused_by_the_engine_path():
             candidate_text=F.normalize(torch.randn(C, 384), dim=-1),
             label_text=F.normalize(torch.randn(V, 384), dim=-1), top_k=4, engine=engine,
         )
+
+
+def test_engine_checkpoints_survive_a_config_default_change(tmp_path):
+    """A checkpoint written before a config field existed must be rebuilt with the behaviour it
+    was TRAINED with, not the field's current default. Found live: changing the scorer default to
+    cosine made a learned-scorer checkpoint unloadable (and, with strict=False, would have been
+    silently rebuilt as the wrong model)."""
+    from dataclasses import asdict
+    from model.blocks import AttentionSpec
+    from model.evidence.engine import EngineConfig, EvidenceEngine
+    from model.evidence.retrieval_scorer import PairScorerConfig
+
+    cfg = EngineConfig(spec=AttentionSpec(d_model=16, n_heads=4), top_k=5,
+                       scorer=PairScorerConfig(learned=True))
+    source = EvidenceEngine(None, cfg)
+    payload = asdict(cfg)
+    del payload["scorer"]["learned"]                     # simulate the pre-field checkpoint
+    path = tmp_path / "engine.pt"
+    torch.save({"evidence_engine": source.state_dict(), "config": {"engine_config": payload}}, path)
+    loaded = load_evidence_engine(path)
+    assert loaded.cfg.scorer.learned is True             # inferred from the weights

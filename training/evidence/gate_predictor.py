@@ -135,6 +135,13 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
             "checkpoint carries engine weights but no engine_config; it cannot be rebuilt without "
             "guessing its shape, and a guess would report the wrong model under the right name"
         )
+    scorer_cfg = dict(saved.get("scorer", {}))
+    if "learned" not in scorer_cfg:
+        # Checkpoints written before the `learned` field default-drifted when the field's default
+        # later changed to False: a model TRAINED with the learned scorer would silently be rebuilt
+        # with the fixed cosine. The weights say which one was trained; believe them.
+        scorer_cfg["learned"] = "scorer.base_gain" in state
+    saved = {**saved, "scorer": scorer_cfg}
     cfg = EngineConfig(
         spec=AttentionSpec(**saved["spec"]),
         trunk_layers=int(saved.get("trunk_layers", 3)),
