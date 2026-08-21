@@ -74,10 +74,13 @@ class PairScorerConfig:
     pair_head_hidden: int = 32
     base_gain_init: float = 1.0 / DEPLOYED_TEMPERATURE
     residual_gain_init: float = 0.02
-    #: False replaces the whole learned head with the plain feature cosine at a FIXED temperature
-    #: and registers no parameters at all. This is the stand-in the ablation ladder substitutes
-    #: when isolating which stage of the model is failing to learn.
-    learned: bool = True
+    #: DEFAULT FALSE as of 2026-08-21. The learned head is retained but off, because the ablation
+    #: ladder measured it contributing nothing: enabling it in isolation moved the paired gain by
+    #: EXACTLY 0.0000 (no validation ever beat step-0), and inside the full stack it was worth
+    #: +0.0085, inside the noise. Its only path to the loss is a softmax that is a near-uniform
+    #: average over 64 rows, and the gradient through that cannot move it. Plain cosine costs
+    #: nothing measurable and removes 115k parameters and a whole stage from the model.
+    learned: bool = False
 
 
 class PairScorer(nn.Module):
@@ -175,8 +178,13 @@ class PairScorer(nn.Module):
         the whole (Q, M) grid is one wavefront of GPU work.
         """
         if not self.cfg.learned:
-            return self.fixed_gain * (F.normalize(query_feature.float(), dim=-1)
-                                      @ F.normalize(memory_feature.float(), dim=-1).t())
+            # Same FP32 island as the learned path: this score feeds a softmax and a top-k, and
+            # returning bf16 under autocast would silently coarsen both.
+            with torch.autocast(device_type=query_feature.device.type, enabled=False):
+                return self.fixed_gain.float() * (
+                    F.normalize(query_feature.float(), dim=-1)
+                    @ F.normalize(memory_feature.float(), dim=-1).t()
+                )
         query_heads = self._joint_heads(query_feature, query_descriptor, self.query_proj)
         memory_heads = self._joint_heads(memory_feature, memory_descriptor, self.memory_proj)
         # (H, Q, dh) x (H, dh, M) -> (H, Q, M): one batched matmul over the interaction heads,

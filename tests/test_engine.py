@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from model.blocks import AttentionSpec, ScaledSum, SetAttentionStack
 from model.evidence.engine import EngineConfig, EvidenceEngine, vote
 from model.evidence.evidence_mixer import EvidenceMixerConfig
-from model.evidence.retrieval_scorer import PairScorer
+from model.evidence.retrieval_scorer import PairScorer, PairScorerConfig
 from model.evidence.rows import SensorRows
 from model.tokenizer.transformer import TemporalTrunk
 from training.tokenizer.episodic import (
@@ -24,6 +24,9 @@ from training.tokenizer.episodic import (
 )
 
 TEXT_DIM = 384
+#: The learned pair scorer is opt-in as of 2026-08-21 (the ablation ladder measured it
+#: contributing nothing). Tests of that code path must ask for it explicitly.
+_LEARNED = PairScorerConfig(learned=True)
 
 
 def _rows(n, *, d=64, enrolled=None, vocab=40, seed=0, windows_per_row=2):
@@ -129,7 +132,7 @@ def test_temporal_trunk_encodes_each_sensor_in_isolation():
 def test_pair_scorer_starts_at_the_retired_cosine_rule():
     """Any later difference must be attributable to training, not to a changed starting point."""
     spec = AttentionSpec(d_model=32, n_heads=4)
-    scorer = PairScorer(spec).eval()
+    scorer = PairScorer(spec, _LEARNED).eval()
     qf, mf = torch.randn(7, 32), torch.randn(19, 32)
     qd = F.normalize(torch.randn(7, TEXT_DIM), dim=-1)
     md = F.normalize(torch.randn(19, TEXT_DIM), dim=-1)
@@ -141,7 +144,7 @@ def test_pair_scorer_reads_all_four_of_its_arguments():
     """A scorer that ignored the descriptions could not learn the physics the hard filter used to
     stipulate, and the removal of that filter would be a straight loss."""
     spec = AttentionSpec(d_model=32, n_heads=4)
-    scorer = PairScorer(spec).eval()
+    scorer = PairScorer(spec, _LEARNED).eval()
     with torch.no_grad():                       # let the learned head matter, not just its init
         scorer.residual_gain.fill_(1.0)
     args = [torch.randn(5, 32), F.normalize(torch.randn(5, TEXT_DIM), dim=-1),
@@ -562,7 +565,7 @@ def test_the_interaction_heads_match_their_reference_formulation():
     """The heads are computed as one batched matmul rather than an einsum, for dispatch. That is a
     performance rewrite, so it needs the formulation it replaced as a reference."""
     spec = AttentionSpec(d_model=32, n_heads=4)
-    scorer = PairScorer(spec).eval()
+    scorer = PairScorer(spec, _LEARNED).eval()
     qf, mf = torch.randn(6, 32), torch.randn(11, 32)
     qd = F.normalize(torch.randn(6, TEXT_DIM), dim=-1)
     md = F.normalize(torch.randn(11, TEXT_DIM), dim=-1)
@@ -584,7 +587,7 @@ def test_the_reduced_precision_pair_head_does_not_change_what_gets_retrieved():
     """
     torch.manual_seed(0)
     spec = AttentionSpec(d_model=64, n_heads=4)
-    scorer = PairScorer(spec).eval()
+    scorer = PairScorer(spec, _LEARNED).eval()
     query_feature, memory_feature = torch.randn(16, 64), torch.randn(600, 64)
     query_desc = F.normalize(torch.randn(16, TEXT_DIM), dim=-1)
     memory_desc = F.normalize(torch.randn(600, TEXT_DIM), dim=-1)
@@ -681,7 +684,7 @@ def test_the_score_couples_patch_and_text_rather_than_summing_separate_scores():
     """
     torch.manual_seed(0)
     spec = AttentionSpec(d_model=32, n_heads=4)
-    scorer = PairScorer(spec).eval()
+    scorer = PairScorer(spec, _LEARNED).eval()
     with torch.no_grad():
         scorer.residual_gain.fill_(1.0)
     query_feature = torch.randn(1, 32)
@@ -748,7 +751,10 @@ def test_retrieval_alignment_loss_prefers_semantically_near_labels():
 def test_retrieval_alignment_loss_reaches_the_scorer():
     from training.tokenizer.episodic import retrieval_alignment_loss
 
-    engine = _engine().train()
+    engine = EvidenceEngine(None, EngineConfig(
+        spec=AttentionSpec(d_model=64, n_heads=4, ffn_mult=2, dropout=0.0), top_k=8,
+        scorer=_LEARNED,                       # the aux loss can only reach a LEARNED scorer
+    )).train()
     query, memory, candidate_text, label_text = _episode()
     scores = engine.scorer(query.feature, query.descriptor, memory.feature, memory.descriptor)
     retrieval_alignment_loss(scores, query.label, memory.label, label_text).backward()
@@ -782,7 +788,7 @@ def test_residual_branches_start_as_small_perturbations():
 
 def test_the_fixed_retrieval_stand_in_has_no_parameters():
     """A ladder rung that disables retrieval learning must really disable it, not merely shrink it."""
-    from model.evidence.retrieval_scorer import PairScorerConfig
+    from model.evidence.retrieval_scorer import PairScorer, PairScorerConfig
 
     engine = EvidenceEngine(None, EngineConfig(
         spec=AttentionSpec(d_model=64, n_heads=4), top_k=8, mixing="off",
@@ -795,3 +801,28 @@ def test_the_fixed_retrieval_stand_in_has_no_parameters():
     lw = out["log_weight"]
     assert torch.isfinite(out["logits"]).all()
     assert float((lw - lw.mean(dim=2, keepdim=True)).abs().max()) < 1e-6
+
+
+@pytest.mark.parametrize("mixing", ["attention", "off"])
+def test_bank_wide_voting_reaches_every_memory_row(mixing):
+    """The gradient-flow property `vote_scope="bank"` exists for.
+
+    Hard top-k gives gradient only to rows the scorer ALREADY ranks highest, so its only feedback
+    confirms its current ranking and a row it ranks poorly can never be learned about. Voting over
+    the bank restores a path to every row while the mixer still processes only the shortlist.
+    """
+    coverage = {}
+    for scope in ("topk", "bank"):
+        engine = EvidenceEngine(None, EngineConfig(
+            spec=AttentionSpec(d_model=64, n_heads=4, ffn_mult=2, dropout=0.0),
+            top_k=8, mixing=mixing, vote_scope=scope,
+        )).train()
+        query, memory, candidate_text, label_text = _episode(n_memory=64)
+        memory.feature.requires_grad_(True)
+        out = engine(query, memory, candidate_text, label_text)
+        F.cross_entropy(out["logits"] / 0.1,
+                        torch.zeros(len(out["logits"]), dtype=torch.long)).backward()
+        assert torch.isfinite(out["logits"]).all()
+        coverage[scope] = int((memory.feature.grad.abs().sum(dim=1) > 0).sum())
+    assert coverage["bank"] == 64                       # every row
+    assert coverage["topk"] < 64                        # hard selection leaves rows dark

@@ -66,12 +66,24 @@ class EngineConfig:
     #: reduces to the closed-form cosine-retrieval ConSE rule and nothing is learned downstream of
     #: the encoder. The ablation ladder walks this back one stage at a time.
     mixing: str = "attention"                   # attention | off
+    #: Which rows the VOTE runs over. "topk" scores only the retrieved shortlist. "bank" scores
+    #: the whole memory while the mixer still only processes the top-k, scattering its corrections
+    #: back onto those positions.
+    #:
+    #: This is a GRADIENT-FLOW choice, not a scoring one. Hard top-k gives gradient to 64 of ~4,900
+    #: rows per query -- 1.3% -- and it is the 1.3% the scorer already ranks highest, so the only
+    #: feedback it ever receives confirms its current ranking. A row it ranks 2,244th, which is
+    #: where same-activity/different-device support actually sits, can never be learned about
+    #: because it is never selected. Voting over the bank restores a path to every row.
+    vote_scope: str = "topk"                    # topk | bank
 
     def __post_init__(self) -> None:
         if self.top_k <= 0:
             raise ValueError("top_k must be positive")
         if self.mixing not in ("attention", "off"):
             raise ValueError("mixing must be 'attention' or 'off'")
+        if self.vote_scope not in ("topk", "bank"):
+            raise ValueError("vote_scope must be 'topk' or 'bank'")
         if self.mixing == "off":
             return                              # no mixer, so no group vocabulary to check
         # Every retrieved row can be its own recording. Group 0 means "no recording" (candidate
@@ -230,17 +242,23 @@ class EvidenceEngine(nn.Module):
         picked_score = scores.gather(1, selected)
 
         row_label_text = evidence_label_tokens(memory, candidate_text, label_text)
+        over_bank = self.cfg.vote_scope == "bank"
+        all_bound = memory.enrolled_candidate.to(selected.device)
         if self.mixer is None:
-            bound = memory.enrolled_candidate.to(selected.device)[selected]
+            bound = all_bound.unsqueeze(0).expand(len(scores), -1) if over_bank \
+                else all_bound[selected]
+            base = (scores if over_bank else picked_score).unsqueeze(-1)
             mixed = {
-                "log_weight": picked_score.unsqueeze(-1).expand(-1, -1, candidate_text.shape[0]),
-                "label_vector": row_label_text[selected],
+                "log_weight": base.expand(-1, -1, candidate_text.shape[0]),
+                "label_vector": (row_label_text.unsqueeze(0).expand(len(scores), -1, -1)
+                                 if over_bank else row_label_text[selected]),
             }
             logits = vote(mixed["log_weight"], mixed["label_vector"], candidate_text, bound)
             result = {"logits": logits, "scores": scores, "selected": selected,
                       "log_weight": mixed["log_weight"]}
             if collect_stats:
-                result["stats"] = self._stats(query, memory, scores, selected, bound, mixed)
+                result["stats"] = self._stats(query, memory, scores, selected,
+                                              all_bound[selected], mixed)
             return result
 
         candidate_slot, evidence_slot, evidence_group, bound = self._identity_channels(
@@ -258,10 +276,26 @@ class EvidenceEngine(nn.Module):
             evidence_slot=evidence_slot,
             evidence_group=evidence_group,
         )
-        logits = vote(mixed["log_weight"], mixed["label_vector"], candidate_text, bound)
+        log_weight, label_vector = mixed["log_weight"], mixed["label_vector"]
+        vote_bound = bound
+        if over_bank:
+            # Every row votes; the mixer's correction is scattered back onto the rows it saw. Rows
+            # outside the shortlist keep the plain retrieval score, so they contribute exactly what
+            # the closed-form rule would give them -- and, crucially, they receive gradient.
+            n_cand = candidate_text.shape[0]
+            full = scores.unsqueeze(-1).expand(-1, -1, n_cand).contiguous()
+            correction = log_weight - picked_score.unsqueeze(-1)
+            full.scatter_add_(1, selected.unsqueeze(-1).expand(-1, -1, n_cand), correction)
+            full_labels = row_label_text.unsqueeze(0).expand(len(scores), -1, -1).contiguous()
+            full_labels.scatter_(
+                1, selected.unsqueeze(-1).expand(-1, -1, label_vector.shape[-1]), label_vector,
+            )
+            log_weight, label_vector = full, full_labels
+            vote_bound = all_bound.unsqueeze(0).expand(len(scores), -1)
+        logits = vote(log_weight, label_vector, candidate_text, vote_bound)
 
         result = {"logits": logits, "scores": scores, "selected": selected,
-                  "log_weight": mixed["log_weight"]}
+                  "log_weight": log_weight}
         if collect_stats:
             result["stats"] = self._stats(query, memory, scores, selected, bound, mixed)
         return result

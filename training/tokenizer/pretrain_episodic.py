@@ -70,6 +70,12 @@ from training.tokenizer.pretrain_data import (
 )
 
 SEED = 20260818
+#: The validation draw is deliberately NOT tied to the training seed. Measured 2026-08-20: four
+#: replicates of one configuration differing only in seed scored 0.4499 / 0.5881 / 0.4545 / 0.4519,
+#: between-run sd 0.068 -- and the step-0 baseline alone had sd 0.073, so essentially all of it was
+#: WHICH CONCEPTS the seed happened to hold out (16 to 23 of them across those runs). Pinning the
+#: draw makes two runs comparable; leaving it tied to --seed made every arm comparison read noise.
+VAL_SEED = 20260901
 
 
 def subject_ids_for(index: CorpusIndex, keys) -> np.ndarray:
@@ -520,9 +526,13 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=64)
     parser.add_argument("--readout", choices=("weights", "semantic"), default="weights")
     # --- ablation ladder: substitute a fixed stand-in for one learnable stage at a time
-    parser.add_argument("--retrieval", choices=("learned", "cosine"), default="learned",
+    parser.add_argument("--retrieval", choices=("learned", "cosine"), default="cosine",
                         help="'cosine' replaces the learned pair scorer with the plain feature "
                              "cosine at a fixed temperature, registering no parameters")
+    parser.add_argument("--vote-scope", choices=("topk", "bank"), default="topk",
+                        help="'bank' votes over the whole memory while the mixer still sees only "
+                             "the top-k, so every row receives gradient instead of the ~1.3% per "
+                             "query that hard selection reaches")
     parser.add_argument("--mixing", choices=("attention", "off"), default="attention",
                         help="'off' removes the evidence mixer entirely: the weight is the "
                              "retrieval score and the label vectors are the frozen row text")
@@ -551,6 +561,9 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--val-seed", type=int, default=VAL_SEED,
+                        help="seed for the concept holdout and the validation episodes, kept "
+                             "SEPARATE from --seed so every run is scored on the same draw")
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--profile-steps", type=int, default=0,
                         help="measure this many real steps (phase timers + op table), then exit")
@@ -608,7 +621,7 @@ def main() -> None:
     eligible = eligible_labels(
         train_table, base_spec, train_stream, execution_ids=train_execution,
     )
-    train_pool, heldout = split_label_pool(eligible, args.holdout_label_fraction, args.seed)
+    train_pool, heldout = split_label_pool(eligible, args.holdout_label_fraction, args.val_seed)
     val_eligible = set(eligible_labels(
         val_table, base_spec, val_stream, execution_ids=val_execution,
     ))
@@ -644,20 +657,20 @@ def main() -> None:
         val_table, val_stream_table, val_pool,
         dataclasses.replace(val_spec, alias_episode_fraction=0.0),
         val_stream, val_execution, n_episodes=args.val_episodes,
-        seed=args.seed + 2, schedule=(max_support,),
+        seed=args.val_seed + 2, schedule=(max_support,),
     )
     coherent_val = _matched_validation_plans(
-        coherent_base, support_grid, train_bank, bank_spec, val_offset, args.seed + 3,
+        coherent_base, support_grid, train_bank, bank_spec, val_offset, args.val_seed + 3,
     )
     positive_grid = tuple(value for value in support_grid if value > 0)
     alias_base = _make_plans(
         val_table, val_stream_table, val_pool,
         dataclasses.replace(val_spec, alias_episode_fraction=1.0),
         val_stream, val_execution, n_episodes=args.val_episodes,
-        seed=args.seed + 4, schedule=(max_support,),
+        seed=args.val_seed + 4, schedule=(max_support,),
     )
     alias_val = _matched_validation_plans(
-        alias_base, positive_grid, train_bank, bank_spec, val_offset, args.seed + 5,
+        alias_base, positive_grid, train_bank, bank_spec, val_offset, args.val_seed + 5,
     ) if positive_grid else []
     val_plans = coherent_val + alias_val
 
@@ -726,6 +739,7 @@ def main() -> None:
         trunk_layers=int(encoder.transformer.num_layers),
         top_k=args.top_k,
         mixing=args.mixing,
+        vote_scope=args.vote_scope,
         scorer=PairScorerConfig(learned=args.retrieval == "learned"),
         mixer=EvidenceMixerConfig(n_groups=max(96, args.top_k + 2), readout=args.readout,
                                   n_layers=args.mixer_layers,
@@ -815,7 +829,7 @@ def main() -> None:
 
     def run_validation(step: int) -> dict:
         report = validate(
-            engine, val_loader, val_plans, label_text, alias_text, device, args.seed + 10_000,
+            engine, val_loader, val_plans, label_text, alias_text, device, args.val_seed + 10_000,
             val_group,
         )
         record({"step": step, "kind": "validation", **report})
