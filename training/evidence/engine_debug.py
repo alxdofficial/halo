@@ -220,12 +220,16 @@ class ActivationMonitor:
             "encoder.sensor_fold": encoder.sensor_fold,
             "encoder.descriptor_proj": encoder.descriptor_proj,
             "encoder.trunk": encoder.transformer,
-            "scorer.query_proj": engine.scorer.query_proj,
-            "scorer.memory_proj": engine.scorer.memory_proj,
             "scorer": engine.scorer,
-            "mixer.attention_stack": engine.mixer.stack,
-            "mixer": engine.mixer,
         }
+        # The fixed-cosine scorer has no learned submodules and the mixer can be absent entirely;
+        # monitor what the configuration actually built rather than assuming the learned stack.
+        if engine.cfg.scorer.learned:
+            stages["scorer.query_proj"] = engine.scorer.query_proj
+            stages["scorer.memory_proj"] = engine.scorer.memory_proj
+        if engine.mixer is not None:
+            stages["mixer.attention_stack"] = engine.mixer.stack
+            stages["mixer"] = engine.mixer
         for layer_index, norm in enumerate(encoder.transformer.attn):
             stages[f"encoder.trunk.attn[{layer_index}]"] = norm
         for name, module in stages.items():
@@ -295,6 +299,8 @@ def gradient_audit(encoder, engine, label_text, episodes, groups, device, title)
     # Phase-A JEPA masking; Phase B never masks a token, so a zero gradient here is the module
     # working as documented — the real trainer should simply not hand it to the optimizer.
     expected_dead = {"encoder.mask_token"}
+    # With the fixed-cosine default the scorer registers no parameters, so no scorer group exists;
+    # nothing to whitelist. (If the learned scorer is enabled its groups must all be live.)
     for name, params in groups.items():
         count = sum(p.numel() for p in params)
         g, r = true_grads[name], rolled_grads[name]
@@ -313,7 +319,7 @@ def gradient_audit(encoder, engine, label_text, episodes, groups, device, title)
 
 
 # ---------------------------------------------------------------------------- training smoke test
-def train_smoke(readout, steps, device, log, seed=0):
+def train_smoke(readout, steps, device, log, seed=0, **engine_overrides):
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
     label_text = make_label_space(np.random.default_rng(123)).to(device)
@@ -326,7 +332,7 @@ def train_smoke(readout, steps, device, log, seed=0):
         trunk="temporal", descriptor_prediction=False,
     ).to(device)
     engine = EvidenceEngine(None, EngineConfig(
-        mixer=EvidenceMixerConfig(readout=readout))).to(device)
+        mixer=EvidenceMixerConfig(readout=readout), **engine_overrides)).to(device)
 
     optimizer = torch.optim.AdamW([
         {"params": [p for p in encoder.parameters() if p.requires_grad], "lr": 1e-4},
@@ -353,7 +359,8 @@ def train_smoke(readout, steps, device, log, seed=0):
     log(audit_text)
 
     # -- training
-    log(f"\n=== training {steps} steps ({readout}) ===")
+    log(f"\n=== training {steps} steps ({readout}, "
+        f"{', '.join(f'{k}={v}' for k, v in engine_overrides.items()) or 'defaults'}) ===")
     history, problems = [], list(audit_problems)
     start = time.perf_counter()
     for step in range(steps):
@@ -394,9 +401,10 @@ def train_smoke(readout, steps, device, log, seed=0):
                 log(f"    {name:28s} {ratio:.2e}{flag}")
         if step % max(1, steps // 10) == 0 or step == steps - 1:
             recent = history[-20:]
-            gains = engine.mixer.telemetry()
-            gains["retrieval/base_gain"] = float(engine.scorer.base_gain)
-            gains["retrieval/residual_gain"] = float(engine.scorer.residual_gain)
+            gains = engine.mixer.telemetry() if engine.mixer is not None else {}
+            if engine.cfg.scorer.learned:
+                gains["retrieval/base_gain"] = float(engine.scorer.base_gain)
+                gains["retrieval/residual_gain"] = float(engine.scorer.residual_gain)
             log(f"  step {step:>4d}  loss {np.mean([h[0] for h in recent]):.4f}  "
                 f"acc {np.mean([h[1] for h in recent]):.3f}  "
                 + "  ".join(f"{k.split('/')[-1]}={v:.3f}" for k, v in sorted(gains.items())))
@@ -442,13 +450,14 @@ def edge_battery(device, log):
     log("\n=== edge-case battery ===")
     label_text = make_label_space(np.random.default_rng(123)).to(device)
     problems = []
-    for readout in ("weights", "semantic"):
+    for readout, scope in (("weights", "topk"), ("weights", "bank"), ("semantic", "topk")):
         encoder = SetTokenizerEncoder(
             d_model=128, num_layers=3, num_heads=4, dim_feedforward=256, dropout=0.1,
             token_granularity="sensor", text_conditioning="factored",
             trunk="temporal", descriptor_prediction=False,
         ).to(device).eval()
         engine = EvidenceEngine(None, EngineConfig(
+            vote_scope=scope,
             mixer=EvidenceMixerConfig(readout=readout))).to(device).eval()
 
         def run(tag, **kwargs):
@@ -460,10 +469,10 @@ def edge_battery(device, log):
                     engine, label_text, q, m, cand, tgt, nq,
                     generator=torch.Generator(device="cpu").manual_seed(1))
             ok = bool(torch.isfinite(result["logits"]).all()) and math.isfinite(float(loss))
-            log(f"  [{readout:8s}] {tag:44s} loss {float(loss):7.3f}  "
+            log(f"  [{readout:8s}/{scope:4s}] {tag:38s} loss {float(loss):7.3f}  "
                 f"logits finite {ok}  rows {len(m.rows.feature)}")
             if not ok:
-                problems.append(f"{readout}/{tag}: non-finite output")
+                problems.append(f"{readout}/{scope}/{tag}: non-finite output")
             return result
 
         run("C=2 minimum candidates", n_candidates=2)
@@ -484,8 +493,8 @@ def edge_battery(device, log):
             b = engine(q.rows, m.rows, label_text[cand], label_text,
                        generator=torch.Generator(device="cpu").manual_seed(3))["logits"]
         if not torch.allclose(a, b):
-            problems.append(f"{readout}: same generator seed produced different logits")
-        log(f"  [{readout:8s}] {'determinism under a fixed generator':44s} "
+            problems.append(f"{readout}/{scope}: same generator seed produced different logits")
+        log(f"  [{readout}/{scope}] {'determinism under a fixed generator':38s} "
             f"max |Δ| {float((a - b).abs().max()):.1e}")
     return problems
 
@@ -509,7 +518,11 @@ def main() -> int:
 
     log(f"device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if device.type == "cuda" else ""))
     problems = []
+    # The three committed operating points: the default (cosine retrieval, top-k vote), the
+    # bank-wide vote, and the semantic readout. Each must train, keep every parameter live, and
+    # stay finite.
     problems += train_smoke("weights", args.steps, device, log)
+    problems += train_smoke("weights", args.steps // 2, device, log, vote_scope="bank")
     problems += train_smoke("semantic", args.semantic_steps, device, log)
     problems += edge_battery(device, log)
 

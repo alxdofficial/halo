@@ -576,6 +576,18 @@ def main() -> None:
         parser.error("steps, episodes-per-step, bank-windows, and calib-batches must be positive")
     if args.top_k > args.bank_windows:
         parser.error("--top-k cannot exceed --bank-windows")
+    # The mixer keeps every attention activation of a (C + 2 + 3k)-token sequence per query row for
+    # backward. At k=512 that OOMed a 24 GiB card 21 steps in; fail at parse time with arithmetic
+    # instead. Rough bound: rows_per_step * seq_len^2 * heads * 2 bytes for the attention maps.
+    seq = max(args.candidate_counts) + 2 + 3 * args.top_k
+    rows = args.episodes_per_step * max(args.candidate_counts) * args.queries_per_candidate * 2
+    attention_gib = rows * seq * seq * 4 * 2 * args.mixer_layers / 2 ** 30
+    if attention_gib > 16:
+        parser.error(
+            f"top_k={args.top_k} gives {seq}-token mixer sequences; the retained attention maps "
+            f"alone are ~{attention_gib:.0f} GiB for backward. Use --vote-scope bank for full "
+            "gradient coverage at top-k cost instead of raising k."
+        )
     if args.warmup_steps < 0 or args.warmup_steps > args.steps:
         parser.error("--warmup-steps must lie in [0, steps]")
     if args.smoke:
