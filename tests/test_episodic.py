@@ -524,3 +524,49 @@ def test_replace_counts_preserves_every_spec_field():
         if field.name == "candidate_counts":
             continue
         assert getattr(narrowed, field.name) == getattr(spec, field.name), field.name
+
+
+def test_shared_stream_episodes_keep_the_requested_candidate_distribution():
+    """Draw the candidate count first, then a stream that can supply it.
+
+    Choosing the stream first silently truncated each episode to whatever that stream carried, and
+    streams are label-poor. Measured on the real corpus that turned a uniform draw over
+    {2,4,8,16} into 45/30/17/8 percent: nearly half the episodes were binary and chance accuracy
+    was 32.8% instead of 22.2%, so every reported number sat against an inflated floor.
+    """
+    import collections
+
+    import numpy as np
+
+    from training.tokenizer.episodic import EpisodeSpec, build_shared_stream_plans
+
+    # 12 streams, deliberately label-poor: only two of them carry enough labels for C=8.
+    rich, poor = list(range(10)), list(range(3))
+    stream_table, table = {}, {}
+    position = 0
+    for stream in range(12):
+        labels = rich if stream < 2 else poor
+        stream_table[stream] = {}
+        for label in labels:
+            rows = np.arange(position, position + 6)
+            position += 6
+            stream_table[stream][label] = {stream * 100: rows}
+            table.setdefault(label, {})[stream * 100] = rows
+    stream_ids = np.zeros(position, dtype=np.int64)
+    for stream, by_label in stream_table.items():
+        for rows in by_label.values():
+            for value in rows.values() if isinstance(rows, dict) else [rows]:
+                stream_ids[value] = stream
+
+    spec = EpisodeSpec(candidate_counts=(2, 8), queries_per_candidate=2, max_support=0,
+                       background_windows=1, alias_episode_fraction=0.0,
+                       disjointness="stream", shared_query_stream=True)
+    plans = build_shared_stream_plans(
+        table, stream_table, sorted(set(rich)), n_episodes=200, spec=spec, seed=0,
+        stream_ids=stream_ids,
+    )
+    counts = collections.Counter(len(plan.candidates) for plan in plans)
+    assert set(counts) == {2, 8}
+    # Both counts must be well represented even though only 2 of 12 streams can host C=8.
+    assert counts[8] / len(plans) > 0.35, counts
+    assert counts[2] / len(plans) > 0.35, counts

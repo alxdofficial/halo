@@ -508,13 +508,35 @@ def build_shared_stream_plans(
             "are not constructible on this corpus subset"
         )
     streams = sorted(usable)
+    # Draw the CANDIDATE COUNT first, then a stream that can supply it -- not the other way round.
+    #
+    # Choosing the stream first silently truncated the episode to whatever that stream happened to
+    # carry, and streams are label-poor (median 11 training labels; only 20 of 56 carry 16 or more).
+    # Measured on this corpus, that turned a uniform draw over {2,4,8,16} into 45% / 30% / 17% / 8%:
+    # nearly half of all episodes were binary, mean candidates 4.69 instead of 7.74, and chance
+    # accuracy 32.8% instead of 22.2%. Every reported number sat against that inflated floor, and
+    # C=16 -- the hardest cell -- was 8% of training.
+    #
+    # The cost of the fix is a bias in WHICH streams host the large-C episodes, since only the
+    # label-rich ones can. That is a narrower distortion than biasing task difficulty itself, and
+    # `stream_coverage` below reports it rather than leaving it implicit.
+    capable = {
+        count: [s for s in streams
+                if len(usable[s]) - (1 if spec.background_windows else 0) >= count]
+        for count in spec.candidate_counts
+    }
+    counts_available = tuple(c for c in spec.candidate_counts if capable[c])
+    if not counts_available:
+        raise ValueError(
+            f"no acquisition stream can supply any of the requested candidate counts "
+            f"{spec.candidate_counts}"
+        )
     plans: list[EpisodePlan] = []
     for episode in range(n_episodes):
-        stream = int(rng.choice(streams))
+        n_candidates = int(rng.choice(counts_available))
+        stream = int(rng.choice(capable[n_candidates]))
         labels = usable[stream]
-        ceiling = len(labels) - (1 if spec.background_windows else 0)
-        counts = tuple(c for c in spec.candidate_counts if c <= ceiling)
-        episode_spec = dataclasses.replace(spec, candidate_counts=counts)
+        episode_spec = dataclasses.replace(spec, candidate_counts=(n_candidates,))
         schedule = None if support_schedule is None else (
             support_schedule[len(plans) % len(support_schedule)],
         )
