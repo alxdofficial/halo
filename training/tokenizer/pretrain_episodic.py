@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import math
 import time
@@ -51,6 +52,7 @@ from training.tokenizer.episodic import (
     retrieval_alignment_loss,
     provenance_lift,
     sample_bank_positions,
+    sensor_modality_codes,
     stream_label_table,
 )
 from training.tokenizer.eval_transfer import build_encoder
@@ -76,6 +78,14 @@ SEED = 20260818
 #: WHICH CONCEPTS the seed happened to hold out (16 to 23 of them across those runs). Pinning the
 #: draw makes two runs comparable; leaving it tied to --seed made every arm comparison read noise.
 VAL_SEED = 20260901
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def subject_ids_for(index: CorpusIndex, keys) -> np.ndarray:
@@ -145,11 +155,43 @@ def replace_counts(spec: EpisodeSpec, pool_size: int) -> EpisodeSpec:
     return dataclasses.replace(spec, candidate_counts=counts)
 
 
+def _pool_retrieval_to_window(encoded: dict, batch: dict) -> dict:
+    """Duration-weight patch rows into the common one-row-per-sensor comparison contract."""
+    tokens = encoded.get("retrieval_tokens")
+    if tokens is None:
+        raise KeyError("encoder comparison requires retrieval_tokens")
+    B, P, _N, _d = tokens.shape
+    modality = sensor_modality_codes(
+        batch["sensor_id"].to(tokens.device), batch["channel_mask"].to(tokens.device), _N,
+    )
+    gravity_present = torch.tensor(
+        [state != "removed" for state in batch["gravity_state"]],
+        dtype=torch.bool, device=tokens.device,
+    ).unsqueeze(1)
+    compatible = modality.eq(0) & gravity_present
+    result = dict(encoded)
+    result["sensor_present"] = encoded["sensor_present"] & compatible
+    if encoded.get("retrieval_window_rows", False):
+        return result
+    patch_mask = batch["patch_padding_mask"].to(tokens.device)
+    if patch_mask.shape != (B, P):
+        raise ValueError("retrieval token and patch-mask shapes disagree before window pooling")
+    durations = batch.get("patch_durations")
+    weights = patch_mask.to(tokens.dtype)
+    if durations is not None:
+        weights = weights * durations.to(device=tokens.device, dtype=tokens.dtype)
+    pooled = (tokens * weights[:, :, None, None]).sum(dim=1)
+    pooled = pooled / weights.sum(dim=1).clamp_min(1e-6)[:, None, None]
+    result["retrieval_tokens"] = pooled.unsqueeze(1)
+    result["retrieval_window_rows"] = True
+    return result
+
+
 def encode_batch(encoder: SetTokenizerEncoder, batch: dict, device: torch.device) -> dict:
     """Encode every window from several independent episodes in one heterogeneous forward."""
     if encoder.trunk != "temporal" or encoder.token_granularity != "sensor":
         raise ValueError("compact Phase B requires a temporal, sensor-granularity encoder")
-    return encoder(
+    encoded = encoder(
         batch["patches"].to(device, non_blocking=True),
         batch["rates"].to(device, non_blocking=True),
         batch["patch_len"].to(device, non_blocking=True),
@@ -161,8 +203,14 @@ def encode_batch(encoder: SetTokenizerEncoder, batch: dict, device: torch.device
         sensor_texts=batch["sensor_texts"],
         sensor_id=batch["sensor_id"].to(device, non_blocking=True),
         source_rate_hz=batch["source_rates"].to(device, non_blocking=True),
+        streams=batch.get("streams"),
+        sources=batch.get("sources"),
+        gravity_state=batch.get("gravity_state"),
         return_retrieval_tokens=True,
     )
+    if getattr(encoder, "retrieval_granularity", "patch") == "window":
+        encoded = _pool_retrieval_to_window(encoded, batch)
+    return encoded
 
 
 def _offset_plan(plan: EpisodePlan, offset: int) -> EpisodePlan:
@@ -544,7 +592,13 @@ def main() -> None:
     parser.add_argument("--queries-per-candidate", type=int, default=2)
     parser.add_argument("--max-support", type=int, default=4)
     parser.add_argument("--bank-windows", type=int, default=512)
-    parser.add_argument("--alias-episode-fraction", type=float, default=0.5)
+    # DEFAULT 0.0 (2026-08-22 decision): random-alias episodes are OUT of the training objective
+    # for now — build the strongest coherent base first. Measured at seed 20260830 (20k steps,
+    # matched): removal is a wash on coherent (0.5718 vs 0.5672 final) and costs the alias
+    # capability (0.4906 -> 0.2934), so this trades the physio "exercise 1" regime for
+    # simplicity, not for coherent gains. Restore with --alias-episode-fraction 0.5 (optionally
+    # --alias-warmup-steps/--alias-ramp-steps for the curriculum).
+    parser.add_argument("--alias-episode-fraction", type=float, default=0.0)
     parser.add_argument("--alias-warmup-steps", type=int, default=0,
                         help="steps with NO random-alias episodes before the curriculum starts")
     parser.add_argument("--alias-ramp-steps", type=int, default=0,
@@ -567,10 +621,9 @@ def main() -> None:
                         help="'off' removes the evidence mixer entirely: the weight is the "
                              "retrieval score and the label vectors are the frozen row text")
     parser.add_argument("--encoder-backbone", choices=("ours", "harnet", "unimts"), default="ours",
-                        help="swap a pretrained third-party backbone in for our encoder; the rest "
-                             "of the engine is unchanged")
-    parser.add_argument("--freeze-backbone", action="store_true",
-                        help="with --encoder-backbone: train only the projection to d_model")
+                        help="encoder-comparison arm; harnet/unimts are always frozen")
+    parser.add_argument("--encoder-comparison", action="store_true",
+                        help="use one sensor row per source window in all three encoder arms")
     parser.add_argument("--frontend", choices=("fixed", "learnable"), default="fixed",
                         help="'learnable' lets the filterbank's filter parameters train instead of "
                              "staying at their physical initialisation (random-init runs only)")
@@ -609,6 +662,10 @@ def main() -> None:
 
     if (args.checkpoint is None) == (not args.random_init):
         parser.error("choose exactly one of --checkpoint or --random-init")
+    if args.encoder_backbone != "ours" and not args.encoder_comparison:
+        parser.error("third-party backbones require --encoder-comparison")
+    if args.encoder_comparison and not args.random_init:
+        parser.error("the three-arm encoder comparison starts from --random-init")
     if (args.steps < 1 or args.episodes_per_step < 1 or args.bank_windows < 1
             or args.calib_batches < 1):
         parser.error("steps, episodes-per-step, bank-windows, and calib-batches must be positive")
@@ -759,16 +816,30 @@ def main() -> None:
         if args.encoder_backbone != "ours":
             from model.tokenizer.baseline_backbone import BaselineRowEncoder
             encoder = BaselineRowEncoder(args.encoder_backbone, d_model=128,
-                                         freeze=args.freeze_backbone, device=device).to(device)
+                                         freeze=True, device=device).to(device)
             config = {"encoder_backbone": args.encoder_backbone,
-                      "freeze_backbone": bool(args.freeze_backbone), "d_model": 128}
+                      "freeze_backbone": True, "d_model": 128,
+                      "retrieval_granularity": "window"}
             trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
             print(f"[phase-b] backbone={args.encoder_backbone} "
-                  f"{'FROZEN' if args.freeze_backbone else 'fine-tuned'} "
+                  "FROZEN "
                   f"trainable encoder params {trainable:,}", flush=True)
+            if args.encoder_backbone == "harnet":
+                from baselines.harnet.adapter import SSL_HUB_REPO, SSL_HUB_TAG, HARNET_NAME
+                source = f"pretrained:{SSL_HUB_REPO}:{SSL_HUB_TAG}/{HARNET_NAME}"
+            else:
+                from baselines.unimts.adapter import UNIMTS_CKPT
+                source = (
+                    f"pretrained:{UNIMTS_CKPT.resolve()}"
+                    f"#sha256={_file_sha256(UNIMTS_CKPT)}"
+                )
+            config["backbone_source"] = source
         else:
             encoder, config = _random_encoder(device, frontend=args.frontend)
-        source = "random-init"
+            source = "random-init"
+            if args.encoder_comparison:
+                encoder.retrieval_granularity = "window"
+                config["retrieval_granularity"] = "window"
     if encoder.trunk != "temporal" or encoder.token_granularity != "sensor":
         raise SystemExit(
             "Phase B accepts only the compact temporal sensor encoder; train/reload Phase A with "
