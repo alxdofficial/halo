@@ -4,6 +4,41 @@ This is the load-bearing "why" for the project. Every design choice (curation, t
 the augmentation split, the baseline contract) traces back to the argument here. If a framing in a
 paper draft cannot be defended against the rebuttals in §2, it is not the contribution.
 
+> ## ⚠️ Evidence status — 2026-08-22. Read before pitching any of this.
+>
+> The argument below is unchanged and still the intended contribution. What has changed is that we
+> now have measurements, and **the thesis's own decisive experiment has not been run**, while two
+> measurements sit in tension with it. Stating that here so no draft asserts what we have not shown.
+>
+> **Not yet demonstrated — §3's told-vs-not-told conditioning experiment.** `HALO+descriptor` vs
+> `HALO−descriptor` vs baseline, under the four transforms, has **never been executed**. It remains
+> a plan in `AUGMENTATIONS.md` §"the conditioning demonstration". Until it runs, the input-side
+> claim — the part no baseline can match, and therefore the whole differentiation in §2 — rests on
+> argument alone.
+>
+> **Counter-evidence to weigh.** (a) Masking the acquisition descriptor at inference left
+> cross-configuration retrieval **unchanged** (`DESIGN_AUDIT_20260821.md`); that is an
+> inference-time ablation on a model trained *with* descriptors, not the §3 experiment, but it is
+> not the result the thesis predicts. (b) The encoder's retrieval feature ranks by **acquisition
+> configuration, not activity** (×7.0 lift for same-config rows; same-activity/different-device rows
+> at the 39th percentile — `PHASE_B_DIAGNOSIS_20260820.md`). Conditioning is about being *told* a
+> config rather than being invariant to it, so this is not a direct refutation — but "the model
+> sorts by device" is the opposite of what a reader will expect the config interface to buy.
+>
+> **What IS demonstrated, and it is not this document's headline.**
+> [`../results/ADAPTATION_TABLE_20260822.md`](../results/ADAPTATION_TABLE_20260822.md): the compact
+> evidence engine is best in **35 of 40 enrollment columns** at d=128 — including *every*
+> clinical/rehab column at every k — and its zero-shot ordinary 36.95 is second of seven with no
+> fitted head. That is a **few-shot enrollment / memory-adaptation** result, and it is currently
+> the project's strongest evidence. Note also that those enrollment columns fit generic heads on
+> frozen features, so they demonstrate the **representation**, not the engine.
+>
+> **Honest reading.** The measured strength (few-shot enrollment on unseen, semantically opaque
+> activities — the "exercise 1" physiotherapy case) and the written thesis (language conditioning
+> on unseen acquisition configurations) are **two different claims**. Either run §3 and earn the
+> written one, or re-centre the contribution on what the evidence supports. Do not pitch the
+> language-config interface as demonstrated.
+
 ## 0. The task
 
 Zero-shot, **open-set** human activity recognition on consumer **phones and smartwatches**: recognize
@@ -151,6 +186,11 @@ into the §3 experiment. Nothing here changes the converters or grids — it fix
 which experiments **lead**.
 
 ## 6. One-paragraph pitch (for abstracts / intros)
+
+> ⚠️ **This paragraph's final sentence ("We show that...") describes an experiment that has not
+> been run** — see the evidence-status banner at the top. As written it would be an unsupported
+> claim in a submission. Either run §3 first, or replace that sentence with the enrollment result
+> we do have.
 
 > Consumer phones and watches produce IMU streams that vary in placement, mounting orientation, sensor
 > set, gravity convention, and sampling rate, and are asked to recognize activities never seen at

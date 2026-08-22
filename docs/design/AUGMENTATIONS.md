@@ -1,5 +1,12 @@
 # Augmentation policy — what each model gets, and why
 
+> **Status 2026-08-22 — the conditioning demonstration below has NOT been run.** It is still the
+> thesis's decisive experiment (`MOTIVATION.md` §3) and still unexecuted. Weigh it against the
+> counter-evidence recorded in `MOTIVATION.md`'s banner: inference-time descriptor masking left
+> cross-configuration retrieval unchanged. Also note the training recipe has moved on — Phase-A
+> cross-placement was deleted 2026-08-06 (recipe is JEPA + aug-VICReg), and random-alias episodes
+> were removed from the Phase-B default on 2026-08-22.
+
 > **Updated 2026-08-18.** The reference recipe enables **jitter and scale** only; every other
 > transform is an explicit, one-at-a-time ablation with a CLI flag. Independent-SO(3) rotation is
 > known-harmful (trained 0.085 below a random-init trunk). Adding the rest of the historical stack
