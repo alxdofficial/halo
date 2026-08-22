@@ -100,7 +100,7 @@ class HALOCompactAdapter(BaselineAdapter):
         cache = _HERE / f"bank_{_ckpt_fp()}_{BANK_SEED}_{BANK_WINDOWS}.pt"
         device = state["device"]
         if cache.exists():
-            payload = T.load(cache, map_location=device, weights_only=False)
+            payload = T.load(cache, map_location=device, weights_only=True)
             return SensorRows(**payload)
 
         from training.tokenizer.pretrain_data import (CorpusIndex, MultiScaleCollate,
