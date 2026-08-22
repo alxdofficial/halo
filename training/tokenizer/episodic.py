@@ -707,9 +707,19 @@ def live_sensor_rows(
             "use_sensor_isolated_retrieval encoder (the rows Phase B deploys)"
         )
     present = out["sensor_present"]                                  # (B, N)
-    patch_pad = batch["patch_padding_mask"].to(tokens.device)        # (B, P)
+    patch_pad = batch["patch_padding_mask"].to(tokens.device)        # (B, P_source)
     B, P, N, d = tokens.shape
-    valid = patch_pad.unsqueeze(2) & present.unsqueeze(1)            # (B, P, N)
+    if out.get("retrieval_window_rows", False):
+        if P != 1:
+            raise ValueError("retrieval_window_rows requires exactly one token row per window")
+        valid = present.unsqueeze(1)                                  # (B, 1, N)
+    else:
+        if patch_pad.shape != (B, P):
+            raise ValueError(
+                f"patch retrieval tokens have shape {(B, P)} but patch mask is "
+                f"{tuple(patch_pad.shape)}"
+            )
+        valid = patch_pad.unsqueeze(2) & present.unsqueeze(1)        # (B, P, N)
 
     sensor_id = batch["sensor_id"].to(tokens.device)
     channel_mask = batch["channel_mask"].to(tokens.device)

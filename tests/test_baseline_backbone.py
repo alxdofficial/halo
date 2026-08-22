@@ -1,8 +1,8 @@
 """The encoder-swap harness must be a faithful stand-in, or the comparison measures the harness.
 
 Each test here pins one property that, if broken, would silently make a third-party backbone look
-worse than it is: rate-correct resampling, an identical row population, matched row scale, real
-freezing, and sensor isolation.
+worse than it is: rate-correct resampling, honest accelerometer-only rows, matched row scale,
+placement, gravity compatibility, and real freezing.
 """
 
 from __future__ import annotations
@@ -11,7 +11,12 @@ import numpy as np
 import pytest
 import torch
 
-from model.tokenizer.baseline_backbone import BaselineRowEncoder
+from model.tokenizer.baseline_backbone import (
+    BaselineRowEncoder,
+    _center_crop_or_wrap,
+    _start_crop_or_wrap,
+    _stream_joint,
+)
 
 
 def _batch(n=8, patches=6, samples=64, channels=6, rate=50.0, slots=2):
@@ -31,9 +36,12 @@ def _batch(n=8, patches=6, samples=64, channels=6, rate=50.0, slots=2):
         "patch_padding_mask": torch.ones(n, patches, dtype=torch.bool),
         "sensor_id": sensor_id,
         "role_texts": [["x", "y", "z"] * 2 for _ in range(n)],
-        "sensor_texts": [["a wrist accelerometer"][:1] * (1 if slots == 1 else 2)
+        "sensor_texts": [(["a wrist accelerometer"] if slots == 1 else
+                          ["a wrist accelerometer", "a wrist gyroscope"])
                          for _ in range(n)],
         "source_rates": torch.full((n,), rate),
+        "streams": ["mhealth/watch_wrist"] * n,
+        "gravity_state": ["present"] * n,
     }
 
 
@@ -44,6 +52,7 @@ def _run(encoder, batch):
         channel_mask=batch["channel_mask"], patch_padding_mask=batch["patch_padding_mask"],
         sensor_texts=batch["sensor_texts"], sensor_id=batch["sensor_id"],
         source_rate_hz=batch["source_rates"],
+        streams=batch["streams"], gravity_state=batch["gravity_state"],
     )
 
 
@@ -60,8 +69,11 @@ def test_rejects_an_unknown_backbone():
 def test_rows_carry_the_engine_contract(harnet):
     batch = _batch()
     out = _run(harnet, batch)
-    assert out["retrieval_tokens"].shape == (8, 6, 2, 128)
+    assert out["retrieval_tokens"].shape == (8, 1, 2, 128)
     assert out["sensor_present"].shape == (8, 2)
+    assert out["sensor_present"][:, 0].all()
+    assert not out["sensor_present"][:, 1].any()       # accel-only published backbones
+    assert out["retrieval_window_rows"] is True
     assert out["descriptor"] is not None                 # live_sensor_rows indexes this
     assert torch.isfinite(out["retrieval_tokens"]).all()
 
@@ -74,6 +86,15 @@ def test_row_scale_matches_our_trunks_contract(harnet):
     rows = out["retrieval_tokens"][:, 0][present]
     norms = rows.norm(dim=-1)
     assert torch.allclose(norms, torch.full_like(norms, 128 ** 0.5), rtol=2e-3)
+
+
+def test_frozen_trunk_projection_receives_gradient(harnet):
+    harnet.zero_grad(set_to_none=True)
+    _run(harnet, _batch(n=2))["retrieval_tokens"][..., 0].mean().backward()
+    assert harnet.proj.weight.grad is not None
+    assert torch.isfinite(harnet.proj.weight.grad).all()
+    assert harnet.proj.weight.grad.norm() > 0
+    assert all(parameter.grad is None for parameter in harnet.net.parameters())
 
 
 def test_resampling_follows_the_sampling_RATE_not_the_array_length(harnet):
@@ -94,9 +115,9 @@ def test_resampling_follows_the_sampling_RATE_not_the_array_length(harnet):
     seen = []
     original = harnet._features
 
-    def spy(window, joint):
+    def spy(window, joint, **kwargs):
         seen.append(window.clone())
-        return original(window, joint)
+        return original(window, joint, **kwargs)
 
     harnet._features = spy
     try:
@@ -108,10 +129,9 @@ def test_resampling_follows_the_sampling_RATE_not_the_array_length(harnet):
     slow, fast = seen[0], seen[1]
     assert slow.shape == fast.shape == (2, 150, 3)
     # Both describe the same seconds of the same sinusoids resampled to 30 Hz. They are not
-    # bit-identical -- linear interpolation from 25 Hz costs more on the 4 Hz component than from
-    # 50 Hz -- but they must be the same waveform, not one a time-scaled copy of the other.
-    # residual is pure interpolation error and scales with frequency: 0.008 at 1 Hz, 0.12 at 4 Hz
-    assert torch.allclose(slow, fast, atol=0.15)
+    # bit-identical because each source clock samples at different phases, but anti-aliased physical
+    # resampling must preserve the same waveform rather than create a time-scaled copy.
+    assert torch.allclose(slow, fast, atol=0.08)
     a = (slow - slow.mean()).flatten()
     b = (fast - fast.mean()).flatten()
     correlation = float(a @ b / (a.norm() * b.norm()))
@@ -134,13 +154,9 @@ def test_a_frozen_backbone_stays_frozen_through_encoder_train():
     assert not any(p.requires_grad for p in frozen.net.parameters())
 
 
-def test_a_fine_tuned_backbone_actually_receives_gradient():
-    """Both loaders hand back gradient-disabled models, so 'fine-tuned' must switch them on."""
-    live = BaselineRowEncoder("harnet", freeze=False, device=torch.device("cpu"))
-    live.train()
-    _run(live, _batch(n=4))["retrieval_tokens"].pow(2).mean().backward()
-    grads = [p.grad for p in live.net.parameters() if p.grad is not None]
-    assert grads and torch.stack([g.norm() for g in grads]).norm() > 0
+def test_fine_tuned_third_party_arm_is_not_part_of_the_experiment():
+    with pytest.raises(ValueError, match="keeps released third-party backbones frozen"):
+        BaselineRowEncoder("harnet", freeze=False, device=torch.device("cpu"))
 
 
 def test_an_accel_row_ignores_the_gyroscope(harnet):
@@ -150,6 +166,34 @@ def test_an_accel_row_ignores_the_gyroscope(harnet):
     batch["patches"][:, :, :, 3:] = torch.randn_like(batch["patches"][:, :, :, 3:])
     after = _run(harnet, batch)["retrieval_tokens"][:, :, 0]
     assert torch.equal(before, after)
+
+
+def test_gyro_never_becomes_an_accelerometer_row(harnet):
+    out = _run(harnet, _batch())
+    assert out["sensor_present"][:, 0].all()
+    assert not out["sensor_present"][:, 1].any()
+
+
+def test_gravity_removed_acceleration_is_explicitly_incompatible(harnet):
+    batch = _batch(n=4)
+    batch["gravity_state"] = ["removed"] * 4
+    out = _run(harnet, batch)
+    assert not out["sensor_present"].any()
+
+
+def test_unimts_placement_mapping_uses_the_stream_key():
+    assert _stream_joint("xrf_v2/left_wrist") == 21
+    assert _stream_joint("xrf_v2/right_pocket") == 5
+    assert _stream_joint("nfi_fared/lower_back") == 9
+    assert _stream_joint("unknown/device") == 0
+
+
+def test_backbones_keep_their_released_crop_and_padding_conventions():
+    x = torch.arange(4, dtype=torch.float32).view(1, 4, 1)
+    assert _center_crop_or_wrap(x, 2).flatten().tolist() == [1.0, 2.0]
+    assert _start_crop_or_wrap(x, 2).flatten().tolist() == [0.0, 1.0]
+    assert _center_crop_or_wrap(x, 6).flatten().tolist() == [3.0, 0.0, 1.0, 2.0, 3.0, 0.0]
+    assert _start_crop_or_wrap(x, 6).flatten().tolist() == [0.0, 1.0, 2.0, 3.0, 0.0, 1.0]
 
 
 def test_padding_and_mixed_rates_do_not_inject_zeros(harnet):
@@ -178,3 +222,88 @@ def test_a_single_sample_window_still_produces_a_row(harnet):
     out = _run(harnet, batch)
     assert torch.isfinite(out["retrieval_tokens"]).all()
     assert out["sensor_present"].any()
+
+
+def test_checkpoint_factory_reconstructs_a_baseline_encoder(harnet):
+    from training.tokenizer.eval_transfer import build_encoder
+
+    checkpoint = {
+        "config": {
+            "encoder_backbone": "harnet",
+            "freeze_backbone": True,
+            "retrieval_granularity": "window",
+            "d_model": 128,
+        },
+        "encoder": harnet.state_dict(),
+    }
+    restored = build_encoder(checkpoint, torch.device("cpu"))
+    assert isinstance(restored, BaselineRowEncoder)
+    assert restored.retrieval_granularity == "window"
+    assert torch.equal(
+        _run(harnet, _batch(n=2))["retrieval_tokens"],
+        _run(restored, _batch(n=2))["retrieval_tokens"],
+    )
+
+
+def test_runtime_acceleration_does_not_change_checkpoint_keys(harnet):
+    """Compiled inference is an execution detail, not a new checkpoint architecture."""
+    assert not any("_compiled_net" in key or "_orig_mod" in key for key in harnet.state_dict())
+
+
+def test_halo_comparison_pool_is_duration_weighted_and_single_row():
+    from training.tokenizer.pretrain_episodic import _pool_retrieval_to_window
+
+    tokens = torch.tensor([1.0, 3.0, 99.0]).view(1, 3, 1, 1)
+    encoded = {
+        "retrieval_tokens": tokens,
+        "sensor_present": torch.ones(1, 1, dtype=torch.bool),
+    }
+    batch = {
+        "patch_padding_mask": torch.tensor([[True, True, False]]),
+        "patch_durations": torch.tensor([[1.0, 0.5, 0.0]]),
+        "sensor_id": torch.zeros(1, 6, dtype=torch.long),
+        "channel_mask": torch.tensor([[True, True, True, False, False, False]]),
+        "gravity_state": ["present"],
+    }
+    out = _pool_retrieval_to_window(encoded, batch)
+    assert out["retrieval_tokens"].shape == (1, 1, 1, 1)
+    assert out["retrieval_window_rows"] is True
+    assert torch.allclose(out["retrieval_tokens"].flatten(), torch.tensor([5.0 / 3.0]))
+
+
+def test_halo_comparison_uses_the_same_accel_only_compatibility_rule():
+    from training.tokenizer.pretrain_episodic import _pool_retrieval_to_window
+
+    encoded = {
+        "retrieval_tokens": torch.randn(2, 3, 2, 8),
+        "sensor_present": torch.ones(2, 2, dtype=torch.bool),
+    }
+    batch = {
+        "patch_padding_mask": torch.ones(2, 3, dtype=torch.bool),
+        "patch_durations": torch.ones(2, 3),
+        "sensor_id": torch.tensor([[0, 0, 0, 1, 1, 1]] * 2),
+        "channel_mask": torch.ones(2, 6, dtype=torch.bool),
+        "gravity_state": ["present", "removed"],
+    }
+    out = _pool_retrieval_to_window(encoded, batch)
+    assert out["sensor_present"].tolist() == [[True, False], [False, False]]
+
+
+def test_comparison_corpus_excludes_incompatible_streams_before_planning():
+    from types import SimpleNamespace
+    from training.tokenizer.pretrain_episodic import encoder_comparison_keys
+
+    refs = [
+        SimpleNamespace(dataset="uci_har", stream="phone_waist", key="uci_har/phone_waist",
+                        mask=np.ones(6, dtype=bool)),
+        SimpleNamespace(dataset="kuhar", stream="phone_waist", key="kuhar/phone_waist",
+                        mask=np.ones(6, dtype=bool)),
+        SimpleNamespace(dataset="unimib_shar", stream="phone_pocket",
+                        key="unimib_shar/phone_pocket",
+                        mask=np.array([1, 1, 0, 0, 0, 0], dtype=bool)),
+    ]
+    index = SimpleNamespace(refs=refs)
+    keys = [SimpleNamespace(stream_i=i) for i in range(3)]
+    kept, excluded = encoder_comparison_keys(index, keys)
+    assert kept == [keys[0]]
+    assert excluded == {"kuhar/phone_waist", "unimib_shar/phone_pocket"}

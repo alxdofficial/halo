@@ -18,7 +18,7 @@ dependencies = [
 dev = ["pytest"]
 eda = ["matplotlib", "torch"]
 # Full training/eval stack: encoder text prototypes (sentence-transformers) + probes (scikit-learn).
-model = ["torch", "sentence-transformers", "scikit-learn"]
+model = ["torch", "torchaudio", "sentence-transformers", "scikit-learn"]
 
 [tool.setuptools.packages.find]
 include = ["data*", "model*", "training*"]

@@ -620,9 +620,9 @@ runtime detail and is not stored in checkpoints.
 | HARNet, frozen trunk | 87.6 | 0.36 GiB | 8.8 min |
 | UniMTS, frozen trunk | 316.3 | 3.69 GiB | 31.6 min |
 
-Seven validation passes (step 0 and every 1,000 steps), startup, calibration, and compilation add an
-estimated 3--6 minutes across the three sequential runs. The complete screen is therefore expected
-to take about 49--52 minutes. This is a representation **screen**, not a converged final comparison:
+Seven validation passes (step 0 and every 1,000 steps), startup, calibration, and compilation add
+several minutes across the three sequential runs. The completed screen took 50.4 minutes. This is a
+representation **screen**, not a converged final comparison:
 128 is smaller than the production 512-row bank and 6,000 steps is shorter than the 35,000-step
 mature schedule. If an arm is still improving at step 6,000, it must be extended before reporting a
 final encoder ranking.
@@ -646,5 +646,33 @@ The earlier `training/tokenizer/outputs/encoder_swap_20260822` pilot is supersed
 baseline window vector across patch rows, fed gyroscope values through accelerometer trunks, omitted
 UniMTS placement, admitted gravity-removed streams, and could not reconstruct baseline checkpoints.
 Do not use its scores. CPU smoke runs of all three corrected arms, a GPU UniMTS train/validation
-smoke, checkpoint reconstruction, and matched GPU profiles pass. The matched 6,000-step screen and
-any subsequent mature run remain pending.
+smoke, checkpoint reconstruction, and matched GPU profiles pass.
+
+### Screen results
+
+The table reports each arm's checkpoint selected on the mean of the four **coherent** validation
+cells. Random aliases were disabled in training, so their diagnostic curve is not used for checkpoint
+selection. All arms have corpus fingerprint `e673381a7cb18517`, source head `2c5098e`, and source-patch
+hash `04e9cc84...f536`.
+
+| arm | best step | k=0 | k=1 | k=2 | k=4 | coherent mean | initial mean | wall time |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| HALO, random-init end to end | 5,000 | 0.4806 | 0.4950 | 0.4780 | 0.4903 | 0.4860 | 0.3017 | 7.70 min |
+| HARNet, frozen trunk | 5,000 | **0.5078** | 0.4210 | 0.5148 | 0.5009 | 0.4861 | 0.3335 | 9.30 min |
+| UniMTS, frozen trunk | 4,000 | 0.4609 | **0.5115** | **0.5182** | **0.5315** | **0.5055** | **0.4218** | 33.39 min |
+
+The screen gives a qualified answer. UniMTS is best overall by 0.0194 macro-F1, with its advantage
+concentrated at k >= 1. HARNet is best at k=0. HALO catches HARNet despite learning its encoder from
+scratch, so these results do not support the claim that HALO's encoder is the sole or dominant
+bottleneck. They do support a smaller claim: a strong pretrained UniMTS representation improves the
+engine's enrollment behavior under this short budget.
+
+The non-monotonic curves, especially HARNet k=1 below k=0, also show that the common evidence engine
+does not yet use additional support reliably for every representation. This is a held-out-concept
+validation screen on a 128-row bank, not the paper's external test suite and not a mature 512-row,
+35,000-step comparison. Do not promote the ranking to a final model claim without the external
+evaluation and, for any still-improving arm, a longer matched run.
+
+Artifacts are under `training/tokenizer/outputs/encoder_comparison_screen/{ours,harnet,unimts}`.
+Each directory contains `best.pt`, `last.pt`, `log.jsonl`, `run_config.json`, `summary.json`, and the
+captured source provenance. The interrupted pre-fix UniMTS pilot was removed from this results path.

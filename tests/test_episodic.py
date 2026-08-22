@@ -293,6 +293,19 @@ def test_live_rows_count_valid_patch_sensor_pairs_only():
     assert live.window.max() < 4
 
 
+def test_window_granularity_emits_one_row_per_present_sensor():
+    out, batch = _fake_encoder_output(B=4, P=1, N=2)
+    out["retrieval_window_rows"] = True
+    # The source batch can still carry six patch masks; window retrieval must not duplicate rows.
+    batch["patch_padding_mask"] = torch.ones(4, 6, dtype=torch.bool)
+    out["sensor_present"][3, 1] = False
+    live = live_sensor_rows(
+        out, batch, labels=torch.zeros(4, dtype=torch.long),
+        enrolled_candidate=torch.full((4,), -1),
+    )
+    assert live.rows.feature.shape[0] == 4 * 2 - 1
+
+
 def test_live_rows_require_a_sensor_isolated_encoder():
     out, batch = _fake_encoder_output()
     out.pop("retrieval_tokens")
@@ -504,6 +517,24 @@ def test_single_stream_labels_are_ineligible_for_stream_disjoint_support():
 def test_shared_query_stream_requires_stream_disjoint_support():
     with pytest.raises(ValueError, match="only meaningful with disjointness='stream'"):
         _spec(disjointness="subject", shared_query_stream=True).validate()
+
+
+def test_checkpoint_selection_follows_the_active_label_regime():
+    from training.tokenizer.pretrain_episodic import select_validation_metric
+
+    coherent_run = select_validation_metric(
+        {"coherent_mean_macro_f1": 0.6, "alias_mean_macro_f1": 0.2},
+        include_aliases=False,
+    )
+    assert coherent_run["selection_metric"] == "coherent_curve_mean"
+    assert coherent_run["selection_score"] == 0.6
+
+    alias_run = select_validation_metric(
+        {"coherent_mean_macro_f1": 0.6, "alias_mean_macro_f1": 0.2},
+        include_aliases=True,
+    )
+    assert alias_run["selection_metric"].startswith("mean(")
+    assert alias_run["selection_score"] == 0.4
 
 
 def test_replace_counts_preserves_every_spec_field():

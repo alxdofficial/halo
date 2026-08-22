@@ -118,8 +118,23 @@ def subject_holdout(subjects: np.ndarray, dataset: str) -> set:
     return set(unique[:max(1, len(unique) // 2)])
 
 
-def build_encoder(ckpt: dict, device, *, training: bool = False) -> SetTokenizerEncoder:
+def build_encoder(ckpt: dict, device, *, training: bool = False) -> torch.nn.Module:
     c = ckpt["config"]
+    backbone = c.get("encoder_backbone")
+    if backbone in {"harnet", "unimts"}:
+        from model.tokenizer.baseline_backbone import BaselineRowEncoder
+
+        if not bool(c.get("freeze_backbone", True)):
+            raise ValueError(
+                "unsupported legacy checkpoint: the encoder comparison permits only frozen "
+                "third-party backbones"
+            )
+        enc = BaselineRowEncoder(
+            backbone, d_model=int(c.get("d_model", 128)), freeze=True, device=device,
+        ).to(device)
+        enc.load_state_dict(ckpt["encoder"])
+        enc.retrieval_granularity = c.get("retrieval_granularity", "window")
+        return enc.train() if training else enc.eval()
     frontend = c.get("frontend", "fixed")
     sensor_bias_dim = c.get("sensor_bias_dim")
     if sensor_bias_dim is None:
@@ -173,6 +188,7 @@ def build_encoder(ckpt: dict, device, *, training: bool = False) -> SetTokenizer
     enc.eval_resolution_pair = tuple(c.get("val_resolution_pair", VAL_RESOLUTION_PAIR))
     enc.min_resolution_ratio = float(c.get("min_resolution_ratio", 1.75))
     enc.multiresolution = bool(c.get("multiresolution", False))
+    enc.retrieval_granularity = c.get("retrieval_granularity", "patch")
     enc = enc.to(device)
     return enc.train() if training else enc.eval()
 

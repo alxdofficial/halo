@@ -69,6 +69,7 @@ from training.tokenizer.pretrain_data import (
     MultiScaleCollate,
     PretrainDataset,
     _seed_worker,
+    _stream_gravity_state,
 )
 
 SEED = 20260818
@@ -97,6 +98,24 @@ def subject_ids_for(index: CorpusIndex, keys) -> np.ndarray:
         identity = (ref.dataset, str(ref.subjects[key.window_i]))
         values.append(seen.setdefault(identity, len(seen)))
     return np.asarray(values, dtype=np.int64)
+
+
+def encoder_comparison_keys(index: CorpusIndex, keys) -> tuple[list, set[str]]:
+    """Keep only complete, gravity-present accelerometer windows for the matched three-arm corpus."""
+    kept = []
+    excluded: set[str] = set()
+    for key in keys:
+        ref = index.refs[key.stream_i]
+        compatible = bool(np.asarray(ref.mask, dtype=bool)[:3].all()) and (
+            _stream_gravity_state(ref.dataset, ref.stream) == "present"
+        )
+        if compatible:
+            kept.append(key)
+        else:
+            excluded.add(ref.key)
+    if not kept:
+        raise ValueError("the encoder-comparison compatibility filter removed every window")
+    return kept, excluded
 
 
 def stream_ids_for(index: CorpusIndex, keys) -> tuple[np.ndarray, dict[str, int]]:
@@ -161,14 +180,18 @@ def _pool_retrieval_to_window(encoded: dict, batch: dict) -> dict:
     if tokens is None:
         raise KeyError("encoder comparison requires retrieval_tokens")
     B, P, _N, _d = tokens.shape
-    modality = sensor_modality_codes(
-        batch["sensor_id"].to(tokens.device), batch["channel_mask"].to(tokens.device), _N,
-    )
+    sensor_ids = batch["sensor_id"].to(tokens.device)
+    channel_mask = batch["channel_mask"].to(tokens.device)
+    modality = sensor_modality_codes(sensor_ids, channel_mask, _N)
+    full_accel = torch.stack([
+        ((sensor_ids[:, :3] == slot) & channel_mask[:, :3]).sum(dim=1).eq(3)
+        for slot in range(_N)
+    ], dim=1)
     gravity_present = torch.tensor(
-        [state != "removed" for state in batch["gravity_state"]],
+        [state == "present" for state in batch["gravity_state"]],
         dtype=torch.bool, device=tokens.device,
     ).unsqueeze(1)
-    compatible = modality.eq(0) & gravity_present
+    compatible = modality.eq(0) & full_accel & gravity_present
     result = dict(encoded)
     result["sensor_present"] = encoded["sensor_present"] & compatible
     if encoded.get("retrieval_window_rows", False):
@@ -191,6 +214,13 @@ def encode_batch(encoder: SetTokenizerEncoder, batch: dict, device: torch.device
     """Encode every window from several independent episodes in one heterogeneous forward."""
     if encoder.trunk != "temporal" or encoder.token_granularity != "sensor":
         raise ValueError("compact Phase B requires a temporal, sensor-granularity encoder")
+    metadata = {}
+    if getattr(encoder, "requires_stream_metadata", False):
+        metadata = {
+            "streams": batch.get("streams"),
+            "sources": batch.get("sources"),
+            "gravity_state": batch.get("gravity_state"),
+        }
     encoded = encoder(
         batch["patches"].to(device, non_blocking=True),
         batch["rates"].to(device, non_blocking=True),
@@ -203,10 +233,8 @@ def encode_batch(encoder: SetTokenizerEncoder, batch: dict, device: torch.device
         sensor_texts=batch["sensor_texts"],
         sensor_id=batch["sensor_id"].to(device, non_blocking=True),
         source_rate_hz=batch["source_rates"].to(device, non_blocking=True),
-        streams=batch.get("streams"),
-        sources=batch.get("sources"),
-        gravity_state=batch.get("gravity_state"),
         return_retrieval_tokens=True,
+        **metadata,
     )
     if getattr(encoder, "retrieval_granularity", "patch") == "window":
         encoded = _pool_retrieval_to_window(encoded, batch)
@@ -396,11 +424,24 @@ def run_episode(
     return out
 
 
+def select_validation_metric(report: dict, *, include_aliases: bool) -> dict:
+    """Attach the checkpoint score for the objective the run actually optimizes."""
+    if include_aliases:
+        report["selection_metric"] = "mean(coherent_curve_mean, alias_positive_curve_mean)"
+        report["selection_score"] = 0.5 * (
+            report["coherent_mean_macro_f1"] + report["alias_mean_macro_f1"]
+        )
+    else:
+        report["selection_metric"] = "coherent_curve_mean"
+        report["selection_score"] = report["coherent_mean_macro_f1"]
+    return report
+
+
 @torch.no_grad()
 def validate(
     engine: EvidenceEngine, loader: DataLoader, plans: list[EpisodePlan],
     label_text: torch.Tensor, alias_text: torch.Tensor, device: torch.device, seed: int,
-    episodes_per_batch: int,
+    episodes_per_batch: int, *, select_on_aliases: bool = True,
 ) -> dict:
     engine.eval()
     cells: dict[tuple[str, int], tuple[list[int], list[int]]] = {}
@@ -444,11 +485,10 @@ def validate(
         "coherent_mean_macro_f1": float(np.mean(coherent)) if coherent else 0.0,
         "alias_mean_macro_f1": float(np.mean(aliases)) if aliases else 0.0,
     }
-    # Coherent recognition and arbitrary-label enrollment are co-primary; neither may disappear
-    # inside one pooled metric.  Their equal mean is used only for checkpoint ordering.
-    report["selection_score"] = 0.5 * (
-        report["coherent_mean_macro_f1"] + report["alias_mean_macro_f1"]
-    )
+    # Alias behavior remains visible as a diagnostic in every run. It may influence checkpoint
+    # ordering only when alias episodes are actually present in the training objective; otherwise
+    # random fluctuations in an unsupported task can reject a better coherent checkpoint.
+    select_validation_metric(report, include_aliases=select_on_aliases)
     engine.train()
     if engine.encoder is not None and not any(
         parameter.requires_grad for parameter in engine.encoder.parameters()
@@ -474,6 +514,8 @@ def profile_training(
     the attribution honest. The op table runs unsynchronised so overlap is visible there instead.
     """
     encoder = engine.encoder
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
     def mark():
         if device.type == "cuda":
@@ -522,6 +564,9 @@ def profile_training(
     for name, span in phases.items():
         print(f"  {name:10s} {span / measured * 1000:7.1f} ms  {span / total * 100:5.1f}%")
     print(f"  {'TOTAL':10s} {total / measured * 1000:7.1f} ms")
+    if device.type == "cuda":
+        print(f"  {'PEAK VRAM':10s} {torch.cuda.max_memory_allocated(device) / 2 ** 30:7.2f} GiB "
+              f"allocated / {torch.cuda.max_memory_reserved(device) / 2 ** 30:.2f} GiB reserved")
 
     from torch.profiler import ProfilerActivity, profile
     activities = [ProfilerActivity.CPU] + (
@@ -666,6 +711,12 @@ def main() -> None:
         parser.error("third-party backbones require --encoder-comparison")
     if args.encoder_comparison and not args.random_init:
         parser.error("the three-arm encoder comparison starts from --random-init")
+    if args.encoder_backbone != "ours" and args.frontend != "fixed":
+        parser.error("--frontend applies only to the HALO encoder arm")
+    if args.encoder_backbone != "ours" and args.freeze_encoder:
+        parser.error("the baseline projection must remain trainable in the encoder comparison")
+    if args.encoder_comparison and args.augment:
+        parser.error("the matched encoder comparison uses clean windows; omit --augment")
     if (args.steps < 1 or args.episodes_per_step < 1 or args.bank_windows < 1
             or args.calib_batches < 1):
         parser.error("steps, episodes-per-step, bank-windows, and calib-batches must be positive")
@@ -701,8 +752,19 @@ def main() -> None:
 
     index = CorpusIndex(seed=args.seed, datasets=tuple(args.datasets))
     print(f"[phase-b] corpus: {index.summary()}", flush=True)
-    combined_keys = list(index.train) + list(index.val)
-    val_offset = len(index.train)
+    train_keys, val_keys = list(index.train), list(index.val)
+    excluded_streams: set[str] = set()
+    if args.encoder_comparison:
+        train_keys, excluded_train = encoder_comparison_keys(index, train_keys)
+        val_keys, excluded_val = encoder_comparison_keys(index, val_keys)
+        excluded_streams = excluded_train | excluded_val
+        print(
+            f"[phase-b] encoder-comparison corpus: {len(train_keys)} train / "
+            f"{len(val_keys)} val windows; excluded streams={sorted(excluded_streams)}",
+            flush=True,
+        )
+    combined_keys = train_keys + val_keys
+    val_offset = len(train_keys)
 
     base_spec = EpisodeSpec(
         candidate_counts=tuple(args.candidate_counts),
@@ -715,16 +777,16 @@ def main() -> None:
         disjointness=args.disjointness,
         shared_query_stream=(args.disjointness == "stream" and not args.no_shared_query_stream),
     )
-    train_subject = subject_ids_for(index, index.train)
-    val_subject = subject_ids_for(index, index.val)
-    train_stream, _ = stream_ids_for(index, index.train)
-    val_stream, _ = stream_ids_for(index, index.val)
-    train_execution = execution_ids_for(index, index.train)
-    val_execution = execution_ids_for(index, index.val)
-    train_table = label_window_table(index.train, train_subject)
-    val_table = label_window_table(index.val, val_subject)
-    train_stream_table = stream_label_table(index.train, train_subject, train_stream)
-    val_stream_table = stream_label_table(index.val, val_subject, val_stream)
+    train_subject = subject_ids_for(index, train_keys)
+    val_subject = subject_ids_for(index, val_keys)
+    train_stream, _ = stream_ids_for(index, train_keys)
+    val_stream, _ = stream_ids_for(index, val_keys)
+    train_execution = execution_ids_for(index, train_keys)
+    val_execution = execution_ids_for(index, val_keys)
+    train_table = label_window_table(train_keys, train_subject)
+    val_table = label_window_table(val_keys, val_subject)
+    train_stream_table = stream_label_table(train_keys, train_subject, train_stream)
+    val_stream_table = stream_label_table(val_keys, val_subject, val_stream)
     eligible = eligible_labels(
         train_table, base_spec, train_stream, execution_ids=train_execution,
     )
@@ -890,6 +952,12 @@ def main() -> None:
                                   n_layers=args.mixer_layers,
                                   identity_gain_init=args.identity_gain),
     )
+    # Released backbone constructors consume different amounts of random state. Reset at the exact
+    # boundary of the shared evidence engine so all comparison arms receive identical scorer/mixer
+    # initialisation and dropout streams; otherwise the "encoder-only" comparison changes two things.
+    torch.manual_seed(args.seed + 10_003)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(args.seed + 10_003)
     engine = EvidenceEngine(encoder, engine_config).to(device).train()
     if args.freeze_encoder:
         encoder.eval()
@@ -935,6 +1003,10 @@ def main() -> None:
     run_info = {
         "source_checkpoint": source,
         "corpus": index.summary(),
+        "effective_corpus": {
+            "train_windows": len(train_keys), "val_windows": len(val_keys),
+            "excluded_streams": sorted(excluded_streams),
+        },
         "corpus_fingerprint": corpus_fingerprint(index),
         "train_concepts": train_pool,
         "heldout_concepts": val_pool,
@@ -963,7 +1035,7 @@ def main() -> None:
             "config": config,
             "label_ids": index.label_ids,
             "step": step,
-            "selection_metric": "mean(coherent_curve_mean, alias_positive_curve_mean)",
+            "selection_metric": report["selection_metric"],
             "selection_value": report["selection_score"],
             "validation": report,
             "source_provenance": provenance,
@@ -975,7 +1047,7 @@ def main() -> None:
     def run_validation(step: int) -> dict:
         report = validate(
             engine, val_loader, val_plans, label_text, alias_text, device, args.val_seed + 10_000,
-            val_group,
+            val_group, select_on_aliases=args.alias_episode_fraction > 0.0,
         )
         record({"step": step, "kind": "validation", **report})
         if report["selection_score"] > best["score"]:
