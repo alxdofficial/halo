@@ -168,9 +168,11 @@ class BaselineRowEncoder(nn.Module):
         valid_len = (patch_len.clamp_min(0) * patch_padding_mask.long())                 # (B,P)
         cumulative = torch.cat(
             [valid_len.new_zeros((B, 1)), valid_len.cumsum(dim=1)], dim=1).float()       # (B,P+1)
-        total = cumulative[:, -1]                                                        # (B,)
-        if bool((total < 2).any()):
-            raise ValueError("a window carries fewer than two valid samples")
+        # ~0.1% of corpus windows (wisdm, capture24, opportunity) carry a SINGLE sample. Our
+        # encoder still emits rows for them, so refusing them here would silently shrink the row
+        # population and stop the arms being comparable. A one-sample window wrap-pads to a
+        # constant signal, which is what the baselines' own adapters do with a short recording.
+        total = cumulative[:, -1].clamp_min(1.0)                                         # (B,)
         duration_s = total / rates.clamp_min(1e-6)
         target_n = (duration_s * self.in_hz).round().clamp_min(1.0)                      # (B,)
         step = torch.arange(self.in_len, device=device, dtype=torch.float32).view(1, -1)

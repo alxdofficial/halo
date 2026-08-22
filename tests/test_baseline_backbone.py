@@ -161,3 +161,20 @@ def test_padding_and_mixed_rates_do_not_inject_zeros(harnet):
     out = _run(harnet, batch)
     assert torch.isfinite(out["retrieval_tokens"]).all()
     assert out["retrieval_tokens"].abs().max() < 1e3
+
+
+def test_a_single_sample_window_still_produces_a_row(harnet):
+    """~0.1% of corpus windows (wisdm, capture24, opportunity) carry exactly one sample.
+
+    Our encoder emits rows for them, so refusing them would shrink the baseline arms' row
+    population and stop the comparison being matched -- and it crashed all four arms at
+    validation before this was handled.
+    """
+    batch = _batch(n=4)
+    batch["patch_len"][:] = 0
+    batch["patch_len"][:, 0] = 1
+    batch["patch_padding_mask"][:] = False
+    batch["patch_padding_mask"][:, 0] = True
+    out = _run(harnet, batch)
+    assert torch.isfinite(out["retrieval_tokens"]).all()
+    assert out["sensor_present"].any()
