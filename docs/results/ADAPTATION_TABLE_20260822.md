@@ -128,6 +128,18 @@ How each row is scored:
 | imagebind | 29.19 | 32.91 | 40.36 | 44.98 | 48.53 |
 | normwear | 25.31 | 25.94 | 33.89 | 36.36 | 38.19 |
 
+## zero_shot (k=0) per dataset — the mechanism each model ships with
+
+| model | inclusivehar | tnda_har | usc_had | ut_complex | **ord mean** | monipar | spar | upper_limb_use | **spec mean** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| halo_compact | 31.05 | 54.84 | 33.32 | 28.62 | **36.95** | 16.98 | 5.05 | 4.21 | **8.75** |
+| harnet | 23.15 | 51.07 | 32.35 | 28.72 | **33.82** | 13.10 | 17.39 | 3.70 | **11.40** |
+| unimts | 27.03 | 48.64 | 26.83 | 28.31 | **32.70** | 23.24 | 24.74 | 9.75 | **19.24** |
+| crosshar | 25.49 | 54.59 | 29.02 | 38.96 | **37.01** | 11.83 | 6.39 | 14.43 | **10.88** |
+| limubert | 28.69 | 44.41 | 21.24 | 16.06 | **27.60** | 10.29 | 8.04 | 9.01 | **9.11** |
+| imagebind | 18.84 | 13.02 | 6.02 | 7.64 | **11.38** | 5.69 | 11.78 | 6.97 | **8.15** |
+| normwear | 8.60 | 5.11 | 4.82 | 1.80 | **5.08** | 0.76 | 6.10 | 3.87 | **3.58** |
+
 ## Reading
 
 * **Enrollment (the project's claim): halo_compact leads 33 of 40 method×k columns**, including

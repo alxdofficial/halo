@@ -1,6 +1,15 @@
 # Results Index
 
-> Project-wide index of measured results. Last updated 2026-08-19.
+> Project-wide index of measured results. Last updated 2026-08-22.
+>
+> **CURRENT HEADLINE — [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md).** The
+> compact evidence engine (`halo_compact`, 1.13M params, d=128) against all seven baselines on
+> the shared `adaptation_v1` manifest, every method (`nearest`/`prototype`/`ridge`/`linear_head`)
+> at k=1,2,4,8,16 plus `zero_shot` at k=0, in both regimes. **Best in 33 of 40 enrollment
+> columns, including every specialized_novel column at every k**; zero-shot ordinary 36.95
+> (second by 0.06, and the only row scored with no fitted head); zero-shot specialized 8.75
+> (disclosed — the case enrollment exists for: one example takes it to ~43). Everything below
+> this banner predates that table.
 >
 > Phase-B design status, run history, and adaptation tables live only in
 > [`PHASE_B_TRAINING_STATUS.md`](PHASE_B_TRAINING_STATUS.md). The historical step-zero analysis is
@@ -15,7 +24,8 @@
 | historical Phase A | `phase_a_fixed_1s_rotation_20260817/best.pt` | selected step 27,000; seven-dataset fixed-1s transfer 0.509 versus old 0.617 | completed but rejected for the next Phase-B bank |
 | replacement Phase A | clean views, isolated retrieval rows, direct row VICReg, external-development selection | implementation complete; no trained result yet | pending training and controlled ablations |
 | parked relational Phase B | v22 and checkpoint study | learned adaptation exists, but usually trails identity/prototype/ridge | historical evidence only |
-| **current Phase B (evidence mixer)** | `PHASE_B_MIXER_20260819.md`, held-out concepts + subjects, 3k steps | **0.5247 hard-mean macro-F1 vs 0.4053 frozen control (+0.119); k=0 0.3916 -> 0.5351** | first learned Phase-B component with a real gain; a scrambled-vocabulary control inverts it, so the gain is semantic. NOT yet scored through the eval harness |
+| **current Phase B (compact engine)** | `ADAPTATION_TABLE_20260822.md`, `adaptation_v1`, 61 cells / 7 datasets / 5 seeds | **33/40 enrollment columns best; all specialized_novel; zero-shot ord 36.95 / spec 8.75** | current headline, scored through the shared harness |
+| superseded Phase B (evidence mixer) | `PHASE_B_MIXER_20260819.md`, held-out concepts + subjects, 3k steps | **0.5247 hard-mean macro-F1 vs 0.4053 frozen control (+0.119); k=0 0.3916 -> 0.5351** | first learned Phase-B component with a real gain; a scrambled-vocabulary control inverts it, so the gain is semantic. NOT yet scored through the eval harness |
 | current admissibility Phase B | matched adaptation v1, rank-8 Stage-2 step 1,000, five seeds | ordinary coherent k=1: 44.79 versus identity 45.71; specialized k=1: 28.62 versus 28.58; arbitrary labels exactly identity | complete seven-dataset result; adaptation exists, but learned admissibility has no held-out advantage |
 
 The Phase-B results below are bound to the historical Phase-A checkpoint
@@ -89,6 +99,12 @@ scores 0.380 mean macro F1 versus 0.592 for the same retrieval rule with admissi
 than a dead training path. It is not an external benchmark result.
 
 ## Historical Zero-Shot Table
+
+> **Protocol-stale for every model.** These cells are protocol v4 / 93 labels; the current
+> protocol is v5 / 166 labels, so `eval/assemble_table.py` rejects them as STALE rather than
+> mixing protocols. Refreshing needs a full re-run of all eight baselines (~19 min of cell time
+> plus ConSE head refits under the new vocabulary). The current, protocol-consistent zero-shot
+> numbers are the `zero_shot` sections of `ADAPTATION_TABLE_20260822.md`.
 
 The last complete baseline table contains 56 cells (8 models by 7 datasets), protocol v4, generated
 from `eval/results/` on 2026-08-06. It must not be mixed with current Phase-A or Phase-B results.
