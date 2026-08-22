@@ -4,7 +4,7 @@ LiMU-BERT ships no released weights; it is an SSL *method* (masked
 reconstruction). This script pools the 9 non-eval training datasets' grids into
 LiMU-BERT's input contract (6-ch acc+gyro, 20 Hz, 120 samples — see
 :mod:`baselines.limubert.prep`) and drives the UPSTREAM LiMU-BERT SSL pipeline
-(model + Trainer + masking + ÷9.8 normalization, reused from
+(model + Trainer + masking, reused from
 ``auxiliary_repos/LIMU-BERT-Public`` via ``sys.path``) to produce the backbone
 checkpoint ``baselines/limubert/limubert_backbone.pt`` that the adapter loads.
 
@@ -89,11 +89,11 @@ def main(argv=None):
     labels = np.zeros((data.shape[0], data.shape[1], 2), dtype=np.float32)  # dummy (SSL)
     print(f"[limubert] corpus: {data.shape[0]} windows, shape {data.shape}")
 
-    # Apply LiMU-BERT's deterministic accel normalization ONCE to the pooled array
-    # instead of inside every __getitem__. For 6-ch data Preprocess4Normalization is
-    # exactly accel[:3] /= 9.8 (the magnetometer branch only fires at 9 channels), so
-    # this is value-identical and lets the per-item pipeline drop to masking-only.
-    data[:, :, :3] /= 9.8
+    # 2026-08-22 audit F1: upstream's Preprocess4Normalization divides accel by 9.8 because its
+    # datasets store m/s²; the model is designed to see acc ≈ 1 in g units. Our grids ALREADY
+    # store g, so the division here fed the backbone acc ≈ 0.10 against gyro O(0.1-0.5) — ~10x
+    # off the designed acc:gyro balance. Grids-in-g are the upstream post-normalization
+    # convention, so no scaling is applied (must match adapter._normalize).
 
     model_cfg = PretrainModelConfig(hidden=72, hidden_ff=144, feature_num=6,
                                     n_layers=4, n_heads=4, seq_len=120, emb_norm=True)

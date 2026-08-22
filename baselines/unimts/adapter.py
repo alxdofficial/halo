@@ -198,17 +198,32 @@ class UniMTSAdapter(CosineAdapter):
             embs.append(e.float().cpu().numpy())
         return np.concatenate(embs, axis=0)
 
+    # 2026-08-22 audit F2: upstream evaluates with ENRICHED label text — each class's whole
+    # label_dictionary synonym list joined into one string (data.py: `' '.join(labels)`) — not the
+    # bare class name. We reproduce that intent with the project's shared TRAIN-ONLY paraphrase
+    # pool (training/evidence/labeltext.py): variant 0 is the canonical name, the rest are
+    # template/synonym paraphrases, all encoded by UniMTS's OWN CLIP tower and averaged. This is
+    # also the labeltext.py parity rule: the halo_evidence row already ensembles E=8, so the bare
+    # string here gave UniMTS strictly weaker target text than we gave ourselves.
+    TEXT_ENSEMBLE = 8
+
     def encode_labels(self, labels, state, device) -> np.ndarray:
-        """(L,512) L2-normalized text embeddings via the fine-tuned CLIP text tower in the checkpoint
-        (model.encode_text). UniMTS uses the RAW label string (no 'a photo of' template)."""
+        """(L,512) L2-normalized CLIP-tower label embeddings, averaged over the shared
+        train-only paraphrase ensemble (E=8; variant 0 = the raw de-underscored label)."""
         import clip
         import torch
+        from training.evidence.labeltext import label_variant_rows   # lazy (pulls no `model` pkg)
 
         model = state["model"]
-        # de-underscore to MATCH eval.scoring's ConSE humanization (scoring.py:400), so the
-        # text tower sees the same label strings as HALO/ConSE (symmetric; audit Q1).
-        tok = clip.tokenize([s.replace("_", " ").strip() for s in labels]).to(device)  # (L,77)
+        rows = label_variant_rows(list(labels), self.TEXT_ENSEMBLE, seed=0,
+                                  use_descriptions=False, train_only=True)
+        acc = None
         with torch.no_grad():
-            t = model.encode_text(tok)                                       # (L,512)
-            t = t / t.norm(dim=-1, keepdim=True)
-        return t.float().cpu().numpy()
+            for row in rows:
+                tok = clip.tokenize([s.replace("_", " ").strip() for s in row],
+                                    truncate=True).to(device)        # (L,77)
+                t = model.encode_text(tok)                           # (L,512)
+                t = t / t.norm(dim=-1, keepdim=True)
+                acc = t if acc is None else acc + t
+            acc = acc / acc.norm(dim=-1, keepdim=True)
+        return acc.float().cpu().numpy()

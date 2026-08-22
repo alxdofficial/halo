@@ -9,10 +9,11 @@ ConSE bridge.
 
 Ported from the working legacy adapter + ``evaluate_limubert.py``. Carried over:
 
-  * INPUT CONTRACT (verified in BASELINES.md): 6-ch acc+gyro, 20 Hz, 120 samples
-    (6 s); accelerometer ÷ 9.8 -> g (gravity RETAINED), gyro raw, + the model's
-    internal LayerNorm. Grid windows (native rate/length, g) are mapped to that
-    contract by :mod:`baselines.limubert.prep`; the ÷9.8 is applied here.
+  * INPUT CONTRACT: 6-ch acc+gyro, 20 Hz, 120 samples (6 s); accelerometer in g
+    (gravity RETAINED — upstream's ÷9.8 assumed m/s² input, and our grids already
+    store g; audit F1, 2026-08-22), gyro raw, + the model's internal LayerNorm.
+    Grid windows (native rate/length, g) are mapped to that contract by
+    :mod:`baselines.limubert.prep`.
   * ARCHITECTURE (base_v1): a 4-layer (weight-shared), 72-d Transformer encoder.
     The module below reproduces the upstream ``LIMUBertModel4Pretrain``
     state_dict layout exactly so the self-pretrained checkpoint loads strict.
@@ -51,7 +52,13 @@ N_LAYERS = 4
 N_HEADS = 4
 SEQ_LEN = 120
 FEAT_DIM = HIDDEN
-ACC_NORM = 9.8            # accel ÷ 9.8 -> g, gravity retained
+# 2026-08-22 audit F1: upstream's ÷9.8 (utils.Preprocess4Normalization) assumes m/s² input and
+# exists to bring accel to ~1 in g units. OUR grids already store g, so dividing again fed the
+# backbone acc ≈ 0.10 vs gyro O(0.1-0.5) — ~10x off the acc:gyro balance the architecture was
+# designed around. Grids-in-g ARE the upstream post-normalization convention; no division.
+# The backbone MUST be pretrained with the same convention (train.py applies none either); the
+# head cache is stamped with the backbone content hash, so a stale-convention backbone refits.
+ACC_NORM = 1.0            # grids are already g == upstream's post-÷9.8 convention
 
 # --- head-fit hyperparameters (parity with the harnet ConSE head-fit) ---
 FIT_EPOCHS = 100
@@ -197,7 +204,7 @@ class _Backbone(nn.Module):
 
 
 def _normalize(x6: np.ndarray) -> np.ndarray:
-    """LiMU-BERT normalization: accel ÷ 9.8 -> g (gravity retained), gyro raw."""
+    """LiMU-BERT normalization: accel in g (gravity retained), gyro raw (audit F1: no ÷9.8)."""
     out = x6.copy()
     out[:, :, :3] = out[:, :, :3] / ACC_NORM
     return out
