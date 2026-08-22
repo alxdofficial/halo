@@ -4,7 +4,7 @@
 manifest `adaptation_v1` (61 cells, 7 datasets, 5 seeds, execution-disjoint support/query,
 fingerprint-verified identical across all rows) · **halo_compact** =
 `training/tokenizer/outputs/long_4h_20260821/best.pt` (compact evidence engine, step 35k,
-1.13M trainable params, adapter `baselines/halo_compact`), baseline rows from `v1_d85761d`.
+1,010,790 trainable params (learned scorer off), adapter `baselines/halo_compact`), baseline rows from `v1_d85761d`.
 Macro-F1, coherent labels, dataset-macro aggregation. **Bold = best in column.**
 
 How each row is scored:

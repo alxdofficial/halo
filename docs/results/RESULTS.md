@@ -3,7 +3,7 @@
 > Project-wide index of measured results. Last updated 2026-08-22.
 >
 > **CURRENT HEADLINE — [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md).** The
-> compact evidence engine (`halo_compact`, 1.13M params, d=128) against all seven baselines on
+> compact evidence engine (`halo_compact`, 1,010,790 params, d=128) against all seven baselines on
 > the shared `adaptation_v1` manifest, every method (`nearest`/`prototype`/`ridge`/`linear_head`)
 > at k=1,2,4,8,16 plus `zero_shot` at k=0, in both regimes. **Best in 35 of 40 enrollment
 > columns, including every specialized_novel column at every k**; zero-shot ordinary 36.95
@@ -20,7 +20,7 @@
 
 Manifest `adaptation_v1` (61 cells · 7 datasets · 5 seeds · execution-disjoint support/query),
 fingerprint-identical across every row. `halo_compact` =
-`training/tokenizer/outputs/long_4h_20260821/best.pt` (1.13M params, d=128 — the smallest
+`training/tokenizer/outputs/long_4h_20260821/best.pt` (1,010,790 params, d=128 — the smallest
 features in the table). Macro-F1, coherent labels, dataset-macro. **Bold = best in column.**
 Full per-method/per-k/per-dataset detail: [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md).
 

@@ -1,7 +1,7 @@
 # The compact evidence engine
 
-Status: **implemented end to end; model, trainer, checkpoint reload, and real-corpus smoke tested.**
-Date: 2026-08-20
+Status: **implemented, trained end to end, and scored on the shared eval manifest.**
+Date: 2026-08-20 · **amended 2026-08-21/22** (see the change log at the foot of this file)
 
 ## What changed and why
 
@@ -60,7 +60,16 @@ sensor-isolated, where before those were alternatives.
 `descriptor_prediction=False` drops the 132k descriptor head, which the reference recipe disabled
 and froze on every run.
 
-### 2. Retrieval — a learned pair scorer
+### 2. Retrieval — a learned pair scorer (**RETIRED 2026-08-21 — default is plain cosine**)
+
+> **Status.** Everything in this section is still implemented and still reachable via
+> `PairScorerConfig(learned=True)`, but it is **OFF by default and not part of the shipped model.**
+> An isolation ablation measured the learned scorer at exactly **+0.0000** against plain
+> `cos(patch_q, patch_m)/0.07` on the end task, so it was reverted rather than deleted. Consequence
+> worth stating plainly: the modality/gravity compatibility constraint that this scorer was
+> supposed to re-learn is now **unguarded** — plain cosine has no mechanism for it, and
+> `physics_violation_rate` remains in telemetry as the watchdog. See `DESIGN_AUDIT_20260821.md`.
+
 
 `model/evidence/retrieval_scorer.py::PairScorer`.
 
@@ -182,6 +191,9 @@ asserting the output permutes with it.
 
 Episodic variation is unchanged in spirit: support count k varies per episode, candidate count varies
 2–16, enrollment is partial, and a fraction of episodes replace canonical names with neutral aliases.
+**Updated 2026-08-22: that fraction now defaults to 0.0** — random-alias episodes were removed from
+the default objective (they remain available via `--alias-episode-fraction`, with an optional
+curriculum via `--alias-warmup-steps` / `--alias-ramp-steps`).
 Adaptation is only ever as good as it was taught.
 
 ## Parameter budget
@@ -198,6 +210,13 @@ Adaptation is only ever as good as it was taught.
 **Committed 2026-08-20: `small`.** `EngineConfig()` defaults are exactly this — d_model 128,
 4 heads, FFN 256, 3 trunk layers, 2 mixer layers, top_k 64, n_groups 96, readout `"weights"`
 (1,126,152; `"semantic"` is 1,159,176).
+
+> **⚠️ The SHIPPED model is smaller than this row: 1,010,790 trainable parameters.** On 2026-08-21
+> retrieval reverted to plain cosine (`PairScorerConfig(learned=False)` is the default), which
+> removes the scorer's 115,458 parameters from the trained model. Measured on the shipped
+> checkpoint `training/tokenizer/outputs/long_4h_20260821/best.pt`: trunk 397,696 + mixer 368,774
+> + sensor fold 132,480 + descriptor proj 98,944 + filterbank 12,768 + mask token 128 (frozen
+> during training) = **1,010,790**. Quote that figure, not the table's 1,126,152.
 
 The two readouts differ by 33,024 in the mixer. The frozen text tower (all-MiniLM-L6-v2, 22,713,216)
 is shared, never trained, identical at every size, and reported separately — UniMTS carries a 63.4M
@@ -331,3 +350,24 @@ backward phases are 75% of the step and mostly launch overhead, so the standalon
 measurements suggest roughly 2–3× is available. Deferred deliberately: it needs padded candidate
 sets and block-diagonal memory handling, which is refactor risk ahead of the first real training
 run rather than after it.
+
+
+## Change log since 2026-08-20
+
+| date | change | consequence for this document |
+|---|---|---|
+| 2026-08-21 | Retrieval reverted to **plain cosine**; `PairScorerConfig(learned=False)` is the default | §2 is retired-but-retained; the shipped model is **1,010,790** params, not 1,126,152. The modality/gravity constraint is now unguarded |
+| 2026-08-21 | Residual-branch scaling `1/sqrt(2·n_layers)` added to `SetAttentionStack` | fixes layer-0 \|Δx\|/\|x\| = 2.55 at init |
+| 2026-08-21 | Episode planner draws the **candidate count before the stream** | previously 45% of episodes were binary and chance was 32.8%, not 22.2% — every score before this sat on an inflated floor |
+| 2026-08-22 | **Random-alias episodes removed from the default objective** (`--alias-episode-fraction` → 0.0), optional curriculum flags added | the training-episode description in "Episodes" no longer describes the default |
+| 2026-08-22 | `--frontend` confirmed `fixed` by default; the learnable arm is **inert** (96 params; after 90k steps gate 0.10→0.14, band centres +0.34% mean) | do not attribute results to the learnable filterbank |
+| 2026-08-22 | `--encoder-backbone {ours,harnet,unimts}` swap harness added (`model/tokenizer/baseline_backbone.py`) | third-party encoders can be dropped in with the rest of the engine byte-identical |
+| 2026-08-22 | `baselines/halo_compact` adapter added | the engine is now scored on the shared `adaptation_v1` manifest — see `../results/ADAPTATION_TABLE_20260822.md` |
+
+### What the results say about this design
+
+Best in **35 of 40** enrollment columns, every clinical/rehab column, at d=128. But those columns
+fit *generic* heads on frozen features, so they validate the **encoder**, not the engine. The
+engine's own retrieve→mix→vote rule is scored in exactly one cell — zero-shot k=0 — where it is
+36.95 on ordinary (2nd of 7, no fitted head) and 8.75 on specialized. **Scoring the engine at
+k ≥ 1 against ridge-on-our-own-features is the decisive experiment this design has not yet had.**

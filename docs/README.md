@@ -22,7 +22,7 @@
 
 **2026-08-22.** The current model is the **compact evidence engine** (`halo_compact`): filterbank
 tokenizer → 3-layer temporal trunk (d=128, one row per (patch, sensor)) → **plain cosine**
-retrieval → hard top-64 → evidence mixer → text-cosine vote. **1,126,024 trainable parameters.**
+retrieval → hard top-64 → evidence mixer → text-cosine vote. **1,010,790 trainable parameters** (the 115,458-parameter learned pair scorer exists but is OFF).
 Checkpoint `training/tokenizer/outputs/long_4h_20260821/best.pt`. Scored on the shared
 `adaptation_v1` manifest (61 cells · 7 held-out datasets · 5 seeds · execution-disjoint
 support/query), fingerprint-identical to every baseline row. Full table:
