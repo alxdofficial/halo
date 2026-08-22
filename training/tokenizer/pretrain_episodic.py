@@ -566,6 +566,11 @@ def main() -> None:
     parser.add_argument("--mixing", choices=("attention", "off"), default="attention",
                         help="'off' removes the evidence mixer entirely: the weight is the "
                              "retrieval score and the label vectors are the frozen row text")
+    parser.add_argument("--encoder-backbone", choices=("ours", "harnet", "unimts"), default="ours",
+                        help="swap a pretrained third-party backbone in for our encoder; the rest "
+                             "of the engine is unchanged")
+    parser.add_argument("--freeze-backbone", action="store_true",
+                        help="with --encoder-backbone: train only the projection to d_model")
     parser.add_argument("--frontend", choices=("fixed", "learnable"), default="fixed",
                         help="'learnable' lets the filterbank's filter parameters train instead of "
                              "staying at their physical initialisation (random-init runs only)")
@@ -751,17 +756,33 @@ def main() -> None:
         config = dict(checkpoint["config"])
         source = str(args.checkpoint)
     else:
-        encoder, config = _random_encoder(device, frontend=args.frontend)
+        if args.encoder_backbone != "ours":
+            from model.tokenizer.baseline_backbone import BaselineRowEncoder
+            encoder = BaselineRowEncoder(args.encoder_backbone, d_model=128,
+                                         freeze=args.freeze_backbone, device=device).to(device)
+            config = {"encoder_backbone": args.encoder_backbone,
+                      "freeze_backbone": bool(args.freeze_backbone), "d_model": 128}
+            trainable = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
+            print(f"[phase-b] backbone={args.encoder_backbone} "
+                  f"{'FROZEN' if args.freeze_backbone else 'fine-tuned'} "
+                  f"trainable encoder params {trainable:,}", flush=True)
+        else:
+            encoder, config = _random_encoder(device, frontend=args.frontend)
         source = "random-init"
     if encoder.trunk != "temporal" or encoder.token_granularity != "sensor":
         raise SystemExit(
             "Phase B accepts only the compact temporal sensor encoder; train/reload Phase A with "
             "--trunk temporal --token-granularity sensor"
         )
-    if encoder.use_sensor_bias_conditioning:
+    if getattr(encoder, "use_sensor_bias_conditioning", False):
         raise SystemExit("compact Phase B does not consume the legacy source-specific sensor bias")
-    frontend = encoder.filterbank
-    if args.random_init:
+    # A third-party backbone has no physical filterbank to calibrate and no mask token to freeze:
+    # it arrives pretrained with its own input contract, handled inside BaselineRowEncoder.
+    is_baseline_backbone = not hasattr(encoder, "filterbank")
+    frontend = None if is_baseline_backbone else encoder.filterbank
+    if is_baseline_backbone:
+        pass
+    elif args.random_init:
         print(f"[phase-b] calibrating filterbank on {args.calib_batches} episode batches", flush=True)
         frontend.reset_norm_accumulator()
         for batch_index, batch in enumerate(train_loader):
@@ -781,7 +802,8 @@ def main() -> None:
             "the supplied Phase-A checkpoint has no fitted filterbank normalization; refusing "
             "to train Phase B on identity-scaled physical features"
         )
-    encoder.mask_token.requires_grad_(False)
+    if not is_baseline_backbone:
+        encoder.mask_token.requires_grad_(False)
     if args.freeze_encoder:
         encoder.requires_grad_(False)
 
