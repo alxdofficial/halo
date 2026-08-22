@@ -140,6 +140,40 @@ How each row is scored:
 | imagebind | 18.84 | 13.02 | 6.02 | 7.64 | **11.38** | 5.69 | 11.78 | 6.97 | **8.15** |
 | normwear | 8.60 | 5.11 | 4.82 | 1.80 | **5.08** | 0.76 | 6.10 | 3.87 | **3.58** |
 
+## What actually improved — old HALO vs the compact engine
+
+Same manifest, same baselines, same methods. `halo` = the Phase-A checkpoint scored in
+[`ADAPTATION_TABLE_20260819.md`](ADAPTATION_TABLE_20260819.md); `halo_compact` = this table. This
+comparison matters because it says *where* the gain is, and therefore which claims may be
+strengthened and which may not.
+
+| regime · method | k | old `halo` | `halo_compact` | Δ |
+|---|---:|---:|---:|---:|
+| ordinary · zero_shot | 0 | 27.43 | **36.95** | **+9.52** |
+| ordinary · prototype | 1 | 55.80 | 56.24 | +0.44 |
+| ordinary · prototype | 4 | 62.41 | 62.64 | +0.23 |
+| ordinary · prototype | 16 | 57.44 | 58.58 | +1.14 |
+| specialized · zero_shot | 0 | 9.81 | 8.75 | **−1.06** |
+| specialized · prototype | 1 | 36.78 | **43.06** | **+6.28** |
+| specialized · prototype | 4 | 46.38 | **58.05** | **+11.67** |
+| specialized · prototype | 16 | 50.66 | **63.00** | **+12.34** |
+
+**The gain is concentrated in two places, and absent in two others.**
+
+1. **Clinical/rehab (specialized) enrollment: transformed.** +6 to +12 points, and it flips the
+   ranking — old HALO *lost* to UniMTS at k=1, 4, 8 and 16 on specialized prototype; the compact
+   engine wins every specialized column against every baseline. This is the single largest change
+   in the project's evidence.
+2. **Ordinary zero-shot: +9.5**, moving from last among the real contenders to second of seven.
+3. **Ordinary enrollment: essentially unchanged** (+0.2 to +1.1). Old HALO was already best here;
+   the compact engine holds that, at a fifth of the parameters, but does not extend it.
+4. **Specialized zero-shot: slightly worse** (−1.06), and still 5th of 7.
+
+So "the model got better, therefore the claims can be stronger" is only true for the clinical
+few-shot regime and for ordinary zero-shot. It is **not** an argument for strengthening any
+ordinary-enrollment claim, and it is an argument *against* any zero-shot claim on novel clinical
+labels.
+
 ## Reading
 
 * **Enrollment (the project's claim): halo_compact leads 35 of 40 method×k columns**, including
