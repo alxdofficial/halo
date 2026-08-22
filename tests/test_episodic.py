@@ -570,3 +570,45 @@ def test_shared_stream_episodes_keep_the_requested_candidate_distribution():
     # Both counts must be well represented even though only 2 of 12 streams can host C=8.
     assert counts[8] / len(plans) > 0.35, counts
     assert counts[2] / len(plans) > 0.35, counts
+
+
+# --- alias curriculum (2026-08-22) -------------------------------------------------------------
+def test_alias_curriculum_is_none_when_disabled():
+    from training.tokenizer.pretrain_episodic import alias_curriculum
+    assert alias_curriculum(100, 4, 0.5, 0, 0) is None
+
+
+def test_alias_curriculum_holds_then_ramps_then_saturates():
+    from training.tokenizer.pretrain_episodic import alias_curriculum
+    schedule = alias_curriculum(4 * 40, 4, 0.5, 10, 10)   # 4 ep/step, hold 10, ramp 10 -> 0.5
+    assert schedule is not None
+    step = np.arange(4 * 40) // 4
+    assert schedule[step < 10].max() == 0.0                       # warmup: no alias at all
+    assert schedule[step == 15][0] == pytest.approx(0.25)         # halfway up the ramp
+    assert schedule[step >= 20].min() == pytest.approx(0.5)       # saturated at the target
+    assert schedule.max() <= 0.5
+
+
+def test_alias_schedule_controls_label_mode_per_episode():
+    """All-zero schedule => no alias episodes; all-one => alias whenever the episode has support."""
+    table, _keys, _subjects = _synthetic_table()
+    spec = _spec(alias_episode_fraction=0.5)
+    pool = eligible_labels(table, spec)
+    n = 64
+    zero = build_episode_plans(table, pool, n_episodes=n, spec=spec, seed=7,
+                               alias_schedule=np.zeros(n))
+    one = build_episode_plans(table, pool, n_episodes=n, spec=spec, seed=7,
+                              alias_schedule=np.ones(n))
+    assert all(p.label_mode == "coherent" for p in zero)
+    aliased = [p for p in one if p.support_positions]
+    assert aliased and all(p.label_mode == "random_alias" for p in aliased)
+
+
+def test_alias_schedule_none_matches_flat_fraction():
+    """The default path is unchanged by the schedule parameter existing."""
+    table, _keys, _subjects = _synthetic_table()
+    spec = _spec(alias_episode_fraction=0.5)
+    pool = eligible_labels(table, spec)
+    a = build_episode_plans(table, pool, n_episodes=32, spec=spec, seed=11)
+    b = build_episode_plans(table, pool, n_episodes=32, spec=spec, seed=11, alias_schedule=None)
+    assert [p.label_mode for p in a] == [p.label_mode for p in b]

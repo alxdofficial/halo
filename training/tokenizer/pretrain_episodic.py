@@ -210,17 +210,42 @@ def _matched_validation_plans(
     return out
 
 
+def alias_curriculum(
+    n_episodes: int, episodes_per_step: int, target: float, warmup_steps: int, ramp_steps: int,
+) -> np.ndarray | None:
+    """Per-episode alias fraction: 0 for `warmup_steps`, then linear to `target` over `ramp_steps`.
+
+    Random-alias episodes are a CAPABILITY TARGET (physiotherapy-style labels such as "exercise 1",
+    where the name carries no usable linguistics), not an augmentation. Presenting them from step 0
+    at full strength asks the model to learn evidence-only classification before it can classify at
+    all. The curriculum builds the coherent base first and introduces the harder regime once there
+    is something to make harder. `warmup_steps=0 and ramp_steps=0` reproduces the flat schedule
+    exactly, so the default path is unchanged.
+    """
+    if warmup_steps <= 0 and ramp_steps <= 0:
+        return None
+    step = np.arange(n_episodes) // max(episodes_per_step, 1)
+    if ramp_steps > 0:
+        fraction = np.clip((step - warmup_steps) / float(ramp_steps), 0.0, 1.0)
+    else:
+        fraction = (step >= warmup_steps).astype(np.float64)
+    return (fraction * float(target)).astype(np.float64)
+
+
 def _make_plans(
     table, stream_table, pool, spec, streams, executions, *, n_episodes, seed, schedule=None,
+    alias_schedule=None,
 ) -> list[EpisodePlan]:
     if spec.shared_query_stream:
         return build_shared_stream_plans(
             table, stream_table, pool, n_episodes=n_episodes, spec=spec, seed=seed,
             stream_ids=streams, support_schedule=schedule, execution_ids=executions,
+            alias_schedule=alias_schedule,
         )
     return build_episode_plans(
         table, pool, n_episodes=n_episodes, spec=spec, seed=seed,
         support_schedule=schedule, stream_ids=streams, execution_ids=executions,
+        alias_schedule=alias_schedule,
     )
 
 
@@ -520,6 +545,11 @@ def main() -> None:
     parser.add_argument("--max-support", type=int, default=4)
     parser.add_argument("--bank-windows", type=int, default=512)
     parser.add_argument("--alias-episode-fraction", type=float, default=0.5)
+    parser.add_argument("--alias-warmup-steps", type=int, default=0,
+                        help="steps with NO random-alias episodes before the curriculum starts")
+    parser.add_argument("--alias-ramp-steps", type=int, default=0,
+                        help="steps to ramp the alias fraction linearly up to "
+                             "--alias-episode-fraction (0 = step change)")
     parser.add_argument("--disjointness", choices=("subject", "stream"), default="stream")
     parser.add_argument("--no-shared-query-stream", action="store_true")
     parser.add_argument("--holdout-label-fraction", type=float, default=0.2)
@@ -646,9 +676,16 @@ def main() -> None:
     print(f"[phase-b] concepts: {len(train_pool)} train / {len(val_pool)} held out", flush=True)
 
     n_train = args.steps * args.episodes_per_step
+    train_alias = alias_curriculum(
+        n_train, args.episodes_per_step, args.alias_episode_fraction,
+        args.alias_warmup_steps, args.alias_ramp_steps,
+    )
+    if train_alias is not None:
+        print(f"[phase-b] alias curriculum: 0.0 for {args.alias_warmup_steps} steps, "
+              f"ramp over {args.alias_ramp_steps} -> {args.alias_episode_fraction}", flush=True)
     train_plans = _make_plans(
         train_table, train_stream_table, train_pool, train_spec, train_stream, train_execution,
-        n_episodes=n_train, seed=args.seed,
+        n_episodes=n_train, seed=args.seed, alias_schedule=train_alias,
     )
     bank_spec = BankSpec(n_windows=args.bank_windows)
     # A held-out concept is absent from the whole Phase-B objective, not merely absent as a query.

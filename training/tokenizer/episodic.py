@@ -303,6 +303,7 @@ def build_episode_plans(
     stream_ids: np.ndarray | None = None,
     query_table: dict[int, dict[int, np.ndarray]] | None = None,
     execution_ids: np.ndarray | None = None,
+    alias_schedule: np.ndarray | None = None,
 ) -> list[EpisodePlan]:
     """Materialise every episode up front.
 
@@ -344,9 +345,13 @@ def build_episode_plans(
         # Enrollment is PARTIAL by construction. With a uniform count every episode is either
         # "nothing enrolled" or "everything enrolled", and neither teaches the model to weigh
         # enrolled evidence against text evidence within one decision.
+        alias_fraction = (
+            spec.alias_episode_fraction if alias_schedule is None
+            else float(alias_schedule[len(plans)])
+        )
         label_mode = (
             "random_alias"
-            if support_k > 0 and rng.random() < spec.alias_episode_fraction else "coherent"
+            if support_k > 0 and rng.random() < alias_fraction else "coherent"
         )
         enrolled = (
             set(range(n_candidates))
@@ -470,6 +475,7 @@ def build_shared_stream_plans(
     stream_ids: np.ndarray,
     support_schedule: tuple[int, ...] | None = None,
     execution_ids: np.ndarray | None = None,
+    alias_schedule: np.ndarray | None = None,
 ) -> list[EpisodePlan]:
     """Episodes whose every query comes from ONE acquisition stream.
 
@@ -537,6 +543,9 @@ def build_shared_stream_plans(
         stream = int(rng.choice(capable[n_candidates]))
         labels = usable[stream]
         episode_spec = dataclasses.replace(spec, candidate_counts=(n_candidates,))
+        if alias_schedule is not None:
+            episode_spec = dataclasses.replace(
+                episode_spec, alias_episode_fraction=float(alias_schedule[episode]))
         schedule = None if support_schedule is None else (
             support_schedule[len(plans) % len(support_schedule)],
         )
