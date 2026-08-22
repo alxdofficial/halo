@@ -1,5 +1,25 @@
 # Why Phase-B training plateaus — diagnosis, 2026-08-20
 
+> ## ⚠️ Partly falsified — 2026-08-22
+>
+> **The mechanism findings STAND** (retrieval ranks by acquisition configuration ×7.0;
+> same-activity/different-device support rows at the 39th percentile; names-vs-signals r = 0.11;
+> the trained vote being worse than uniform). Those are measurements on fixed checkpoints and
+> nothing since has contradicted them.
+>
+> **The "more steps do not help" row is WRONG.** This document's table rules out "the step budget
+> is too small" on the grounds that the plateau is reached by step 250 and 6,000 steps add nothing.
+> A 90,000-step run on 2026-08-21 reached **0.5424** against ~0.457 on the 6k schedule — the
+> plateau was a **cosine learning-rate schedule collapsing to zero by 6k**, not signal exhaustion.
+> Coherent-cell learning continues past 15k (0.5722 over steps 15–30k vs 0.5894 over 45–65k,
+> t = 2.87).
+>
+> **But do not over-correct.** A noise analysis of that same run shows the 0.5424 peak is about
+> what a maximum over 76 validation points of a *flat* plateau (mean 0.512, sd 0.0135) produces by
+> chance. So: longer training is genuinely better than 6k, the gain is real but modest, and
+> **best-checkpoint selection carries roughly +0.03 of inflation** that every reported "best"
+> number in this project inherits.
+
 Branch `phase-b-diagnostics`. Every number below is measured; the scripts are
 `training/evidence/phase_b_autopsy.py` and `training/evidence/phase_b_bottleneck.py`.
 
