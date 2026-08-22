@@ -10,6 +10,17 @@
 >
 > What remains current is §1–§4 (what the approach is *for*, and how to report it) and the
 > experiment designs in §5–§7.
+>
+> **Current numbers live in [`../results/ADAPTATION_TABLE_20260822.md`](../results/ADAPTATION_TABLE_20260822.md)**
+> (compact evidence engine, 1,010,790 params: best in 35/40 enrollment columns and every
+> clinical/rehab column; zero-shot ordinary 36.95, specialized 8.75). Two framing consequences
+> for this document:
+> 1. The strongest evidence is **few-shot enrollment**, not zero-shot. §1's "as a product claim:
+>    no / as a research claim: yes" split holds, and the enrollment result is the concrete form of
+>    the research claim.
+> 2. The enrollment columns fit **generic heads on frozen features**, so they establish the
+>    representation. The engine's own rule is scored only at k=0. Any positioning that credits the
+>    *evidence engine* for the 35/40 is overclaiming — see `MOTIVATION.md`'s evidence-status banner.
 
 > **Status: decision notes, 2026-07-21.** Written to answer one question: *is a HAR model that
 > generalizes zero-shot to unseen datasets, configs and labels worth pursuing, and would the end

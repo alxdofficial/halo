@@ -4,6 +4,24 @@
 >
 > Status: implementation-aligned as of 2026-08-17. The relational evidence decoder is not the
 > active design. Phase B now starts with a closed-form predictor and a small admissibility gate.
+>
+> ## ⚠️ SUPERSEDED ARCHITECTURE — 2026-08-22
+>
+> **The closed-form predictor + admissibility gate described below is no longer the active
+> design.** It was replaced by the **compact evidence engine**
+> ([`COMPACT_EVIDENCE_ENGINE.md`](COMPACT_EVIDENCE_ENGINE.md)), which is what the code implements
+> and what the current results measure:
+>
+> | this document says | the code now does |
+> |---|---|
+> | admissibility-gated retrieval, `cosine/τ + log(admissibility)` | **plain `cos(patch_q, patch_m)/0.07`**, no gate — the learned pair scorer measured +0.0000 and is off |
+> | a fitted low-rank admissibility gate artifact (Stage 1) bound to a memory bank | **no gate**; the engine is trained end to end from random init |
+> | closed-form prediction rule | **learned evidence mixer** (set attention over candidates + query + top-64 rows) then a text-cosine vote |
+> | arbitrary-alias episodes as a standing regime | **removed from the default objective 2026-08-22** (`--alias-episode-fraction` = 0.0) |
+>
+> What is still current here: the *motivation* for memory as an adaptation mechanism, and the
+> standard of evidence it demands. What is stale: every mechanism description and every Stage-1/2
+> artifact contract. Read this for intent, `COMPACT_EVIDENCE_ENGINE.md` for the design.
 
 `docs/design/DESIGN_OF_RECORD.md` gives the full design history and evidence. This document states
 only the current training and evaluation contract. `training/evidence/README.md` gives commands.
