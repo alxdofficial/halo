@@ -150,6 +150,11 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   retracted and its conclusion inverted**: it argues from protocol-v4 numbers that we lose on
   accuracy, which is no longer true for the enrollment regime it is about. Bannered.
 - [LANGUAGE_HIERARCHY.md](design/LANGUAGE_HIERARCHY.md) — language at every level; a second act.
+- [**CONTINUOUS_KERNEL_FRONTEND.md**](design/CONTINUOUS_KERNEL_FRONTEND.md) — a CNN whose kernels are
+  continuous curves in **real time** (seconds), sampled at whatever rate the signal arrives at.
+  Brainstorm + build plan; nothing built. Its decisive test is **cross-rate transfer**, not
+  accuracy — which makes it the *mechanism* form of the config thesis whose language form measured
+  inert.
 
 ## `data/` — the corpus
 - [DATA_PIPELINE.md](data/DATA_PIPELINE.md) — source → curate → unit→g → resample → window → grids.
