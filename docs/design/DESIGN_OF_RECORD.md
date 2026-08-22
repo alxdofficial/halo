@@ -1,7 +1,30 @@
 # HALO — design of record
 
 Agreed 2026-08-11; Phase-A recipe updated 2026-08-18. Supersedes the Phase-A/B design in `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`
-and `EVIDENCE_ENGINE_*` for anything they disagree on. Written to be re-read at the start of a
+and `EVIDENCE_ENGINE_*` for anything they disagree on.
+
+> ## ⚠️ Phase-B sections are SUPERSEDED — 2026-08-22
+>
+> Phase A here is current. **Every Phase-B mechanism section below — the admissibility gate, the
+> joint retrieval score `feature cosine / temperature + log(admissibility)`, the closed-form Stage-1
+> predictor and its artifacts — describes a design the code no longer implements.** The active
+> design is the compact evidence engine
+> ([`COMPACT_EVIDENCE_ENGINE.md`](COMPACT_EVIDENCE_ENGINE.md)): plain `cos(patch_q, patch_m)/0.07`
+> retrieval with **no gate**, hard top-64, a learned evidence mixer, a text-cosine vote, trained end
+> to end from random init at 1,010,790 parameters.
+>
+> **The thesis paragraph below needs the same care.** Its centrepiece — configuration calibrating
+> the *admissibility* of retrieved evidence, so a pocket phone cannot vote on an arm gesture — is
+> the claim the deleted gate was built to instantiate. There is currently **no admissibility
+> mechanism in the model at all**, and the measured result that retired it is in
+> `../results/PHASE_B_TRAINING_STATUS.md`: learned admissibility had no held-out advantage over
+> setting admissibility to one. Constraint 4 below ("learned readouts have lost to their closed
+> forms twice") is the honest frame, and the compact engine is the third attempt at beating them.
+>
+> What the current evidence supports instead is in
+> [`../results/ADAPTATION_TABLE_20260822.md`](../results/ADAPTATION_TABLE_20260822.md): a compact
+> encoder whose frozen features win 35/40 enrollment columns. That is a representation claim, not
+> an admissibility claim. Do not carry this thesis paragraph into a draft unmodified. Written to be re-read at the start of a
 session; every non-obvious choice carries the reason it was made, because most of them were reached
 by eliminating an alternative that looked better.
 
