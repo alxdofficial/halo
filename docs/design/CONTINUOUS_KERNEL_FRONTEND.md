@@ -259,3 +259,119 @@ demonstrate twice.
 rate transfer by more than the between-run noise band, it is not worth its complexity, and the
 correct action is to record the negative result beside the EfficientLEAF citation and keep the
 filterbank.
+
+
+---
+
+# THE PROPOSED DESIGN (spec — build this)
+
+Everything above is the reasoning. This section is the decision.
+
+## S1. Kernel parametrisation — a truncated Fourier series in normalised time
+
+Each kernel `k` is a continuous function of normalised time `u = t/T_k ∈ [-½, ½]`:
+
+```
+w_k(u) = envelope_k(u) · Σ_{m=1..M} [ a_km · cos(2π m u) + b_km · sin(2π m u) ]
+envelope_k(u) = exp( -u² / (2 σ_k²) )                       # σ_k learnable (FlexConv's learned extent)
+```
+
+**M = 8 harmonics ⇒ 16 numbers per kernel**, which is exactly the "16 numbers forming a curve"
+formulation. Why this basis rather than control points + spline:
+
+- **Band-limiting is exact, not approximate.** Harmonic `m` sits at precisely `m/T_k` Hz. Dropping
+  the ones above Nyquist is a mask on a coefficient, not a smoothing heuristic. This is the fix for
+  §2.4(c), the failure mode with no filterbank analogue.
+- **Zero-mean is free.** No `m = 0` term ⇒ `∫w = 0` by construction ⇒ kernels cannot measure
+  gravity/DC (§3.2), which stays a separate signed feature.
+- **Gabor init is a one-liner.** Set `a_k4 = 1`, everything else 0, and the kernel *is* a Gabor
+  wavelet at the carrier — i.e. step 0 ≈ the filterbank we know works (§3.6).
+
+## S2. Span grid — carrier at harmonic 4 makes it constant-Q
+
+```
+f_k        : 32 log-spaced centres over [0.3, 15.0] Hz     # identical to FB_F_MIN_HZ/FB_F_MAX_HZ
+N_CYCLES   : 4                                             # carrier sits at harmonic m = 4
+T_k        : clamp(N_CYCLES / f_k, 0.05 s, 4.0 s)          # span in SECONDS
+```
+
+With the carrier at `m = 4`, harmonics 1–8 span `[f_k/4, 2f_k]` — a constant relative bandwidth,
+which is the constant-Q property arriving from the time side instead of the frequency side. The
+4-second clamp is the window budget; low-frequency kernels that hit it are flagged
+resolution-limited exactly as `FB_RESOLUTION_MIN_CYCLES` does today.
+
+## S3. Sampling at the signal's rate
+
+```
+taps_k(r) = max(round(T_k · r), 3)
+u_n       = (n - (taps_k-1)/2) / taps_k          n = 0 … taps_k-1
+w_k[n]    = w_k(u_n)                              evaluated in FP32
+```
+
+Then, in order, and none of these is optional:
+
+1. **Per-harmonic band-limit.** Zero coefficient `m` where `m/T_k > 0.9 · r/2`. (Measured: at 20 Hz
+   this keeps 84% of harmonics and 27 of 32 kernels — the filterbank keeps 26 of 32 bands at the
+   same rate, so the two mask comparably by construction.)
+2. **Integral, not sum.** Multiply by `dt = 1/r`, or equivalently renormalise `w_k[n]` to unit L2
+   *after* sampling. **Without this the response scales with sampling rate and the model learns to
+   identify the device** — the ×7.0 acquisition-configuration failure, re-entered through the front
+   door.
+3. **Re-zero-mean after sampling.** Discretisation breaks the exact `∫w = 0`; subtract the mean.
+
+## S4. Where it runs, and what it emits
+
+Runs on the **contiguous window before patching** (long kernels do not fit a 1 s patch), then slices
+its output back into patches so the encoder contract is unchanged. Reconstruct the window from
+`patches` + `patch_len` + `patch_padding_mask` by indexing valid samples — the same `searchsorted`
+over cumulative patch lengths already written in `model/tokenizer/baseline_backbone.py`.
+
+```
+F = 8 output frames per second (fixed, rate-independent) → 8 frames per 1 s patch
+per frame f, channel c, kernel k:
+    quadrature response  z = (w_k^cos * x)[t_f] + i·(w_k^sin * x)[t_f]
+    magnitude            e = |z|          → log1p compression → frozen per-band standardisation
+per (patch, channel) token, concatenate:
+    mean_f(e) (K) ‖ max_f(e) (K) ‖ std_f(e) (K) ‖ nyquist_mask (K) ‖ resolution_flag (K)
+      ‖ amplitude (1) ‖ signed DC (1)                                  = 5K + 2 = 162 for K = 32
+    → shared Linear(162 → d_model)
+```
+
+`mean/max/std` over the 8 frames is what buys the **temporal localisation** the DFT path cannot
+give, while keeping one token per (patch, sensor) so nothing downstream changes.
+
+## S5. Budget, contract, integration
+
+| | |
+|---|---|
+| analysis params | 32 × 16 coeffs + 32 σ + 32 gains = **576** |
+| projection | `Linear(162 → 128)` = 20,864 |
+| **total** | **≈ 21,440** (filterbank: 12,672 + 96) |
+| contract | `forward(patches, sampling_rate_hz, patch_len_samples, source_rate_hz) → (B,P,C,d)` — drop-in |
+| selection | extend to `--frontend {fixed, learnable, continuous}`; **no other file changes** |
+| precision | FP32 island for kernel sampling and the dot product, as the filterbank already does |
+| cost note | long kernels dominate; they are band-limited by construction, so evaluate them on a decimated copy of the signal |
+
+## S6. Tests that must exist before any training run
+
+1. **Rate agreement (the important one).** One synthetic signal resampled to 20/25/50/100 Hz →
+   outputs agree within tolerance. This is the property the whole design exists for, and it is the
+   class of bug that bit the encoder-swap harness on 2026-08-22.
+2. **Zero-mean.** A pure DC input produces ~zero response on every kernel.
+3. **Amplitude linearity.** Scaling the input scales the pre-compression magnitude proportionally.
+4. **Gabor-init equivalence.** At init, per-band output correlates > 0.95 with
+   `PhysicalFilterbankTokenizer`'s. If it does not, the two arms do not start from the same place
+   and no later comparison is attributable to learning.
+5. **Padding isolation.** Poisoning the padded region leaves the output unchanged.
+
+## S7. The experiment, and the pre-registered kill criterion
+
+Order: build + tests (S6) → frozen-probe sanity on the existing 24k/6k protocol (expect a tie) →
+**the cross-rate transfer experiment**: train on a rate-restricted subset (50 Hz sources only),
+evaluate on held-out 20 Hz and 100 Hz sources, `fixed` vs `continuous`, matched seed and schedule.
+
+**Kill criterion.** If `continuous` does not beat `fixed` on held-out rate transfer by more than the
+between-run noise band, it does not earn its complexity: record the negative result beside the
+EfficientLEAF citation and keep the filterbank. Given that our learnable-filterbank arm is inert and
+the frozen bank already beats a raw CNN, **the prior is that this fails** — which is exactly why the
+criterion is written down before the run rather than after it.
