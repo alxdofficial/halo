@@ -1,7 +1,9 @@
 # Baseline roster, contracts, and comparison design
 
 The authoritative, paper-ready reference for **which baselines we compare against, how each is run, and how
-we report results.** Every contract below was **verified against the actual paper + code** (2026-07-12).
+we report results.** Every contract below was **verified against the actual paper + code** (2026-07-12), and re-verified
+against each upstream repo's preprocessing on **2026-08-22** — see §3b for the two corrections that
+sweep produced.
 Companion docs: `BASELINE_FAIRNESS_POLICY.md` (the treatment contract), `MOTIVATION.md` (why HALO),
 `AUGMENTATIONS.md` (the conditioning experiment).
 
@@ -67,6 +69,21 @@ discarding their pretraining. NormWear, being channel-independent, receives the 
 **HALO parity row run on the 3-channel accelerometer-only input at each frozen baseline's rate.** If HALO
 still wins at 3-ch accel-only, the advantage is architecture + language, not the extra gyro. This parity
 row is the load-bearing defense; the "each model gets its published max" statement is the framing around it.
+
+### 3b. Two contract corrections — 2026-08-22 audit
+
+A full sweep of the eval path against each upstream repo
+([`../results/EVAL_HARNESS_AUDIT_20260822.md`](../results/EVAL_HARNESS_AUDIT_20260822.md)) found the
+scoring code sound but two places where a baseline was **not used as its developers intended**. Both
+are now fixed in code, and both corrections favour the baseline — which is the honest direction.
+
+| # | Baseline | What was wrong | Status |
+|---|---|---|---|
+| F1 | **LiMU-BERT** | Upstream `Preprocess4Normalization` divides accel by 9.8 because *its* datasets store m/s²; the model is designed to see accel ≈ 1 in **g**. Our grids **already store g**, and both our SSL pretrain and the adapter divided again — the backbone saw accel ≈ 0.10 against gyro O(0.1–0.5), about **10× off the designed accel:gyro balance**. | Both divisions removed. **Its backbone must be re-pretrained**; until then an adapter guard refuses the old-convention checkpoint rather than emitting a valid-looking wrong number. Every published LiMU-BERT figure predates the fix. |
+| F2 | **UniMTS** | Upstream evaluates with **enriched** label text — each class's whole `label_dictionary` synonym list joined into one string (`data.py`: `' '.join(labels)`). We passed the bare class name, while our own `halo_evidence` row already ensembled E=8 paraphrases. | `encode_labels` now averages the shared **train-only** paraphrase pool (E=8, variant 0 = the raw label) through UniMTS's *own* CLIP tower. Affects zero-shot only — enrollment methods read no label text. |
+
+Rule this establishes: **an input-contract claim in this file is only trustworthy once it has been
+checked against the upstream repo's own preprocessing code**, not against its paper text alone.
 
 ## 4. Evaluation & reporting design
 

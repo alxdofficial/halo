@@ -9,7 +9,10 @@
 >    — what Phase A actually is, as built, and the artifact handed to Phase B.
 > 4. [**design/PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — what Phase B is,
 >    why memory is an adaptation mechanism, and the evidence required before claiming it works.
-> 5. [**results/PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the current
+> 5. [**results/ADAPTATION_TABLE_20260822.md**](results/ADAPTATION_TABLE_20260822.md) — **the
+>    current headline result.** The compact evidence engine against all seven baselines on the
+>    shared manifest, every method at every k. Supersedes the 2026-08-19 table.
+> 6. [**results/PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the current
 >    Phase-B run history, matched tables, confirmed defects, and next-run requirements.
 >
 > Then take every number from Results below, and nothing at all from
@@ -17,32 +20,69 @@
 
 ## Current Matched Results
 
-The matched adaptation-v1 suite was completed on 2026-08-17 over seven held-out test datasets, five
-serialized episode seeds, HALO, and six external representations. It reports ordinary and
-specialized-novel activities separately. Full enrollment curves and controls are in
-[`results/PHASE_B_TRAINING_STATUS.md`](results/PHASE_B_TRAINING_STATUS.md); generated tables are in
-`eval/adaptation_tables/v1_d85761d_stage2/`.
+**2026-08-22.** The current model is the **compact evidence engine** (`halo_compact`): filterbank
+tokenizer → 3-layer temporal trunk (d=128, one row per (patch, sensor)) → **plain cosine**
+retrieval → hard top-64 → evidence mixer → text-cosine vote. **1,126,024 trainable parameters.**
+Checkpoint `training/tokenizer/outputs/long_4h_20260821/best.pt`. Scored on the shared
+`adaptation_v1` manifest (61 cells · 7 held-out datasets · 5 seeds · execution-disjoint
+support/query), fingerprint-identical to every baseline row. Full table:
+[`results/ADAPTATION_TABLE_20260822.md`](results/ADAPTATION_TABLE_20260822.md).
 
-| semantic k=0 method | ordinary macro F1 | specialized-novel macro F1 |
+### Zero-shot, k = 0 — each model's own shipped mechanism
+
+| model | ordinary macro F1 | specialized-novel macro F1 |
 |---|---:|---:|
 | CrossHAR + ConSE | **37.01** | 10.88 |
+| **HALO compact engine** | 36.95 | 8.75 |
 | HARNet + ConSE | 33.82 | 11.40 |
-| UniMTS + ConSE | 32.70 | **19.24** |
+| UniMTS (own text tower) | 32.70 | **19.24** |
 | LiMU-BERT + ConSE | 27.60 | 9.11 |
-| HALO Stage 2 | 23.75 | 9.81 |
-| ImageBind + ConSE | 11.38 | 8.15 |
-| NormWear + ConSE | 5.08 | 3.58 |
+| ImageBind (own text tower) | 11.38 | 8.15 |
+| NormWear (L1 text match) | 5.08 | 3.58 |
 
-HALO's labeled-memory path shows real adaptation under support-removal and label-shuffle controls,
-but the learned admissibility gate is near or below identity retrieval and does not beat the strongest
-external frozen-feature linear heads. This is the current result; the older protocol-v4 table remains
-historical and is indexed in [`results/RESULTS.md`](results/RESULTS.md).
+HALO's row is the only one produced with **no fitted head** — the engine's native
+retrieve→mix→vote rule. The specialized-novel 8.75 is weak and expected: the memory bank holds no
+clinical motions and their names do not project onto the training vocabulary. That is precisely
+the case enrollment exists for — one enrolled example takes it to ≈43.
+
+### Enrollment, k ≥ 1 — and the nuance that matters
+
+**HALO is best in 35 of 40 method×k enrollment columns**, including *every* specialized-novel
+column at every k, at d=128 (baselines 512–2048). The five it loses are all `ordinary` at high k
+(nearest k=4/8/16, linear_head k=8/16) — everyday activities with many labelled examples, where a
+larger frozen feature has room to be fitted. Per-dataset margins are positive in 34/44
+comparisons against the strongest baseline per column, typically +1 to +7 F1.
+
+> ⚠️ **Read this before citing the 35/40.** Those enrollment columns fit *generic* heads
+> (nearest/prototype/ridge/linear_head) on each model's **frozen features**, with identical code
+> for every model. So they demonstrate that **our encoder's representation** is strong — they do
+> **not** demonstrate that our *engine* works. The engine's own mechanism is scored in exactly one
+> place: zero-shot k=0. Scoring the engine at k ≥ 1 (enrolled rows placed in the memory bank,
+> native rule, versus ridge on our own features) is **not yet done** and is the decisive
+> outstanding experiment.
+
+Caveats bound to this table: `limubert` rows predate the 2026-08-22 accel-scale fix
+([`results/EVAL_HARNESS_AUDIT_20260822.md`](results/EVAL_HARNESS_AUDIT_20260822.md) F1) and may
+understate it — its backbone re-pretrain is pending; `unimts` zero-shot predates the label-text
+ensemble fix (F2). Enrollment methods read no label text, so those columns are unaffected. The
+older protocol-v4 (93-label) zero-shot table is stale **for every model** and is indexed in
+[`results/RESULTS.md`](results/RESULTS.md).
 
 ### Retracted — do not cite
 - the **49.5 "beats harnet"** evidence-decoder headline — retracted twice: first for eval-label text
   contamination plus eval-tuned hyperparameters, then again after the vocabulary fix;
 - the **r = −0.973** seen-vs-unseen correlation — re-measured at −0.328, p = 0.47;
 - the **learnable filterbank** as a contribution — measured inert; the gain was multiresolution.
+
+### Also do not cite
+- the **random-alias training objective** as part of the recipe — removed from the default on
+  2026-08-22 (`--alias-episode-fraction` defaults to 0.0). It remains available behind the flag,
+  with an optional curriculum (`--alias-warmup-steps` / `--alias-ramp-steps`).
+- the **"Phase-B plateaus at 0.45 / the signal is exhausted"** verdict — falsified: it was a
+  cosine learning-rate schedule collapsing by 6k steps. A 90k run reaches ≈0.51–0.54. But note the
+  reciprocal caution: the 0.5424 "best @ 35k" is roughly what a max over 76 validation points of a
+  flat plateau (mean 0.512, sd 0.0135) yields by chance, so **best-checkpoint scores carry a
+  selection inflation of about +0.03**.
 
 ### The number trap
 Any figure produced before the vocabulary fix (**59 labels**) is not comparable to the table above:
@@ -109,13 +149,26 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   simultaneity claim about the ten new sources.
 
 ## `results/` — the measured record
-- [RESULTS.md](results/RESULTS.md) — concise project-wide results index and next registered readout.
+- [**ADAPTATION_TABLE_20260822.md**](results/ADAPTATION_TABLE_20260822.md) — **the current
+  headline**: compact engine vs seven baselines, all methods × k, both regimes, plus per-dataset
+  zero-shot. Supersedes `ADAPTATION_TABLE_20260819.md`.
+- [RESULTS.md](results/RESULTS.md) — project-wide results index; carries the headline table inline.
+- [EVAL_HARNESS_AUDIT_20260822.md](results/EVAL_HARNESS_AUDIT_20260822.md) — verification that the
+  eval path is sound and that every baseline is used as its developers intended. Two deviations
+  found and fixed in code (LiMU-BERT accel scale; UniMTS label text); LiMU-BERT needs a re-pretrain
+  before its row is valid again, and an adapter guard enforces that.
+- [PHASE_B_DIAGNOSIS_20260820.md](results/PHASE_B_DIAGNOSIS_20260820.md) — why Phase-B training
+  looked stuck. Its **mechanism** findings stand (retrieval ranks by acquisition configuration
+  ×7.0; same-activity/different-device support rows at the 39th percentile; names-vs-signals
+  r = 0.11). Its **"more steps do not help"** conclusion was later falsified by the 90k run.
 - [PHASE_B_TRAINING_STATUS.md](results/PHASE_B_TRAINING_STATUS.md) and
   [PHASE_B_STEP0_CONTROL.md](results/PHASE_B_STEP0_CONTROL.md) — the parked relational-decoder
   history and the step-0 control that retired its headline. Also linked from `design/` above.
 
 ## `baselines/` — who we compare against
 - [BASELINES.md](baselines/BASELINES.md) — roster, verified input contracts, frozen-vs-self-train.
+  ⚠️ two contract statements were corrected on 2026-08-22 — see
+  [`results/EVAL_HARNESS_AUDIT_20260822.md`](results/EVAL_HARNESS_AUDIT_20260822.md).
 - [BASELINE_FAIRNESS_POLICY.md](baselines/BASELINE_FAIRNESS_POLICY.md) — the treatment contract.
   ⚠️ its "identical 6-channel 60 Hz tensor" invariant describes the design, **not** the executed
   path (scoring runs `non_harmonised`); see the correction in its §2.
@@ -137,7 +190,10 @@ Each carries a banner naming its live replacement.
 - A doc whose central claim is falsified gets a banner and **moves to `archive/`** — kept, not
   deleted, because the record of what we believed and why is part of the work. What changed in the
   2026-08-08 consolidation is that stale docs no longer sit beside live ones.
-- Zero-shot baseline numbers live in the table above, generated from `eval/results/`. Phase-B
-  adaptation numbers live only in `results/PHASE_B_TRAINING_STATUS.md`; generated output READMEs are
+- Zero-shot and enrollment numbers live in the table above and in
+  `results/ADAPTATION_TABLE_20260822.md`, generated from `eval/adaptation_results/`. The
+  `eval/results/` store is protocol-v4 and stale for every model. Generated output READMEs are
   artifact indexes, not competing reports.
+- A comparison is only citable if every row shares one manifest fingerprint. Mixing protocol
+  versions is rejected by `eval/assemble_table.py` by design; do not work around it.
 - Cross-session context lives in the memory files (`~/.claude/.../memory/halo-*.md`).
