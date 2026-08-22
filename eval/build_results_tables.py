@@ -23,8 +23,14 @@ from pathlib import Path
 
 import numpy as np
 
+# `halo_compact` is the CURRENT model (compact evidence engine); `halo` is the superseded Phase-A
+# ConSE row. Both are listed so a regenerated table shows the transition rather than silently
+# restoring only the old one -- which is what happened before 2026-08-22, when this map had no
+# `halo_compact` entry and re-running the generator reproduced stale Phase-A rows.
 MODEL_NAMES = {
-    "halo": "HALO (ours)", "harnet": "HARNet", "crosshar": "CrossHAR", "unimts": "UniMTS",
+    "halo_compact": "HALO (ours, compact engine)",
+    "halo": "HALO (superseded Phase-A row)",
+    "harnet": "HARNet", "crosshar": "CrossHAR", "unimts": "UniMTS",
     "limubert": "LIMU-BERT", "normwear": "NormWear", "imagebind": "ImageBind",
 }
 REGIMES = ("ordinary", "specialized_novel")

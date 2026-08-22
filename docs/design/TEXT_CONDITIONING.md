@@ -1,5 +1,21 @@
 # Sensor text conditioning
 
+> ## ⚠️ Half of this is stale — 2026-08-22
+> - **`sensor_bias` is NOT a conditioning input.** The current encoder builds
+>   `use_sensor_bias_conditioning=False`, and the Phase-B trainer *hard-rejects* any checkpoint that
+>   carries it. One artifact reaches the sensor token: the frozen `text_descriptor`, through one
+>   gated projection. `SensorRows.bias` survives as a dead field nothing in `model/evidence/` reads.
+> - **The descriptor-mask JEPA event is not running.** The recipe builds with
+>   `descriptor_prediction=False`, so the mechanism that was supposed to make conditioning
+>   non-ignorable is off — which is the direct explanation for the 2026-08-11 parity gate finding
+>   the conditioning **inert** (+0.0086 mean, sign flipping on 2 of 4 datasets).
+> - **The partner-modality rationale no longer holds.** It is justified here by "the encoder attends
+>   across the available sensor set before export"; under the temporal trunk each sensor is encoded
+>   in isolation, so a wrist accelerometer row is identical whether or not a gyroscope was present.
+> - **Missing: the descriptor's second consumer.** It is carried raw as `SensorRows.descriptor` into
+>   the evidence mixer as `ROLE_QUERY_DESC` / `ROLE_EVIDENCE_DESC` tokens — a larger conditioning
+>   path than the encoder-side gate this file documents.
+
 This file records the current implementation only. Historical per-channel and flat-factored designs
 were removed to avoid presenting superseded alternatives as live model paths. The authoritative
 end-to-end architecture remains `DESIGN_OF_RECORD.md`.

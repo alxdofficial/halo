@@ -1,5 +1,16 @@
 # The language-native hierarchy: conditioning → concepts → labels (with graceful degradation)
 
+> **Grounding table partly dead — 2026-08-22.** Still correctly labelled as unbuilt, but two rows of
+> its "why it fits HALO" table name components that do not exist: there is **no boundary head**, and
+> there is **no MoCo memory bank** (retrieval is a frozen 512-window stratified corpus bank with
+> plain cosine top-64). The filterbank and signed-DC rows are still real. Two further corrections:
+> the "twin of the Tier-1 config result" argument is unearned (that experiment has not run and its
+> proxy came back inert), and the "graceful degradation is a capability no baseline has" contrast
+> now cuts both ways — **we have no abstention mechanism either**, since the hard modality/gravity
+> filter was deleted and the learned scorer that re-learned it is off. The strongest available
+> motivation for this doc is one it predates: names and signals correlate at only **r = 0.11** on
+> this corpus, which is a measured argument for a signal-derived concept layer.
+
 > **Status: proposed, not decided, not built.** Nothing here exists in code and no result depends on
 > it. It is a direction we may take *after* Phase B is validated. Do not describe it as part of the
 > system; see [`MOTIVATION.md`](MOTIVATION.md) for what HALO actually claims.

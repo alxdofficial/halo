@@ -1,5 +1,16 @@
 # Phase-A recovery measurements — 2026-08-18
 
+> **Partly superseded, 2026-08-22.** The Phase-A probes (transfer floor, posture canary,
+> ExtraSensory, depth/selectivity, the recipe sweep, the MAE null) are the only record of those
+> measurements and stand. Two things do not: the HALO rows in the cohort-artifact and
+> "representation gap" sections are the retired Phase-A engine — the compact engine now leads
+> `nearest`/`prototype`/`ridge` in the ordinary regime at every k and wins every specialized column
+> ([`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md)) — and every LiMU-BERT comparator
+> here was produced under the pre-fix accel convention (audit F1), so the *direction* of any
+> residual HALO-vs-LiMU-BERT gap is unknown, not merely smaller. Note also that the random-alias
+> protocol used here is an **eval** control, unaffected by the 2026-08-22 removal of random-alias
+> episodes from the **training** objective.
+
 Measurements taken while recovering from the rejected `phase_a_fixed_1s_rotation_20260817` arm.
 Everything here is measured, not projected. The Phase-B numbers are re-derived from the committed
 `eval/adaptation_tables/v1_d85761d_stage2/cells.csv`; the Phase-A numbers come from

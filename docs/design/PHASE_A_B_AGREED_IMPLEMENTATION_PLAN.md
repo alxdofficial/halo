@@ -1,5 +1,16 @@
 # Phase-A Implementation Record and Phase-B Handoff
 
+> **Three corrections — 2026-08-22.** The Phase-A objective record (JEPA + augmentation VICReg, the
+> removed-objective list, the 96-parameter learnable filterbank arm) is verified correct against the
+> code. These are not: (1) "VICReg runs directly on the **sensor-isolated retrieval rows**" — under
+> the temporal trunk there is no separate shallow export; the retrieval row *is* the trunk output,
+> and sensor isolation comes from the architecture instead. (2) The pointer to
+> `PHASE_B_TRAINING_INTENT.md` as the canonical Phase-B contract now aims at a superseded document —
+> use [`COMPACT_EVIDENCE_ENGINE.md`](COMPACT_EVIDENCE_ENGINE.md). (3) The **Phase-B handoff
+> contract** (schema-5 offline bank, rebuild-after-gates) is superseded: the compact Phase B draws
+> banks **per episode** from the corpus index and trains from `--random-init`, so no offline bank is
+> in the loop.
+
 Status: the sensor-granularity Phase-A run completed on 2026-08-17, but it is now a historical failed
 arm: independent SO(3) invariance removed gravity-frame signal, retrieval rows remained
 cross-sensor-contextual, and checkpoint selection used an internal source probe. Do not build the

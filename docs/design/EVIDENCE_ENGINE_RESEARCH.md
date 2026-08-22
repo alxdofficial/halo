@@ -1,5 +1,22 @@
 # HALO Evidence-Engine — Research Synthesis & Decision Report
 
+> **Status ledger — 2026-08-22.** This is a dated (2026-07-14) literature snapshot, and its §1/§4
+> still read as live instructions. They are not. **Nothing in its "defensible seam" is built**: no
+> evidential/Dirichlet decoder, no abstain head, and config-conditioning measured inert. In
+> particular **"Curated-memory evidence engine with abstention — lead with this" points at a
+> mechanism we do not have** (there is no abstention anywhere in the model). Its ranked adoption
+> list (evidential decoder, JEPA masked-channel, open-set metrics, compose-outliers abstain,
+> product-key memory, ColBERT MaxSim) is entirely unbuilt; the shipped pipeline is one 128-d row per
+> (patch, sensor) with plain cosine.
+>
+> Two of its predictions came true and should be read as validated, not hypothetical:
+> **"invariance-vs-conditioning risks being rhetorical … THE make-or-break ablation"** — the parity
+> gate returned inert, and UniMTS (the invariance camp) beats us 19.24 vs 8.75 on specialized-novel
+> zero-shot; and **"fixed physical front end ≈/> learned convs"** — now internally replicated (96
+> learnable params, gate 0.10→0.14 over 90k steps, band centres +0.34%; default `--frontend fixed`).
+> One prediction did not: **"from-scratch tokenizer is a real risk"** — a from-scratch 1.01M/d=128
+> encoder is best in 35/40 enrollment columns against pretrained baselines.
+
 > Produced by a 7-facet research workflow (Consensus + Perplexity/web), 2026-07-14. Companion to
 > `docs/archive/EVIDENCE_ENGINE.md` (historical design) and `PHASE_B_TRAINING_INTENT.md` (current contract). Verdicts are the workflow's;
 > treat as decision input, not gospel — but the citations are real and the novelty read is blunt.

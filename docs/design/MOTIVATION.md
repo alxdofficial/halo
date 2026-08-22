@@ -10,11 +10,15 @@ paper draft cannot be defended against the rebuttals in §2, it is not the contr
 > now have measurements, and **the thesis's own decisive experiment has not been run**, while two
 > measurements sit in tension with it. Stating that here so no draft asserts what we have not shown.
 >
-> **Not yet demonstrated — §3's told-vs-not-told conditioning experiment.** `HALO+descriptor` vs
-> `HALO−descriptor` vs baseline, under the four transforms, has **never been executed**. It remains
-> a plan in `AUGMENTATIONS.md` §"the conditioning demonstration". Until it runs, the input-side
-> claim — the part no baseline can match, and therefore the whole differentiation in §2 — rests on
-> argument alone.
+> **Not demonstrated — and the closest proxy came back NEGATIVE.** The full four-transform §3
+> experiment has never been executed; it remains a plan in `AUGMENTATIONS.md`. But a weaker version
+> *was* run: the **parity gate of 2026-08-11** (`DESIGN_OF_RECORD.md`, "PARITY GATE — Result: the
+> conditioning is inert"). Trained with full text, evaluated with neutral text, held-out-config
+> transfer: mean gain **+0.0086** against a 0.0065 noise floor — about 1.3 sd — and **the sign flips
+> on two of four datasets** (realworld −0.007, inclusivehar −0.057). A real effect does not change
+> sign across half the cohort. DESIGN_OF_RECORD calls that result "the measured motivation for the
+> entire Phase-A redesign". So the input-side claim is not merely unproven; the one measurement we
+> have points the wrong way.
 >
 > **Counter-evidence to weigh.** (a) Masking the acquisition descriptor at inference left
 > cross-configuration retrieval **unchanged** (`DESIGN_AUDIT_20260821.md`); that is an
@@ -28,16 +32,35 @@ paper draft cannot be defended against the rebuttals in §2, it is not the contr
 > **What IS demonstrated, and it is not this document's headline.**
 > [`../results/ADAPTATION_TABLE_20260822.md`](../results/ADAPTATION_TABLE_20260822.md): the compact
 > evidence engine is best in **35 of 40 enrollment columns** at d=128 — including *every*
-> clinical/rehab column at every k — and its zero-shot ordinary 36.95 is second of seven with no
-> fitted head. That is a **few-shot enrollment / memory-adaptation** result, and it is currently
-> the project's strongest evidence. Note also that those enrollment columns fit generic heads on
-> frozen features, so they demonstrate the **representation**, not the engine.
+> clinical/rehab column at every k. That is a **few-shot enrollment / memory-adaptation** result and
+> it is the project's strongest evidence. Two qualifications: those columns fit generic heads on
+> frozen features, so they demonstrate the **representation**, not the engine; and the zero-shot
+> picture is split — ordinary **36.95** (2nd of 7, no fitted head) but specialized-novel **8.75**,
+> **5th of 7**, behind UniMTS 19.24 and harnet 11.40. §2's headline is "unseen labels *and* unseen
+> configs"; being 5th of 7 on precisely the novel-label regime is the most direct contradiction of
+> the label half in this document. Underneath it, names and signals correlate at only **r = 0.11**
+> across 105 labels on this corpus — a ceiling on any signal-based label bridge, independent of our
+> design.
+>
+> **One more measurement, and it is the only one that favours the config story.** Our encoder carries
+> **more cross-configuration structure than any encoder tested**, including harnet and UniMTS (raw
+> kNN lift 2.82 vs 2.36 / 2.59 —
+> [`../results/ENCODER_COMPARISON_20260822.md`](../results/ENCODER_COMPARISON_20260822.md)). That
+> says the representation has the property; it does **not** say language conditioning produced it —
+> the parity gate says the conditioning is inert.
 >
 > **Honest reading.** The measured strength (few-shot enrollment on unseen, semantically opaque
 > activities — the "exercise 1" physiotherapy case) and the written thesis (language conditioning
 > on unseen acquisition configurations) are **two different claims**. Either run §3 and earn the
 > written one, or re-centre the contribution on what the evidence supports. Do not pitch the
 > language-config interface as demonstrated.
+>
+> ⚠️ **And note a trap in the re-centring option:** random-alias episodes — the only training
+> mechanism that produced the "exercise 1" capability — were **removed from the default objective on
+> 2026-08-22**, because removing them was a wash on coherent performance. Removal cost that
+> capability directly (alias-cell score 0.4906 → 0.2934). Re-centring on the physiotherapy case
+> therefore requires **re-enabling `--alias-episode-fraction` and re-measuring**, not just
+> rewriting the pitch.
 
 ## 0. The task
 
@@ -70,7 +93,7 @@ ConSE and a config one-hot are each half of what's needed, and each is limited:
 |---|---|---|
 | **ConSE** (label→embedding) | *output*: unseen **labels** | label side only; **no** input-side mechanism |
 | **config one-hot / extra features** | *input*: **seen** configs | cannot represent a config **not seen at train time** |
-| **HALO: per-channel/stream language description** | *input*: **unseen** configs | — |
+| **HALO: per-channel/stream language description** | *input*: **unseen** configs | ⚠️ **not demonstrated** — parity gate inert (+0.0086, sign flips 2/4); descriptor masking leaves cross-config lift unchanged |
 
 HALO conditions its **encoder** on a free-text description of how each channel/stream was acquired
 (placement, sensor modality, gravity state, mounting orientation / applied transform). Because the

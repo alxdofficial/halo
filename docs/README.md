@@ -85,6 +85,8 @@ older protocol-v4 (93-label) zero-shot table is stale **for every model** and is
   selection inflation of about +0.03**.
 
 ### The number trap
+Add to the do-not-cite list: the Stage-2 pair **23.75 / 9.81** (yesterday's headline) and the
+protocol-v4 triple **45.7 / 42.9 / 34.4**, which `APPLICATIONS.md` still asserted as current.
 Any figure produced before the vocabulary fix (**59 labels**) is not comparable to the table above:
 40.4, 42.7, 45.1, 46.1, 47.3, 49.5. **Never pair a number from `pretrain_native` with one from
 `pretrain_fixed_mr`** — they are different encoders.
@@ -100,24 +102,34 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   (device + placement + modality) plus intra-sensor axis role, as implemented.
 
 **The two phases, as built**
-- [**DESIGN_OF_RECORD.md**](design/DESIGN_OF_RECORD.md) — the current architecture decision record:
-  the three per-(patch, sensor) vectors, the front end, `sensor_bias`, the admissibility gate and
-  its three guards, the Phase-B prediction rule, and the build ledger with what is deleted and what
-  is still pending. When this and an older design doc disagree, this one wins.
+- [**COMPACT_EVIDENCE_ENGINE.md**](design/COMPACT_EVIDENCE_ENGINE.md) — **the live architecture**:
+  filterbank → temporal trunk (d=128, one row per (patch, sensor)) → plain cosine → top-64 →
+  evidence mixer → text vote, 1,010,790 parameters, with its change log. **When any design doc
+  disagrees with this one about Phase B, this one wins.**
+- [**DESIGN_AUDIT_20260821.md**](design/DESIGN_AUDIT_20260821.md) — the stage-by-stage verification
+  record: what is proven by test or measurement, what is an open risk, and the four methodology
+  rules (each of which was violated once, at cost).
+- [DESIGN_OF_RECORD.md](design/DESIGN_OF_RECORD.md) — **Phase A only.** Its Phase-B half (the
+  admissibility gate, `cosine/τ + log(admissibility)`, the closed-form Stage-1 predictor,
+  `sensor_bias` in the trunk) describes components the code no longer has, and its *thesis*
+  paragraph is built on the admissibility claim the gate was meant to instantiate. Bannered.
 - [**PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md**](design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md) —
   Phase-A record and the handoff contract. Commands live in
   [`training/tokenizer/README.md`](../training/tokenizer/README.md).
-- [**PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — the sole Phase-B motivation
-  and training contract. Commands live in
-  [`training/evidence/README.md`](../training/evidence/README.md).
-- [**PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the authoritative current
-  readiness and experiment ledger. Its completed tables are explicitly marked as parked relational
-  experiments and do not validate the active admissibility design.
-- [**PHASE_B_STEP0_CONTROL.md**](results/PHASE_B_STEP0_CONTROL.md) — what Phase-B training actually
-  buys, measured against the system at initialisation. Training pushes zero-shot below its chance
-  floor by destroying a ConSE-like bridge the untrained mechanism already had; at k=2 cross-subject
-  it is a wash, the decoder's +1.25 exactly cancelling the retriever's −1.27.
-- [AUGMENTATIONS.md](design/AUGMENTATIONS.md) — augmentation policy and the told-vs-not-told experiment.
+- [PHASE_B_TRAINING_INTENT.md](design/PHASE_B_TRAINING_INTENT.md) — Phase-B *motivation* (memory
+  as an adaptation mechanism, and the standard of evidence it demands). ⚠️ **its mechanism sections
+  are superseded** — required artifacts, prediction rule, and alias handling all describe the
+  retired gate design. Bannered.
+- [**PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the current readiness and
+  experiment ledger. (There is no longer an "active admissibility design" — that mechanism was
+  removed; see the compact engine above.)
+- [PHASE_B_STEP0_CONTROL.md](results/PHASE_B_STEP0_CONTROL.md) — ⚠️ **conclusions reversed.**
+  Measured on the 2026-08-09 trainer, which no longer exists; "training destroys zero-shot" and
+  "prototype/ridge beat both arms everywhere" are both contradicted by the mixer and the compact
+  engine. Bannered; quote no number from it.
+- [AUGMENTATIONS.md](design/AUGMENTATIONS.md) — augmentation policy and the told-vs-not-told
+  experiment. ⚠️ **that experiment has never been run** (its closest proxy, the 2026-08-11 parity
+  gate, came back inert), and the doc's "active configuration" table misreports the defaults.
 
 **Planning and open issues**
 - [REMEDIATION_PLAN.md](design/REMEDIATION_PLAN.md) — historical July audit ledger. Its file paths
@@ -134,8 +146,9 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   HAR + LLM/foundation-model literature. Same status: input, not contract.
 
 **Proposed — not decided, not built.** Do not describe these as part of the system.
-- [APPLICATIONS.md](design/APPLICATIONS.md) — what a HAR foundation model could make possible
-  downstream, chosen so the pitch does not rest on accuracy we do not have.
+- [APPLICATIONS.md](design/APPLICATIONS.md) — downstream applications. ⚠️ **its §0 premise is
+  retracted and its conclusion inverted**: it argues from protocol-v4 numbers that we lose on
+  accuracy, which is no longer true for the enrollment regime it is about. Bannered.
 - [LANGUAGE_HIERARCHY.md](design/LANGUAGE_HIERARCHY.md) — language at every level; a second act.
 
 ## `data/` — the corpus

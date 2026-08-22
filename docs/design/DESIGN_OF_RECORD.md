@@ -21,6 +21,20 @@ and `EVIDENCE_ENGINE_*` for anything they disagree on.
 > setting admissibility to one. Constraint 4 below ("learned readouts have lost to their closed
 > forms twice") is the honest frame, and the compact engine is the third attempt at beating them.
 >
+> **Three further Phase-A corrections (2026-08-22), each verified against code:**
+> 1. The `retrieval_tokens` "shallow path" paragraph is stale. Under `trunk="temporal"` the encoder
+>    forces `use_sensor_isolated_retrieval=False`, so the shallow branch never fires and the
+>    retrieval row **is the full 3-layer trunk output, taken after descriptor conditioning**. The
+>    "816k of 7.5M parameters" figure and the depth-1-vs-3 ablation refer to nothing in the code.
+>    Sensor isolation is now supplied by the trunk architecture instead — a correct property,
+>    reached by a different mechanism than described. (Same error in
+>    `PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md`'s VICReg sentence.)
+> 2. "Cross-sensor attention operates within a placement in Phase A" — `TemporalTrunk` has no
+>    cross-sensor attention.
+> 3. "The reference recipe adds only jitter and scale" — as coded the recipe is **fully clean**:
+>    `AugmentationConfig.phase_a()` overwrites both probabilities to 0.0 and the CLI flags default
+>    to `None`. The 0.5 values are dataclass defaults that never take effect unless passed.
+>
 > What the current evidence supports instead is in
 > [`../results/ADAPTATION_TABLE_20260822.md`](../results/ADAPTATION_TABLE_20260822.md): a compact
 > encoder whose frozen features win 35/40 enrollment columns. That is a representation claim, not
@@ -107,7 +121,9 @@ that is *absent*, not data that is *present but insufficient*.
 
 ## Trunk
 
-`DualBranchTransformer`, **3 layers** (measured 2026-08-18; was 6). Physical-time RoPE in seconds,
+~~`DualBranchTransformer`, **3 layers**~~ — **corrected 2026-08-22:** the trunk of record is
+`TemporalTrunk`, 3 layers, with **no cross-sensor branch at all**. Phase B hard-rejects anything
+else (`pretrain_episodic.py` exits unless `trunk="temporal"` and `token_granularity="sensor"`). Physical-time RoPE in seconds,
 never patch index. Sensors carry no positional index; identity is text, so sensor count and order
 are free.
 

@@ -2,17 +2,37 @@
 
 > **Status: brainstorm, 2026-08-06. No decision taken.** Written to answer the supervisor's note
 > that the paper needs something that excites MobiCom reviewers beyond a technique contribution.
-> Nothing here is built or measured; the numbers cited are from
-> `docs/archive/EVIDENCE_ENGINE_FINDINGS.md` and `eval/assemble_table`.
+>
+> ## ⚠️ §0's PREMISE IS RETRACTED — 2026-08-22. Its conclusion is now inverted.
+>
+> The numbers §0 was built on (**harnet 45.7 / HALO 42.9 / HALO+ConSE 34.4**) are protocol-v4,
+> 93-label, and are on `../README.md`'s do-not-cite list — stale for **every** model, and drawn
+> from `archive/`, which that same index says to take nothing from.
+>
+> **What is measured now** ([`../results/ADAPTATION_TABLE_20260822.md`](../results/ADAPTATION_TABLE_20260822.md)):
+> ordinary zero-shot **36.95 vs harnet 33.82** — we are *ahead* of harnet and 0.06 off first — and
+> at k ≥ 1 we are **best in 35 of 40 enrollment columns**, winning **every** clinical/rehab column
+> at every k. So "the paper enters a comparison it currently loses" is **false for the enrollment
+> regime, which is exactly the regime this document is about.**
+>
+> The honest counterpart: specialized-novel **zero-shot** is 8.75, 5th of 7, behind UniMTS 19.24
+> and harnet 11.40. That is not a weakness in the application story — it is the argument *for* it.
+> Enrollment is the answer to it: one labelled example takes that 8.75 to ≈43.
+>
+> Two caveats that must travel with any use of these numbers: the enrollment columns fit *generic*
+> heads on frozen features, so they credit the **representation** rather than the engine; and the
+> table is a **single seed**, which does not yet meet the three-seed rule in
+> `../baselines/BASELINE_FAIRNESS_POLICY.md` §6b.
 
 ## 0. The constraint that should drive the choice
 
-Current zero-shot standing: **harnet 45.7, HALO evidence engine 42.9, HALO+ConSE 34.4.** We are
-behind the strongest baseline. Any application framed as *"more accurate activity recognition"*
-puts the paper in a comparison it currently loses.
+~~Current zero-shot standing: **harnet 45.7, HALO evidence engine 42.9, HALO+ConSE 34.4.** We are
+behind the strongest baseline.~~ *(retracted — see the banner above)*
 
-So the application must rest on **capabilities the baselines structurally cannot provide** — where
-the comparison is not "better" but "possible at all."
+The application should still rest on **capabilities the baselines structurally cannot provide** —
+but the framing changes from *"we cannot win on accuracy, so lead with capability"* to *"we win on
+few-shot accuracy **and** the capability is structural."* The comparison is now both "better" and
+"possible at all", and the capability half is what makes the accuracy half durable.
 
 | primitive | what it enables | baselines |
 |---|---|---|

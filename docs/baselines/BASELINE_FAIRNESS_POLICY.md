@@ -238,9 +238,23 @@ Exactly what we do to each model, and why it passes Section 3.
   *Faithful:* arch + recipe unchanged, corpus/rate swapped via its own config (3a.4).
 
 - **LiMU-BERT** *(we pretrain, SSL)* — T0 LiMU-BERT encoder + GRU; retrained on our corpus at
-  60 Hz. T1 fixed→60 Hz. T2 fixed 6-ch, `÷9.8` accel norm (keeps gravity), zero-pad+mask,
-  placement-blind. T3 closed→ConSE. *Modification:* removed the eval-time GT sub-window filter
-  (target-label leakage) — a *fairness restoration* (3b.3), not a capability change.
+  **20 Hz / seq_len 120** (per the §2 correction at "Models we pretrain"; the earlier "60 Hz" here
+  was the same error). T1 fixed→20 Hz. T2 fixed 6-ch, **accel consumed in `g` with gravity retained
+  — no `÷9.8`**, zero-pad+mask, placement-blind. T3 closed→ConSE. *Modification:* removed the
+  eval-time GT sub-window filter (target-label leakage) — a *fairness restoration* (3b.3), not a
+  capability change.
+
+  > ### ⚠️ Corrected 2026-08-22 — this line previously read `÷9.8` accel norm, and that WAS the bug
+  > Upstream's `Preprocess4Normalization` divides accel by 9.8 because *its* datasets store m/s²;
+  > the model is designed to see accel ≈ 1 in **g**. Our grids **already store g**, so dividing
+  > again fed the backbone accel ≈ 0.10 against gyro O(0.1–0.5) — roughly **10× off the designed
+  > accel:gyro balance**. This policy line documented that as intended treatment, which is how it
+  > survived. Removed from both `baselines/limubert/train.py` and `adapter.py`
+  > (`ACC_NORM = 1.0`). **Consequence: every published LiMU-BERT cell in every table predates the
+  > fix and was produced under the wrong convention.** The backbone must be re-pretrained before
+  > its row is valid again; until then `adapter._load_backbone` refuses a checkpoint lacking the
+  > `acc_convention: "g"` stamp rather than emitting a plausible wrong number.
+  > Full finding: [`../results/EVAL_HARNESS_AUDIT_20260822.md`](../results/EVAL_HARNESS_AUDIT_20260822.md) F1.
 
 - **ssl / harnet5** *(frozen released — OxWearables, **UK-Biobank ~700k person-days** pretrain; NOT Capture-24)* — T0 1D-ResNet, **frozen**.
   T1 fixed **30 Hz** (source resampled to 30, center-cropped to 5 s / 150). T2 fixed **3-ch
@@ -249,7 +263,12 @@ Exactly what we do to each model, and why it passes Section 3.
 
 - **UniMTS** *(frozen released — HF)* — T0 acc-only ST-GCN + fine-tuned CLIP text tower, **frozen**.
   T1 resample + wrap-pad to 200. T2 **native placement** (accel written to the dataset's SMPL joint,
-  others zero), acc-only 3-ch, needs gravity-present m/s². T3 **native CLIP text** (cosine).
+  others zero), acc-only 3-ch, needs gravity-present m/s². T3 **native CLIP text** (cosine), fed the
+  shared **train-only E=8 paraphrase ensemble** rather than the bare class string — a *disclosed
+  protocol change* made 2026-08-22 to match upstream's own evaluation, which joins each class's
+  whole `label_dictionary` synonym list into the text (`data.py`: `' '.join(labels)`). Symmetric,
+  not a UniMTS-only boost: our `halo_evidence` row already ensembled E=8, so the bare string gave
+  UniMTS *weaker* target text than we gave ourselves. Zero-shot only. See audit F2.
   *Faithful:* uses the model's own placement + text mechanisms; N/A on gravity-removed sets (3a.8).
 
 - **NormWear** *(frozen released — GitHub)* — T0 channel-independent CWT-ViT + MSiTF + TinyLlama,
@@ -342,6 +361,14 @@ underlying movement new. A random-alias k=0 cell is unidentifiable and is always
 - At least five support-manifest seeds are evaluated. Random-label experiments also use at least
   five independent alias permutations. Learned Phase-B results require at least three training
   seeds before a paper claim.
+
+  > ⚠️ **Open compliance gap, 2026-08-22.** `../results/ADAPTATION_TABLE_20260822.md` is a **single
+  > checkpoint at a single training seed** (`long_4h_20260821/best.pt`, seed 20260830), so its
+  > 35/40 enrollment result does **not** satisfy this rule and must not enter a paper as is. Two
+  > further seeds of the same recipe are the outstanding requirement. Related: best-checkpoint
+  > selection on that run carries roughly **+0.03 of inflation** — the peak is about a
+  > max-over-76-validation-points draw from a plateau of mean 0.512, sd 0.0135 — which more seeds
+  > would also help bound.
 
 ### 6c. Question 1: coherent k=0 zero-shot comparison
 

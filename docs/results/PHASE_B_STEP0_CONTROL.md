@@ -1,5 +1,14 @@
 # Phase-B step-0 control — what Phase-B training actually buys
 
+> ## ⚠️ Conclusions REVERSED — 2026-08-22
+> Measured on the 2026-08-09 trainer, which no longer exists. Three of its findings have since been
+> overturned: "training destroys zero-shot" (the mixer took k=0 from 0.3916 to 0.5351, and the
+> shipped engine scores 36.95 ordinary zero-shot in the real harness); "the gap belongs to the
+> mechanism, not the training" and "prototype/ridge beat both arms everywhere" (the trained
+> mechanism now wins 35/40 columns); and "training makes real activity names actively harmful" (the
+> scrambled-vocabulary control in `PHASE_B_MIXER_20260819.md` inverts that — the gain is semantic).
+> Its §1 methodology (identity-at-init assertion) remains good practice. Quote no number from it.
+
 > Historical control that motivated the relational decoder now specified by
 > [`../design/PHASE_B_TRAINING_INTENT.md`](../design/PHASE_B_TRAINING_INTENT.md).
 > Measured 2026-08-09. Development roster only; the sealed test roster was not touched.

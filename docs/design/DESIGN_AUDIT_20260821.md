@@ -17,7 +17,11 @@ vote         softmax over rows (+ null row) × rectified text cosine → logits
              vote_scope: "topk" (default) or "bank" (all rows vote; mixer corrections scattered)
 ```
 
-Learnable: encoder 641,792 + mixer 364,678 = **1,006,470**. The learned pair scorer (115k) is
+Learnable: encoder 641,792 + mixer **368,774** = **1,010,566** trained (the mask token is frozen;
+the module total is 1,010,694 with a fixed frontend, 1,010,790 with the learnable one — the shipped
+checkpoint uses the latter). *Corrected 2026-08-22: the mixer figure was 364,678, which is the count
+at `n_groups=64`; the trainer sets `n_groups = max(96, top_k+2)`, and 64 would now be rejected at
+construction for `top_k=64`.* The learned pair scorer (115k) is
 retained behind `PairScorerConfig(learned=True)` but off — measured at exactly +0.0000 in
 isolation.
 
@@ -27,7 +31,7 @@ isolation.
 | property | status |
 |---|---|
 | sensor isolation (a row is independent of co-resident sensors) | ✅ test |
-| residual branches start small (`1/sqrt(2·n_layers)` scaling) | ✅ fixed 2026-08-20, test; was \|Δx\|/\|x\| = 2.55 at layer 0 |
+| residual branches start small | ✅ — but this row belonged under **Mixer**, not Encoder. `_scale_residual_branches` exists only in `SetAttentionStack` (`model/blocks.py`), which is the mixer; `TemporalTrunk` has no such scaling. **Re-measured 2026-08-22: the encoder trunk does not need it** — its attention branch is \|Δx\|/\|x\| ≈ 0.16 at every layer at init. The 2.55 figure was the mixer's, and the fix there stands |
 | representation improves under training (kNN 0.782 → 0.875) | ✅ measured |
 | **cross-config activity matching flat at ×1.3 from init through 6k steps** | ⚠️ **the** open problem — the objective never rewards that axis |
 | descriptor conditioning is *not* the cause of config-sorting (masking it leaves cross-config lift unchanged) | ✅ measured (inference-masking caveat noted) |
@@ -91,3 +95,24 @@ architecture is now clean, tested, and cheap; further plumbing changes are unlik
 The open decision — one invariance term (conflicts with "no auxiliary losses") vs Phase-A
 pretraining (conflicts with "e2e = random init") vs accepting the ceiling and reporting it — is
 design-level and is the user's call.
+
+
+## Addendum — 2026-08-22
+
+1. **The central conclusion needs a caveat.** This audit concludes "the bottleneck is the learning
+   signal's content, not the architecture." A 90k-step run then showed the plateau it reasoned from
+   was a **learning-rate-schedule artifact**: best 0.5424 @ 35k against ~0.457 on the 6k schedule,
+   and coherent-objective learning continues past 15k (0.5722 over 15–30k vs 0.5894 over 45–65k,
+   t = 2.87). The counter-caveat is equally important — that 0.5424 peak is about what a maximum
+   over 76 validation points of a *flat* plateau (mean 0.512, sd 0.0135) yields by chance, so
+   **every "best checkpoint" figure in this document carries roughly +0.03 of selection inflation.**
+2. **Random-alias episodes were removed from the default objective** (`--alias-episode-fraction`
+   → 0.0), with `--alias-warmup-steps` / `--alias-ramp-steps` as an optional curriculum. The
+   empirical basis is in this audit's own direction of travel: alias cells go flat and then decline
+   after ~15k while coherent cells keep improving.
+3. **The "is the encoder the bottleneck?" question this audit raises now has a direct measurement.**
+   `model/tokenizer/baseline_backbone.py` swaps harnet/UniMTS in under our encoder's exact output
+   contract. Result: harnet starts higher (step-0 0.3699 vs 0.3336) and finishes level (0.4662 vs
+   0.4699). See [`../results/ENCODER_COMPARISON_20260822.md`](../results/ENCODER_COMPARISON_20260822.md).
+4. **Not covered here, and now part of the system:** `baselines/halo_compact` (the engine scored on
+   the shared manifest) and the alias curriculum.

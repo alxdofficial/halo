@@ -34,6 +34,15 @@
 
 ---
 
+
+> **Numbers in this section are superseded (2026-08-22).** Every figure in the table below
+> (39.6 / 42.7 / 45.1 / 46.1) is on `../README.md`'s do-not-cite list. Current same-purpose numbers:
+> ordinary k=0 **36.95** (2nd of 7, 0.06 behind crosshar 37.01) and specialized-novel **8.75**
+> (5th of 7), with a full k-curve to k=16 in `../results/ADAPTATION_TABLE_20260822.md`. The
+> *direction* of §1's argument survives for ordinary and **inverts for specialized**. Also re-derive
+> or drop the "58,000× data ratio" — its 290–547 h figure comes from `archive/` and predates the
+> 2026-08 corpus expansion.
+
 ## 1. Is zero-shot HAR worth pursuing?
 
 Split the question, because the two halves have opposite answers.
@@ -162,6 +171,14 @@ For each held-out eval cell, and for k ∈ {0, 1, 5, 10, 50, full} labeled targe
 | **harnet probe** | same, on frozen harnet features — the strong-representation control |
 
 Report macro-F1 vs k, with subject-stratified CIs, per axis of shift (§6).
+
+> ⚠️ **Partially triggered, 2026-08-22.** §3.4's kill criterion is "if a linear probe beats
+> retrieval at *every* label budget including k=1". On our own frozen features `linear_head` already
+> beats `nearest` and `prototype` at k=1 in **both** regimes (ordinary 57.41 > 57.14 > 56.24;
+> specialized 43.36 > 43.23 > 43.06). That is not yet the kill condition — the *engine's*
+> retrieve→mix→vote arm has never been scored at k ≥ 1 — but the only measurement we have points
+> the wrong way for the pre-registered hypothesis, and §5's retrieval arm is exactly the missing
+> experiment.
 
 **Hypothesis (pre-registered):** retrieval wins at very low k — nearest-neighbour beats linear
 probes when labels are scarce — and probes overtake somewhere in the 10–50 range. If so our

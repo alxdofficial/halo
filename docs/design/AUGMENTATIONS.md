@@ -1,5 +1,23 @@
 # Augmentation policy — what each model gets, and why
 
+> ## ⚠️ The "Active configuration" table is wrong about the defaults — 2026-08-22
+> It lists `jitter` and `scale` as ✅ enabled at p = 0.5. Those are the *dataclass field* defaults,
+> which `AugmentationConfig.phase_a()` immediately **overwrites with 0.0**, and the CLI flags default
+> to `None`. **As coded, the Phase-A reference recipe is fully clean** — jitter/scale at 0.5 is a
+> value someone must pass explicitly. Same wording error in `DESIGN_OF_RECORD.md`.
+>
+> **Also missing entirely: `AugmentationConfig.phase_b_generic()`**, which is what the episodic
+> trainer uses under `--augment` — and it enables **jitter 0.7, scale 0.7, and `rotation_3d` 0.8**.
+> That directly contradicts this document's own banner ("independent SO(3) rotation is
+> known-harmful, 0.085 below a random-init trunk") and its table listing `rotation_3d` at ❌ 0.0. No
+> baseline receives `phase_b_generic`, so it also sits outside the Bucket-1 equal-exposure rule.
+> Reconcile before citing any augmentation policy.
+>
+> **A third fairness arm now exists** and is not covered here: harnet/UniMTS running frozen *inside*
+> HALO's own pipeline (`model/tokenizer/baseline_backbone.py`, `--encoder-backbone`). Two facts that
+> belong in the fairness section — augmentation is *forbidden* in that arm, and it drops gyroscope
+> and gravity-removed rows in **every** arm, so it is not the same data as the headline table.
+
 > **Status 2026-08-22 — the conditioning demonstration below has NOT been run.** It is still the
 > thesis's decisive experiment (`MOTIVATION.md` §3) and still unexecuted. Weigh it against the
 > counter-evidence recorded in `MOTIVATION.md`'s banner: inference-time descriptor masking left

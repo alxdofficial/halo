@@ -102,7 +102,7 @@ equalizing pretraining data across foundation models):
    descriptor is toggled (`MOTIVATION.md` §3, `AUGMENTATIONS.md`).
 
 Closed-vocab baselines (CrossHAR, LiMU-BERT, harnet) reach the open-set eval via the **ConSE bridge**;
-text-native ones (UniMTS, NormWear) use their own text tower. Metric: **macro-F1**, subject-disjoint,
+text-native ones (UniMTS, NormWear) use their own text tower (UniMTS since 2026-08-22 over the shared train-only E=8 paraphrase ensemble, per §3b). Metric: **macro-F1**, subject-disjoint,
 zero-shot vs each dataset's own label strings.
 
 ## 5. Completeness of the frozen-SOTA set (verified survey, 2026-07-12)

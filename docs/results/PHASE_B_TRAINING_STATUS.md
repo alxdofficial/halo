@@ -5,7 +5,7 @@
 > [`training/evidence/README.md`](../../training/evidence/README.md). This file owns completed-run
 > results, current readiness, and their interpretation.
 >
-> Last updated: 2026-08-17. The current rank-8 per-sensor admissibility experiment and matched
+> Last updated: 2026-08-22. The current rank-8 per-sensor admissibility experiment and matched
 > five-seed adaptation suite are recorded below.
 > Its checkpoint was selected on internal and external development results before the frozen test
 > roster was opened. No test result was used for fitting, checkpoint selection, or configuration
@@ -590,3 +590,61 @@ Artifacts:
 - evaluator: `training/evidence/eval_harnet_enrollment.py`;
 - development: `training/evidence/outputs/representation_controls/harnet_enrollment_dev.json`;
 - test: `training/evidence/outputs/representation_controls/harnet_enrollment_test.json`.
+
+## 11. Matched Encoder-Swap Experiment (2026-08-22)
+
+This experiment asks whether HALO's signal encoder limits the evidence engine. It has exactly three
+arms: randomly initialized HALO trained end to end, released HARNet frozen, and released UniMTS
+frozen. The baseline arms train only a 512-to-128 projection and the same evidence engine used by
+HALO. Candidate sets, episodes, loss, retrieval, mixer, vote, seed, and validation are otherwise
+identical.
+
+The common input contract is deliberately conservative: one duration-weighted row per sensor per
+six-second source window, complete gravity-present accelerometer triads only. Gyroscope rows are not
+fed to accelerometer-only pretrained models, and gravity-removed KU-HAR/XRF-AirPods rows are absent
+from all three arms. HARNet receives anti-aliased 30 Hz input with its released center-crop/wrap-pad
+rule; UniMTS receives anti-aliased 20 Hz input, its released right-wrap/truncate rule, g-to-m/s2
+conversion, and the placement-specific SMPL joint used by its released adapter.
+
+### One-hour matched screen
+
+The corrected GPU profile uses four independently constructed episodes per optimizer step, 128
+background windows per episode, top-k 64, BF16, and four data workers on the RTX 4090. The frozen
+trunks are evaluated in large batches; UniMTS additionally uses a static-shape compiled forward
+whose outputs agree with eager BF16 inference (minimum per-row cosine 0.999992). Compilation is a
+runtime detail and is not stored in checkpoints.
+
+| arm | measured ms/step | peak allocated VRAM | 6,000-step train estimate |
+|---|---:|---:|---:|
+| HALO, random-init end to end | 55.5 | 0.49 GiB | 5.6 min |
+| HARNet, frozen trunk | 87.6 | 0.36 GiB | 8.8 min |
+| UniMTS, frozen trunk | 316.3 | 3.69 GiB | 31.6 min |
+
+Seven validation passes (step 0 and every 1,000 steps), startup, calibration, and compilation add an
+estimated 3--6 minutes across the three sequential runs. The complete screen is therefore expected
+to take about 49--52 minutes. This is a representation **screen**, not a converged final comparison:
+128 is smaller than the production 512-row bank and 6,000 steps is shorter than the 35,000-step
+mature schedule. If an arm is still improving at step 6,000, it must be extended before reporting a
+final encoder ranking.
+
+Launch each arm sequentially, changing only `--encoder-backbone` and the output directory. HALO uses
+the current fixed physical filterbank; the learnable-frontend experiment is not part of this test.
+
+```bash
+python -m training.tokenizer.pretrain_episodic --random-init --encoder-comparison \
+  --encoder-backbone ours --steps 6000 --warmup-steps 500 --bank-windows 128 \
+  --val-every 1000 --out training/tokenizer/outputs/encoder_comparison_screen/ours
+python -m training.tokenizer.pretrain_episodic --random-init --encoder-comparison \
+  --encoder-backbone harnet --steps 6000 --warmup-steps 500 --bank-windows 128 \
+  --val-every 1000 --out training/tokenizer/outputs/encoder_comparison_screen/harnet
+python -m training.tokenizer.pretrain_episodic --random-init --encoder-comparison \
+  --encoder-backbone unimts --steps 6000 --warmup-steps 500 --bank-windows 128 \
+  --val-every 1000 --out training/tokenizer/outputs/encoder_comparison_screen/unimts
+```
+
+The earlier `training/tokenizer/outputs/encoder_swap_20260822` pilot is superseded: it duplicated one
+baseline window vector across patch rows, fed gyroscope values through accelerometer trunks, omitted
+UniMTS placement, admitted gravity-removed streams, and could not reconstruct baseline checkpoints.
+Do not use its scores. CPU smoke runs of all three corrected arms, a GPU UniMTS train/validation
+smoke, checkpoint reconstruction, and matched GPU profiles pass. The matched 6,000-step screen and
+any subsequent mature run remain pending.

@@ -1,5 +1,19 @@
 # Phase-B evidence mixer: the first learned component that works, and why
 
+> ## ⚠️ Two corrections — 2026-08-22
+> 1. **The noise band here is wrong by 5x.** This doc calibrates against a measured validation std
+>    of **0.0130**; `PHASE_B_DIAGNOSIS_20260820.md` later measured between-run sd at **0.068** when
+>    the validation draw floats with the seed. Every "inside/outside noise" judgement below, and the
+>    "~9 sigma" claim on the +0.119 headline, is calibrated against the wrong band. The defensible
+>    statistic is the paired gain: **+0.0656 +/- 0.0035, p = 0.0003**.
+> 2. **The harness gap is CLOSED.** The closing section says none of this had touched the eval
+>    harness because `predict` had no mixer branch and rows carried no source-window id. Both are
+>    done: `baselines/halo_compact` runs the deployed retrieve->mix->vote rule through the shared
+>    manifest — see [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md).
+>
+> The scrambled-vocabulary control (the gain inverts under a scrambled vocabulary, so it is
+> **semantic**, not structural) is this document's load-bearing result and **still stands**.
+
 **Date** 2026-08-19 · **Encoder** `phase_a_h_mae_fixes_20260818/best.pt` · **Trainer**
 `training/tokenizer/pretrain_episodic.py` · **Module** `model/evidence/evidence_mixer.py`
 
