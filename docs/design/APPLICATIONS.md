@@ -76,6 +76,14 @@ data already exists (xrf_v2, sp_sw_har, nfi_fared). **Caveat added 2026-08-06:**
 cross-placement objective that trained this property has since been removed from Phase A, so this
 claim now rests on the tokenizer alone and must be re-measured before it is asserted.
 
+  **Re-measured 2026-08-22, and the answer is two-sided.** *Relatively strong:* our encoder carries
+  more cross-configuration structure than any encoder tested, including harnet and UniMTS (raw kNN
+  lift 2.82 vs 2.36 / 2.59 — [`../results/ENCODER_COMPARISON_20260822.md`](../results/ENCODER_COMPARISON_20260822.md)).
+  *Absolutely weak:* same-activity/different-device rows still sit at the **39th percentile** of
+  retrieval, and cross-config activity matching is flat at ×1.3 from init. The claim cannot be
+  closed either way until the eval roster contains a genuine cross-configuration enrollment cohort;
+  it does not today.
+
 **(4) Open-set hazard flagging with abstention.** "This is not any of the 20 normal activities"
 for elder monitoring. Interesting because closed-vocabulary baselines *must* answer. Ranked below
 the others because anomaly detection is a crowded field.
@@ -104,11 +112,19 @@ placement change, which requires the config-agnostic encoder. If that transfer c
 demonstrated, the application degenerates into ordinary few-shot learning and the contribution
 evaporates.
 
-**Reads as a pivot.** Our *k*=0 numbers trail harnet, so a reviewer may read an application
-section as retreat from a weak result. Better to state plainly that zero-shot accuracy is not the
+**Reads as a pivot.** ⚠️ *Split as of 2026-08-22:* ordinary k=0 is now **36.95 vs harnet 33.82** —
+we are ahead — while specialized-novel k=0 is 8.75 vs harnet 11.40. So the "trails harnet" framing
+holds only for the specialized regime, and there it is the argument *for* enrollment. Better to state plainly that zero-shot accuracy is not the
 contribution, and that the *k*-curve plus cost-to-enroll is.
 
-**Unresolved control.** A retrieval-augmented harnet may do most of this too. That experiment is
+**Control — largely settled 2026-08-22.** A retrieval-augmented harnet *is* `nearest`/`prototype` on
+frozen harnet features, and it loses in every column (ordinary nearest k=1 48.64 vs our 57.14;
+specialized 32.62 vs 43.23). A full engine swap — harnet inside our retrieve→mix→vote pipeline —
+also finishes level with ours from a *higher* start
+([`../results/ENCODER_COMPARISON_20260822.md`](../results/ENCODER_COMPARISON_20260822.md)). What
+remains open is only the richer variant: harnet plus a *learned* mixer and vote.
+
+~~**Unresolved control.** A retrieval-augmented harnet may do most of this too. That experiment is
 already on the task list and should be settled *before* a demo is built on top of the assumption,
 because if a frozen harnet with a memory attached matches us, the application loses its
 foundation.
