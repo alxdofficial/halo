@@ -5,7 +5,7 @@
 > **CURRENT HEADLINE — [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md).** The
 > compact evidence engine (`halo_compact`, 1.13M params, d=128) against all seven baselines on
 > the shared `adaptation_v1` manifest, every method (`nearest`/`prototype`/`ridge`/`linear_head`)
-> at k=1,2,4,8,16 plus `zero_shot` at k=0, in both regimes. **Best in 33 of 40 enrollment
+> at k=1,2,4,8,16 plus `zero_shot` at k=0, in both regimes. **Best in 35 of 40 enrollment
 > columns, including every specialized_novel column at every k**; zero-shot ordinary 36.95
 > (second by 0.06, and the only row scored with no fitted head); zero-shot specialized 8.75
 > (disclosed — the case enrollment exists for: one example takes it to ~43). Everything below
@@ -16,6 +16,48 @@
 > retained in [`PHASE_B_STEP0_CONTROL.md`](PHASE_B_STEP0_CONTROL.md). Neither file defines the current
 > model; that contract is [`../design/PHASE_B_TRAINING_INTENT.md`](../design/PHASE_B_TRAINING_INTENT.md).
 
+## Headline comparison — compact evidence engine vs baselines (2026-08-22)
+
+Manifest `adaptation_v1` (61 cells · 7 datasets · 5 seeds · execution-disjoint support/query),
+fingerprint-identical across every row. `halo_compact` =
+`training/tokenizer/outputs/long_4h_20260821/best.pt` (1.13M params, d=128 — the smallest
+features in the table). Macro-F1, coherent labels, dataset-macro. **Bold = best in column.**
+Full per-method/per-k/per-dataset detail: [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md).
+
+### ordinary (4 everyday datasets)
+
+| model | zero-shot k=0 | nearest k=1 | prototype k=1 | ridge k=1 | linear_head k=1 | prototype k=4 | ridge k=4 | linear_head k=16 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| halo_compact | 36.95 | **57.14** | **56.24** | **55.04** | **57.41** | **62.64** | **64.24** | 63.28 |
+| harnet | 33.82 | 48.64 | 47.34 | 48.21 | 51.35 | 52.95 | 57.48 | 59.73 |
+| unimts | 32.70 | 53.76 | 50.69 | 47.31 | 54.81 | 55.49 | 56.61 | **65.05** |
+| crosshar | **37.01** | 51.77 | 50.95 | 45.04 | 51.94 | 57.64 | 54.98 | 61.37 |
+| limubert | 27.60 | 54.39 | 53.21 | 42.61 | 54.26 | 61.13 | 54.61 | 60.29 |
+| imagebind | 11.38 | 45.29 | 43.02 | 43.38 | 45.17 | 48.76 | 54.79 | 55.94 |
+| normwear | 5.08 | 30.86 | 26.26 | 22.13 | 35.81 | 28.84 | 25.29 | 44.99 |
+
+### specialized_novel (3 clinical/rehab datasets)
+
+| model | zero-shot k=0 | nearest k=1 | prototype k=1 | ridge k=1 | linear_head k=1 | prototype k=4 | ridge k=4 | linear_head k=16 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| halo_compact | 8.75 | **43.23** | **43.06** | **39.45** | **43.36** | **58.05** | **57.14** | **69.46** |
+| harnet | 11.40 | 32.62 | 30.83 | 29.85 | 34.72 | 41.79 | 47.36 | 66.37 |
+| unimts | **19.24** | 38.84 | 37.02 | 32.41 | 38.95 | 47.82 | 48.30 | 65.17 |
+| crosshar | 10.88 | 31.65 | 31.27 | 26.43 | 32.20 | 44.41 | 41.27 | 51.12 |
+| limubert | 9.11 | 31.99 | 29.90 | 16.84 | 28.95 | 37.07 | 27.91 | 39.96 |
+| imagebind | 8.15 | 28.60 | 27.29 | 26.16 | 29.19 | 34.27 | 36.73 | 48.53 |
+| normwear | 3.58 | 23.60 | 18.63 | 11.75 | 25.31 | 21.87 | 14.57 | 38.19 |
+
+**halo_compact is best in 35 of 40 enrollment columns**, including every
+`specialized_novel` column at every k. Zero-shot ordinary 36.95 is second by 0.06 and is the
+only row produced with no fitted head (the engine's native retrieve→mix→vote rule); zero-shot
+specialized 8.75 is weak and disclosed — the bank holds no clinical motions, which is exactly
+what enrollment is for (one example takes it to ~43).
+
+Caveats bound to this table: the `limubert` rows predate the 2026-08-22 accel-scale fix
+(`EVAL_HARNESS_AUDIT_20260822.md` F1) and may understate it — its backbone retrain is pending;
+the `unimts` zero-shot predates the label-text ensemble fix (F2). Enrollment methods read no
+label text, so those columns are unaffected. The Phase-A `halo` row is superseded and omitted.
 ## Current Snapshot
 
 | area | artifact/protocol | result | status |
@@ -24,7 +66,7 @@
 | historical Phase A | `phase_a_fixed_1s_rotation_20260817/best.pt` | selected step 27,000; seven-dataset fixed-1s transfer 0.509 versus old 0.617 | completed but rejected for the next Phase-B bank |
 | replacement Phase A | clean views, isolated retrieval rows, direct row VICReg, external-development selection | implementation complete; no trained result yet | pending training and controlled ablations |
 | parked relational Phase B | v22 and checkpoint study | learned adaptation exists, but usually trails identity/prototype/ridge | historical evidence only |
-| **current Phase B (compact engine)** | `ADAPTATION_TABLE_20260822.md`, `adaptation_v1`, 61 cells / 7 datasets / 5 seeds | **33/40 enrollment columns best; all specialized_novel; zero-shot ord 36.95 / spec 8.75** | current headline, scored through the shared harness |
+| **current Phase B (compact engine)** | `ADAPTATION_TABLE_20260822.md`, `adaptation_v1`, 61 cells / 7 datasets / 5 seeds | **35/40 enrollment columns best; all specialized_novel; zero-shot ord 36.95 / spec 8.75** | current headline, scored through the shared harness |
 | superseded Phase B (evidence mixer) | `PHASE_B_MIXER_20260819.md`, held-out concepts + subjects, 3k steps | **0.5247 hard-mean macro-F1 vs 0.4053 frozen control (+0.119); k=0 0.3916 -> 0.5351** | first learned Phase-B component with a real gain; a scrambled-vocabulary control inverts it, so the gain is semantic. NOT yet scored through the eval harness |
 | current admissibility Phase B | matched adaptation v1, rank-8 Stage-2 step 1,000, five seeds | ordinary coherent k=1: 44.79 versus identity 45.71; specialized k=1: 28.62 versus 28.58; arbitrary labels exactly identity | complete seven-dataset result; adaptation exists, but learned admissibility has no held-out advantage |
 

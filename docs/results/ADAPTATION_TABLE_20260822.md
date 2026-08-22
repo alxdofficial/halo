@@ -142,10 +142,13 @@ How each row is scored:
 
 ## Reading
 
-* **Enrollment (the project's claim): halo_compact leads 33 of 40 method×k columns**, including
+* **Enrollment (the project's claim): halo_compact leads 35 of 40 method×k columns**, including
   every specialized_novel column at every k — the clinical/rehab regime where names carry no
   usable semantics and the representation must do the work. It does this at d=128, the smallest
-  feature dimension in the table (baselines 512–2048).
+  feature dimension in the table (baselines 512–2048). The five it does not win are all
+  `ordinary` at high k: nearest k=4/8/16 (limubert 65.33/65.00, unimts 63.27) and linear_head
+  k=8/16 (unimts 66.69/65.05) — i.e. everyday activities with many labelled examples, where a
+  bigger frozen feature has room to be fitted and the semantic bridge no longer matters.
 * **Zero-shot ordinary is competitive** (36.95, second by 0.06 to crosshar), through the native
   engine mechanism with no fitted head — the baselines' zero-shot rows all require a head fit on
   the training corpus (ConSE tier) or a text tower.
