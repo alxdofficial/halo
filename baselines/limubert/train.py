@@ -26,6 +26,7 @@ SMOKE (what we run to prove the wiring; under-trained by design):
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import sys
 from pathlib import Path
@@ -146,6 +147,11 @@ def main(argv=None):
     # Trainer.pretrain reloads the best state into `model`; save it as the
     # canonical checkpoint the adapter loads.
     torch.save(model.state_dict(), str(BACKBONE_CKPT))
+    # Convention stamp (audit F1): the adapter refuses a backbone pretrained under a different
+    # accel convention, so the ÷9.8 fix cannot silently mix with an old-scale checkpoint.
+    BACKBONE_CKPT.with_suffix(".meta.json").write_text(
+        json.dumps({"acc_convention": "g", "epochs": args.epochs,
+                    "max_per_stream": args.max_per_stream, "seed": args.seed}) + "\n")
     print(f"[limubert] saved backbone -> {BACKBONE_CKPT}")
 
 

@@ -259,6 +259,19 @@ class LiMUBERTAdapter(ConSEAdapter):
                 f"LiMU-BERT backbone checkpoint missing at {_BACKBONE_CKPT}. "
                 "Self-pretrain it on our corpus first:\n"
                 "  python -m baselines.limubert.train")
+        # Audit F1 guard: the 2026-08-22 fix changed the input convention (acc in g, no ÷9.8).
+        # A backbone pretrained under the OLD convention would still load and produce a
+        # valid-looking (silently wrong) number, so require the convention stamp train.py writes.
+        meta_path = _BACKBONE_CKPT.with_suffix(".meta.json")
+        import json as _json
+        meta = _json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        if meta.get("acc_convention") != "g":
+            raise RuntimeError(
+                f"LiMU-BERT backbone at {_BACKBONE_CKPT} predates the 2026-08-22 accel-convention "
+                "fix (or lacks its stamp) — it was pretrained with accel divided by 9.8 on "
+                "grids already in g. Re-pretrain before scoring:\n"
+                "  python -m baselines.limubert.train --epochs 800 --batch-size 128 "
+                "--max-per-stream 20000 --gpu")
         backbone = _Backbone().to(device)
         sd = torch.load(str(_BACKBONE_CKPT), map_location=device, weights_only=True)
         backbone.load_state_dict(sd)
