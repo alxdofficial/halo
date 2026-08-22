@@ -1,5 +1,13 @@
 # HALO vs baselines across k — matched adaptation protocol
 
+> ## ⚠️ SUPERSEDED — 2026-08-22
+> Replaced by [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md), which scores the
+> **compact evidence engine** (`halo_compact`, 1,010,790 params) on the same `adaptation_v1`
+> manifest with the same fingerprint. The `halo` row below is the older Phase-A checkpoint
+> `phase_a_h_mae_fixes_20260818/best.pt` and is **not** the current model. The BASELINE rows are
+> unchanged between the two tables (both drawn from `v1_d85761d`), so this file stays useful as
+> the record of how the previous HALO compared — nothing more.
+
 **Generated** 2026-08-19 from `eval/adaptation_tables/v2_20260819/` ·
 manifest `adaptation_v1` (61 cells, 7 datasets, 5 seeds, execution-disjoint support/query) ·
 HALO checkpoint `phase_a_h_mae_fixes_20260818/best.pt`, baselines from `v1_d85761d`.

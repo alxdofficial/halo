@@ -1,5 +1,10 @@
 # Results
 
+> ## ⚠️ SUPERSEDED — 2026-08-22
+> Current tables: [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md) (headline) and
+> [`RESULTS.md`](RESULTS.md) (index, headline inlined). The HALO row here predates the compact
+> evidence engine.
+
 ## 1. Zero-shot
 
 No labelled examples. Macro F1, mean over datasets.
