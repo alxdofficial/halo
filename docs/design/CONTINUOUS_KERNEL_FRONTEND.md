@@ -539,3 +539,99 @@ flatten), not the shallow pooled version — because the shallow version does no
 The filterbank remains the control, and the single respect in which Arm A differs is: *time-domain
 kernels with ordered sub-second output*, versus *whole-patch band energies*. That is one claim, and
 it is the claim.
+
+---
+
+# S10. Why ordinary convs above layer 1, the shape trace, and the cost correction
+
+## S10.1 Why layers 2+ are ordinary, not continuous
+
+A continuous kernel exists to **decouple the kernel's parametrisation from the sample spacing**,
+because the spacing varies from 20 to 100 Hz and is not known until the recording arrives. That
+problem is fully solved by layer 1: its output sits on a grid of exactly **125 ms per frame at every
+rate**. Above layer 1 the spacing is fixed and known, so:
+
+- An ordinary conv on a known grid **is** a continuous kernel evaluated at that grid; the taps are
+  the parametrisation. Continuous parametrisation adds cost and buys nothing.
+- What continuous parametrisation *does* still impose is a **smoothness/band-limit prior** — but at
+  3 taps there is nothing to be smooth about. A "continuous curve through 3 points" is 3 numbers.
+- The compression only pays where taps are many and rate-varying: layer 1's longest kernel is **400
+  taps at 100 Hz and 80 at 20 Hz, both described by the same 16 numbers**. That is a 25× compression
+  *and* the mechanism that makes one kernel serve both rates. Layer 2 has 3 taps described by 3
+  numbers. Nothing to compress, nothing to reconcile.
+
+Same conclusion as Rule 1, now with the reason rather than the assertion.
+
+## S10.2 The time axis, traced (this is the "pixels" question)
+
+`F = 8` frames/s, 1 s patches, 6 s window:
+
+| stage | 20 Hz | 50 Hz | 100 Hz | per patch | ms / pixel |
+|---|---:|---:|---:|---:|---:|
+| input samples | 120 | 300 | 600 | varies | varies |
+| after layer 1 (continuous) | **48** | **48** | **48** | 8 | 125 |
+| after layer 2 (3-tap, stride 2) | **24** | **24** | **24** | 4 | 250 |
+| after layer 3 (3-tap, stride 1) | **24** | **24** | **24** | 4 | 250 |
+
+**The time axis becomes rate-independent at layer 1 and stays that way** — that is the whole
+property, visible as three identical columns. Full tensor trace:
+
+```
+(B, C=6, T=120..600)        native, T rate-dependent
+  → layer 1 (continuous)    (B, 6, 32, 48)     48 frames at ANY rate
+  → layer 2 (dw-sep, s=2)   (B, 6, 64, 24)
+  → layer 3 (dw-sep, s=1)   (B, 6, 64, 24)
+  → slice to patches        (B, P=6, C=6, 64, 4)
+  → flatten frames          (B, 6, 6, 256)     ORDERED
+  → ‖ masks ‖ amp ‖ DC      (B, 6, 6, 256 + 2K + 2 = 322)
+  → Linear(322 → 128)       (B, P, C, d)       unchanged contract
+```
+
+**Receptive field per output pixel:** layer 1 contributes the kernel span itself (0.27 s at the top
+band to 4.0 s at the bottom); layers 2–3 add 5 frames = 0.625 s on top of that.
+
+**Short windows work out exactly.** Every window length yields 4 frames per patch, because a patch
+is a fixed 1 s and `F = 8` is divisible by the single stride-2:
+
+| window | 1 s | 2 s | 3 s | 5 s | 6 s |
+|---|---:|---:|---:|---:|---:|
+| frames after L1 | 8 | 16 | 24 | 40 | 48 |
+| after stride 2 | 4 | 8 | 12 | 20 | 24 |
+| **per patch** | **4** | **4** | **4** | **4** | **4** |
+
+Single-sample windows (~0.1 %) wrap-pad to the minimum tap count and are flagged by the resolution
+mask — they must return a row, never raise.
+
+## S10.3 Cost correction — S9.1's stack was too expensive
+
+Measured at a realistic step volume (B ≈ 2,080 windows: bank + queries), against the temporal trunk
+at **9.8 GFLOP/step** as the yardstick:
+
+| variant | GFLOP/step | vs trunk |
+|---|---:|---:|
+| S9.1 as written — dense 32→64→128 | 22.1 | **2.3×** |
+| dense, stride 2 moved to layer 2 | 18.4 | 1.9× |
+| **depthwise-separable 32→64→128** | 6.3 | 0.64× |
+| **depthwise-separable 32→48→64** | 2.9 | **0.30×** |
+| one dw-sep layer 32→64 only | 1.3 | 0.13× |
+
+*(layer 1 decimated: 1.2 · filterbank: 0.31)*
+
+**S9.1 as written would cost 2.3× the entire temporal trunk** for a front end — unacceptable for an
+arm meant to be a controlled swap. Revised default:
+
+> **Depthwise-separable convolutions, 32 → 64 → 64, stride 2 at layer 2.** ≈2.9 GFLOP/step, under a
+> third of the trunk, flatten width 64 × 4 = **256** ordered features.
+
+Depthwise-separable is the right tool here for a structural reason, not only a cost one: the
+depthwise stage mixes **time within a kernel band**, and the pointwise stage mixes **across bands at
+a fixed time**. That factorisation matches the physics — a band's temporal envelope and the
+cross-band pattern at an instant are different kinds of structure — and it is why MobileNet-style
+separation costs little accuracy here.
+
+**Also correct the layer-1 cost.** Naively convolving the 4 s kernel at 100 Hz is 400 taps and
+16.7 GFLOP/step. But every kernel is band-limited to `8/T_k` Hz *by construction*, so it may be
+evaluated on a decimated copy of the signal at `max(2·8/T_k, 4)` Hz with no loss. That is a **13.6×
+saving at 100 Hz** (16.7 → 1.2 GFLOP) and it makes the layer-1 cost nearly rate-independent, which
+is aesthetically right: the same physical analysis should not cost 5× more because the device
+sampled faster.
