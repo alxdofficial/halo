@@ -375,3 +375,89 @@ between-run noise band, it does not earn its complexity: record the negative res
 EfficientLEAF citation and keep the filterbank. Given that our learnable-filterbank arm is inert and
 the frozen bank already beats a raw CNN, **the prior is that this fails** — which is exactly why the
 criterion is written down before the run rather than after it.
+
+---
+
+# S8. Stacking — the decision, and the rules if you stack anyway
+
+## S8.1 Recommendation: do NOT build a deep front end for the first experiment
+
+The instinct to stack (widen channels, non-linearities, pool) is correct CNN practice and wrong
+*here*, for a reason specific to our architecture: **HALO already has the depth.** The temporal
+trunk is 3 attention layers over per-patch tokens with a receptive field of the whole window. A deep
+convolutional front end would be a second temporal model stacked under an existing one.
+
+Two hard numbers make the point:
+
+- A 1 s patch at 8 frames/s supports **at most 3 stride-2 stages** before it is a single frame
+  (8 → 4 → 2 → 1). There is very little temporal extent to spend.
+- The depth you would be adding is depth the trunk already has, over a longer span.
+
+And a methodological reason that matters more: the experiment is *"do continuous kernels beat a
+fixed filterbank"*. If the continuous arm is also 3 layers deeper and 4× wider, a win is
+unattributable — the same confound that made this morning's `ours-fixed` vs `ours-learnable` probe
+row uninterpretable (different run lengths, not different front ends). **Arm A must differ from the
+filterbank in exactly one respect.**
+
+So: **one continuous layer, magnitude, compression, pool to a token.** Depth stays where it is.
+
+## S8.2 If you stack anyway — the rules
+
+Should the shallow arm win and you want to spend depth on the front end, these are the constraints,
+and the first one is the only truly novel constraint in the design.
+
+**Rule 1 — exactly one layer is rate-aware.** Layer 1 consumes the native-rate signal and emits a
+**fixed 8 Hz real-time grid**. Every later layer sees that grid regardless of whether the recording
+was 20 Hz or 100 Hz, so layers 2+ are **ordinary fixed-tap convolutions**. Do not make them
+continuous — there is no variable rate left for a continuous kernel to solve, and a second
+rate-aware module is how rate-invariance leaks. Enforce by assertion: only the layer-1 module may
+read `sampling_rate_hz`.
+
+**Rule 2 — kernel sizes upstairs are still stated in seconds.** A 5-tap kernel on an 8 Hz grid spans
+0.62 s. Write it that way in the config so the physical meaning survives a change of `F`. Stacked
+5-tap layers with dilation 1/2/4 reach 0.62 s → 1.62 s → 3.62 s of receptive field, which covers a
+gait cycle by layer 2 and the whole window by layer 3.
+
+**Rule 3 — channel growth is per input channel, and the fold stays downstream.** Layer 1 emits `K`
+kernel responses **per sensor channel**, kept separate (as the filterbank does) so `sensor_fold`
+still owns cross-channel mixing. Widen `K → 2K → 4K` within a channel, never across channels. A
+front end that mixes accel and gyro breaks the sensor-isolation property the retrieval rows depend
+on, and there is a test asserting it.
+
+**Rule 4 — non-linearity: note that layer 1 already has one.** `|z|` (quadrature magnitude) followed
+by `log1p` is a compressive non-linearity, and it is the one that makes the features behave like
+band energies. Layers 2+ use GELU. Do not put a ReLU directly on the layer-1 complex response — you
+would be half-wave rectifying a phase, which is meaningless.
+
+**Rule 5 — normalise over channels, never over time.** LayerNorm/GroupNorm across the feature dim at
+each frame is safe. **Any statistic pooled over the time axis is rate- and length-dependent** and
+will silently reintroduce a device fingerprint. BatchNorm is doubly forbidden: it mixes statistics
+across recordings from different devices in the same batch. Keep the **frozen per-band
+standardisation** calibrated over the corpus for layer 1, as the filterbank does.
+
+**Rule 6 — pooling and variable length.** The length problem is already solved by patching and must
+stay that way:
+
+- *Within a patch*: a patch is a fixed **1 s**, so it always yields exactly 8 frames. Stride-2
+  stages reduce 8 → 4 → 2 → 1 deterministically. **Length-invariant by construction** — variable
+  recording length shows up as a variable number of *patches*, which `patch_padding_mask` already
+  handles, not as a variable number of frames.
+- *Across the window* (the conv runs on the contiguous window for long kernels): pad the window
+  edges by `T_max/2`, and use **masked** pooling everywhere so padding never enters a mean.
+- *Too short*: ~0.1 % of corpus windows carry a **single sample** (wisdm, capture24, opportunity).
+  These must produce a row, not an exception — this exact case crashed all four arms of the
+  encoder-swap harness on 2026-08-22. Wrap-pad to the minimum tap count and let the resolution mask
+  flag it.
+- *Too long*: not reachable through the grid loader (windows cap at 6 s), but masked pooling makes
+  it a non-issue if it ever is.
+
+**Rule 7 — keep the token contract.** Whatever the depth, the module still emits **one vector per
+(patch, sensor)**. Everything downstream — `sensor_fold`, descriptor conditioning, the trunk, the
+retrieval rows, the memory bank — is unchanged. That is what keeps the arm comparison matched and
+the change revertible.
+
+## S8.3 Build order
+
+1. **Arm A (shallow, S1–S7).** One continuous layer. This is the experiment.
+2. Only if A wins: **Arm B** adds 2 ordinary dilated stages under Rules 1–7, and is compared
+   against **A**, not against the filterbank — so depth is isolated from the kernel change.
