@@ -461,3 +461,81 @@ the change revertible.
 1. **Arm A (shallow, S1–S7).** One continuous layer. This is the experiment.
 2. Only if A wins: **Arm B** adds 2 ordinary dilated stages under Rules 1–7, and is compared
    against **A**, not against the filterbank — so depth is isolated from the kernel change.
+
+---
+
+# S9. REVISION — S4/S8.1 were wrong about temporal collapse
+
+**Correcting the record.** S4 pooled the 8 frames of a patch into `mean/max/std`, and S8.1 argued
+that depth was unnecessary because "the trunk already has it". Both are wrong for the same reason,
+and it defeats the point of the proposal.
+
+**The trunk's depth is at 1-second granularity.** It attends over *patch* tokens. It cannot see
+anything below one second. So an order-invariant pool over the 8 frames does not hand sub-second
+structure to a deeper model — it **destroys it at the only point in the pipeline where it existed**,
+which is the same collapse the filterbank performs, merely one layer later. If the whole motivation
+for a convolutional front end is to keep *when* something happened and not only *how much energy*
+was present, the design must not do that.
+
+What is actually being lost (measured against a 1 s token boundary):
+
+| structure | scale | visible at 1 s tokens? |
+|---|---:|---|
+| heel strike / impact transient | ~60 ms | **no** |
+| arm-swing reversal | ~150 ms | **no** |
+| step (half gait cycle) | ~500 ms | **no** |
+| gait cycle | ~1000 ms | yes |
+
+Three of the four are invisible to HALO today. That is the gap this front end exists to close.
+
+## S9.1 Revised S4 — keep the frames ORDERED, and stack across them
+
+Replace the order-invariant pool with an order-preserving one, and put the stack **inside the
+patch**, on the fixed 8 Hz grid where it is rate-safe:
+
+```
+layer 1 (continuous, rate-aware)   native rate → (K=32, F=8 frames) per patch per channel
+layer 2 (ordinary conv, 3 taps)    32 → 64,  frames 8 → 8      GELU, GroupNorm over channels
+layer 3 (ordinary conv, 3 taps)    64 → 128, frames 8 → 4      GELU, GroupNorm  (stride 2)
+flatten                            128 × 4 = 512 ORDERED features
+concat masks                       ‖ nyquist(K) ‖ resolution(K) ‖ amplitude ‖ signed DC
+→ Linear(578 → d_model)
+```
+
+The flatten is the point: the projection sees frames **in order**, so a rising ramp and a falling
+ramp are different inputs. `mean/max/std` could not tell them apart. Layers 2–3 are ordinary convs
+because after layer 1 the grid is a fixed 8 Hz regardless of the device rate — Rule 1 still holds,
+and this is where stacking genuinely earns its place rather than duplicating the trunk.
+
+`F = 8` (125 ms) is the recommended grid: it resolves the arm-swing and step scales, and it costs a
+512-wide flatten. `F = 16` (62 ms) would reach the impact transient at 1024 wide — worth an ablation,
+not the default.
+
+## S9.2 The bigger alternative, costed but not recommended yet
+
+The thorough answer to "preserve temporal information" is to stop collapsing at the patch at all:
+emit **one token per frame** rather than per patch, and let the trunk attend at 125 ms resolution.
+That is architecturally cleaner and it is what a pure CNN-plus-transformer design would do.
+
+It is not free, and the cost lands squarely on Phase B:
+
+```
+today      6 patches × 2 sensors  =  12 retrieval rows per window
+per-frame  48 frames × 2 sensors  =  96 retrieval rows per window        → 8×
+```
+
+Eight times the trunk sequence length, eight times the rows in every episode's memory bank (512
+windows ≈ 4,000 rows → ≈ 32,000), eight times the pair-scoring matrix, and a top-64 that now
+selects among far more, mostly redundant, neighbours. The bank is already 97% of training compute.
+
+So: **S9.1 first** — it recovers ordered sub-second structure inside the existing token contract, at
+no cost to Phase B. Treat per-frame tokens as a separate, later decision that should be argued on
+its own evidence, not smuggled in with the front-end change.
+
+## S9.3 Consequence for S8.3
+
+Build order is revised. Arm A is now the S9.1 stack (continuous layer + 2 ordinary layers + ordered
+flatten), not the shallow pooled version — because the shallow version does not test the hypothesis.
+The filterbank remains the control, and the single respect in which Arm A differs is: *time-domain
+kernels with ordered sub-second output*, versus *whole-patch band energies*. That is one claim, and
+it is the claim.
