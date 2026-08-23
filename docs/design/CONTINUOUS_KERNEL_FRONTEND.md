@@ -635,3 +635,75 @@ evaluated on a decimated copy of the signal at `max(2·8/T_k, 4)` Hz with no los
 saving at 100 Hz** (16.7 → 1.2 GFLOP) and it makes the layer-1 cost nearly rate-independent, which
 is aesthetically right: the same physical analysis should not cost 5× more because the device
 sampled faster.
+
+---
+
+# S11. Kernel spans, overlap, and two consequences worth knowing
+
+Yes — kernels are **variable length by design**, one span per band, spanning a **15× range**.
+
+## S11.1 The span table
+
+`T_k = clamp(N_CYCLES / f_k, 0.05 s, T_MAX)` with `N_CYCLES = 4`:
+
+| band | centre (Hz) | span (s) | cycles in span | taps @20 Hz | taps @100 Hz |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 0.30 | 4.000 | 1.20 | 80 | 400 |
+| 6 | 0.64 | 4.000 | 2.56 | 80 | 400 |
+| 12 | 1.36 | 2.933 | 4.00 | 59 | 293 |
+| 18 | 2.91 | 1.375 | 4.00 | 28 | 138 |
+| 24 | 6.20 | 0.645 | 4.00 | 13 | 65 |
+| 31 | 15.00 | 0.267 | 4.00 | 5 | 27 |
+
+Spans run **0.267 s to 4.0 s**. Ten of 32 kernels hit the cap and therefore see *fewer* than 4
+cycles — the 0.3 Hz kernel sees only 1.20 — which is precisely the condition the resolution mask
+already flags in the filterbank (`FB_RESOLUTION_MIN_CYCLES = 1.0`). Nothing new, but the flag must
+be wired or those bands quietly report blur as signal.
+
+## S11.2 Consequence 1 — adjacent frames overlap heavily
+
+With stride 125 ms and spans up to 4 s, successive output frames share most of their input:
+
+| band | span | adjacent-frame overlap |
+|---:|---:|---:|
+| 15.00 Hz | 0.267 s | 53% |
+| 5.47 Hz | 0.732 s | 83% |
+| 1.99 Hz | 2.008 s | 94% |
+| 0.30 Hz | 4.000 s | **97%** |
+
+Cross-checked against what each band actually *needs*: a band's envelope has bandwidth ≈ `f/Q`, so
+it needs ~`f/2` frames/s. The top band needs 7.5 fps and we give 8 — right. The 1 Hz band needs
+1 fps and gets 8 — **8× redundant**; the bottom bands are **16× redundant**.
+
+So the low bands carry almost no independent information across the 8 frames of a patch. This is
+**not a correctness problem** (it is cheap after decimation, and the projection can learn to ignore
+it), but it is wasted flatten width and it should be recorded rather than discovered later. The
+principled fix is a **per-band frame rate** — a wavelet/constant-Q pyramid, where low bands emit
+1–2 frames per patch and high bands emit 8. That gives ragged tensors and is a natural **ablation**,
+not the v1 default.
+
+## S11.3 Consequence 2 — long kernels are mostly edge-padded, and this sets `T_MAX`
+
+A 4 s kernel in a 6 s window is fully supported for only 2 s of frame positions:
+
+| `T_MAX` | frames fully supported (longest kernel) | padded | bands hitting the cap |
+|---:|---:|---:|---:|
+| 1.0 s | 40 of 48 | 17% | 21 |
+| **2.0 s** | **32 of 48** | **33%** | **16** |
+| 3.0 s | 24 of 48 | 50% | 12 |
+| 4.0 s | 16 of 48 | 67% | 10 |
+
+Per band at `T_MAX = 4`: the 15 Hz kernel is fully supported for 94% of frames, the 2 Hz kernel for
+65%, and the sub-1 Hz kernels for only **33%**. Two-thirds of the low bands' output is computed
+against padding.
+
+**Recommendation: `T_MAX = 2.0 s`.** It keeps two-thirds of frames fully supported for every kernel,
+still reaches 2 cycles at 1 Hz and 1 cycle at 0.5 Hz, and the bands below that were already
+resolution-flagged in the filterbank — we are not losing information we currently have, we are
+declining to fabricate it. The bands it clamps hardest (0.3–0.9 Hz) are also the ones the signed-DC
+feature and the trunk's cross-patch attention already cover.
+
+Whatever `T_MAX` is chosen: **pad by reflection, not zeros** (a zero-padded edge looks like a
+step discontinuity to a band-pass kernel and injects broadband energy that is not in the signal),
+and emit a per-frame **edge-support fraction** alongside the Nyquist and resolution masks so the
+model can discount partially-supported frames rather than trusting them equally.
