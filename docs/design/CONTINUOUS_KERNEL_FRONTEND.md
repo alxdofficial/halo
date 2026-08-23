@@ -1,5 +1,24 @@
 # Continuous-time kernel front end — design brainstorm
 
+> ## ✅ BUILT — 2026-08-23. `model/tokenizer/continuous_kernel.py`, **not yet integrated.**
+>
+> `ContinuousKernelTokenizer`, 49,344 parameters, drop-in contract identical to
+> `PhysicalFilterbankTokenizer`. 17 tests in `tests/test_continuous_kernel.py`; full suite 717.
+>
+> **Deliberately NOT wired into `encoder.py` or `pretrain_episodic.py`** — there is no
+> `--frontend continuous` arm yet, so an in-flight experiment cannot be perturbed by it. A test
+> (`test_is_not_yet_wired_into_the_encoder`) asserts that and should be deleted in the commit that
+> adds the arm.
+>
+> **Measured cross-rate agreement** against 100 Hz on a band-limited signal, anti-alias decimated to
+> each rate: **0.995 at 20 Hz · 0.997 at 25 Hz · 0.9998 at 50 Hz.** Perturbing one kernel's
+> coefficients drops it to 0.837, so the test discriminates rather than passing trivially.
+>
+> To integrate later: add `"continuous"` to the `--frontend` choices, construct it in
+> `SetTokenizerEncoder` beside the filterbank (the `analyze`/`project`/`accumulate_norm_stats`/
+> `finalize_norm_stats`/`reset_norm_accumulator` API matches), and run the cross-rate transfer
+> experiment in S7 — **not** an accuracy bake-off.
+
 **Status: proposal, 2026-08-22. Nothing built.** A CNN whose kernels are defined as continuous
 curves over *real time* (seconds), sampled at whatever rate the signal arrives at, so one set of
 weights convolves 20 Hz and 100 Hz recordings without resampling either.
