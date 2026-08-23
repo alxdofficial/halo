@@ -707,3 +707,90 @@ Whatever `T_MAX` is chosen: **pad by reflection, not zeros** (a zero-padded edge
 step discontinuity to a band-pass kernel and injects broadband energy that is not in the signal),
 and emit a per-frame **edge-support fraction** alongside the Nyquist and resolution masks so the
 model can discount partially-supported frames rather than trusting them equally.
+
+---
+
+# S12. Cross-rate agreement — MEASURED, and the bug it exposed
+
+S3 said "evaluate at arbitrary output times". That sentence was doing more work than it looked, and
+under-specifying it produces a design that silently fails the property it exists for. Simulated
+end-to-end (band-limited signal generated at 400 Hz, anti-alias **decimated** to each rate as a real
+ADC would, kernel `T = 1.0 s`, 8 harmonics, 8 frames/s output), comparing every rate against 100 Hz:
+
+| implementation | corr @20 Hz | corr @25 Hz | corr @50 Hz |
+|---|---:|---:|---:|
+| **naive: sample kernel on a symmetric grid, round frame centre to nearest sample** | **0.844** | 0.972 | 0.971 |
+| **correct: evaluate the kernel at the exact offsets of the real samples** | **0.986** | 0.987 | 0.998 |
+
+**The bug.** Rounding the output-frame centre to the nearest input sample introduces up to half a
+sample of jitter — at 20 Hz that is 25 ms, which is **45° of phase error on a 5 Hz component**. The
+fix is the reason to have a continuous kernel at all: for output time `t_f`, take the real sample
+times `t_n = n/r` that fall inside the span and evaluate
+
+```
+w[n] = w_k( (t_n - t_f) / T_k )
+```
+
+so the kernel **absorbs the sub-sample offset** exactly. Never resample the signal, never round the
+centre. This is a hard requirement, not an optimisation, and the rate-agreement test in S6 is what
+catches it.
+
+**Each of the three S3 rules is load-bearing** — ablated at 20 Hz vs 100 Hz:
+
+| rule removed | correlation | magnitude ratio 20/100 |
+|---|---:|---:|
+| no `dt = 1/r` (plain sum) | 0.698 | **0.213** |
+| no per-harmonic band-limit | 0.644 | 1.067 |
+| no re-zero-mean | 0.699 | 1.068 |
+
+Dropping `dt = 1/r` makes a 20 Hz recording return **one fifth** the response of the same physical
+motion at 100 Hz — the device fingerprint, straight back in.
+
+**Residual error is genuine, not a defect.** After the fix, ~0.17 relative RMS remains at 20 Hz. It
+is quadrature error: a 1 s kernel gets 20 taps at 20 Hz and 100 at 100 Hz, so the Riemann sum
+approximating `∫w·x dt` is simply coarser. `L1` normalisation matches `dt`; `L2` is **worse**
+(0.556 rel RMS) because it rescales per-rate and destroys amplitude comparability — **use `dt = 1/r`
+or `L1`, never `L2`.**
+
+**Two separate causes must not be conflated:**
+- *Kernel band-limiting* — a `T = 0.5 s` kernel with 8 harmonics wants 16 Hz, which 20 Hz sampling
+  cannot represent, so harmonics 5–8 are dropped and it is **genuinely a different filter** (corr
+  0.931). Correct behaviour, and the Nyquist mask flags it.
+- *Signal information loss* — a broadband transient sampled at 20 Hz is genuinely not the same
+  signal (corr 0.836 even with a perfect front end). Nothing can fix that, and nothing should try.
+
+Design consequence: prefer kernels whose top harmonic is representable at the **lowest** corpus rate
+where possible. At 20 Hz the limit is 9 Hz, so `T_k ≥ M/9 ≈ 0.9 s` is fully representable
+everywhere; shorter kernels degrade gracefully to fewer harmonics and are masked.
+
+---
+
+# S13. Do we need patches at all? (No — and the design already reflects that)
+
+Correct on both counts, and worth making explicit.
+
+**Patching is an artefact of the filterbank, not a requirement.** The DFT needs a fixed-length
+window, so the loader pre-divides into 1 s patches. A convolution has no such need: it consumes a
+contiguous signal of any length and emits a sequence whose length scales with duration.
+
+**The design already produces exactly that.** Layer 1 emits 8 frames per second of recording, and
+Step 6 groups frames into one token per second. So a 3 s recording yields **3 tokens** and a 6 s
+recording yields **6** — the token count already scales with duration, which is the intuitive
+behaviour you describe. Variable-length recordings are handled by the existing
+`patch_padding_mask`, exactly as now.
+
+What changes is the *status* of the 1 s grid. Today it is **structural** — the DFT window. With a
+convolutional front end it becomes a **free hyperparameter**: the token stride is just where we
+pool, and 0.5 s (12 tokens per 6 s window) or 2 s (3 tokens) are equally legal. That is a genuine
+gain in flexibility, and it makes token stride an ablation we could never run before.
+
+**Keep the patched input format for v1 anyway.** `MultiScaleCollate` already delivers `(B,P,S,C)`,
+and the module reconstructs the contiguous window from `patch_len` + `patch_padding_mask` before
+convolving (the `searchsorted`-over-cumulative-lengths routine already written in
+`baseline_backbone.py`). Reconstructing and re-slicing is mildly redundant, but it means **zero
+loader changes**, which keeps the arm a controlled swap. Changing the loader to deliver contiguous
+signals is a clean follow-up once the front end has earned it — not a prerequisite.
+
+The one thing to preserve: **token count must remain a function of duration only, never of sampling
+rate.** 6 s gives 6 tokens at 20 Hz and at 100 Hz alike. That is the invariant the S6 rate-agreement
+test should assert on shapes as well as values.
