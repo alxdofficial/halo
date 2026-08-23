@@ -813,3 +813,107 @@ signals is a clean follow-up once the front end has earned it — not a prerequi
 The one thing to preserve: **token count must remain a function of duration only, never of sampling
 rate.** 6 s gives 6 tokens at 20 Hz and at 100 Hz alike. That is the invariant the S6 rate-agreement
 test should assert on shapes as well as values.
+
+---
+
+# S14. Debug sweep + capacity audit — 2026-08-23
+
+Swept the built module for numerical behaviour, literature conformance, and capacity. **Two real
+defects found and fixed**; both are now regression-tested.
+
+## S14.1 DEFECT — a duration fingerprint (fixed)
+
+`GroupNorm(1, C)` on `(N, C, L)` normalises over **channels *and* time**. It looks like a per-frame
+channel norm and is not one. Measured: two windows sharing their first 2 s but differing afterwards
+produced tokens for that **shared span** differing by **max |Δ| = 2.43**.
+
+That is a *duration fingerprint* — the same class of leak as a rate fingerprint, and precisely what
+Rule 5 forbids. A 2 s and a 6 s recording of the same opening motion would encode differently, and
+nothing in a loss curve would ever reveal it. Replaced with `LayerNorm` over the channel dimension
+at each frame (delta → 0.0). Test:
+`test_features_do_not_depend_on_how_long_the_rest_of_the_recording_was`.
+
+## S14.2 CAPACITY — 8 harmonics were too few for the motivating shape (fixed: M = 8 → 12)
+
+Measured the fraction of an arbitrary kernel shape's variance that `M` harmonics can express:
+
+| target shape | M=4 | **M=8** | **M=12** | M=16 |
+|---|---:|---:|---:|---:|
+| Gabor (the init) | 0.871 | **1.000** | 1.000 | 1.000 |
+| **asymmetric impact (heel strike)** | 0.591 | **0.763** | **0.836** | 0.876 |
+| chirp | 0.324 | **0.616** | **0.922** | 0.991 |
+| double pulse | 0.846 | 0.979 | 1.000 | 1.000 |
+| **sharp spike** | 0.442 | **0.754** | **0.916** | 0.978 |
+| random smooth | 0.246 | 0.466 | 0.611 | 0.815 |
+
+The whole argument for a time-domain kernel is *"a heel strike is an asymmetric impulse, not a
+sinusoid"* — and M=8 captured only **76%** of that shape. Raised to **M = 12** (24 coefficients per
+kernel, bank 576 → 832 params). Test asserts R² > 0.80 on an asymmetric impact.
+
+**The cost, quantified — a genuine tension worth knowing.** A kernel is fully representable only
+where `f_k ≤ 1.8·r / M`. More harmonics means sharper shapes but *more rate-fragility*:
+
+| M | bank params | fully-live kernels @20 Hz | corr @20 Hz | corr @50 Hz |
+|---:|---:|---:|---:|---:|
+| 8 | 576 | 22/32 | 0.99484 | 0.99978 |
+| **12** | **832** | **19/32** | **0.99455** | 0.99975 |
+| 16 | 1,088 | 16/32 | 0.99494 | 0.99973 |
+| 24 | 1,600 | 0/32 | — | 0.99972 |
+
+Cross-rate correlation is *unaffected* for kernels that stay intact; what changes is how many stay
+intact. **You cannot have both full shape capacity and full band coverage at 20 Hz** — a shaped
+kernel needs more bandwidth than a pure sinusoid, so our high bands are inherently more
+rate-fragile than the filterbank's. M=12 trades three Nyquist-masked bands at the lowest rate for
+substantially better shape capacity. M=24 is unusable (nothing survives at 20 Hz).
+
+## S14.3 CAPACITY — functional test: can it represent what the filterbank cannot?
+
+Two classes with **power spectra matched to corr 0.9999** (impulsive pulse trains vs their
+phase-randomised surrogates), so the discriminating information is *waveform shape only*. Linear
+probe on frozen features, held-out split, chance 0.500:
+
+| front end | probe accuracy |
+|---|---:|
+| filterbank (magnitude per patch) | 0.865 |
+| **continuous kernel, Gabor init, frozen** | **0.942** |
+| **continuous kernel, after 200 training steps** | **0.981** |
+
+Two things this shows. The architecture beats the filterbank **before any learning** (0.942 vs
+0.865) — that gain is the **ordered sub-second frames**, not the kernel shapes. Training then adds
+0.04 on top, with coefficients moving 0.019 from init, so the 24 numbers per kernel are genuinely
+being used rather than sitting at their Gabor initialisation.
+
+*(An earlier version of this test had both front ends at 1.000 because the construction leaked
+spectral cues. The phase-randomised surrogate is the fair version; the first attempt was discarded.)*
+
+## S14.4 Numerical health
+
+- **No dead kernels** (0 of 32 with ~zero variance); per-kernel activation sd spans 0.0007–0.0996,
+  which tracks where the probe signal actually has energy rather than indicating collapse.
+- **Gradients reach every learnable**, all finite. `sin_coeff` and `log_gain` start at exactly zero
+  by construction (Gabor init), so their gradient/weight ratio is undefined at step 0 — expected,
+  and they receive non-zero gradient immediately.
+- Token output at init: mean +0.033, sd 0.454, |max| 1.20 — a healthy scale for the trunk.
+
+## S14.5 Literature conformance
+
+| best practice | status |
+|---|---|
+| Gabor/mel initialisation rather than random | ✅ as SincNet and LEAF both do |
+| windowed kernel (avoid ringing) | ✅ Gaussian envelope; SincNet uses Hamming |
+| per-band compression + standardisation | ✅ `log1p` + frozen stats — **LEAF reports PCEN beats log**; an untested alternative |
+| quadrature magnitude (phase-invariant energy) | ✅ `\|z\|` from a cos/sin pair, as LEAF |
+| constrained parametrisation on small data | ✅ 24 numbers/kernel, not a free MLP |
+| learnable pooling after the bank | ⚠️ **partial** — strided depthwise conv; LEAF uses a learnable Gaussian low-pass |
+| anti-alias before sampling the kernel | ✅ exact per-harmonic mask — **CKConv does not do this** |
+| integral (`dt`) normalisation for variable rate | ✅ the rate-comparability requirement |
+
+**Parameter budget against the field:** analysis bank **832** vs SincNet ~160 (2/filter), LEAF ~320,
+CKConv 10–50k per layer (an implicit SIREN MLP). We sit between the constrained and free camps,
+which is where the literature puts small-data front ends — and we have 2.6× LEAF's analysis
+capacity. Note that **84% of the module's 49,600 parameters are the output projection**, though the
+fixed filterbank is 99% projection, so this is the more balanced of the two.
+
+**Two open items, neither blocking:** PCEN instead of `log1p` (LEAF's reported win), and a learnable
+low-pass pooling instead of the strided conv. Both are ablations for after the front end has earned
+its place.

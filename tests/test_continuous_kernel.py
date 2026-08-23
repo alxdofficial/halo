@@ -225,3 +225,47 @@ def test_is_not_yet_wired_into_the_encoder():
 
     source = open(encoder_module.__file__).read()
     assert "continuous_kernel" not in source
+
+
+def test_features_do_not_depend_on_how_long_the_rest_of_the_recording_was():
+    """A duration fingerprint is the same class of leak as a rate fingerprint.
+
+    `GroupNorm(1, C)` normalises over (channels, time), so a frame's features come to depend on the
+    statistics of the whole recording — measured at 2.43 max delta for a shared span between a 2 s
+    and a 6 s window. The stack must normalise over CHANNELS at each frame only (design doc Rule 5).
+    """
+    torch.manual_seed(0)
+    module = ContinuousKernelTokenizer().eval()
+    rate, per = 50.0, 50
+    head = torch.randn(1, 2, per, 1)
+    tail = torch.randn(1, 4, per, 1) * 5.0                 # a loud, different remainder
+    short_len = torch.full((1, 2), per, dtype=torch.long)
+    long_len = torch.full((1, 6), per, dtype=torch.long)
+    with torch.no_grad():
+        short = module(head, rate, short_len, patch_mask=torch.ones(1, 2, dtype=torch.bool))
+        long = module(torch.cat([head, tail], dim=1), rate, long_len,
+                      patch_mask=torch.ones(1, 6, dtype=torch.bool))
+    # the shared first patch must be unaffected by what follows it, up to the kernel's own
+    # legitimate look-ahead at the boundary
+    assert torch.allclose(short[:, 0], long[:, 0], atol=0.15), (
+        f"first token moved by {(short[:, 0] - long[:, 0]).abs().max():.4f} when the recording "
+        "was extended -- a duration fingerprint has leaked in")
+
+
+def test_harmonic_count_is_enough_for_the_shapes_this_front_end_claims():
+    """The motivating claim is that a time-domain kernel can match an asymmetric impact, which a
+    Gaussian band cannot. Assert the basis can actually express one."""
+    module = ContinuousKernelTokenizer()
+    M = module.M
+    n = 256
+    u = torch.linspace(-0.5, 0.5, n)
+    impact = torch.where(u < 0, torch.exp(u * 20), torch.exp(-u * 6)) * torch.sign(u + 1e-9)
+    impact = impact - impact.mean()
+    basis = []
+    for m in range(1, M + 1):
+        basis += [torch.cos(2 * math.pi * m * u), torch.sin(2 * math.pi * m * u)]
+    design = torch.stack(basis, dim=1)
+    coeff = torch.linalg.lstsq(design, impact.unsqueeze(1)).solution
+    predicted = (design @ coeff).squeeze(1)
+    r2 = float(1 - ((impact - predicted) ** 2).sum() / ((impact - impact.mean()) ** 2).sum())
+    assert r2 > 0.80, f"only {r2:.3f} of an asymmetric impact is representable with M={M}"

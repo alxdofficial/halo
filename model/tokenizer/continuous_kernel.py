@@ -72,7 +72,19 @@ import torch.nn.functional as F
 # Defaults — physically motivated, mirroring filterbank.py's constants where they correspond.
 # ---------------------------------------------------------------------------------------------
 CK_N_KERNELS = 32          # one per band; same count and log grid as FB_N_BANDS
-CK_N_HARMONICS = 8         # -> 16 coefficients per kernel (8 cos + 8 sin)
+CK_N_HARMONICS = 12        # -> 24 coefficients per kernel (12 cos + 12 sin).
+                           # Chosen by measuring representational capacity: the fraction of an
+                           # arbitrary kernel shape's variance M harmonics can express is
+                           #   shape                       M=8     M=12    M=16
+                           #   asymmetric impact (heel strike)  0.76   0.84   0.88
+                           #   chirp                            0.62   0.92   0.99
+                           #   sharp spike                      0.75   0.92   0.98
+                           # M=8 is marginal for exactly the shapes this front end exists to
+                           # capture. The cost is rate-fragility: a kernel is fully representable
+                           # only where f_k <= 1.8*r/M, so at 20 Hz M=8 keeps 22/32 kernels intact
+                           # and M=12 keeps 19/32. Cross-rate correlation is unaffected for the
+                           # kernels that ARE intact (0.9948 vs 0.9946). M=12 buys real shape
+                           # capacity for three more Nyquist-masked bands at the lowest rate.
 CK_F_MIN_HZ = 0.3          # == FB_F_MIN_HZ; below this is quasi-DC, handled by the signed DC feature
 CK_F_MAX_HZ = 15.0         # == FB_F_MAX_HZ; <= Nyquist of the lowest corpus rate (20 Hz)
 CK_N_CYCLES = 4.0          # cycles of the centre frequency inside the span -> carrier at harmonic 4,
@@ -158,10 +170,15 @@ class ContinuousKernelTokenizer(nn.Module):
         c1, c2 = conv_channels
         self.dw1 = nn.Conv1d(self.K, self.K, 3, stride=2, padding=1, groups=self.K)
         self.pw1 = nn.Conv1d(self.K, c1, 1)
-        self.gn1 = nn.GroupNorm(1, c1)
+        # LayerNorm over the CHANNEL dim at each frame -- never over time. `GroupNorm(1, C)` looks
+        # equivalent but pools over (C, L), which makes a frame's features depend on how long the
+        # rest of the recording was: measured, a 2 s and a 6 s window sharing their first 2 s got
+        # tokens differing by 2.43 for that shared span. That is a duration fingerprint, the same
+        # class of leak as a rate fingerprint, and it is what design-doc Rule 5 forbids.
+        self.ln1 = nn.LayerNorm(c1)
         self.dw2 = nn.Conv1d(c1, c1, 3, stride=1, padding=1, groups=c1)
         self.pw2 = nn.Conv1d(c1, c2, 1)
-        self.gn2 = nn.GroupNorm(1, c2)
+        self.ln2 = nn.LayerNorm(c2)
         self.frames_per_token = self.F // 2                      # after the single stride-2
         self.in_dim = (c2 * self.frames_per_token   # ORDERED frames — the point of the design
                        + self.K                     # nyquist mask
@@ -339,8 +356,10 @@ class ContinuousKernelTokenizer(nn.Module):
         if self.norm == "frozen":
             compressed = (compressed - self.norm_mu.view(1, 1, K, 1)) / self.norm_sd.view(1, 1, K, 1)
         x = compressed.reshape(B * C, K, n_frames)
-        x = self.pw1(self.dw1(x)); x = F.gelu(self.gn1(x))
-        x = self.pw2(self.dw2(x)); x = F.gelu(self.gn2(x))                       # (B*C, c2, f/2)
+        x = self.pw1(self.dw1(x))
+        x = F.gelu(self.ln1(x.transpose(1, 2)).transpose(1, 2))
+        x = self.pw2(self.dw2(x))
+        x = F.gelu(self.ln2(x.transpose(1, 2)).transpose(1, 2))                  # (B*C, c2, f/2)
         c2, reduced = x.shape[1], x.shape[2]
         per_token = max(reduced // P, 1)
         x = x[:, :, :per_token * P].reshape(B, C, c2, P, per_token)
