@@ -1,22 +1,20 @@
-# Latest Completed Results
+# Current Best Results
 
-> Last updated 2026-08-24. These measurements belong to the completed pairwise recording-reranker
-> checkpoint named below. The active code now uses a contextual scalar reranker with C=2/4/8/16;
-> it has passed smoke testing but has not yet produced a full result. Do not attribute these numbers
-> to the new mixer.
+> Last updated 2026-08-24. `PB-04-SET-SCALAR-1NN` is the promoted HALO checkpoint because it gives
+> the strongest zero-shot result and a small ordinary-activity 1-NN improvement. Its deployed
+> enrollment readout is 1-NN; retrieve-mix-vote is retained and reported as an auxiliary ablation.
 
-**Result set:** `PB-03-PAIRWISE-1NN`. See the
+**Result set:** `PB-04-SET-SCALAR-1NN` selected checkpoint. See the
 [`Phase-B Version Registry`](PHASE_B_TRAINING_STATUS.md) for the exact checkpoint hash and for how it
-differs from the active `PB-04-SET-SCALAR-1NN` architecture.
+differs from the previous `PB-03-PAIRWISE-1NN` model.
 
 ## Protocol
 
-The latest completed checkpoint is
-`training/tokenizer/outputs/e2e_recording_rerank_35k_v3_20260824/best.pt`. It was trained end to end
-from random initialization for 35,000 steps and selected at step 33,000 using the predeclared
-development metric. Training used partial-enrollment episodes with candidate counts 8, 16, 32, and
-64. Each episode queried four labels and enrolled both queried labels and distractors so that the
-presence of enrollment did not reveal the answer.
+The promoted checkpoint is
+`training/tokenizer/outputs/e2e_pb04_fixed_filterbank_35k_20260824/best.pt`. It was trained end to
+end from random initialization for 35,000 steps and selected at step 10,000 using the predeclared
+development metric. Training used partial-enrollment episodes with candidate counts 2, 4, 8, and
+16. Each episode queried up to four labels and enrolled queried labels and distractors independently.
 
 External evaluation uses the sealed `adaptation_v1` manifest: seven held-out datasets, five seeds,
 execution-disjoint support and query sets, and no test-set training. Here `k` has the standard N-way
@@ -24,10 +22,9 @@ k-shot meaning: every candidate receives exactly `k` independent enrolled execut
 cohort and candidate roster remain fixed across k. Macro F1 is averaged within each dataset and then
 equally across datasets.
 
-The strict assembler validated 20,957 cells. Generated tables are in
-[`../../eval/adaptation_tables/e2e_recording_rerank_35k_v3_20260824/headline_tables.md`](../../eval/adaptation_tables/e2e_recording_rerank_35k_v3_20260824/headline_tables.md),
-and the raw HALO decomposition is in
-[`../../eval/adaptation_results/e2e_recording_rerank_35k_v3_20260824/halo_engine_decomposition.json`](../../eval/adaptation_results/e2e_recording_rerank_35k_v3_20260824/halo_engine_decomposition.json).
+The strict assembler validated 7,997 coherent-label cells. Generated aggregate and per-dataset
+tables are in
+[`../../eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/headline_tables.md`](../../eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/headline_tables.md).
 
 ## Zero-Shot Recognition
 
@@ -40,7 +37,7 @@ mechanism.
 | HARNet | 33.82 | 11.40 |
 | UniMTS | 31.98 | **17.37** |
 | LIMU-BERT | 30.60 | 10.27 |
-| **HALO / retrieve-mix-vote** | 20.72 | 9.72 |
+| **HALO PB-04** | 26.99 | 11.32 |
 | ImageBind | 11.38 | 8.15 |
 | NormWear | 5.08 | 3.58 |
 
@@ -59,10 +56,10 @@ Each sees only the enrolled support executions. Linear-head fitting is excluded 
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| **HALO / retrieve-mix-vote** | 53.99 | 57.82 | 61.68 | 60.81 | 58.48 |
-| HALO / 1-NN | 53.32 | 56.83 | 60.33 | 60.01 | 57.97 |
-| HALO / prototype | 53.32 | 55.50 | 58.10 | 57.56 | 55.74 |
-| HALO / ridge | 52.83 | 56.09 | 60.18 | 60.80 | 58.07 |
+| HALO / retrieve-mix-vote | 48.86 | 51.50 | 55.18 | 53.59 | 51.58 |
+| **HALO / 1-NN** | 53.72 | 57.91 | 60.85 | 60.62 | 58.74 |
+| HALO / prototype | 53.72 | 57.82 | 58.82 | 59.01 | 55.22 |
+| HALO / ridge | 52.53 | 56.47 | 57.93 | 58.19 | 55.78 |
 | LIMU-BERT / 1-NN | 56.91 | **61.95** | **65.24** | **64.89** | 61.55 |
 | LIMU-BERT / prototype | **56.91** | 60.19 | 63.84 | 63.06 | 59.18 |
 | LIMU-BERT / ridge | 50.23 | 53.46 | 58.41 | 57.85 | 55.06 |
@@ -86,10 +83,10 @@ Each sees only the enrolled support executions. Linear-head fitting is excluded 
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| **HALO / retrieve-mix-vote** | **38.28** | **38.71** | **51.74** | **55.78** | **58.22** |
-| HALO / 1-NN | 36.78 | 37.88 | 50.00 | 53.25 | 55.35 |
-| HALO / prototype | 36.78 | 37.06 | 49.16 | 51.11 | 52.78 |
-| HALO / ridge | 35.61 | 36.14 | 49.17 | 52.85 | 57.74 |
+| HALO / retrieve-mix-vote | 31.18 | 31.38 | 36.18 | 37.48 | 41.83 |
+| **HALO / 1-NN** | 36.01 | 36.18 | 48.16 | 52.07 | 54.85 |
+| HALO / prototype | 36.01 | 35.86 | 45.16 | 46.98 | 48.49 |
+| HALO / ridge | 35.65 | 35.21 | 46.70 | 51.37 | **56.41** |
 | LIMU-BERT / 1-NN | 30.58 | 33.83 | 40.28 | 42.78 | 43.97 |
 | LIMU-BERT / prototype | 30.58 | 33.36 | 38.76 | 40.38 | 41.66 |
 | LIMU-BERT / ridge | 27.56 | 30.75 | 36.07 | 38.25 | 40.39 |
@@ -109,53 +106,71 @@ Each sees only the enrolled support executions. Linear-head fitting is excluded 
 | NormWear / prototype | 18.63 | 18.14 | 21.50 | 21.76 | 21.05 |
 | NormWear / ridge | 14.68 | 14.24 | 18.43 | 19.35 | 19.67 |
 
-![Primary adaptation curves](figures/e2e_recording_rerank_35k_v3_20260824/primary_adaptation_curves.png)
+![Primary adaptation curves](figures/e2e_set_scalar_1nn_35k_20260824_best/primary_adaptation_curves.png)
 
-Retrieve-mix-vote beats HALO pooled-execution 1-NN at every k. The gain is 0.51-1.35 F1 on
-ordinary activities and 0.83-2.87 F1 on specialized activities. HALO leads all compared methods on
-specialized activities, but LIMU-BERT remains strongest on ordinary activities through k=8.
+PB-04's 1-NN readout is the promoted enrollment mechanism. Retrieve-mix-vote is below 1-NN at every
+k and is reported to make that negative result explicit. LIMU-BERT remains strongest on ordinary
+activities through k=8, while PB-04 is competitive with UniMTS on specialized activities.
 
-## Reranker Decomposition
+## Per-Dataset Performance
 
-The native-versus-pooled comparison does not isolate learning because the native path preserves
-multiple recording rows per enrolled execution and also includes corpus memory. The matched
-decomposition below compares raw and learned scores while holding those inputs fixed. Values are
-means over k=1,2,4,8,16 after equal dataset weighting.
+The complete per-dataset report contains native zero-shot results and separate `retrieve-mix-vote`,
+1-NN, prototype, and ridge curves for every model on all seven held-out datasets:
+[`headline_tables.md`](../../eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/headline_tables.md#3-per-dataset-performance).
+The promoted HALO mechanism is summarized below; `n/a` means the sealed protocol could not form the
+requested support count without reusing an execution.
 
-| memory available | ordinary raw | ordinary reranked | specialized raw | specialized reranked |
+| dataset | k=0 | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|---:|---:|
+| Inclusive-HAR | 23.21 | 34.90 | 37.09 | 38.24 | 41.96 | 43.85 |
+| MoniPar | 15.19 | 38.40 | 41.80 | 38.09 | 41.08 | 43.47 |
+| SPAR | 15.35 | 52.02 | 52.48 | 58.23 | 63.05 | 66.23 |
+| TNDA-HAR | 46.21 | 59.07 | 63.91 | 68.69 | 72.12 | 76.34 |
+| Upper Limb Use | 3.43 | 17.61 | 14.25 | n/a | n/a | n/a |
+| USC-HAD | 14.64 | 56.26 | 60.81 | 63.75 | 53.18 | 56.03 |
+| UT Complex | 23.88 | 64.65 | 69.83 | 72.70 | 75.21 | n/a |
+
+## Checkpoint And Readout Selection
+
+PB-04 trained for 35,000 steps in 4,314 seconds. The predeclared development metric selected step
+10,000. Both that checkpoint and the final step were evaluated on the same sealed manifest. Values
+below are mean macro F1; positive-k columns average k=1,2,4,8,16.
+
+| checkpoint / readout | ordinary k=0 | ordinary k>0 | specialized k=0 | specialized k>0 |
 |---|---:|---:|---:|---:|
-| Enrollment only | 58.60 | 58.66 | 48.59 | 48.56 |
-| Corpus only | 21.23 | 21.23 | 9.98 | 11.34 |
-| Enrollment + corpus | 58.50 | 58.56 | 48.57 | 48.55 |
+| PB-03 retrieve-mix-vote | 20.72 | **58.56** | 9.72 | **48.55** |
+| PB-03 1-NN | - | 57.69 | - | 46.65 |
+| PB-04 best retrieve-mix-vote | 26.99 | 52.14 | 11.32 | 35.61 |
+| PB-04 best 1-NN | - | 58.37 | - | 45.45 |
+| PB-04 last retrieve-mix-vote | 29.44 | 46.59 | 8.12 | 25.97 |
+| PB-04 last 1-NN | - | 56.89 | - | 45.34 |
 
-![Recording-level reranking decomposition](figures/e2e_recording_rerank_35k_v3_20260824/halo_engine_decomposition.png)
+PB-04 is promoted for its stronger zero-shot performance. Its selected encoder is also modestly
+better under ordinary 1-NN (+0.67 F1), although specialized 1-NN is lower (-1.20 F1). The learned
+mechanism is far below its own 1-NN control, and late training makes that gap larger. Therefore the
+promoted model is PB-04 with 1-NN enrollment, not PB-04 retrieve-mix-vote. Full tables are in
+[`e2e_set_scalar_1nn_35k_20260824_best_full/headline_tables.md`](../../eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/headline_tables.md).
 
-The learned correction is nearly neutral on the full deployed path: +0.06 ordinary and -0.02
-specialized F1 relative to exact raw full-memory 1-NN. It improves weak corpus-only retrieval on
-specialized activities, but that path remains far below enrollment retrieval. The demonstrated
-native gain therefore comes primarily from retaining individual recording rows rather than pooling
-each execution, not from learned reranking. This run does not yet establish that the learned
-reranker adds useful adaptation beyond a carefully matched raw nearest-neighbor rule.
+## Learned Readout Finding
+
+Across both regimes and every k, PB-04 retrieve-mix-vote is below PB-04 1-NN. This is consistent
+with the prior PB-03 decomposition, where most of the apparent native gain came from retaining
+individual recording rows rather than from learned score correction. No current experiment shows
+that a learned Phase-B mixer improves a matched nearest-neighbor decision.
 
 ## Training Health
 
-The repaired run completed without a non-finite loss or gradient. Development macro F1 rose from
-0.0910 before training to a best of 0.2441 at step 33,000, then ended at 0.2386 at step 35,000. The
-reranker's development margin over its exact raw full-memory control was also small: +0.0039 at the
-selected checkpoint. This is mild late overfitting rather than early convergence.
-
-Total wall time was 97.5 minutes under the code used for this recorded run: 29.8 minutes constructing
-280,000 deterministic episode plans and approximately 67.7 minutes for initialization, validation,
-and GPU training. The planner has since been made deterministic-parallel and cacheable without
-changing episode semantics. A real-corpus benchmark projects about 6 minutes of cold setup and 2
-minutes of warm setup; per-step CPU data preparation remains the main training-time limitation.
+PB-04 completed 35,000 finite steps in 71.9 minutes. Development macro F1 rose from 0.2010 before
+training to 0.3642 at step 10,000, then ended at 0.3353. External evaluation confirms that the
+selected checkpoint is preferable: the final checkpoint loses 3.6-6.8 F1 on ordinary
+retrieve-mix-vote and 7.2-13.3 F1 on specialized retrieve-mix-vote. Encoder-only 1-NN changes much
+less, so late training primarily overfits the learned correction.
 
 ## Current Conclusion
 
-The simplified model fixes the severe degradation caused by the retired attention mixer and gives a
-small, consistent headline advantage over pooled-execution 1-NN. It also provides the strongest
-tested representation/readout combination for specialized novel activities. However, the exact
-decomposition does not show a meaningful learned-reranking advantage, and zero-shot recognition is
-weak. The next experiment should compare the deployed full-memory reranker directly against the
-same recording-level raw 1NN objective during model selection and training, rather than using the
-pooled-execution control as the optimization reference.
+PB-04 is the current best HALO checkpoint because it provides the strongest zero-shot result. For
+enrollment adaptation, its supported mechanism is simple 1-NN over the learned representation. The
+encoder and append-only enrollment memory are supported by the experiments; a learned Phase-B mixer
+is not. The next clean experiment is end-to-end episodic encoder training with a differentiable
+soft-nearest-neighbor objective and exact hard 1-NN inference, with no mixer, vote head, or learned
+reranker.

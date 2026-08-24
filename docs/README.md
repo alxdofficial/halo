@@ -10,8 +10,8 @@
 > 4. [**design/PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — what Phase B is,
 >    why memory is an adaptation mechanism, and the evidence required before claiming it works.
 > 5. [**results/RESULTS.md**](results/RESULTS.md) — **the current headline result.** The current
->    HALO checkpoint and all six external encoders on the shared manifest, with the native engine
->    separated from matched frozen-representation controls.
+>    HALO checkpoint and all six external encoders on the shared manifest, with the promoted 1-NN
+>    readout separated from the learned retrieve-mix-vote ablation.
 > 6. [**results/PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the current
 >    Phase-B run history, matched tables, confirmed defects, and next-run requirements.
 >
@@ -20,39 +20,15 @@
 
 ## Current Matched Results
 
-**2026-08-24.** The latest completed result is the recording-level pairwise reranker at
-`training/tokenizer/outputs/e2e_recording_rerank_35k_v3_20260824/best.pt` (selected step 33,000). It
-and all six external encoders were scored on the same `adaptation_v1` manifest: seven held-out
-datasets, five seeds, and execution-disjoint support/query. Full tables and protocol details are in
-[`results/RESULTS.md`](results/RESULTS.md).
+**2026-08-24.** The promoted checkpoint is `PB-04-SET-SCALAR-1NN`, selected at step 10,000 from
+`training/tokenizer/outputs/e2e_pb04_fixed_filterbank_35k_20260824/best.pt`. It gives HALO's
+strongest zero-shot result. For k>=1, the supported deployment rule is 1-NN over enrolled
+executions; the learned retrieve-mix-vote readout is reported as an underperforming ablation.
 
-### Zero-shot, k = 0 — each model's own shipped mechanism
-
-| model | ordinary macro F1 | specialized-novel macro F1 |
-|---|---:|---:|
-| CrossHAR + ConSE | **37.70** | 11.22 |
-| HARNet + ConSE | 33.82 | 11.40 |
-| UniMTS (own text tower) | 31.98 | **17.37** |
-| LiMU-BERT + ConSE | 30.60 | 10.27 |
-| **HALO native engine** | 20.72 | 9.72 |
-| ImageBind (own text tower) | 11.38 | 8.15 |
-| NormWear (L1 text match) | 5.08 | 3.58 |
-
-HALO's row uses the native corrected-nearest rule with no fitted test head. It is not competitive at
-k=0 in this run.
-
-### Enrollment, k ≥ 1 — and the nuance that matters
-
-The native engine scores 53.99/57.82/61.68/60.81/58.48 across ordinary k=1/2/4/8/16 and leads every
-compared method on specialized activities. Its exact learned reranking correction is nevertheless
-nearly neutral relative to raw full-memory 1-NN. LIMU-BERT 1-NN remains stronger on ordinary
-activities through k=8.
-
-The historical `69.46` in `ADAPTATION_TABLE_20260822.md` is HALO with a **fitted linear head** at
-specialized k=16; it is not a HALO 1-NN score. The directly comparable previous pooled-execution
-HALO 1-NN checkpoint scored 55.11-63.94 ordinary and 42.76-62.12 specialized. The current encoder is
-1.5-3.6 points lower on ordinary activities and about 6-7 points lower on specialized activities;
-the external baseline rows and sealed evaluation manifest did not change.
+PB-04 and all six external encoders were scored on the same sealed `adaptation_v1` manifest: seven
+held-out datasets, five seeds, and execution-disjoint support/query sets. Aggregate tables,
+per-dataset tables, checkpoint comparisons, and the exact protocol are maintained only in
+[`results/RESULTS.md`](results/RESULTS.md) to prevent duplicate numbers from becoming stale.
 
 ### Retracted — do not cite
 - the **49.5 "beats harnet"** evidence-decoder headline — retracted twice: first for eval-label text
@@ -88,11 +64,9 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   (device + placement + modality) plus intra-sensor axis role, as implemented.
 
 **The two phases, as built**
-- [**COMPACT_EVIDENCE_ENGINE.md**](design/COMPACT_EVIDENCE_ENGINE.md) — **the live architecture**:
-  filterbank → temporal trunk (d=128, one row per six-second recording) → cosine top-64 → one
-  unordered candidate/query/evidence mixer → one scalar correction per evidence row → corrected
-  nearest neighbor. There is no vector refinement or text vote. **When any design doc disagrees
-  with this one about Phase B, this one wins.**
+- [**COMPACT_EVIDENCE_ENGINE.md**](design/COMPACT_EVIDENCE_ENGINE.md) — the implemented PB-04
+  retrieve-mix-vote ablation. The promoted deployment path uses the same PB-04 encoder with direct
+  1-NN enrollment because the learned correction reduces held-out performance.
 - [**DESIGN_AUDIT_20260821.md**](design/DESIGN_AUDIT_20260821.md) — the stage-by-stage verification
   record: what is proven by test or measurement, what is an open risk, and the four methodology
   rules (each of which was violated once, at cost).
@@ -153,8 +127,9 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   simultaneity claim about the ten new sources.
 
 ## `results/` — the measured record
-- [**RESULTS.md**](results/RESULTS.md) — **the current headline**: native HALO engine and HALO+1-NN
-  against the complete external-model roster, all matched controls, both regimes, and every k.
+- [**RESULTS.md**](results/RESULTS.md) — **the current headline**: PB-04 zero-shot and 1-NN
+  enrollment against the complete external-model roster, all matched controls, both regimes, every
+  k, and per-dataset tables.
 - [ADAPTATION_TABLE_20260822.md](results/ADAPTATION_TABLE_20260822.md) — historical August 22 table;
   retained for auditability and explicitly superseded by `RESULTS.md`.
 - [EVAL_HARNESS_AUDIT_20260822.md](results/EVAL_HARNESS_AUDIT_20260822.md) — verification that the

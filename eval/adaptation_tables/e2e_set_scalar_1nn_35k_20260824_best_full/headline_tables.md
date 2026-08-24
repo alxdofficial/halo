@@ -10,7 +10,7 @@ No labelled examples. Macro F1, mean over datasets.
 | CrossHAR | **37.70** | 11.22 |
 | HARNet | 33.82 | 11.40 |
 | LIMU-BERT | 30.60 | 10.27 |
-| HALO (ours) | 20.72 | 9.72 |
+| HALO (ours) | 26.99 | 11.32 |
 | ImageBind | 11.38 | 8.15 |
 | NormWear | 5.08 | 3.58 |
 
@@ -24,10 +24,10 @@ Datasets per regime: ordinary 4, specialized_novel 3
 
 | model | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 53.99 | 57.82 | 61.68 | 60.81 | 58.48 |
-| HALO / 1-NN | 53.32 | 56.83 | 60.33 | 60.01 | 57.97 |
-| HALO / prototype | 53.32 | 55.50 | 58.10 | 57.56 | 55.74 |
-| HALO / ridge | 52.83 | 56.09 | 60.18 | 60.80 | 58.07 |
+| HALO / retrieve-mix-vote | 48.86 | 51.50 | 55.18 | 53.59 | 51.58 |
+| HALO / 1-NN | 53.72 | 57.91 | 60.85 | 60.62 | 58.74 |
+| HALO / prototype | 53.72 | 57.82 | 58.82 | 59.01 | 55.22 |
+| HALO / ridge | 52.53 | 56.47 | 57.93 | 58.19 | 55.78 |
 | LIMU-BERT / 1-NN | 56.91 | **61.95** | **65.24** | **64.89** | 61.55 |
 | LIMU-BERT / prototype | **56.91** | 60.19 | 63.84 | 63.06 | 59.18 |
 | LIMU-BERT / ridge | 50.23 | 53.46 | 58.41 | 57.85 | 55.06 |
@@ -51,15 +51,15 @@ Datasets per regime: ordinary 4, specialized_novel 3
 
 | model | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | **38.28** | **38.71** | **51.74** | **55.78** | **58.22** |
-| HALO / 1-NN | 36.78 | 37.88 | 50.00 | 53.25 | 55.35 |
-| HALO / prototype | 36.78 | 37.06 | 49.16 | 51.11 | 52.78 |
-| HALO / ridge | 35.61 | 36.14 | 49.17 | 52.85 | 57.74 |
+| HALO / retrieve-mix-vote | 31.18 | 31.38 | 36.18 | 37.48 | 41.83 |
+| HALO / 1-NN | 36.01 | 36.18 | 48.16 | 52.07 | 54.85 |
+| HALO / prototype | 36.01 | 35.86 | 45.16 | 46.98 | 48.49 |
+| HALO / ridge | 35.65 | 35.21 | 46.70 | 51.37 | **56.41** |
 | LIMU-BERT / 1-NN | 30.58 | 33.83 | 40.28 | 42.78 | 43.97 |
 | LIMU-BERT / prototype | 30.58 | 33.36 | 38.76 | 40.38 | 41.66 |
 | LIMU-BERT / ridge | 27.56 | 30.75 | 36.07 | 38.25 | 40.39 |
-| UniMTS / 1-NN | 37.02 | 36.71 | 49.12 | 52.77 | 55.05 |
-| UniMTS / prototype | 37.02 | 36.49 | 47.87 | 50.19 | 50.91 |
+| UniMTS / 1-NN | **37.02** | **36.71** | **49.12** | **52.77** | 55.05 |
+| UniMTS / prototype | **37.02** | 36.49 | 47.87 | 50.19 | 50.91 |
 | UniMTS / ridge | 34.39 | 34.78 | 46.71 | 50.28 | 52.85 |
 | CrossHAR / 1-NN | 28.32 | 32.36 | 40.73 | 43.04 | 45.44 |
 | CrossHAR / prototype | 28.32 | 32.46 | 40.97 | 43.38 | 44.74 |
@@ -82,7 +82,7 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 
 | model | Inclusive-HAR | MoniPar | SPAR | TNDA-HAR | USC-HAD | UT Complex | Upper Limb Use |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| HALO (ours) | 13.90 | 10.46 | 13.85 | 30.42 | 25.55 | 13.03 | 4.85 |
+| HALO (ours) | 23.21 | 15.19 | 15.35 | 46.21 | 14.64 | 23.88 | 3.43 |
 | LIMU-BERT | **36.10** | 11.05 | 9.57 | 44.42 | 22.89 | 19.00 | 10.20 |
 | UniMTS | 30.53 | **22.22** | **22.21** | 45.12 | 24.17 | 28.09 | 7.68 |
 | CrossHAR | 30.56 | 11.97 | 9.79 | **52.27** | **35.14** | **32.85** | **11.90** |
@@ -96,15 +96,15 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 34.06 | 36.81 | 38.74 | 40.97 | 43.81 |
-| HALO / 1-NN | 35.76 | 37.73 | 38.68 | 42.43 | 42.88 |
-| HALO / prototype | 35.76 | 36.35 | 37.65 | 40.81 | 42.36 |
-| HALO / ridge | **35.94** | 37.38 | 39.02 | 42.75 | 43.34 |
+| HALO / retrieve-mix-vote | 30.19 | 32.53 | 33.66 | 32.85 | 35.42 |
+| HALO / 1-NN | 34.90 | 37.09 | 38.24 | 41.96 | 43.85 |
+| HALO / prototype | 34.90 | 37.22 | 38.38 | 42.82 | 43.94 |
+| HALO / ridge | 34.65 | 38.14 | 38.89 | 42.71 | 44.83 |
 | LIMU-BERT / 1-NN | 31.56 | 36.14 | 37.75 | 38.78 | 39.18 |
 | LIMU-BERT / prototype | 31.56 | 33.03 | 35.90 | 38.74 | 41.13 |
 | LIMU-BERT / ridge | 31.15 | 32.64 | 35.69 | 37.79 | 38.16 |
-| UniMTS / 1-NN | 35.40 | **38.63** | **41.93** | **44.24** | **49.04** |
-| UniMTS / prototype | 35.40 | 35.55 | 38.63 | 41.59 | 43.70 |
+| UniMTS / 1-NN | **35.40** | **38.63** | **41.93** | **44.24** | **49.04** |
+| UniMTS / prototype | **35.40** | 35.55 | 38.63 | 41.59 | 43.70 |
 | UniMTS / ridge | 34.80 | 35.42 | 39.52 | 42.52 | 44.96 |
 | CrossHAR / 1-NN | 32.83 | 33.85 | 36.81 | 37.61 | 39.97 |
 | CrossHAR / prototype | 32.83 | 34.09 | 37.36 | 38.89 | 40.01 |
@@ -123,10 +123,10 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 57.26 | 60.94 | 66.98 | 69.74 | 74.39 |
-| HALO / 1-NN | 57.63 | 61.58 | 67.13 | 69.49 | 74.21 |
-| HALO / prototype | 57.63 | 58.99 | 63.64 | 66.86 | 68.45 |
-| HALO / ridge | 57.33 | 59.54 | 64.75 | 68.86 | 72.49 |
+| HALO / retrieve-mix-vote | 59.21 | 64.28 | 69.00 | 72.15 | 74.86 |
+| HALO / 1-NN | 59.07 | 63.91 | 68.69 | 72.12 | 76.34 |
+| HALO / prototype | 59.07 | 64.53 | 63.77 | 67.73 | 68.56 |
+| HALO / ridge | 59.05 | 63.48 | 62.40 | 68.04 | 70.63 |
 | LIMU-BERT / 1-NN | **60.59** | **66.34** | **70.99** | 75.64 | 79.96 |
 | LIMU-BERT / prototype | **60.59** | 63.49 | 70.24 | 73.26 | 74.64 |
 | LIMU-BERT / ridge | 54.04 | 59.68 | 69.54 | 73.73 | 75.17 |
@@ -150,10 +150,10 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 61.58 | 65.29 | 68.10 | 55.64 | 57.25 |
-| HALO / 1-NN | 59.90 | 63.40 | 66.24 | 54.91 | 56.81 |
-| HALO / prototype | 59.90 | 62.88 | 65.10 | 55.17 | 56.41 |
-| HALO / ridge | 59.60 | 63.24 | 66.14 | 56.07 | 58.39 |
+| HALO / retrieve-mix-vote | 48.58 | 49.43 | 52.61 | 40.76 | 44.46 |
+| HALO / 1-NN | 56.26 | 60.81 | 63.75 | 53.18 | 56.03 |
+| HALO / prototype | 56.26 | 59.50 | 61.07 | 52.06 | 53.15 |
+| HALO / ridge | 54.31 | 56.88 | 59.70 | 48.78 | 51.89 |
 | LIMU-BERT / 1-NN | 66.63 | 70.47 | **73.36** | **62.85** | **65.51** |
 | LIMU-BERT / prototype | **66.63** | **70.54** | 72.82 | 62.02 | 61.78 |
 | LIMU-BERT / ridge | 56.56 | 58.59 | 62.07 | 50.11 | 51.85 |
@@ -177,10 +177,10 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 63.05 | 68.24 | 72.89 | 76.91 | n/a |
-| HALO / 1-NN | 59.99 | 64.62 | 69.30 | 73.20 | n/a |
-| HALO / prototype | 59.99 | 63.76 | 66.01 | 67.40 | n/a |
-| HALO / ridge | 58.47 | 64.22 | 70.80 | 75.53 | n/a |
+| HALO / retrieve-mix-vote | 57.45 | 59.74 | 65.47 | 68.60 | n/a |
+| HALO / 1-NN | 64.65 | 69.83 | 72.70 | 75.21 | n/a |
+| HALO / prototype | 64.65 | 70.01 | 72.05 | 73.42 | n/a |
+| HALO / ridge | 62.12 | 67.37 | 70.76 | 73.24 | n/a |
 | LIMU-BERT / 1-NN | **68.87** | **74.85** | **78.87** | **82.28** | n/a |
 | LIMU-BERT / prototype | **68.87** | 73.71 | 76.39 | 78.21 | n/a |
 | LIMU-BERT / ridge | 59.16 | 62.94 | 66.32 | 69.78 | n/a |
@@ -206,15 +206,15 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 41.66 | **46.52** | 41.05 | 44.45 | 47.16 |
-| HALO / 1-NN | 40.34 | 43.85 | 39.65 | 42.06 | 43.38 |
-| HALO / prototype | 40.34 | 43.54 | 39.88 | 41.00 | 42.23 |
-| HALO / ridge | 36.25 | 38.65 | 37.06 | 39.51 | 43.33 |
+| HALO / retrieve-mix-vote | 34.59 | 38.95 | 32.82 | 34.12 | 36.99 |
+| HALO / 1-NN | 38.40 | 41.80 | 38.09 | 41.08 | 43.47 |
+| HALO / prototype | 38.40 | 41.26 | 37.11 | 38.43 | 39.34 |
+| HALO / ridge | 36.43 | 38.14 | 36.36 | 39.57 | 43.61 |
 | LIMU-BERT / 1-NN | 36.63 | 41.18 | 33.75 | 37.73 | 39.34 |
 | LIMU-BERT / prototype | 36.63 | 38.85 | 30.53 | 33.26 | 35.45 |
 | LIMU-BERT / ridge | 30.35 | 31.80 | 26.12 | 29.44 | 32.31 |
 | UniMTS / 1-NN | **43.31** | 45.65 | 41.32 | 42.65 | 43.00 |
-| UniMTS / prototype | **43.31** | 46.43 | **42.74** | 43.58 | 42.92 |
+| UniMTS / prototype | **43.31** | **46.43** | **42.74** | 43.58 | 42.92 |
 | UniMTS / ridge | 38.84 | 42.36 | 40.44 | 42.62 | 43.99 |
 | CrossHAR / 1-NN | 38.16 | 42.25 | 38.35 | 40.83 | 42.74 |
 | CrossHAR / prototype | 38.16 | 42.37 | 40.05 | 42.08 | 43.01 |
@@ -233,15 +233,15 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | **57.79** | **57.48** | **62.42** | **67.12** | 69.29 |
-| HALO / 1-NN | 54.94 | 55.29 | 60.36 | 64.45 | 67.32 |
-| HALO / prototype | 54.94 | 54.88 | 58.43 | 61.22 | 63.32 |
-| HALO / ridge | 55.29 | 56.71 | 61.28 | 66.19 | **72.16** |
+| HALO / retrieve-mix-vote | 42.52 | 39.71 | 39.54 | 40.85 | 46.67 |
+| HALO / 1-NN | 52.02 | **52.48** | **58.23** | 63.05 | 66.23 |
+| HALO / prototype | 52.02 | 49.90 | 53.21 | 55.53 | 57.64 |
+| HALO / ridge | 52.73 | 50.97 | 57.04 | **63.18** | **69.20** |
 | LIMU-BERT / 1-NN | 35.63 | 45.39 | 46.81 | 47.83 | 48.59 |
 | LIMU-BERT / prototype | 35.63 | 45.22 | 46.99 | 47.51 | 47.86 |
 | LIMU-BERT / ridge | 35.34 | 44.50 | 46.02 | 47.07 | 48.46 |
-| UniMTS / 1-NN | 52.86 | 50.65 | 56.92 | 62.89 | 67.11 |
-| UniMTS / prototype | 52.86 | 48.67 | 53.00 | 56.81 | 58.89 |
+| UniMTS / 1-NN | **52.86** | 50.65 | 56.92 | 62.89 | 67.11 |
+| UniMTS / prototype | **52.86** | 48.67 | 53.00 | 56.81 | 58.89 |
 | UniMTS / ridge | 51.25 | 48.30 | 52.99 | 57.94 | 61.72 |
 | CrossHAR / 1-NN | 31.83 | 39.05 | 43.10 | 45.25 | 48.14 |
 | CrossHAR / prototype | 31.83 | 38.11 | 41.89 | 44.67 | 46.48 |
@@ -260,10 +260,10 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 15.38 | 12.13 | n/a | n/a | n/a |
-| HALO / 1-NN | 15.06 | 14.51 | n/a | n/a | n/a |
-| HALO / prototype | 15.06 | 12.75 | n/a | n/a | n/a |
-| HALO / ridge | 15.28 | 13.07 | n/a | n/a | n/a |
+| HALO / retrieve-mix-vote | 16.42 | 15.47 | n/a | n/a | n/a |
+| HALO / 1-NN | 17.61 | 14.25 | n/a | n/a | n/a |
+| HALO / prototype | 17.61 | 16.43 | n/a | n/a | n/a |
+| HALO / ridge | 17.80 | 16.51 | n/a | n/a | n/a |
 | LIMU-BERT / 1-NN | **19.49** | 14.93 | n/a | n/a | n/a |
 | LIMU-BERT / prototype | **19.49** | 16.02 | n/a | n/a | n/a |
 | LIMU-BERT / ridge | 16.98 | 15.95 | n/a | n/a | n/a |

@@ -10,6 +10,7 @@
 ## Status Labels
 
 - **active, untrained**: implemented and verified, but no full checkpoint or external result exists;
+- **promoted best**: the strongest completed result and the model used for headline reporting;
 - **completed**: a full run and matched evaluation exist;
 - **historical**: valid as a prior experiment, but not an active code path;
 - **failed attempt**: incomplete or numerically invalid; never use its checkpoint in a result table.
@@ -20,8 +21,8 @@
 |---|---|---|---|---|---|---|---|
 | `PB-01-FULL-MIX-VOTE` | 2026-08-23 | patch/sensor | two-layer set attention refines semantic evidence vectors | text-weighted evidence vote | 2/4/8/16 | dirty `5a23b44`, exact `source.patch` in run | historical, completed |
 | `PB-02-SCALAR-MIX-VOTE` | 2026-08-24 | patch/sensor | one-layer set attention emits one scalar per top-64 evidence row | text-weighted evidence vote | 8/16/32/64 | tag `phaseb-vector8-vote-20260824` | historical, completed |
-| `PB-03-PAIRWISE-1NN` | 2026-08-24 | one pooled six-second recording | independent pairwise MLP scalar for every memory row | corrected nearest neighbor | 8/16/32/64 | run source `8d60b86`; base tag `phaseb-recording-reranker-pretrain-20260824` | latest completed |
-| `PB-04-SET-SCALAR-1NN` | 2026-08-24 | one pooled six-second recording | one-layer set attention emits one scalar per top-64 evidence row | corrected nearest neighbor | 2/4/8/16 | tag `phaseb-contextual-scalar-reranker-20260824` after release | **active, untrained** |
+| `PB-03-PAIRWISE-1NN` | 2026-08-24 | one pooled six-second recording | independent pairwise MLP scalar for every memory row | corrected nearest neighbor | 8/16/32/64 | run source `8d60b86`; base tag `phaseb-recording-reranker-pretrain-20260824` | historical, previous best |
+| `PB-04-SET-SCALAR-1NN` | 2026-08-24 | one pooled six-second recording | one-layer set attention emits one scalar per top-64 evidence row | corrected nearest neighbor | 2/4/8/16 | tag `phaseb-contextual-scalar-reranker-20260824`; exact run patch persisted | **promoted best checkpoint; deploy with 1-NN enrollment** |
 
 The architecture ID is stored in every new `run_config.json` and checkpoint under
 `phase_b_version`. Do not identify a run only as “latest,” “native engine,” or “the mixer.” Use the
@@ -83,7 +84,23 @@ surrogate. Candidate counts return to 2/4/8/16.
 - raw evaluation: `eval/adaptation_results/e2e_recording_rerank_35k_v3_20260824/`
 - assembled evaluation: `eval/adaptation_tables/e2e_recording_rerank_35k_v3_20260824/`
 - paper-facing summary: [`RESULTS.md`](RESULTS.md), explicitly labeled `PB-03-PAIRWISE-1NN`
-- status: latest completed result; not the active architecture
+- status: historical previous best
+
+### PB-04-SET-SCALAR-1NN
+
+- selected checkpoint: `training/tokenizer/outputs/e2e_pb04_fixed_filterbank_35k_20260824/best.pt`
+- selected checkpoint SHA-256: `b9efbebb766a4ad4e368b99a10a7f4e7c4994afb9559648a9803c12c74606ac0`
+- selected step: 10,000 of 35,000
+- final checkpoint SHA-256: `7d97374fb129f1b8c0435b642fe9ca4c958d0bed38921ddb0cf022038f014bf4`
+- wall time: 4,314.06 seconds
+- exact source: base commit `6b33b17`, with the run-local `source.patch` and provenance retained
+- selected raw evaluation: `eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_best/`
+- final raw evaluation: `eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_last/`
+- shared external-model evaluation: `eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_shared/`
+- selected assembled evaluation: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/`
+- final assembled evaluation: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_last_full/`
+- status: promoted best checkpoint because it gives the strongest zero-shot result. Use 1-NN for
+  enrollment; retrieve-mix-vote remains an underperforming auxiliary readout.
 
 ## Failed Recording-Reranker Attempts
 
@@ -98,13 +115,13 @@ These directories are retained for diagnosis only and must never be used as comp
 The `v3` suffix belongs to the run repair history, not the architecture ID. In prose and tables call
 it `PB-03-PAIRWISE-1NN`, not “v3.”
 
-## Active Run Contract
+## PB-04 Completed Run Contract
 
-The next full run must use:
+The completed run used:
 
 ```text
 architecture:       PB-04-SET-SCALAR-1NN
-output directory:   training/tokenizer/outputs/e2e_set_scalar_1nn_35k_20260824
+output directory:   training/tokenizer/outputs/e2e_pb04_fixed_filterbank_35k_20260824
 steps:              35,000
 episodes per step:  8
 candidate counts:   2, 4, 8, 16
@@ -116,13 +133,15 @@ support k:          0, 1, 2, 4, 8, 16
 aliases/augmentation: disabled
 ```
 
-Expected result directories:
+Result directories:
 
-- raw: `eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824/`
-- assembled: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824/`
+- selected raw: `eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_best/`
+- final raw: `eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_last/`
+- shared baselines: `eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_shared/`
+- selected assembled: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/`
+- final assembled: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_last_full/`
 
-Do not overwrite PB-03 outputs. After PB-04 completes, add its checkpoint hash, selected step, wall
-time, and exact result paths here before changing [`RESULTS.md`](RESULTS.md).
+PB-03 outputs remain immutable as the previous-best comparison.
 
 ## Legacy Pre-Compact Line
 

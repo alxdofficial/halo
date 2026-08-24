@@ -1,0 +1,2732 @@
+[
+  {
+    "ci95": [
+      -10.260377419031997,
+      -4.351279083280489
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -7.31436445637877,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -10.308438453936036,
+      -4.2323482313673075
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -7.31436445637877,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -3.289665778475862,
+      2.030125626273664
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -0.6778616565087888,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.920249130880809,
+      -6.18099769845182
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -9.13014204870918,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.960309537062894,
+      -6.304452864198254
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -9.13014204870918,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.396973578192606,
+      -5.413284547961454
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -8.463452227776958,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -6.943400847233346,
+      -2.189301442621338
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -4.639625410443541,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.063244540889921,
+      -2.1222739340706296
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -4.639625410443541,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -5.531979187577304,
+      -1.1827818283940625
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -3.3943327605589033,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -2.3834489984693175,
+      4.397814167039663
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": 1.0684124212310595,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -2.282258959384094,
+      4.349729171403463
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": 1.0684124212310595,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -2.379477907664099,
+      4.36258034421544
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": 0.9604033958062953,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.142974049858132,
+      -7.247349696480178
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -11.781064308547434,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.270970334018184,
+      -7.220568754524752
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -11.78196263466675,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -8.917602928356928,
+      -1.918120863168428
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -5.43906614900124,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      8.922533631557432,
+      14.174185393096053
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": 11.605598069909629,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      8.94135361940726,
+      14.290413926428585
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 11.605598069909629,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      15.06009516767238,
+      22.328176595365203
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 18.78169909060771,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.762982856359134,
+      -4.801556062380998
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -7.324607125644619,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.794286064111436,
+      -4.742946847117103
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -7.325320691532256,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.13934569138009,
+      -2.624601744351935
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -4.819763382748382,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.471426805259432,
+      -5.773227799763324
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -9.209804908552425,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.978136472873175,
+      -5.509891293648582
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -8.808067479343096,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -4.422720370051743,
+      1.306546519586219
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -1.5699737879587607,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.787876879274416,
+      -7.236714461040819
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -10.542785234668454,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.905104340787002,
+      -6.546965675462365
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -9.76737373965177,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.658869272746921,
+      -6.561239551107391
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -9.67997748326132,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.225991344412076,
+      -3.7106246816663075
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -6.4984521237605275,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -8.004194432062492,
+      -2.205541766868901
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -5.208619137563538,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -6.864187607015561,
+      -1.6741479631009533
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -4.335932954905575,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -6.2806037970588395,
+      0.6418118766501504
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -2.771571876573152,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -3.2270732795133155,
+      4.137444130473644
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": 0.4361014625248387,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -4.2484637169929,
+      2.5698763701930907
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": -0.8188040100088727,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -19.635009913305304,
+      -10.833468223701571
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -15.159216301479221,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -17.550561576343892,
+      -7.535274215213859
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -12.397703788254395,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.448282785762737,
+      -2.3926633040378777
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -5.895907616790404,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      8.17367311123369,
+      13.955348825424931
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": 11.198862729158567,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      9.893637783436123,
+      15.605813433402082
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 12.869980679952446,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      16.95258657624265,
+      24.53671502383282
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 20.768885439714598,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.971349458601628,
+      -7.898567309044917
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -10.945659737723284,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -10.15084195797214,
+      -4.527768600135866
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -7.354759468591702,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.857561643313277,
+      -2.967615101689661
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -5.438634439896962,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.758639311859195,
+      -8.407137527534637
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -11.143503471847056,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.890128625149046,
+      -7.490394874927057
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -10.224406167862234,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -6.729207150482985,
+      -1.5073400850534167
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -4.150770188487236,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.787143082793563,
+      -7.958556129923283
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -10.89560838345114,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.529794770445937,
+      -6.2711763968928045
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -8.857225031875934,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.140357455421816,
+      -6.472919109457856
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -9.34539200877662,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.724065749676791,
+      -4.321899582250808
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -7.119269539238241,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -8.751921863116213,
+      -3.027479858414975
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -5.969471021519562,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -8.68433404531542,
+      -3.5178915656787932
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -6.120324785067887,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -8.834559630151565,
+      -2.203348309563519
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -5.451593537340958,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -3.8088941403714798,
+      2.4088612126474125
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": -0.6380234577823758,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -6.668358933400493,
+      -0.7653537646901237
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": -3.6509281881039057,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -20.635628040183786,
+      -12.719359629907869
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -16.616608937186456,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -17.997893622504495,
+      -9.629933578528458
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -13.667673191074755,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.547884189396758,
+      -5.693543911866921
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -8.570327659515291,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      7.476067333220879,
+      14.294986379879044
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": 10.945847798891469,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      10.925996539249734,
+      17.915470339059794
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 14.466240219410839,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      17.666770688128704,
+      26.730007437866195
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 22.351900547230255,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.548071707007217,
+      -11.10198205519635
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -13.833995180433963,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.014894295187322,
+      -5.821421119192932
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -8.387254443321709,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.826626909747262,
+      -4.750426608444074
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -7.2869843583383584,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.572806020986311,
+      -6.815154003300312
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -9.786215804634537,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.725842828631025,
+      -5.64064846509611
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -8.680687382992327,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.287661133685787,
+      -1.6184896623522869
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -4.404145106019019,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.407172633307315,
+      -8.623176328207041
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -11.048182156143659,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.242849310865612,
+      -6.819944020554038
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -9.049442895286179,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.522943488494223,
+      -7.482262712034413
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -10.032304406819796,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.273143398761748,
+      -2.940254156489271
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -6.142466412630893,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.627881875454801,
+      -1.9028619510843272
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -4.9101528541120265,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.13556781506745,
+      -3.724140961507471
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -6.49694174389488,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.916901505990694,
+      -2.0744714068974948
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -5.020631787150132,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -1.7937544635034768,
+      4.573625312546225
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": 1.3409214723763148,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -6.391733998207272,
+      0.6472701292161757
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": -2.9131133033105523,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -19.510737171608906,
+      -11.32508626170929
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -15.539962755169043,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -17.094111897635443,
+      -8.696329237537933
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -12.900606544715437,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.772631769148877,
+      -5.530241973784388
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -8.758423176056068,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      5.133260139425354,
+      11.989092201333785
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": 8.678760791097254,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      10.038364840982334,
+      17.758979210855586
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 13.923778305399615,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      15.971904723364979,
+      25.829286780529706
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 20.816310977796103,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -17.553031562614915,
+      -11.718001288146073
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -14.6840605988379,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.040345726410651,
+      -6.352387917041004
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -9.193977564002244,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.56838975193589,
+      -6.439635954108016
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -9.528232497891299,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 45,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.384486910974658,
+      -4.141413370898335
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -6.8206657786691975,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.77830542032871,
+      -2.253096400721063
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -4.93401723481083,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -5.308416567845541,
+      -0.2392133492924113
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -2.7936265670358233,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -8.61446516501496,
+      -4.077767220351705
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -6.327845012723128,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.3050083537069535,
+      -2.32294867334126
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -4.8524321695152794,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.756942378692273,
+      -3.795437678916072
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -6.846035084211948,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -5.943365813946698,
+      1.0347831465021966
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -2.5185366660936754,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -4.885290741472271,
+      2.0230627385785764
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -1.5575684342598257,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.626479302213104,
+      -0.9868984680403511
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -4.337438251703743,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -3.515113569039243,
+      2.2321595013132582
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -0.6281953808877712,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -0.7508372862068546,
+      5.720376631556192
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": 2.4885477247863896,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -2.832895603467326,
+      3.7619778292318764
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": 0.46175841473385026,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.865097750139805,
+      -5.652279430977136
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -9.90513204108185,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.775231936853256,
+      -4.884822611847676
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -8.841070644982329,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -8.912597006012499,
+      -2.2810897341579133
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -5.707729455731479,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      4.831719254953025,
+      12.606689483347271
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": 8.675540443243374,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      11.11462893668561,
+      18.271032385192406
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 14.756759734926968,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      14.570934865539526,
+      21.92175026014066
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 18.329672453049568,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -18.232973456503043,
+      -10.836164364402842
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -14.464240387493076,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -10.935859228135488,
+      -4.630473132034688
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -7.736615087804265,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.842159914278087,
+      -5.885936347358445
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -9.24900093604677,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 35,
+    "regime": "ordinary",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.27423465215269,
+      -3.9214038125763087
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -5.605775074359747,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.349651391485509,
+      -3.949200470070594
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -5.605775074359747,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -5.153702500954926,
+      -1.7179076947189678
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -3.423712243242596,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -15.049977170979915,
+      -8.711007567162387
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -11.752455871635886,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -15.04027444277615,
+      -8.699333947832239
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -11.752455871635886,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.557827653189618,
+      -7.061639419236032
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -10.237759738138855,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -10.353661084852316,
+      -5.070203431435904
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -7.715877998606867,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -10.460723309899107,
+      -5.141062011152703
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -7.715877998606867,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.32090916283691,
+      -4.25331031238545
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -6.743453999866656,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -3.5828266207461645,
+      0.879631078615268
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -1.3373474043066242,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -3.6305504572739102,
+      0.8207370081919657
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": -1.3373474043066242,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -2.942168640990668,
+      1.488936766707952
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": -0.6964395621285375,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.408455045241396,
+      -4.306283008240501
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -5.849947128019084,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.418809270469923,
+      -4.304141310610126
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -5.849947128019084,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -5.266787554014924,
+      -1.6411979455390446
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -3.458846595943711,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      3.2988552517848304,
+      6.2334046497372375
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": 4.778345982990135,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      3.332804195295564,
+      6.274976647140666
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 4.778440664084387,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      8.807247369724566,
+      12.130835058924356
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 10.460162196834137,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.213398171067993,
+      -10.461751790784964
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -13.344080988484409,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.19119314411571,
+      -10.549052739710387
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -13.344080988484409,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.515010469112617,
+      -7.478999566902423
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -10.421501189385662,
+    "k": 1,
+    "label_mode": "coherent",
+    "paired_subjects": 63,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -14.868865492333418,
+      -10.29205449985395
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -12.537148876509704,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -14.706681467427034,
+      -10.343954911740347
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -12.51220404232652,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.209796084242571,
+      -8.747337785493684
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -10.972520286990301,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -20.042176742832027,
+      -11.843932176299862
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -15.832356418810242,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -18.62975086266355,
+      -10.954766889409875
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -14.831946595031456,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -18.173099435782472,
+      -9.514343905747543
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -13.672602211260655,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -15.613752422521648,
+      -9.798519866799433
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -12.665700704889451,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -14.69302710404947,
+      -8.926654205121492
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -11.758043076357664,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -14.672948748986723,
+      -9.458251566424803
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -12.061005117286532,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.017215896340533,
+      -4.589877532510388
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -7.819928944046328,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.206060019053126,
+      -4.289767874856292
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": -7.784240508855574,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.493865622634848,
+      -4.808169430179992
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": -8.166069205695115,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.870638257024265,
+      -10.98573662052571
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -13.869331164008386,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -15.707076972647851,
+      -9.442495435391189
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -12.588414013244687,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.337577780768191,
+      -6.338043320769747
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -9.760766079274186,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -2.220039409765861,
+      1.8333989133234956
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": -0.21304826771038882,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      0.585695633508378,
+      4.383709556462386
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 2.4292178011088583,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      5.693393227101084,
+      9.707263991682533
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 7.703182786582922,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -20.290519367951838,
+      -13.717824178771178
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -16.971553795571044,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -19.119897156635187,
+      -13.121472850899226
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -16.040102904434036,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -17.16605566083011,
+      -10.775752288917477
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -13.955926380104449,
+    "k": 2,
+    "label_mode": "coherent",
+    "paired_subjects": 61,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -18.529642572813277,
+      -13.69622237115758
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -16.146670865788334,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -18.447078323377468,
+      -13.933287166001112
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -16.214277843859183,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -17.582023060812645,
+      -13.151903436099838
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -15.411631956856942,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -25.981549940448698,
+      -17.856986206508477
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -21.884446129160423,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -24.305927746744487,
+      -16.316434675893053
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -20.13042862508113,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -24.74049502566091,
+      -15.624425344444656
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -20.184755358549605,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -22.015959383726088,
+      -16.163406866185788
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -19.08232235670207,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -19.356219596866637,
+      -13.463697531716333
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -16.47018516133711,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -21.251090168858923,
+      -15.90287289900472
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -18.54766929869056,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.2481156761027,
+      -6.578128437502473
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -9.929686652827433,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.22853503695956,
+      -3.585577041613808
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": -7.357644198410181,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.479630325039919,
+      -4.975790432965721
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": -8.690741507015908,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -18.49197020011956,
+      -12.894755786417967
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -15.721787246896271,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.5196387774698,
+      -9.93863239447305
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -13.332623027975684,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.634535134018474,
+      -6.430927504645777
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -9.96846240722723,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -3.4510123106059694,
+      0.5420778391396716
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": -1.4360982028429365,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      2.2010231393364657,
+      5.6114526450641105
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 3.8959826706257172,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      7.094560839962694,
+      10.236125365211313
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 8.653680552197912,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -26.798129297289858,
+      -19.8865629663625
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -23.213980914683003,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -24.341126558320585,
+      -18.473427433653992
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -21.330994162318124,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -23.258291701087863,
+      -16.726050621982598
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -19.908184685240613,
+    "k": 4,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -14.782679460253906,
+      -10.896813888895895
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -12.802549188106608,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -15.21644464169799,
+      -10.697474096686792
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -12.968543809039724,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -15.316701060543135,
+      -10.98438573944692
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -13.082081440998147,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -23.07469950926477,
+      -16.640175263304503
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -19.82091118345864,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -19.219617811454984,
+      -12.764552385691024
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -15.923911853533745,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -22.74342908768029,
+      -14.902091800105175
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -18.66319695711896,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -19.757455004673027,
+      -14.937202076844397
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -17.40193544492865,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.253913383360402,
+      -10.810109421752053
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -13.540313381944001,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -21.16689892993577,
+      -15.910202360472663
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -18.53775751327414,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.42714561539805,
+      -5.087042040198553
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -7.276497775974069,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -6.3376535165116445,
+      -0.5418123564179653
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": -3.4463871802489194,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.92641895293429,
+      -4.559855023423554
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": -7.25881706428314,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -14.792467441434127,
+      -11.268336809662845
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -13.05019965594398,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -11.899898604189497,
+      -7.072779617608836
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -9.590604067535333,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.424113046492725,
+      -4.429357530331098
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -6.957269293823462,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -0.005118648404912497,
+      3.580558420910883
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": 1.8131851932936882,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      7.231418745837894,
+      10.982693004559017
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 9.142986111624651,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      10.757984443695051,
+      14.32684673011347
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 12.559394883888153,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -24.61096517379909,
+      -18.16985171644446
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -21.35609006637875,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -21.529443040323134,
+      -15.35868749262442
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -18.361952089841434,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -21.36575261249678,
+      -15.02364377552289
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -18.117866526741036,
+    "k": 8,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.491928104267625,
+      -9.564560153463848
+    ],
+    "comparator": "crosshar/nearest",
+    "delta_f1_macro": -11.512484851154165,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -13.186421699662443,
+      -8.031735211504405
+    ],
+    "comparator": "crosshar/prototype",
+    "delta_f1_macro": -10.619157321803458,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -14.69933414954874,
+      -9.825945031605947
+    ],
+    "comparator": "crosshar/ridge",
+    "delta_f1_macro": -12.27697411953345,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -21.710225075065175,
+      -16.546663945389742
+    ],
+    "comparator": "halo_compact/nearest",
+    "delta_f1_macro": -19.10741580018504,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -16.510993529456623,
+      -11.607333253328214
+    ],
+    "comparator": "halo_compact/prototype",
+    "delta_f1_macro": -13.989713817684128,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -23.390943538219137,
+      -16.548929656243676
+    ],
+    "comparator": "halo_compact/ridge",
+    "delta_f1_macro": -19.881620694777286,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -19.31016161546245,
+      -14.794395706859028
+    ],
+    "comparator": "harnet/nearest",
+    "delta_f1_macro": -17.062790592141482,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -14.468798150442472,
+      -9.023513781714431
+    ],
+    "comparator": "harnet/prototype",
+    "delta_f1_macro": -11.763125632740264,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -23.071028444657937,
+      -17.345170851321193
+    ],
+    "comparator": "harnet/ridge",
+    "delta_f1_macro": -20.152767527873895,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.868718269010751,
+      -4.906293736160397
+    ],
+    "comparator": "imagebind/nearest",
+    "delta_f1_macro": -6.351974756988857,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -2.7237381658781294,
+      1.4715238747403006
+    ],
+    "comparator": "imagebind/prototype",
+    "delta_f1_macro": -0.6025511366788463,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.13869834090447,
+      -5.305930564650368
+    ],
+    "comparator": "imagebind/ridge",
+    "delta_f1_macro": -7.179496589037466,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -12.89902381520057,
+      -9.345517684158253
+    ],
+    "comparator": "limubert/nearest",
+    "delta_f1_macro": -11.096268942825048,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -9.760671337333449,
+      -5.492421872495071
+    ],
+    "comparator": "limubert/prototype",
+    "delta_f1_macro": -7.6489658857995275,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -7.7879337709279755,
+      -3.78225924453773
+    ],
+    "comparator": "limubert/ridge",
+    "delta_f1_macro": -5.80549529338984,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      0.5784917235312617,
+      4.802838103345759
+    ],
+    "comparator": "normwear/nearest",
+    "delta_f1_macro": 2.7195473495910014,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      10.683196872097227,
+      15.137600844894562
+    ],
+    "comparator": "normwear/prototype",
+    "delta_f1_macro": 12.89399650020348,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      11.972234572117728,
+      17.167603234221552
+    ],
+    "comparator": "normwear/ridge",
+    "delta_f1_macro": 14.478116433049687,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -23.29076269688016,
+      -17.367901068284038
+    ],
+    "comparator": "unimts/nearest",
+    "delta_f1_macro": -20.27358886225962,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -19.157089918419146,
+      -13.105540899946115
+    ],
+    "comparator": "unimts/prototype",
+    "delta_f1_macro": -16.156258277048178,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  },
+  {
+    "ci95": [
+      -21.011252604852732,
+      -14.871764567524577
+    ],
+    "comparator": "unimts/ridge",
+    "delta_f1_macro": -17.85234877691679,
+    "k": 16,
+    "label_mode": "coherent",
+    "paired_subjects": 48,
+    "regime": "specialized_novel",
+    "target": "halo_compact/evidence_engine"
+  }
+]

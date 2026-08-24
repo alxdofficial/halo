@@ -1,11 +1,12 @@
 # Compact evidence engine
 
-Status: **recording-level contextual scalar reranker implemented, unit-tested, smoke-tested, and
-profiled; full training and held-out evaluation are pending.**
+Status: **recording-level contextual scalar reranker implemented, trained, and evaluated as
+PB-04. It underperforms direct 1-NN and is retained as an ablation, not the promoted readout.**
 
-This is the active Phase-B design. The previous patch-level retrieve-mix-vote model is preserved by
-the Git tag `phaseb-vector8-vote-20260824`; it is not an alternative path in the current trainer.
-Its completed results remain historical results and must not be combined with this model's results.
+The promoted model uses the PB-04 encoder and direct 1-NN enrollment. This document records the
+learned contextual scalar readout that was tested on top of that encoder. The previous patch-level
+retrieve-mix-vote model is preserved by the Git tag `phaseb-vector8-vote-20260824`; its historical
+results must not be combined with PB-04 results.
 
 ## Purpose
 

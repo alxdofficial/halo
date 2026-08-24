@@ -31,6 +31,15 @@ REGIMES = ("ordinary", "specialized_novel")
 REPORT_MODEL_ORDER = (
     "halo_compact", "limubert", "unimts", "crosshar", "harnet", "imagebind", "normwear",
 )
+DATASET_NAMES = {
+    "inclusivehar": "Inclusive-HAR",
+    "usc_had": "USC-HAD",
+    "tnda_har": "TNDA-HAR",
+    "ut_complex": "UT Complex",
+    "monipar": "MoniPar",
+    "spar": "SPAR",
+    "upper_limb_use": "Upper Limb Use",
+}
 
 
 def _emit(header: list[str], rows: list[tuple[str, list[float]]], higher_better=True) -> list[str]:
@@ -119,6 +128,20 @@ def table_zero_shot(cells: list[dict]) -> str:
     return "\n".join(out)
 
 
+def _enrollment_model_methods() -> list[tuple[str, str, str]]:
+    rows = []
+    readout_names = {"nearest": "1-NN", "prototype": "prototype", "ridge": "ridge"}
+    for model in REPORT_MODEL_ORDER:
+        display_model = "HALO" if model == "halo_compact" else MODEL_NAMES[model]
+        if model == "halo_compact":
+            rows.append(("HALO / retrieve-mix-vote", model, "evidence_engine"))
+        rows.extend(
+            (f"{display_model} / {display_method}", model, method)
+            for method, display_method in readout_names.items()
+        )
+    return rows
+
+
 def table_label_efficiency(cells: list[dict]) -> str:
     ks = sorted({int(c["k"]) for c in cells if int(c["k"]) > 0})
     out = ["## 2. Label efficiency", "",
@@ -129,17 +152,7 @@ def table_label_efficiency(cells: list[dict]) -> str:
            "executions. Macro F1, mean over datasets.", ""]
     for regime in REGIMES:
         scored = []
-        model_methods = []
-        readout_names = {"nearest": "1-NN", "prototype": "prototype", "ridge": "ridge"}
-        for model in REPORT_MODEL_ORDER:
-            display_model = "HALO" if model == "halo_compact" else MODEL_NAMES[model]
-            if model == "halo_compact":
-                model_methods.append(("HALO / retrieve-mix-vote", model, "evidence_engine"))
-            model_methods.extend(
-                (f"{display_model} / {display_method}", model, method)
-                for method, display_method in readout_names.items()
-            )
-        for display_name, model, method in model_methods:
+        for display_name, model, method in _enrollment_model_methods():
             row = [
                 _dataset_macro([c for c in cells if c["model"] == model
                                 and c["method"] == method and c["regime"] == regime
@@ -151,6 +164,54 @@ def table_label_efficiency(cells: list[dict]) -> str:
         out += [f"### {regime.replace('_', ' ')}", ""]
         out += _emit(["model"] + [f"k={k}" for k in ks], scored)
         out.append("")
+    return "\n".join(out)
+
+
+def table_per_dataset(cells: list[dict]) -> str:
+    ks = sorted({int(c["k"]) for c in cells if int(c["k"]) > 0})
+    out = [
+        "## 3. Per-dataset performance", "",
+        "These tables use the same protocol as the aggregate results. Values are macro F1 averaged "
+        "over seeds within each held-out dataset.", "", "### Native zero-shot by dataset", "",
+    ]
+    datasets = sorted({c["dataset"] for c in cells}, key=lambda d: DATASET_NAMES.get(d, d))
+    zero_rows = []
+    for model in REPORT_MODEL_ORDER:
+        values = [
+            _dataset_macro([
+                c for c in cells
+                if c["model"] == model and c["method"] == "zero_shot"
+                and c["dataset"] == dataset and c["label_mode"] == "coherent"
+                and int(c["k"]) == 0
+            ])[0]
+            for dataset in datasets
+        ]
+        zero_rows.append((MODEL_NAMES[model], values))
+    out += _emit(["model"] + [DATASET_NAMES.get(d, d) for d in datasets], zero_rows)
+    out.append("")
+
+    for regime in REGIMES:
+        out += [f"### {regime.replace('_', ' ')} enrollment", ""]
+        regime_datasets = sorted(
+            {c["dataset"] for c in cells if c["regime"] == regime},
+            key=lambda d: DATASET_NAMES.get(d, d),
+        )
+        for dataset in regime_datasets:
+            scored = []
+            for display_name, model, method in _enrollment_model_methods():
+                values = [
+                    _dataset_macro([
+                        c for c in cells
+                        if c["model"] == model and c["method"] == method
+                        and c["dataset"] == dataset and c["regime"] == regime
+                        and c["label_mode"] == "coherent" and int(c["k"]) == k
+                    ])[0]
+                    for k in ks
+                ]
+                scored.append((display_name, values))
+            out += [f"#### {DATASET_NAMES.get(dataset, dataset)}", ""]
+            out += _emit(["model / readout"] + [f"k={k}" for k in ks], scored)
+            out.append("")
     return "\n".join(out)
 
 
@@ -166,6 +227,7 @@ def main() -> None:
         "# Results", "",
         table_zero_shot(cells),
         table_label_efficiency(cells),
+        table_per_dataset(cells),
     ])
     print(text)
     if args.out:
