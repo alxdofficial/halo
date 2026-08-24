@@ -192,3 +192,18 @@ def test_correction_is_bounded():
     label_text, candidate = _texts()
     correction = engine(query, memory, candidate, label_text)["score_correction"]
     assert float(correction.detach().abs().max()) <= engine.reranker.cfg.max_correction
+
+
+def test_representation_telemetry_handles_rank_deficient_batches():
+    from training.tokenizer.pretrain import representation_health
+
+    # Sixteen samples in 128 dimensions make the covariance singular by construction; repeated
+    # rows make the zero eigenspace even larger. Telemetry must remain finite and never stop a run.
+    row = torch.linspace(-1.0, 1.0, 128)
+    values = representation_health(row.repeat(16, 1), "query_repr")
+    assert values.keys() == {
+        "query_repr/min_std", "query_repr/mean_std", "query_repr/effective_rank",
+        "query_repr/mean_norm", "query_repr/cov_offdiag_abs_mean",
+        "query_repr/cov_max_eigenvalue",
+    }
+    assert all(torch.isfinite(torch.tensor(value)) for value in values.values())

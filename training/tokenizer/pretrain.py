@@ -357,8 +357,14 @@ def representation_health(z: torch.Tensor, prefix: str = "repr") -> dict[str, fl
         x = z.detach().float()
         std = x.std(dim=0, unbiased=False)
         centered = x - x.mean(0)
-        cov = centered.T @ centered / max(len(x) - 1, 1)
-        eig = torch.linalg.eigvalsh(cov).clamp_min(0)
+        denominator = max(len(x) - 1, 1)
+        cov = centered.T @ centered / denominator
+        # The telemetry batch is usually much narrower than the embedding dimension, so the
+        # covariance is rank-deficient by construction. Solving its repeated zero eigenspace can
+        # fail to converge on CUDA even for finite inputs. The nonzero covariance eigenvalues are
+        # exactly squared singular values of the centered sample matrix divided by (n - 1), and the
+        # rectangular SVD is both smaller and numerically better conditioned here.
+        eig = torch.linalg.svdvals(centered).square().div(denominator).clamp_min(0)
         probs = eig / eig.sum().clamp_min(1e-12)
         effective_rank = torch.exp(-(probs * probs.clamp_min(1e-12).log()).sum())
         offdiag = cov - torch.diag_embed(torch.diagonal(cov))
