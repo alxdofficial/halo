@@ -118,6 +118,17 @@ class UniMTSAdapter(CosineAdapter):
     # accel-only, 20 Hz, 10 s window (short windows wrap-padded internally).
     contract = InputContract(channels=("acc_x", "acc_y", "acc_z"), rate_hz=20.0, window_sec=10.0)
 
+    def evaluation_artifacts(self, state):
+        return {"released_checkpoint": UNIMTS_CKPT}
+
+    def evaluation_config(self, state):
+        return {
+            "input_rate_hz": TARGET_HZ,
+            "input_samples": PAD_LEN,
+            "input_channels": ["acc_x", "acc_y", "acc_z"],
+            "label_text_ensemble": self.TEXT_ENSEMBLE,
+        }
+
     def setup(self, device):
         """Load ContrastiveModule (acc-only ST-GCN + fine-tuned CLIP text tower) with UniMTS.pth.
 

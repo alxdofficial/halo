@@ -9,9 +9,9 @@
 >    — what Phase A actually is, as built, and the artifact handed to Phase B.
 > 4. [**design/PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — what Phase B is,
 >    why memory is an adaptation mechanism, and the evidence required before claiming it works.
-> 5. [**results/ADAPTATION_TABLE_20260822.md**](results/ADAPTATION_TABLE_20260822.md) — **the
->    current headline result.** The compact evidence engine against all seven baselines on the
->    shared manifest, every method at every k. Supersedes the 2026-08-19 table.
+> 5. [**results/RESULTS.md**](results/RESULTS.md) — **the current headline result.** The current
+>    HALO checkpoint and all six external encoders on the shared manifest, with the native engine
+>    separated from matched frozen-representation controls.
 > 6. [**results/PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the current
 >    Phase-B run history, matched tables, confirmed defects, and next-run requirements.
 >
@@ -20,53 +20,43 @@
 
 ## Current Matched Results
 
-**2026-08-22.** The current model is the **compact evidence engine** (`halo_compact`): filterbank
-tokenizer → 3-layer temporal trunk (d=128, one row per (patch, sensor)) → **plain cosine**
-retrieval → hard top-64 → evidence mixer → text-cosine vote. **1,010,790 trainable parameters** (the 115,458-parameter learned pair scorer exists but is OFF).
-Checkpoint `training/tokenizer/outputs/long_4h_20260821/best.pt`. Scored on the shared
-`adaptation_v1` manifest (61 cells · 7 held-out datasets · 5 seeds · execution-disjoint
-support/query), fingerprint-identical to every baseline row. Full table:
-[`results/ADAPTATION_TABLE_20260822.md`](results/ADAPTATION_TABLE_20260822.md).
+**2026-08-23.** The current model is the compact end-to-end evidence engine at
+`training/tokenizer/outputs/e2e_compact_35k_20260823/best.pt` (selected step 10,000). It and all six
+external encoders were scored on the same `adaptation_v1` manifest: seven held-out datasets, five
+seeds, and execution-disjoint support/query. CrossHAR and LIMU-BERT were retrained on the current
+18-source corpus before evaluation. Full tables and protocol details are in
+[`results/RESULTS.md`](results/RESULTS.md).
 
 ### Zero-shot, k = 0 — each model's own shipped mechanism
 
 | model | ordinary macro F1 | specialized-novel macro F1 |
 |---|---:|---:|
-| CrossHAR + ConSE | **37.01** | 10.88 |
-| **HALO compact engine** | 36.95 | 8.75 |
+| CrossHAR + ConSE | **37.70** | 11.22 |
+| **HALO compact engine** | 35.11 | 17.17 |
 | HARNet + ConSE | 33.82 | 11.40 |
-| UniMTS (own text tower) | 32.70 | **19.24** |
-| LiMU-BERT + ConSE | 27.60 | 9.11 |
+| UniMTS (own text tower) | 31.98 | **17.37** |
+| LiMU-BERT + ConSE | 30.60 | 10.27 |
 | ImageBind (own text tower) | 11.38 | 8.15 |
 | NormWear (L1 text match) | 5.08 | 3.58 |
 
-HALO's row is the only one produced with **no fitted head** — the engine's native
-retrieve→mix→vote rule. The specialized-novel 8.75 is weak and expected: the memory bank holds no
-clinical motions and their names do not project onto the training vocabulary. That is precisely
-the case enrollment exists for — one enrolled example takes it to ≈43.
+HALO's row uses the engine's native retrieve-mix-vote mechanism with no fitted test head.
 
 ### Enrollment, k ≥ 1 — and the nuance that matters
 
-**HALO is best in 35 of 40 method×k enrollment columns**, including *every* specialized-novel
-column at every k, at d=128 (baselines 512–2048). The five it loses are all `ordinary` at high k
-(nearest k=4/8/16, linear_head k=8/16) — everyday activities with many labelled examples, where a
-larger frozen feature has room to be fitted. Per-dataset margins are positive in 34/44
-comparisons against the strongest baseline per column, typically +1 to +7 F1.
+The current result separates the native engine from the representation controls. HALO+1-NN is
+second to LIMU-BERT on ordinary activities through k=8 and is best at every k on specialized
+activities. The same specialized advantage holds for prototype, ridge, and a fitted linear head.
+This supports the quality of the frozen HALO representation.
 
-> ⚠️ **Read this before citing the 35/40.** Those enrollment columns fit *generic* heads
-> (nearest/prototype/ridge/linear_head) on each model's **frozen features**, with identical code
-> for every model. So they demonstrate that **our encoder's representation** is strong — they do
-> **not** demonstrate that our *engine* works. The engine's own mechanism is scored in exactly one
-> place: zero-shot k=0. Scoring the engine at k ≥ 1 (enrolled rows placed in the memory bank,
-> native rule, versus ridge on our own features) is **not yet done** and is the decisive
-> outstanding experiment.
-
-Caveats bound to this table: `limubert` rows predate the 2026-08-22 accel-scale fix
-([`results/EVAL_HARNESS_AUDIT_20260822.md`](results/EVAL_HARNESS_AUDIT_20260822.md) F1) and may
-understate it — its backbone re-pretrain is pending; `unimts` zero-shot predates the label-text
-ensemble fix (F2). Enrollment methods read no label text, so those columns are unaffected. The
-older protocol-v4 (93-label) zero-shot table is stale **for every model** and is indexed in
-[`results/RESULTS.md`](results/RESULTS.md).
+The native evidence engine is materially worse: ordinary macro F1 is 45.02 at k=1 and remains near
+45 through k=16, versus 55.11-63.94 for HALO+1-NN. Specialized k=1 is 24.82 versus 42.76 for
+HALO+1-NN. The current evidence therefore does **not** support a claim that learned
+retrieve-mix-vote improves over simple retrieval. The completed acquisition-description ablation
+improves matched 1-NN by 1.3-2.4 F1 when descriptions are removed throughout training, but weakens
+the native engine. The completed retrieve-mix-vote decomposition localizes the largest regression
+to the learned attention mixer: it loses 12.7 ordinary and 15.8 specialized F1 relative to its own
+unmixed full-bank vote. Seed replication and a minimal retrieval-first engine are the next required
+experiments.
 
 ### Retracted — do not cite
 - the **49.5 "beats harnet"** evidence-decoder headline — retracted twice: first for eval-label text
@@ -150,11 +140,10 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   retracted and its conclusion inverted**: it argues from protocol-v4 numbers that we lose on
   accuracy, which is no longer true for the enrollment regime it is about. Bannered.
 - [LANGUAGE_HIERARCHY.md](design/LANGUAGE_HIERARCHY.md) — language at every level; a second act.
-- [**CONTINUOUS_KERNEL_FRONTEND.md**](design/CONTINUOUS_KERNEL_FRONTEND.md) — a CNN whose kernels are
-  continuous curves in **real time** (seconds), sampled at whatever rate the signal arrives at.
-  Brainstorm + build plan; nothing built. Its decisive test is **cross-rate transfer**, not
-  accuracy — which makes it the *mechanism* form of the config thesis whose language form measured
-  inert.
+- [**CONTINUOUS_KERNEL_FRONTEND.md**](design/CONTINUOUS_KERNEL_FRONTEND.md) — experimental CNN whose
+  kernels are continuous curves in **real time** (seconds), sampled at the recording rate. A
+  standalone implementation and focused tests exist, but it is not wired into the encoder or any
+  trainer. Its decisive test remains cross-rate transfer rather than headline accuracy.
 
 ## `data/` — the corpus
 - [DATA_PIPELINE.md](data/DATA_PIPELINE.md) — source → curate → unit→g → resample → window → grids.
@@ -167,10 +156,10 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   simultaneity claim about the ten new sources.
 
 ## `results/` — the measured record
-- [**ADAPTATION_TABLE_20260822.md**](results/ADAPTATION_TABLE_20260822.md) — **the current
-  headline**: compact engine vs seven baselines, all methods × k, both regimes, plus per-dataset
-  zero-shot. Supersedes `ADAPTATION_TABLE_20260819.md`.
-- [RESULTS.md](results/RESULTS.md) — project-wide results index; carries the headline table inline.
+- [**RESULTS.md**](results/RESULTS.md) — **the current headline**: native HALO engine and HALO+1-NN
+  against the complete external-model roster, all matched controls, both regimes, and every k.
+- [ADAPTATION_TABLE_20260822.md](results/ADAPTATION_TABLE_20260822.md) — historical August 22 table;
+  retained for auditability and explicitly superseded by `RESULTS.md`.
 - [EVAL_HARNESS_AUDIT_20260822.md](results/EVAL_HARNESS_AUDIT_20260822.md) — verification that the
   eval path is sound and that every baseline is used as its developers intended. Two deviations
   found and fixed in code (LiMU-BERT accel scale; UniMTS label text); LiMU-BERT needs a re-pretrain
@@ -208,8 +197,8 @@ Each carries a banner naming its live replacement.
 - A doc whose central claim is falsified gets a banner and **moves to `archive/`** — kept, not
   deleted, because the record of what we believed and why is part of the work. What changed in the
   2026-08-08 consolidation is that stale docs no longer sit beside live ones.
-- Zero-shot and enrollment numbers live in the table above and in
-  `results/ADAPTATION_TABLE_20260822.md`, generated from `eval/adaptation_results/`. The
+- Current zero-shot and enrollment numbers live in the table above and in `results/RESULTS.md`,
+  generated from `eval/adaptation_results/`. The
   `eval/results/` store is protocol-v4 and stale for every model. Generated output READMEs are
   artifact indexes, not competing reports.
 - A comparison is only citable if every row shares one manifest fingerprint. Mixing protocol

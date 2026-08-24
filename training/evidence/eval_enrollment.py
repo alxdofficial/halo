@@ -1302,8 +1302,8 @@ def main() -> None:
             # refuses a mismatched encoder, but say why plainly rather than leaving the operator to
             # decode an embedding-path assertion.
             print(f"[eval_enrollment] evidence engine loaded from {args.engine_checkpoint} "
-                  f"(top-k {engine.cfg.top_k}, readout "
-                  f"{engine.cfg.mixer.readout}); the bank must have been built from the "
+                  f"(top-k {engine.cfg.top_k}, recording-level residual mixer); the bank must "
+                  f"have been built from the "
                   f"SAME checkpoint's encoder")
     else:
         cfg = predictor["cfg"]

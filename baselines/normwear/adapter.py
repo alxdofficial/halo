@@ -154,6 +154,17 @@ class NormWearAdapter(BaselineAdapter):
     tier = "bespoke"
     contract = InputContract(channels=None, rate_hz=float(TARGET_HZ), window_sec=6.0)
 
+    def evaluation_artifacts(self, state):
+        return {"backbone": BACKBONE_CKPT, "zero_shot_fusion": MSITF_CKPT}
+
+    def evaluation_config(self, state):
+        return {
+            "input_rate_hz": TARGET_HZ,
+            "input_samples": WINDOW_65,
+            "real_channels_only": True,
+            "native_metric": "manhattan_l1",
+        }
+
     def setup(self, device):
         model = _load_normwear_model(device)
         query_emb = _compute_query(model)   # (1, 2048), reused for every window

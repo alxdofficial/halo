@@ -13,7 +13,12 @@ from eval.enrollment_protocol import (
     save_manifest,
     stream_fingerprint,
 )
-from eval.run_adaptation_baselines import _macro_f1_positions, support_predictions
+from eval.run_adaptation_baselines import (
+    _macro_f1_positions,
+    score_native_enrollment_cell,
+    score_positive_cell,
+    support_predictions,
+)
 
 
 def _stream(name="wrist"):
@@ -133,6 +138,99 @@ def test_frozen_adaptation_controls_learn_separable_support():
     assert set(predicted) == {"nearest", "prototype", "ridge", "linear_head"}
     for values in predicted.values():
         np.testing.assert_array_equal(values, [0, 1])
+
+
+def test_positive_controls_weight_executions_not_their_window_counts():
+    # Candidate A has one long x-axis execution and one short y-axis execution. Equal execution
+    # weighting puts its prototype at 45 degrees; pooling all windows would incorrectly let the
+    # long execution dominate and classify this query as B.
+    support = np.asarray(
+        [[1.0, 0.0]] * 10 + [[0.0, 1.0]] + [[0.0, 1.0]] * 2,
+        dtype=np.float32,
+    )
+    query = np.asarray([[0.6, 0.8]], dtype=np.float32)
+    plan = {
+        "subject": "s1",
+        "candidate_names": ["a", "b"],
+        "support_execution_rows": [[list(range(10)), [10]], [[11], [12]]],
+        "support_execution_ids": [["a0", "a1"], ["b0", "b1"]],
+        "query_rows": [0],
+        "query_execution_ids": ["q0"],
+    }
+    result = score_positive_cell(
+        query_features=query,
+        support_features=support,
+        query_labels=np.asarray(["a"], dtype=object),
+        plans=[plan],
+        support_count=2,
+        device=torch.device("cpu"),
+        seed=7,
+        methods=("prototype",),
+    )
+    assert result["prototype"]["f1_macro"] == 100.0
+    assert result["subject_results"]["s1"]["support_executions"] == 4
+    assert result["subject_results"]["s1"]["support_windows"] == 13
+
+
+def test_native_enrollment_is_scored_on_the_manifest_queries():
+    class NativeAdapter:
+        name = "native_fake"
+
+        def predict_enrollment(
+            self, query_stream, support_stream, plan, support_count, candidate_texts,
+            state, device, *, seed,
+        ):
+            del query_stream, support_stream, support_count, candidate_texts, state, device, seed
+            return ["walk", "sit"], {"rows": 4}
+
+    plan = {
+        "subject": "s1",
+        "candidate_names": ["walk", "sit"],
+        "support_execution_rows": [[[2]], [[3]]],
+        "query_rows": [0, 1],
+        "query_execution_ids": ["q0", "q1"],
+    }
+    result = score_native_enrollment_cell(
+        NativeAdapter(), _stream(), _stream(),
+        np.asarray(["walk", "sit"], dtype=object), [plan], 1,
+        ["walk", "sit"], None, torch.device("cpu"), seed=3,
+    )
+    assert result["evidence_engine"]["f1_macro"] == 100.0
+    assert result["native_subject_results"]["s1"]["evidence_engine_f1_macro"] == 100.0
+
+
+def test_halo_native_bank_appends_all_rows_and_binds_candidates():
+    from baselines.halo_compact.adapter import HALOCompactAdapter
+    from model.evidence.rows import SensorRows
+
+    def rows(n, source_window, *, labelled):
+        return SensorRows(
+            feature=torch.arange(n * 4, dtype=torch.float32).view(n, 4),
+            descriptor=torch.ones(n, 384),
+            bias=torch.zeros(n, 1),
+            modality=torch.zeros(n, dtype=torch.long),
+            gravity=torch.zeros(n, dtype=torch.long),
+            label=torch.arange(n, dtype=torch.long) if labelled else torch.full((n,), -1),
+            dataset=torch.zeros(n, dtype=torch.long),
+            enrolled_candidate=torch.full((n,), -1, dtype=torch.long),
+            source_window=torch.as_tensor(source_window, dtype=torch.long),
+        )
+
+    base = rows(2, [0, 1], labelled=True)
+    support = rows(6, [0, 0, 1, 1, 2, 2], labelled=False)
+    plan = {
+        "support_execution_rows": [[[0]], [[2]]],
+        "candidate_names": ["a", "b"],
+    }
+    merged, selected_windows, selected_rows = HALOCompactAdapter._append_enrollment(
+        base, support, support.source_window, plan, 1,
+    )
+    assert selected_windows == 2
+    assert selected_rows == 4
+    assert len(merged.feature) == 6
+    assert merged.enrolled_candidate.tolist() == [-1, -1, 0, 0, 1, 1]
+    assert merged.label.tolist()[-4:] == [-1, -1, -1, -1]
+    assert merged.source_window.tolist()[-4:] == [2, 2, 3, 3]
 
 
 def test_external_runner_consumes_manifest_without_rebuilding_episodes(tmp_path, monkeypatch):

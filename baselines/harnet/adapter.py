@@ -268,6 +268,21 @@ class HarnetAdapter(ConSEAdapter):
                     "requires gravity retained")
         return None
 
+    def evaluation_artifacts(self, state):
+        return {"conse_head": _HEAD_CACHE}
+
+    def evaluation_config(self, state):
+        return {
+            "released_model": HARNET_NAME,
+            "released_source": f"{SSL_HUB_REPO}:{SSL_HUB_TAG}",
+            "input_rate_hz": TARGET_HZ,
+            "input_samples": TARGET_LEN,
+            "corpus_mode": CORPUS_MODE,
+            "head_fit_datasets": _corpus_datasets(),
+            "head_fit_max_per_stream": (
+                MATCHED_MAX_PER_STREAM if CORPUS_MODE == "matched" else None
+            ),
+        }
     # ---- setup: load frozen trunk + fit (or load cached) ConSE head -----------
     def setup(self, device):
         vocab = global_labels()

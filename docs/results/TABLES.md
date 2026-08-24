@@ -1,9 +1,8 @@
 # Results
 
-> ## ⚠️ SUPERSEDED — 2026-08-22
-> Current tables: [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md) (headline) and
-> [`RESULTS.md`](RESULTS.md) (index, headline inlined). The HALO row here predates the compact
-> evidence engine.
+> ## SUPERSEDED
+> Current tables live only in [`RESULTS.md`](RESULTS.md). The rows below predate the current
+> checkpoint, matched baseline retrains, and native-engine positive-k evaluation.
 
 ## 1. Zero-shot
 

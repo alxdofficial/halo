@@ -55,8 +55,8 @@ the same integral), not a defect.
 CONTRACT
 --------
 `forward(patches, sampling_rate_hz, patch_len_samples=None, source_rate_hz=None,
-patch_mask=None) -> (B, P, C, d_model)` — identical to `PhysicalFilterbankTokenizer`, so it is a
-drop-in swap. Token count is a function of DURATION only, never of sampling rate.
+patch_mask=None) -> (B, P, C, d_model)` — identical to `PhysicalFilterbankTokenizer`. Stored and
+native acquisition rates may vary across a batch; token count is a function of duration only.
 """
 
 from __future__ import annotations
@@ -133,22 +133,40 @@ class ContinuousKernelTokenizer(nn.Module):
         self.nyquist_margin = float(nyquist_margin)
         self.envelope_sigma = float(envelope_sigma)
         self.norm = norm
+        self.learnable = True
+        self._geometry_cache: dict[tuple, dict[str, torch.Tensor]] = {}
+        self._telemetry_requested = False
+        self._runtime_summary: dict[str, torch.Tensor] = {}
+        self.sigma_min = 0.05
+        self.sigma_max = 0.50
+        self.gain_max = 2.0
 
         # --- band centres and spans (fixed physics, not learned) ---
         k = torch.arange(self.K, dtype=torch.float32)
         centres = f_min * (f_max / f_min) ** (k / (self.K - 1))
         spans = torch.clamp(n_cycles / centres, t_min, t_max)
+        self.max_span = float(spans.max())
         self.register_buffer("centres", centres)                 # (K,) Hz
         self.register_buffer("spans", spans)                     # (K,) seconds
         # carrier harmonic: the one nearest f_k within this kernel's own span
         carrier = torch.clamp(torch.round(centres * spans), 1, self.M).long()
         self.register_buffer("carrier", carrier)                 # (K,)
 
-        # --- the 16 numbers per kernel, plus envelope width and gain ---
+        # Coefficient direction describes kernel shape; a separate bounded gain describes scale.
+        # Normalising the coefficient pair removes an otherwise unidentifiable scale degree of
+        # freedom between coefficients and gain.
         self.cos_coeff = nn.Parameter(torch.zeros(self.K, self.M))
         self.sin_coeff = nn.Parameter(torch.zeros(self.K, self.M))
-        self.log_sigma = nn.Parameter(torch.full((self.K,), math.log(envelope_sigma)))
-        self.log_gain = nn.Parameter(torch.zeros(self.K))
+        sigma_fraction = (envelope_sigma - self.sigma_min) / (self.sigma_max - self.sigma_min)
+        if not 0.0 < sigma_fraction < 1.0:
+            raise ValueError(
+                f"envelope_sigma must be in ({self.sigma_min}, {self.sigma_max}), got "
+                f"{envelope_sigma}"
+            )
+        self.sigma_logit = nn.Parameter(
+            torch.full((self.K,), math.log(sigma_fraction / (1.0 - sigma_fraction)))
+        )
+        self.gain_logit = nn.Parameter(torch.zeros(self.K))
         if gabor_init:
             # A Gabor wavelet at the carrier: the quadrature pair is (cos, sin) of that harmonic,
             # so at step 0 this bank approximates the physical filterbank we already trust.
@@ -157,6 +175,9 @@ class ContinuousKernelTokenizer(nn.Module):
         else:
             nn.init.normal_(self.cos_coeff, std=0.3)
             nn.init.normal_(self.sin_coeff, std=0.3)
+        self.register_buffer("initial_cos_coeff", self._normalised_coefficients()[0].detach().clone())
+        self.register_buffer("initial_sin_coeff", self._normalised_coefficients()[1].detach().clone())
+        self.register_buffer("initial_sigma", torch.full((self.K,), float(envelope_sigma)))
 
         # --- frozen per-kernel standardisation of the compressed magnitude ---
         self.register_buffer("norm_mu", torch.zeros(self.K))
@@ -165,6 +186,15 @@ class ContinuousKernelTokenizer(nn.Module):
         self.register_buffer("_acc_count", torch.zeros(self.K, dtype=torch.float64), persistent=False)
         self.register_buffer("_acc_sum", torch.zeros(self.K, dtype=torch.float64), persistent=False)
         self.register_buffer("_acc_sqsum", torch.zeros(self.K, dtype=torch.float64), persistent=False)
+        for name in ("amp", "dc"):
+            self.register_buffer(f"{name}_mu", torch.zeros(()))
+            self.register_buffer(f"{name}_sd", torch.ones(()))
+            self.register_buffer(f"_{name}_acc_count", torch.zeros((), dtype=torch.float64),
+                                 persistent=False)
+            self.register_buffer(f"_{name}_acc_sum", torch.zeros((), dtype=torch.float64),
+                                 persistent=False)
+            self.register_buffer(f"_{name}_acc_sqsum", torch.zeros((), dtype=torch.float64),
+                                 persistent=False)
 
         # --- depthwise-separable stack on the fixed real-time grid (see design doc S10) ---
         c1, c2 = conv_channels
@@ -183,60 +213,203 @@ class ContinuousKernelTokenizer(nn.Module):
         self.in_dim = (c2 * self.frames_per_token   # ORDERED frames — the point of the design
                        + self.K                     # nyquist mask
                        + self.K                     # resolution flag
-                       + self.frames_per_token      # per-frame edge support
+                       + self.K * self.frames_per_token  # per-kernel, per-frame real support
                        + 1                          # amplitude
                        + 1)                         # signed DC
         self.proj = nn.Linear(self.in_dim, self.d_model)
 
+    def _normalised_coefficients(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        joined = torch.cat((self.cos_coeff, self.sin_coeff), dim=1)
+        joined = F.normalize(joined, dim=1, eps=1e-8)
+        return joined[:, :self.M], joined[:, self.M:]
+
+    def _sigmas(self) -> torch.Tensor:
+        return self.sigma_min + (self.sigma_max - self.sigma_min) * torch.sigmoid(self.sigma_logit)
+
+    def _gains(self) -> torch.Tensor:
+        return torch.exp(math.log(self.gain_max) * torch.tanh(self.gain_logit))
+
+    def adaptation_parameters(self) -> tuple[nn.Parameter, ...]:
+        """Mildly learned analysis-bank parameters, excluding the ordinary CNN/projection."""
+        return (self.cos_coeff, self.sin_coeff, self.sigma_logit, self.gain_logit)
+
+    def adaptation_regularization(self) -> torch.Tensor:
+        """Dimensionless pull toward the physical Gabor initialisation."""
+        cos_coeff, sin_coeff = self._normalised_coefficients()
+        shape = (cos_coeff - self.initial_cos_coeff).square().mean()
+        shape = shape + (sin_coeff - self.initial_sin_coeff).square().mean()
+        sigma = ((self._sigmas() - self.initial_sigma) /
+                 (self.sigma_max - self.sigma_min)).square().mean()
+        gain = torch.tanh(self.gain_logit).square().mean()
+        return torch.stack((shape, sigma, gain)).mean()
+
+    @torch.no_grad()
+    def adaptation_summary(self) -> dict[str, float]:
+        cos_coeff, sin_coeff = self._normalised_coefficients()
+        displacement = torch.cat((cos_coeff - self.initial_cos_coeff,
+                                  sin_coeff - self.initial_sin_coeff), dim=1).norm(dim=1)
+        sigma = self._sigmas()
+        gain = self._gains()
+        return {
+            "frontend/kernel_shape_shift_mean": float(displacement.mean()),
+            "frontend/kernel_shape_shift_max": float(displacement.max()),
+            "frontend/kernel_sigma_min": float(sigma.min()),
+            "frontend/kernel_sigma_max": float(sigma.max()),
+            "frontend/kernel_gain_min": float(gain.min()),
+            "frontend/kernel_gain_max": float(gain.max()),
+        }
+
+    def request_runtime_telemetry(self, enabled: bool = True) -> None:
+        self._telemetry_requested = bool(enabled)
+
+    @torch.no_grad()
+    def runtime_summary(self) -> dict[str, float]:
+        return {name: float(value) for name, value in self._runtime_summary.items()}
+
     # ------------------------------------------------------------------ kernel construction
-    def kernel_at(self, offsets: torch.Tensor, rate_hz: float) -> torch.Tensor:
+    def kernel_at(self, offsets: torch.Tensor, rate_hz: float,
+                  source_rate_hz: Optional[float] = None) -> torch.Tensor:
         """Evaluate every kernel at exact time offsets in SECONDS -> (K, 2, n) quadrature pair.
 
         `offsets` is (n,) seconds relative to an output-frame centre. Returns cos-phase and
         sin-phase kernels so the magnitude |z| is phase-invariant like a band energy.
         """
+        return self._kernel_frames(offsets.unsqueeze(0), rate_hz, source_rate_hz)[0]
+
+    def _kernel_frames(self, offsets: torch.Tensor, rate_hz: float,
+                       source_rate_hz: Optional[float] = None) -> torch.Tensor:
+        """Vectorized kernel evaluation for offsets shaped (frames, taps)."""
         spans = self.spans.to(offsets.device)                     # (K,)
-        u = offsets.unsqueeze(0) / spans.unsqueeze(1)             # (K, n) normalised time
+        u = offsets.unsqueeze(1) / spans.view(1, self.K, 1)       # (F,K,n)
         inside = u.abs() <= 0.5
         m = torch.arange(1, self.M + 1, device=offsets.device, dtype=offsets.dtype)  # (M,)
-        phase = 2 * math.pi * m.view(1, self.M, 1) * u.unsqueeze(1)                  # (K, M, n)
+        phase = 2 * math.pi * m.view(1, 1, self.M, 1) * u.unsqueeze(2)  # (F,K,M,n)
         # Rule 1 of the rate contract: per-harmonic band-limit. Harmonic m sits at m/T_k Hz, so
         # this is an exact mask on a coefficient, never a smoothing approximation.
-        limit = self.nyquist_margin * rate_hz / 2.0
+        observable_rate = rate_hz if source_rate_hz is None else source_rate_hz
+        limit = self.nyquist_margin * observable_rate / 2.0
         live = (m.view(1, self.M) / spans.unsqueeze(1)) <= limit                     # (K, M)
-        cos_c = self.cos_coeff.to(offsets.dtype) * live
-        sin_c = self.sin_coeff.to(offsets.dtype) * live
-        cos_k = (cos_c.unsqueeze(-1) * torch.cos(phase)).sum(1)
-        sin_k = (sin_c.unsqueeze(-1) * torch.cos(phase)).sum(1)
+        cos_coeff, sin_coeff = self._normalised_coefficients()
+        cos_c = (cos_coeff.to(offsets.dtype) * live).view(1, self.K, self.M, 1)
+        sin_c = (sin_coeff.to(offsets.dtype) * live).view(1, self.K, self.M, 1)
+        cos_k = (cos_c * torch.cos(phase)).sum(2)
+        sin_k = (sin_c * torch.cos(phase)).sum(2)
         # quadrature partner: same coefficients, sine basis
-        cos_q = (cos_c.unsqueeze(-1) * torch.sin(phase)).sum(1)
-        sin_q = (sin_c.unsqueeze(-1) * torch.sin(phase)).sum(1)
+        cos_q = (cos_c * torch.sin(phase)).sum(2)
+        sin_q = (sin_c * torch.sin(phase)).sum(2)
         real = cos_k + sin_q
         imag = sin_k - cos_q
-        sigma = self.log_sigma.exp().to(offsets.dtype).unsqueeze(1).clamp(0.05, 1.0)
+        sigma = self._sigmas().to(offsets.dtype).view(1, self.K, 1)
         env = torch.exp(-u.pow(2) / (2 * sigma.pow(2)))
         real, imag = real * env * inside, imag * env * inside
-        pair = torch.stack((real, imag), dim=1)                                       # (K, 2, n)
+        pair = torch.stack((real, imag), dim=2)                                       # (F,K,2,n)
         # Rule 3: re-zero-mean after sampling (discretisation breaks the exact integral).
-        count = inside.sum(-1, keepdim=True).clamp_min(1).unsqueeze(1)
-        pair = (pair - pair.sum(-1, keepdim=True) / count) * inside.unsqueeze(1)
+        count = inside.sum(-1, keepdim=True).clamp_min(1).unsqueeze(2)
+        pair = (pair - pair.sum(-1, keepdim=True) / count) * inside.unsqueeze(2)
         # Rule 2: convolution is an INTEGRAL. dt = 1/r. Never L2-normalise here.
-        gain = self.log_gain.exp().to(offsets.dtype).view(self.K, 1, 1)
+        gain = self._gains().to(offsets.dtype).view(1, self.K, 1, 1)
         return pair * gain / float(rate_hz)
 
+    def _frame_geometry(self, rate: float, P: int, device: torch.device) -> dict[str, torch.Tensor]:
+        """Cache rate-dependent sample geometry and Fourier bases, never learned values."""
+        key = (device.type, device.index, float(rate), int(P))
+        cached = self._geometry_cache.get(key)
+        if cached is not None:
+            return cached
+        half = int(math.ceil(self.max_span * rate / 2.0)) + 2
+        offsets_base = torch.arange(-half, half + 1, device=device, dtype=torch.float32)
+        frame = torch.arange(P * self.F, device=device, dtype=torch.float32)
+        frame_time = (frame + 0.5) / self.F
+        centre = torch.floor(frame_time * rate)
+        sample_index = centre.unsqueeze(1) + offsets_base.unsqueeze(0)
+        fractional_phase = frame_time * rate - centre
+        unique_phase, phase_id = torch.unique(fractional_phase, return_inverse=True)
+        unique_offsets = (offsets_base.unsqueeze(0) - unique_phase.unsqueeze(1)) / rate
+        spans = self.spans.to(device)
+        u = unique_offsets.unsqueeze(1) / spans.view(1, self.K, 1)
+        inside = u.abs() <= 0.5
+        harmonic = torch.arange(1, self.M + 1, device=device, dtype=torch.float32)
+        phase = 2 * math.pi * harmonic.view(1, 1, self.M, 1) * u.unsqueeze(2)
+        support = inside.index_select(0, phase_id)
+        cached = {
+            "sample_index": sample_index.long(),
+            "frame_time": frame_time,
+            "phase_id": phase_id,
+            "u": u,
+            "inside": inside,
+            "cos_phase": torch.cos(phase),
+            "sin_phase": torch.sin(phase),
+            "support": support,
+        }
+        self._geometry_cache[key] = cached
+        return cached
+
+    def _kernels_from_geometry(self, geometry: dict[str, torch.Tensor], rate: float,
+                               source_rate: float) -> torch.Tensor:
+        """Apply current learnable coefficients to cached constant bases."""
+        device = self.spans.device
+        harmonic = torch.arange(1, self.M + 1, device=device, dtype=self.spans.dtype)
+        live = (harmonic.view(1, self.M) / self.spans.unsqueeze(1)) <= (
+            self.nyquist_margin * source_rate / 2.0)
+        cos_coeff, sin_coeff = self._normalised_coefficients()
+        cos_coeff = (cos_coeff * live).view(1, self.K, self.M, 1)
+        sin_coeff = (sin_coeff * live).view(1, self.K, self.M, 1)
+        cos_phase = geometry["cos_phase"]
+        sin_phase = geometry["sin_phase"]
+        cos_k = (cos_coeff * cos_phase).sum(2)
+        sin_k = (sin_coeff * cos_phase).sum(2)
+        cos_q = (cos_coeff * sin_phase).sum(2)
+        sin_q = (sin_coeff * sin_phase).sum(2)
+        real, imag = cos_k + sin_q, sin_k - cos_q
+        sigma = self._sigmas().view(1, self.K, 1)
+        envelope = torch.exp(-geometry["u"].square() / (2 * sigma.square()))
+        inside = geometry["inside"]
+        pair = torch.stack((real * envelope * inside, imag * envelope * inside), dim=2)
+        count = inside.sum(-1, keepdim=True).clamp_min(1).unsqueeze(2)
+        pair = (pair - pair.sum(-1, keepdim=True) / count) * inside.unsqueeze(2)
+        pair = pair * self._gains().view(1, self.K, 1, 1) / float(rate)
+        return pair.index_select(0, geometry["phase_id"])
+
     # ------------------------------------------------------------------ masks
-    def masks(self, rate_hz: float, duration_s: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    @staticmethod
+    def _rate_vector(value, B: int, device: torch.device, dtype: torch.dtype,
+                     name: str) -> torch.Tensor:
+        value = torch.as_tensor(value, device=device, dtype=dtype).reshape(-1)
+        if value.numel() == 1:
+            value = value.expand(B)
+        if value.numel() != B:
+            raise ValueError(f"{name} must be scalar or length B={B}, got {value.numel()}")
+        positive = (value > 0).all()
+        if value.device.type == "cpu":
+            if not bool(positive):
+                raise ValueError(f"{name} must contain only positive rates")
+        else:
+            torch._assert_async(positive, f"{name} must contain only positive rates")
+        return value
+
+    def masks(self, rate_hz, duration_s: torch.Tensor,
+              source_rate_hz=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """(nyquist observability, resolution flag), each (B, K).
 
         `nyquist`: fraction of this kernel's harmonics representable at `rate_hz`.
         `resolution`: how much of the kernel's span the recording can actually supply.
         """
+        duration_s = torch.as_tensor(duration_s, device=self.spans.device,
+                                     dtype=self.spans.dtype).reshape(-1)
+        B = duration_s.numel()
+        rate = self._rate_vector(rate_hz, B, self.spans.device, self.spans.dtype,
+                                 "sampling_rate_hz")
+        source_rate = (rate if source_rate_hz is None else
+                       self._rate_vector(source_rate_hz, B, self.spans.device,
+                                         self.spans.dtype, "source_rate_hz"))
         spans = self.spans
         m = torch.arange(1, self.M + 1, device=spans.device, dtype=spans.dtype)
-        live = (m.view(1, self.M) / spans.unsqueeze(1)) <= (self.nyquist_margin * rate_hz / 2.0)
-        nyq = live.to(spans.dtype).mean(dim=1)                                  # (K,)
+        harmonic_hz = m.view(1, self.M) / spans.unsqueeze(1)                    # (K,M)
+        live = harmonic_hz.view(1, self.K, self.M) <= (
+            self.nyquist_margin * source_rate.view(B, 1, 1) / 2.0)
+        nyq = live.to(spans.dtype).mean(dim=2)                                  # (B,K)
         res = (duration_s.unsqueeze(1) / spans.unsqueeze(0)).clamp(0.0, 1.0)    # (B, K)
-        return nyq.unsqueeze(0).expand_as(res), res
+        return nyq, res
 
     # ------------------------------------------------------------------ window reconstruction
     @staticmethod
@@ -267,60 +440,153 @@ class ContinuousKernelTokenizer(nn.Module):
         window = flat.gather(1, (patch_of * S + offset).unsqueeze(-1).expand(-1, -1, C))
         return window * inside.unsqueeze(-1).to(window.dtype), total
 
+    @staticmethod
+    def _reflect_indices(index: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        """Reflect arbitrary integer indices at each row's own valid recording boundary."""
+        lengths = lengths.long().clamp_min(1).view(-1, 1, 1)
+        period = (2 * (lengths - 1)).clamp_min(1)
+        folded = torch.remainder(index.view(1, *index.shape), period)
+        reflected = torch.where(folded <= lengths - 1, folded, period - folded)
+        return torch.where(lengths > 1, reflected, torch.zeros_like(reflected)).long()
+
+    @staticmethod
+    def _patch_summaries(patches: torch.Tensor, patch_len: torch.Tensor,
+                         patch_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, P, S, _ = patches.shape
+        sample_valid = torch.arange(S, device=patches.device).view(1, 1, S) \
+            < patch_len.clamp_min(0).unsqueeze(-1)
+        sample_valid = sample_valid & patch_mask.view(B, P, 1)
+        weight = sample_valid.unsqueeze(-1).to(patches.dtype)
+        count = weight.sum(dim=2).clamp_min(1.0)
+        amplitude = torch.log1p((patches.abs() * weight).sum(dim=2) / count)
+        dc = (patches * weight).sum(dim=2) / count
+        valid = patch_mask.unsqueeze(-1).to(patches.dtype)
+        return amplitude * valid, dc * valid
+
+    def _analyze_rate_group(self, window: torch.Tensor, total: torch.Tensor, P: int,
+                            rate: float, source_rate: float
+                            ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Analyze a homogeneous stored/native-rate group without sharing recording boundaries."""
+        B, _, C = window.shape
+        device = window.device
+        n_frames = P * self.F
+        geometry = self._frame_geometry(rate, P, device)
+        sample_index_all = geometry["sample_index"]
+        taps = sample_index_all.shape[1]
+        signal = window.permute(0, 2, 1)                                         # (B,C,T)
+        duration = total / rate
+        with torch.autocast(device_type=device.type, enabled=False):
+            kernels_all = self._kernels_from_geometry(geometry, rate, source_rate)
+        responses, edge_support, frame_valid = [], [], []
+        for start in range(0, n_frames, CK_FRAME_CHUNK):
+            stop = min(start + CK_FRAME_CHUNK, n_frames)
+            t_f = geometry["frame_time"][start:stop]
+            sample_index = sample_index_all[start:stop]
+            reflected = self._reflect_indices(sample_index, total)               # (B,f,t)
+            gather = reflected.reshape(B, 1, -1).expand(B, C, -1)
+            segment = signal.gather(2, gather).reshape(B, C, stop - start, taps)
+            with torch.autocast(device_type=device.type, enabled=False):
+                kernels = kernels_all[start:stop]
+                z = torch.einsum("bcft,fkqt->bckfq", segment.float(), kernels)
+            responses.append(z.square().sum(-1).clamp_min(1e-12).sqrt())
+
+            kernel_support = geometry["support"][start:stop]
+            real_sample = ((sample_index.view(1, stop - start, taps) >= 0) &
+                           (sample_index.view(1, stop - start, taps) <
+                            total.view(B, 1, 1)))
+            supported = (kernel_support.unsqueeze(0) & real_sample.unsqueeze(2)).sum(-1)
+            denominator = kernel_support.sum(-1).clamp_min(1).unsqueeze(0)
+            edge_support.append((supported / denominator).permute(0, 2, 1).float())
+            frame_valid.append((t_f.view(1, -1) < duration.view(B, 1)))
+        return (torch.cat(responses, dim=3), torch.cat(edge_support, dim=2),
+                torch.cat(frame_valid, dim=1))
+
     # ------------------------------------------------------------------ the analysis stage
     def analyze(self, patches, sampling_rate_hz, patch_len_samples=None,
                 source_rate_hz=None, patch_mask=None) -> dict:
         """Per-frame band magnitudes and the masks. Returns a dict; `project` turns it into tokens."""
         B, P, S, C = patches.shape
         device = patches.device
-        rate = float(torch.as_tensor(sampling_rate_hz).reshape(-1)[0].item())
+        rates = self._rate_vector(sampling_rate_hz, B, device, patches.dtype,
+                                  "sampling_rate_hz")
+        source_rates = (rates if source_rate_hz is None else
+                        self._rate_vector(source_rate_hz, B, device, patches.dtype,
+                                          "source_rate_hz"))
         if patch_len_samples is None:
             patch_len_samples = torch.full((B, P), S, dtype=torch.long, device=device)
+        else:
+            patch_len_samples = torch.as_tensor(
+                patch_len_samples, device=device, dtype=torch.long)
+            if patch_len_samples.numel() == 1:
+                patch_len_samples = patch_len_samples.reshape(1, 1).expand(B, P)
+            elif patch_len_samples.numel() == B:
+                patch_len_samples = patch_len_samples.reshape(B, 1).expand(B, P)
+            elif patch_len_samples.numel() == B * P:
+                patch_len_samples = patch_len_samples.reshape(B, P)
+            else:
+                raise ValueError(f"patch_len_samples must be scalar, (B,), or (B,P)=({B},{P})")
+        lengths_fit = (patch_len_samples <= S).all()
+        if device.type == "cpu":
+            if not bool(lengths_fit):
+                raise ValueError(f"patch_len_samples cannot exceed padded sample width S={S}")
+        else:
+            torch._assert_async(lengths_fit, f"patch_len_samples exceeds sample width S={S}")
+        length_valid = patch_len_samples > 0
+        patch_mask = (length_valid if patch_mask is None else
+                      torch.as_tensor(patch_mask, device=device, dtype=torch.bool).reshape(B, P)
+                      & length_valid)
         window, total = self.contiguous_window(patches, patch_len_samples, patch_mask)
-        duration = total / max(rate, 1e-6)                                       # (B,) seconds
-        n_frames = int(P * self.F)                                               # duration-only
-        half = int(math.ceil(self.spans.max().item() * rate / 2.0)) + 2
-        # reflection padding: a zero edge is a step discontinuity to a band-pass kernel and injects
-        # broadband energy the recording does not contain.
-        pad_width = min(half, max(window.shape[1] - 1, 0))
-        signal = window.permute(0, 2, 1)                                         # (B, C, T)
-        if pad_width > 0:
-            signal = F.pad(signal, (pad_width, pad_width), mode="reflect")
-        elif half > 0:
-            signal = F.pad(signal, (half, half), mode="replicate")
-            pad_width = half
-
-        taps = 2 * half + 1
-        offsets_base = torch.arange(-half, half + 1, device=device, dtype=torch.float32)
-        responses, edge = [], []
-        for start in range(0, n_frames, CK_FRAME_CHUNK):
-            stop = min(start + CK_FRAME_CHUNK, n_frames)
-            idx = torch.arange(start, stop, device=device, dtype=torch.float32)
-            t_f = (idx + 0.5) / self.F                                           # exact, seconds
-            centre = torch.floor(t_f * rate)                                     # index anchor only
-            # Rule 1 (the important one): offsets are EXACT; the kernel absorbs the sub-sample shift.
-            offs = (centre.unsqueeze(1) + offsets_base.unsqueeze(0)) / rate - t_f.unsqueeze(1)
-            gather_idx = (centre.unsqueeze(1) + offsets_base.unsqueeze(0)).long() + pad_width
-            gather_idx = gather_idx.clamp(0, signal.shape[-1] - 1)
-            seg = signal[:, :, gather_idx.reshape(-1)].reshape(B, C, stop - start, taps)
-            with torch.autocast(device_type=device.type, enabled=False):
-                kern = torch.stack([self.kernel_at(offs[j].float(), rate)
-                                    for j in range(offs.shape[0])], dim=0)       # (f, K, 2, taps)
-                z = torch.einsum("bcft,fkqt->bckfq", seg.float(), kern)          # (B,C,K,f,2)
-            responses.append(z.pow(2).sum(-1).clamp_min(1e-12).sqrt())           # magnitude |z|
-            frame_edge = ((t_f.unsqueeze(0) >= 0) & (t_f.unsqueeze(0) <= duration.unsqueeze(1)))
-            edge.append(frame_edge.to(torch.float32))
-        magnitude = torch.cat(responses, dim=3)                                  # (B, C, K, n_frames)
-        edge_support = torch.cat(edge, dim=1)                                    # (B, n_frames)
+        duration = total / rates
+        n_frames = P * self.F
+        magnitude = patches.new_zeros(B, C, self.K, n_frames, dtype=torch.float32)
+        edge_support = patches.new_zeros(B, self.K, n_frames, dtype=torch.float32)
+        frame_valid = torch.zeros(B, n_frames, device=device, dtype=torch.bool)
+        pairs = torch.stack((rates, source_rates), dim=1)
+        unique_pairs, inverse = torch.unique(pairs, dim=0, return_inverse=True)
+        # One synchronization obtains the small list of distinct physical configurations. The
+        # previous implementation synchronized twice per group via scalar .item() calls.
+        pair_values = unique_pairs.detach().cpu().tolist()
+        for group_id, (rate, source_rate) in enumerate(pair_values):
+            rows = torch.nonzero(inverse == group_id, as_tuple=False).flatten()
+            group_magnitude, group_edge, group_valid = self._analyze_rate_group(
+                window.index_select(0, rows), total.index_select(0, rows), P,
+                float(rate), float(source_rate))
+            magnitude = magnitude.index_copy(0, rows, group_magnitude)
+            edge_support = edge_support.index_copy(0, rows, group_edge)
+            frame_valid = frame_valid.index_copy(0, rows, group_valid)
         compressed = torch.log1p(magnitude)
-        nyq, res = self.masks(rate, duration)
+        nyq, res = self.masks(rates, duration, source_rates)
+        amplitude, dc = self._patch_summaries(patches, patch_len_samples, patch_mask)
+        if self._telemetry_requested:
+            valid_frames = frame_valid.view(B, 1, 1, n_frames).to(compressed.dtype)
+            valid_count = (valid_frames.sum() * C).clamp_min(1.0)
+            mean = (compressed * valid_frames).sum(dim=(0, 1, 3)) / valid_count
+            variance = ((compressed - mean.view(1, 1, self.K, 1)).square()
+                        * valid_frames).sum(dim=(0, 1, 3)) / valid_count
+            edge_weight = frame_valid.view(B, 1, n_frames).to(edge_support.dtype)
+            self._runtime_summary = {
+                "frontend/observable_fraction": nyq.mean().detach(),
+                "frontend/edge_support_mean": (
+                    (edge_support * edge_weight).sum()
+                    / (edge_weight.sum() * self.K).clamp_min(1.0)
+                ).detach(),
+                "frontend/response_std_mean": variance.sqrt().mean().detach(),
+                "frontend/dead_kernel_fraction": (variance < 1e-10).float().mean().detach(),
+            }
+            self._telemetry_requested = False
         return {"compressed": compressed, "nyquist": nyq, "resolution": res,
                 "edge": edge_support, "window": window, "duration": duration,
-                "n_patches": P, "rate": rate}
+                "frame_valid": frame_valid, "patch_valid": patch_mask,
+                "amplitude": amplitude, "dc": dc,
+                "n_patches": P, "rate": rates, "source_rate": source_rates}
 
     # ------------------------------------------------------------------ normalisation stats
     def reset_norm_accumulator(self):
         self._acc_count.zero_(); self._acc_sum.zero_(); self._acc_sqsum.zero_()
+        for name in ("amp", "dc"):
+            getattr(self, f"_{name}_acc_count").zero_()
+            getattr(self, f"_{name}_acc_sum").zero_()
+            getattr(self, f"_{name}_acc_sqsum").zero_()
 
     @torch.no_grad()
     def accumulate_norm_stats(self, patches, sampling_rate_hz, patch_len_samples=None,
@@ -328,25 +594,60 @@ class ContinuousKernelTokenizer(nn.Module):
         out = self.analyze(patches, sampling_rate_hz, patch_len_samples,
                            source_rate_hz=source_rate_hz, patch_mask=patch_mask)
         value = out["compressed"]                                                # (B,C,K,f)
+        B, C, _, n_frames = value.shape
+        weight = out["frame_valid"].view(B, 1, 1, n_frames).to(torch.float64)
+        weight = weight * out["nyquist"].view(B, 1, self.K, 1).to(torch.float64)
         if channel_mask is not None:
-            value = value * channel_mask.to(value.dtype).view(value.shape[0], -1, 1, 1)
-            weight = channel_mask.to(torch.float64).sum() * value.shape[-1]
+            channel_mask = torch.as_tensor(channel_mask, device=value.device, dtype=torch.bool)
+            weight = weight * channel_mask.view(B, C, 1, 1).to(torch.float64)
         else:
-            weight = torch.tensor(float(value.shape[0] * value.shape[1] * value.shape[-1]),
-                                  dtype=torch.float64)
-        flat = value.double().permute(2, 0, 1, 3).reshape(self.K, -1)
-        self._acc_sum += flat.sum(dim=1)
-        self._acc_sqsum += flat.pow(2).sum(dim=1)
-        self._acc_count += torch.full_like(self._acc_count, float(flat.shape[1]))
+            weight = weight.expand(B, C, self.K, n_frames)
+        value64 = value.to(torch.float64)
+        self._acc_count += weight.sum(dim=(0, 1, 3))
+        self._acc_sum += (value64 * weight).sum(dim=(0, 1, 3))
+        self._acc_sqsum += (value64.square() * weight).sum(dim=(0, 1, 3))
+
+        patch_weight = out["patch_valid"].view(B, -1, 1).to(torch.float64)
+        if channel_mask is not None:
+            patch_weight = patch_weight * channel_mask.view(B, 1, C).to(torch.float64)
+        else:
+            patch_weight = patch_weight.expand(B, out["patch_valid"].shape[1], C)
+        for name, sample in (("amp", out["amplitude"]), ("dc", out["dc"])):
+            sample = sample.to(torch.float64)
+            getattr(self, f"_{name}_acc_count").add_(patch_weight.sum())
+            getattr(self, f"_{name}_acc_sum").add_((sample * patch_weight).sum())
+            getattr(self, f"_{name}_acc_sqsum").add_((sample.square() * patch_weight).sum())
 
     @torch.no_grad()
     def finalize_norm_stats(self, eps: float = 1e-5):
+        seen = self._acc_count > 0
         count = self._acc_count.clamp_min(1.0)
         mu = self._acc_sum / count
         var = (self._acc_sqsum / count - mu.pow(2)).clamp_min(0.0)
-        self.norm_mu.copy_(mu.float())
-        self.norm_sd.copy_(var.sqrt().float().clamp_min(eps))
+        self.norm_mu.copy_(torch.where(seen, mu, torch.zeros_like(mu)).float())
+        self.norm_sd.copy_(torch.where(
+            seen, var.sqrt().clamp_min(eps), torch.ones_like(var)).float())
+        for name in ("amp", "dc"):
+            scalar_count = getattr(self, f"_{name}_acc_count")
+            if float(scalar_count) > 0:
+                count = scalar_count.clamp_min(1.0)
+                mu = getattr(self, f"_{name}_acc_sum") / count
+                var = getattr(self, f"_{name}_acc_sqsum") / count - mu.square()
+                getattr(self, f"{name}_mu").copy_(mu.float())
+                getattr(self, f"{name}_sd").copy_(var.clamp_min(0.0).sqrt().clamp_min(eps).float())
+            else:
+                getattr(self, f"{name}_mu").zero_()
+                getattr(self, f"{name}_sd").fill_(1.0)
         self._norm_fitted.fill_(1.0)
+
+    @torch.no_grad()
+    def fit_norm_stats(self, patches, sampling_rate_hz, patch_len_samples=None, eps: float = 1e-5,
+                       patch_mask=None, channel_mask=None, source_rate_hz=None):
+        self.reset_norm_accumulator()
+        self.accumulate_norm_stats(
+            patches, sampling_rate_hz, patch_len_samples, patch_mask=patch_mask,
+            channel_mask=channel_mask, source_rate_hz=source_rate_hz)
+        self.finalize_norm_stats(eps)
 
     # ------------------------------------------------------------------ projection to tokens
     def project(self, analysis: dict) -> torch.Tensor:
@@ -355,6 +656,7 @@ class ContinuousKernelTokenizer(nn.Module):
         P = analysis["n_patches"]
         if self.norm == "frozen":
             compressed = (compressed - self.norm_mu.view(1, 1, K, 1)) / self.norm_sd.view(1, 1, K, 1)
+        compressed = compressed * analysis["nyquist"].view(B, 1, K, 1)
         x = compressed.reshape(B * C, K, n_frames)
         x = self.pw1(self.dw1(x))
         x = F.gelu(self.ln1(x.transpose(1, 2)).transpose(1, 2))
@@ -367,22 +669,25 @@ class ContinuousKernelTokenizer(nn.Module):
         # pool (mean/max/std) cannot distinguish them, which would re-destroy the sub-second
         # structure this front end exists to keep.
         ordered = x.permute(0, 3, 1, 2, 4).reshape(B, P, C, c2 * per_token)
-        if ordered.shape[-1] < self.in_dim - (2 * K + self.frames_per_token + 2):
-            pad = self.in_dim - (2 * K + self.frames_per_token + 2) - ordered.shape[-1]
+        metadata_dim = 2 * K + K * self.frames_per_token + 2
+        if ordered.shape[-1] < self.in_dim - metadata_dim:
+            pad = self.in_dim - metadata_dim - ordered.shape[-1]
             ordered = F.pad(ordered, (0, pad))
         nyq = analysis["nyquist"].view(B, 1, 1, K).expand(B, P, C, K)
         res = analysis["resolution"].view(B, 1, 1, K).expand(B, P, C, K)
-        edge = analysis["edge"]
-        edge = edge[:, :per_token * P].reshape(B, P, per_token) if edge.shape[1] >= per_token * P \
-            else F.pad(edge, (0, per_token * P - edge.shape[1])).reshape(B, P, per_token)
-        edge = edge.unsqueeze(2).expand(B, P, C, per_token)
-        if edge.shape[-1] < self.frames_per_token:
-            edge = F.pad(edge, (0, self.frames_per_token - edge.shape[-1]))
-        edge = edge[..., :self.frames_per_token]
-        window = analysis["window"]                                              # (B,T,C)
-        amplitude = window.abs().mean(dim=1).view(B, 1, C, 1).expand(B, P, C, 1)
-        dc = window.mean(dim=1).view(B, 1, C, 1).expand(B, P, C, 1)
-        features = torch.cat([ordered[..., :self.in_dim - (2 * K + self.frames_per_token + 2)],
+        edge = F.avg_pool1d(analysis["edge"], kernel_size=2, stride=2)            # (B,K,f/2)
+        edge = edge[..., :per_token * P].reshape(B, K, P, per_token)
+        edge = edge.permute(0, 2, 1, 3).reshape(B, P, 1, K * per_token)
+        edge = edge.expand(B, P, C, K * per_token)
+        if edge.shape[-1] < K * self.frames_per_token:
+            edge = F.pad(edge, (0, K * self.frames_per_token - edge.shape[-1]))
+        edge = edge[..., :K * self.frames_per_token]
+        amplitude = analysis["amplitude"].unsqueeze(-1)
+        dc = analysis["dc"].unsqueeze(-1)
+        if self.norm == "frozen":
+            amplitude = (amplitude - self.amp_mu) / self.amp_sd
+            dc = (dc - self.dc_mu) / self.dc_sd
+        features = torch.cat([ordered[..., :self.in_dim - metadata_dim],
                               nyq, res, edge, amplitude, dc], dim=-1)
         return self.proj(features)
 

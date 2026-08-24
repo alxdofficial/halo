@@ -233,7 +233,7 @@ or gives one side an edge the other lacks — it fails.
 Exactly what we do to each model, and why it passes Section 3.
 
 - **CrossHAR** *(we pretrain, SSL)* — T0 masked-reconstruction Transformer + `Transformer_ft`;
-  retrained on our corpus at **60 Hz** via `seq_len`. T1 fixed→60 Hz. T2 fixed 6-ch acc+gyro,
+  retrained on our corpus at **20 Hz / seq_len 120**. T1 fixed→20 Hz. T2 fixed 6-ch acc+gyro,
   zero-pad+mask, placement-blind (per-window InstanceNorm ⇒ scale/gravity-immune). T3 closed→ConSE.
   *Faithful:* arch + recipe unchanged, corpus/rate swapped via its own config (3a.4).
 
@@ -373,8 +373,8 @@ underlying movement new. A random-alias k=0 cell is unidentifiable and is always
 ### 6c. Question 1: coherent k=0 zero-shot comparison
 
 Every method predicts the dataset's frozen, meaningful candidate labels without target support.
-The table includes HARNet+ConSE, CrossHAR+ConSE, LiMU-BERT+ConSE, UniMTS, ImageBind, NormWear, HALO
-with admissibility disabled, and HALO with the learned gate. Closed-set models fit their shared
+The table includes HARNet+ConSE, CrossHAR+ConSE, LiMU-BERT+ConSE, UniMTS, ImageBind, NormWear, and
+HALO's full evidence engine with no enrolled rows. Closed-set models fit their shared
 global-vocabulary head and ConSE calibration on source training subjects only. No arbitrary-label
 k=0 table is produced.
 
@@ -387,15 +387,20 @@ before comparison with current HALO.
 For k greater than zero, every model receives exactly the same labeled executions. The core
 comparison contains two adaptation strengths:
 
-1. **HALO enrollment:** insert support embeddings and labels into memory; perform no gradient update.
-2. **Frozen-representation supervised adaptation:** nearest support, class prototype, and one common
-   L2 ridge/target-head recipe on each model's frozen representation. The target head uses 200
-   AdamW steps initialized from class prototypes. Thus `k=4` means four labeled executions per
-   candidate and still 200 optimizer steps; k never denotes the number of gradient updates.
+1. **HALO enrollment:** insert every patch/sensor row from each selected support execution into the
+   evidence memory and run the complete retrieve-mix-vote evidence engine. Enrollment performs no
+   gradient update.
+2. **Frozen-representation controls for every model, including HALO:** reduce each selected support
+   execution to one normalized mean-pooled vector, then apply one-nearest-neighbor (kNN), normalized
+   class prototypes, L2 ridge, or the common linear head. Giving each execution one vector prevents
+   a long recording from receiving more support weight merely because it produced more windows.
+   The linear head uses 200 AdamW steps initialized from class prototypes. Thus `k=4` means four
+   labeled executions per candidate and still 200 optimizer steps; k never denotes the number of
+   gradient updates.
 
-The second row is the supervised fine-tuning comparison: it fits a new target classifier by
-gradient descent while keeping the pretrained representation frozen. This is the one common update
-scope every model supports and prevents a per-architecture optimizer search from confounding label
+The linear-head row is the supervised fine-tuning comparison: it fits a new linear target
+classifier by gradient descent while keeping the pretrained encoder frozen. This is the one common
+update scope every model supports and prevents a per-architecture optimizer search from confounding label
 efficiency. An additional model-native end-to-end transfer row may be reported where a publication
 defines one, but it is secondary and does not replace the common target-head comparison.
 
@@ -410,20 +415,11 @@ gradient-free memory update with ordinary supervised adaptation to novel physica
 
 ### 6e. Question 3: HALO mechanism attribution
 
-On the same Phase-A embeddings and manifests, report:
-
-- learned admissibility;
-- identity retrieval with admissibility fixed to one;
-- nearest labeled support;
-- normalized class prototypes;
-- an L2 ridge head;
-- support removed; and
-- support-label bindings shuffled.
-
-The learned gate is useful only if it improves over identity retrieval, not merely if HALO improves
-with k. Prototype and ridge determine whether a simpler supervised rule already extracts more from
-the same representation. Support removal and shuffling establish that an apparent k gain is caused
-by the enrolled evidence.
+On the same checkpoint, features, and serialized episodes, report the full evidence engine beside
+kNN, normalized prototypes, L2 ridge, and the fine-tuned linear head. The evidence engine is useful
+only if it improves over the strongest simple readout, not merely if HALO improves with k. Any
+support-removal, label-shuffling, or mixer ablation is a diagnostic rather than an external
+competitor and must appear outside the primary table.
 
 ### 6f. Metrics and aggregation
 
@@ -441,11 +437,12 @@ by the enrolled evidence.
 
 1. **Semantic zero-shot:** model by held-out dataset at coherent k=0, with ordinary and specialized
    dataset means and an equal-dataset overall mean.
-2. **Label efficiency:** HALO enrollment versus each baseline's frozen-head and supervised
-   fine-tuning curves at k = 0, 1, 2, 4, 8, and supported k=16, with separate ordinary and
+2. **Label efficiency:** the semantic zero-shot result at k=0, followed by HALO's evidence engine
+   versus each baseline's fine-tuned linear-head curves at k = 1, 2, 4, 8, and supported k=16,
+   with separate ordinary and
    specialized-novel panels.
-3. **HALO ablation:** learned gate versus identity, nearest support, prototype, and ridge over the
-   same k values, with coherent and random-label panels plus support-removal/shuffle controls.
+3. **Representation and mechanism controls:** kNN, prototype, ridge, and linear-head results for
+   every model that exposes a latent representation, including HALO, over the same k values.
 
 The first two tables establish external performance. The third attributes any gain to the evidence
 mechanism. A contribution claim requires a paired improvement over the strongest external baseline
@@ -477,29 +474,10 @@ $PY -m eval.enrollment_protocol \
 $PY -m eval.check_adaptation_readiness \
   --manifest eval/manifests/adaptation_v1.json.gz
 
-# External semantic k=0 plus matched k>0 frozen-representation controls.
+# Native semantic k=0, HALO evidence-engine enrollment, and matched frozen-representation controls.
 $PY -m eval.run_adaptation_baselines \
   --manifest eval/manifests/adaptation_v1.json.gz \
-  --baselines harnet crosshar limubert unimts imagebind normwear --device cuda
-
-# HALO: run every serialized seed once with coherent text and once with random aliases. k=0 is
-# seed-independent, so retain it only for the first coherent run.
-for seed in 20260808 20260809 20260810 20260811 20260812; do
-  zero=()
-  controls=()
-  if test "$seed" != 20260808; then
-    zero=(--skip-zero-shot)
-    controls=(--counterfactual-controls none)
-  fi
-  $PY -m training.evidence.eval_enrollment \
-    --manifest eval/manifests/adaptation_v1.json.gz --manifest-seed "$seed" \
-    --protocol-role test --device cuda --batch 64 "${zero[@]}" "${controls[@]}" \
-    --out "training/evidence/outputs/eval_manifest_${seed}.json"
-  $PY -m training.evidence.eval_enrollment \
-    --manifest eval/manifests/adaptation_v1.json.gz --manifest-seed "$seed" \
-    --protocol-role test --device cuda --batch 64 --random-aliases "${controls[@]}" \
-    --out "training/evidence/outputs/eval_manifest_${seed}_alias.json"
-done
+  --baselines halo_compact harnet crosshar limubert unimts imagebind normwear --device cuda
 
 # Assemble any completed artifacts; manifest mismatches fail loudly.
 $PY -m eval.assemble_adaptation \

@@ -19,7 +19,7 @@ Ported from the working legacy adapter + ``evaluate_crosshar.py``. Carried over:
     layout exactly so the self-pretrained checkpoint loads strict.
 
 LEAKAGE-SAFE HEAD-FIT (mirrors harnet): the head is fit on FROZEN backbone
-features (mean-pooled sequence embedding) over the 9 training datasets, selecting
+features (mean-pooled sequence embedding) over the current training corpus, selecting
 the best epoch on a SUBJECT-DISJOINT held-out fold — no source subject appears in
 both the head-train and head-selection fold. Eval targets are a separate held-out
 cohort, so there is no target leakage (structural in ZS-XD). The fitted head is
@@ -33,6 +33,7 @@ command to create it.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -250,12 +251,38 @@ class CrossHARAdapter(ConSEAdapter):
         head.eval()
         return {"backbone": backbone, "head": head, "temperature": temperature}
 
+    def evaluation_artifacts(self, state):
+        return {"backbone": _BACKBONE_CKPT,
+                "backbone_metadata": _BACKBONE_CKPT.with_suffix(".meta.json"),
+                "conse_head": _HEAD_CACHE}
+
+    def evaluation_config(self, state):
+        return {
+            "input_rate_hz": prep.TARGET_HZ,
+            "input_samples": prep.TARGET_LEN,
+            "train_datasets": list(prep.TRAIN_DATASETS),
+            "head_fit_max_per_stream": HEAD_FIT_MAX_PER_STREAM,
+        }
+
     def _load_backbone(self, device) -> nn.Module:
         if not _BACKBONE_CKPT.exists():
             raise FileNotFoundError(
                 f"CrossHAR backbone checkpoint missing at {_BACKBONE_CKPT}. "
                 "Self-pretrain it on our corpus first:\n"
                 "  python -m baselines.crosshar.train")
+        meta_path = _BACKBONE_CKPT.with_suffix(".meta.json")
+        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        if (meta.get("schema_version") != 1
+                or meta.get("corpus_profile") != "expanded_phase_a"
+                or meta.get("recipe") != "full"
+                or meta.get("batch_size") != 512
+                or meta.get("max_per_stream") != 20_000
+                or not meta.get("channel_augmentation")
+                or tuple(meta.get("train_datasets", ())) != tuple(prep.TRAIN_DATASETS)):
+            raise RuntimeError(
+                f"CrossHAR backbone at {_BACKBONE_CKPT} is unstamped or does not match the "
+                "locked expanded-corpus recipe. Re-pretrain before scoring:\n"
+                "  python -m baselines.crosshar.train --recipe full --gpu")
         backbone = _Backbone().to(device)
         sd = torch.load(str(_BACKBONE_CKPT), map_location=device, weights_only=True)
         backbone.load_state_dict(sd)

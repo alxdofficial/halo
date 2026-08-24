@@ -241,6 +241,17 @@ class PhysicalFilterbankTokenizer(nn.Module):
         return (torch.sigmoid(self._adaptive_gate_logit) if self.learnable
                 else self.centers.new_zeros(()))
 
+    def adaptation_parameters(self) -> tuple[nn.Parameter, ...]:
+        """Analysis parameters that use the slower physical-adaptation optimizer group."""
+        if not self.learnable:
+            return ()
+        parameters = []
+        if self.n_bands > 2:
+            parameters.append(self._center_offsets)
+        parameters.extend((self._bandwidth_logits, self._compression_logits,
+                           self._shape_logit, self._adaptive_gate_logit))
+        return tuple(parameters)
+
     def adaptation_regularization(self) -> torch.Tensor:
         """Dimensionless pull toward the fixed physical initialization."""
         if not self.learnable:

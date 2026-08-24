@@ -24,7 +24,7 @@ def test_paired_deltas_do_not_pool_label_modes_or_support_counts():
     ):
         rows.extend([
             _row(
-                model="halo_learned_gate", method="learned",
+                model="halo_compact", method="evidence_engine",
                 label_mode=label_mode, k=k, score=target,
             ),
             _row(
@@ -49,7 +49,7 @@ def test_paired_deltas_average_repeated_cells_within_subject():
     rows = []
     for cell, target, comparator in (("cell-a", 50.0, 40.0), ("cell-b", 30.0, 40.0)):
         target_row = _row(
-            model="halo_learned_gate", method="learned",
+            model="halo_compact", method="evidence_engine",
             label_mode="coherent", k=1, score=target,
         )
         comparator_row = _row(

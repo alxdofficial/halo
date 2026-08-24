@@ -92,7 +92,7 @@ class PretrainConfig:
     num_heads: int = 8
     dim_feedforward: int = 1024
     dropout: float = 0.1
-    frontend: str = "fixed"               # fixed | constrained-learnable filterbank
+    frontend: str = "fixed"               # fixed | constrained-learnable | continuous kernels
     trunk: str = "dual"                   # dual (checkpoint-compatible) | temporal (compact engine)
     # Omit the Phase-A-only descriptor head unless its explicit objective is enabled. Serialize this
     # shape decision so strict reconstruction never has to infer it from state-dict prefixes.
@@ -966,7 +966,8 @@ def module_grad_norms(model) -> dict:
                   for p in params if p.grad is not None]
         return float(torch.stack(pieces).sum().sqrt()) if pieces else 0.0
 
-    mods = [("encoder", model.encoder), ("jepa_predictor", model.jepa_predictor),
+    mods = [("encoder", model.encoder), ("frontend", model.encoder.filterbank),
+            ("jepa_predictor", model.jepa_predictor),
             ("vicreg_projector", model.vicreg_projector)]
     if getattr(model, "mae_head", None) is not None:
         mods.append(("mae_head", model.mae_head))
@@ -1014,10 +1015,11 @@ def main() -> None:
     parser.add_argument("--resume", type=Path, default=None,
                         help="warm-resume from a checkpoint (restore encoder/heads/opt/sched/scaler/"
                              "RNG + step and continue the remaining steps)")
-    parser.add_argument("--frontend", choices=("fixed", "learnable"), default="fixed",
+    parser.add_argument("--frontend", choices=("fixed", "learnable", "continuous"), default="fixed",
                         help="tokenizer arm. 'fixed' = physical-Hz constant-Q filterbank (default); "
                              "'learnable' = the constrained-adaptive filterbank arm "
-                             "(docs/archive/LEARNABLE_TOKENIZER_ARM.md).")
+                             "(docs/archive/LEARNABLE_TOKENIZER_ARM.md); 'continuous' = the "
+                             "continuous-time temporal-kernel arm.")
     parser.add_argument("--text-conditioning", choices=("per_channel", "factored"), default=None,
                         help="config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). "
                              "'per_channel' = one description per channel; 'factored' (the CLI "
@@ -1325,6 +1327,17 @@ def main() -> None:
             parser.error(f"{name} must be in [0,1]")
     if cfg.patch_seconds <= 0:
         parser.error("--patch-seconds must be positive")
+    if cfg.frontend == "continuous":
+        if cfg.multiresolution or abs(cfg.patch_seconds - 1.0) > 1e-6:
+            parser.error(
+                "the continuous frontend currently requires fixed one-second patches; its ordered "
+                "frame projection has a fixed number of subframes per token"
+            )
+        if cfg.mae_weight > 0:
+            parser.error(
+                "--mae-weight is not defined for the continuous frontend's structured analysis; "
+                "use the reference JEPA + VICReg objective"
+            )
     if cfg.selection_every <= 0:
         parser.error("selection_every must be positive")
     if cfg.vicreg_proj_dim > 2048:
@@ -1573,16 +1586,12 @@ def main() -> None:
     # Label-text prototypes for the live ConSE-style zero-shot probe (built once, frozen LM).
     label_protos = label_text_prototypes(model, index.label_ids)   # (L, 384) cpu, normalized
 
-    adaptive_names = {
-        "encoder.filterbank._center_offsets", "encoder.filterbank._bandwidth_logits",
-        "encoder.filterbank._compression_logits", "encoder.filterbank._shape_logit",
-        "encoder.filterbank._adaptive_gate_logit",
-    }
+    adaptive_ids = {id(parameter) for parameter in fe.adaptation_parameters()}
     adaptive_params, base_params = [], []
-    for name, parameter in model.named_parameters():
+    for _, parameter in model.named_parameters():
         if not parameter.requires_grad:
             continue
-        if name in adaptive_names:
+        if id(parameter) in adaptive_ids:
             adaptive_params.append(parameter)
         else:
             base_params.append(parameter)
@@ -1887,6 +1896,8 @@ def main() -> None:
         calibration_report = None
         do_log = step % 50 == 0 or step == 1
         do_objective_grad_log = step == 1 or step % 500 == 0
+        if hasattr(fe, "request_runtime_telemetry"):
+            fe.request_runtime_telemetry(do_log)
         patches = batch["patches"].to(device, non_blocking=True)   # NOT gravity-aligned (2026-07-19 design)
         rates = batch["rates"].to(device, non_blocking=True)
         patch_len = batch["patch_len"].to(device, non_blocking=True)
@@ -2476,6 +2487,8 @@ def main() -> None:
                 rec["lr_frontend"] = lrs[1]
             if model.encoder.filterbank.learnable:
                 rec.update(model.encoder.filterbank.adaptation_summary())
+            if hasattr(fe, "runtime_summary"):
+                rec.update(fe.runtime_summary())
             if model.encoder.use_duration_embedding:
                 rec["duration/gate"] = float(torch.sigmoid(
                     model.encoder.duration_gate_logit.detach()))

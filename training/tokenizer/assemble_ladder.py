@@ -57,7 +57,7 @@ def collect(directory: Path) -> dict | None:
         "curve": {k: cell["macro_f1"] for k, cell in curve.items()},
         "transfer": _last(log, "transfer/mean"),
         "pair_gain": _last(log, "mixer/pair_gain"),
-        "correction": _last(log, "mixer/mean_abs_correction"),
+        "correction": _last(log, "mixer/mean_abs_residual"),
         "pool_rows": _last(log, "mixer/pool_rows"),
         "reached": _last(log, "dead_path/memory_rows_with_gradient"),
         "top_k_share": _last(log, "dead_path/top_k_gradient_share"),

@@ -32,6 +32,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .channel_text import ChannelTextFusion, FactoredChannelTextFusion, TokenTextEncoder
+from .continuous_kernel import ContinuousKernelTokenizer
 from .filterbank import PhysicalFilterbankTokenizer
 from .sensor_tokens import ConditioningProjection, DescriptorHead, SensorFold
 from ..blocks import AttentionSpec
@@ -59,7 +60,7 @@ class SetTokenizerEncoder(nn.Module):
         dim_feedforward: int = 256,
         dropout: float = 0.1,
         text_model: str = "all-MiniLM-L6-v2",
-        frontend: str = "fixed",                  # tokenizer front end: 'fixed'|'learnable'
+        frontend: str = "fixed",                  # 'fixed'|'learnable'|'continuous'
         trunk: str = "dual",                     # representation trunk: 'dual'|'temporal'
         descriptor_prediction: bool = True,      # build the Phase-A descriptor-prediction head
         text_conditioning: str = "per_channel",  # 'per_channel' (legacy) | 'factored' (role+sensor)
@@ -105,12 +106,23 @@ class SetTokenizerEncoder(nn.Module):
         self.use_sensor_isolated_retrieval = (
             False if trunk == "temporal" else bool(use_sensor_isolated_retrieval)
         )
-        if frontend not in {"fixed", "learnable"}:
-            raise ValueError("frontend must be 'fixed' or 'learnable'")
+        if frontend not in {"fixed", "learnable", "continuous"}:
+            raise ValueError("frontend must be 'fixed', 'learnable', or 'continuous'")
         # Attribute stays named `filterbank` for checkpoint compatibility.
-        self.filterbank = PhysicalFilterbankTokenizer(
-            learnable=frontend == "learnable", d_model=d_model, **filterbank_kwargs,
-        )
+        if frontend == "continuous":
+            # dft_size is padding capacity for the physical FFT, not a continuous-kernel setting.
+            continuous_kwargs = dict(filterbank_kwargs)
+            for physical_only in (
+                "dft_size", "center_shift_fraction", "bandwidth_factor_max",
+                "compression_gain_max", "filter_shape_min", "filter_shape_max",
+                "adaptive_gate_init",
+            ):
+                continuous_kwargs.pop(physical_only, None)
+            self.filterbank = ContinuousKernelTokenizer(d_model=d_model, **continuous_kwargs)
+        else:
+            self.filterbank = PhysicalFilterbankTokenizer(
+                learnable=frontend == "learnable", d_model=d_model, **filterbank_kwargs,
+            )
         self.text_encoder = TokenTextEncoder(model_name=text_model)   # frozen, cached
         if token_granularity == "sensor":
             # DESIGN OF RECORD: a sensor is one modality triad. Folding xyz into one token makes the
@@ -216,7 +228,7 @@ class SetTokenizerEncoder(nn.Module):
         return self.filterbank.analyze(patches, sampling_rate_hz, patch_len_samples,
                                        source_rate_hz=source_rate_hz)
 
-    def project_tokens(self, token_in: torch.Tensor) -> torch.Tensor:
+    def project_tokens(self, token_in) -> torch.Tensor:
         """Apply THIS encoder's learnable filterbank projection to a shared analysis."""
         return self.filterbank.project(token_in)
 
@@ -518,9 +530,9 @@ class SetTokenizerEncoder(nn.Module):
             tokens = torch.where(token_mask.unsqueeze(-1),
                                  self.mask_token.expand_as(tokens), tokens)
 
-        # Retrieval rows are sensor-isolated and physical: one temporal-attention layer supplies
-        # local context before sensor-description conditioning and before any cross-sensor mixing.
-        # This makes an accelerometer row independent of whether a gyroscope happened to coexist.
+        # Legacy dual-trunk checkpoints can request a shallow sensor-isolated retrieval branch.
+        # The active temporal trunk forces this option off: its final output below is already
+        # sensor-isolated, carries all temporal layers, and includes descriptor conditioning.
         retrieval_tokens = None
         if return_retrieval_tokens and self.use_sensor_isolated_retrieval:
             retrieval_tokens = self.transformer.retrieval_context(

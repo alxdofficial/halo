@@ -15,7 +15,9 @@ import torch
 
 from training.evidence.admissibility_gate import AdmissibilityGate
 from training.evidence.admissible_retrieval import admissibility_from_gate
+from training.tokenizer.pretrain_episodic import support_count_grid
 from training.tokenizer.episodic import (
+    EpisodePlan,
     EpisodeSpec,
     GroupedEpisodicBatchSampler,
     EpisodicCollate,
@@ -30,6 +32,7 @@ from training.tokenizer.episodic import (
     live_sensor_rows,
     matched_support_variants,
     sensor_modality_codes,
+    select_rows,
 )
 
 
@@ -111,6 +114,38 @@ def test_support_schedule_pins_k_for_validation():
     assert all(p.n_background > 0 for p in zero_shot)
 
 
+def test_specialized_phase_b_support_schedules_do_not_mix_regimes():
+    assert support_count_grid(16, "zero-shot") == (0,)
+    assert support_count_grid(16, "enrollment") == (1, 2, 4, 8, 16)
+    assert support_count_grid(16, "unified") == (0, 1, 2, 4, 8, 16)
+    with pytest.raises(ValueError, match="requires max_support"):
+        support_count_grid(0, "enrollment")
+
+
+def test_candidate_schedule_groups_shapes_without_sharing_episode_identity():
+    from training.tokenizer.pretrain_episodic import grouped_candidate_schedule
+
+    schedule = grouped_candidate_schedule(steps=12, episodes_per_step=4,
+                                          candidate_counts=(8, 16, 32, 64), seed=7)
+    grouped = schedule.reshape(12, 4)
+    assert all(len(set(row.tolist())) == 1 for row in grouped)
+    assert {value: int(np.sum(schedule == value)) for value in (8, 16, 32, 64)} == {
+        8: 12, 16: 12, 32: 12, 64: 12,
+    }
+
+
+def test_requested_support_count_is_not_silently_truncated():
+    table, _, _ = _synthetic_table(per_cell=2)
+    spec = _spec(max_support=8)
+    plans = build_episode_plans(
+        table, eligible_labels(table, spec), n_episodes=8, spec=spec, seed=13,
+        support_schedule=(8,),
+    )
+    assert all(plan.support_k == 8 for plan in plans)
+    assert all(plan.n_support == 0 for plan in plans)
+    assert all(not plan.enrolled_slots for plan in plans)
+
+
 def test_matched_k_curve_changes_only_nested_support():
     table, _, _ = _synthetic_table()
     spec = _spec(max_support=2)
@@ -171,6 +206,59 @@ def test_plans_are_deterministic_for_a_seed():
     a = build_episode_plans(table, pool, n_episodes=8, spec=spec, seed=42)
     b = build_episode_plans(table, pool, n_episodes=8, spec=spec, seed=42)
     assert a == b
+
+
+def test_large_candidate_roster_does_not_multiply_query_encoder_work():
+    """C is the decision roster; only the configured active labels need query recordings."""
+    table, _, _ = _synthetic_table(n_labels=70, n_subjects=3, per_cell=6)
+    spec = _spec(
+        candidate_counts=(64,), query_labels_per_episode=4, queries_per_candidate=3,
+        max_support=0, background_windows=1,
+    )
+    # Simulate one label-poor acquisition stream: it can provide four active truths even though the
+    # episode asks the classifier to reject sixty additional global-label distractors.
+    query_pool = [0, 1, 2, 3]
+    query_table = {label: table[label] for label in query_pool}
+    plan = build_episode_plans(
+        table, list(range(70)), n_episodes=1, spec=spec, seed=23,
+        query_pool=query_pool, query_table=query_table,
+    )[0]
+    assert len(plan.candidates) == 64
+    assert len(set(plan.query_slot)) == 4
+    assert plan.n_query == 4 * 3
+    assert {plan.candidates[slot] for slot in plan.query_slot}.issubset(query_pool)
+
+
+def test_large_roster_partial_enrollment_respects_fixed_memory_capacity():
+    """Large C and k remain legal by capping enrolled labels, never by truncating k."""
+    table, _, _ = _synthetic_table(n_labels=70, n_subjects=4, per_cell=20)
+    spec = _spec(
+        candidate_counts=(64,), query_labels_per_episode=4, queries_per_candidate=2,
+        max_support=16, background_windows=1, max_memory_windows=512,
+        alias_episode_fraction=0.0,
+    )
+    plans = build_episode_plans(
+        table, list(range(70)), n_episodes=20, spec=spec, seed=31,
+        support_schedule=(16,),
+    )
+    assert all(plan.n_support <= 512 for plan in plans)
+    assert all(len(plan.enrolled_slots) <= 32 for plan in plans)
+    for plan in plans:
+        counts = [plan.support_slot.count(slot) for slot in plan.enrolled_slots]
+        assert counts and set(counts) == {16}
+
+
+def test_random_alias_rejects_a_roster_that_cannot_be_fully_enrolled():
+    table, _, _ = _synthetic_table(n_labels=70, n_subjects=4, per_cell=20)
+    spec = _spec(
+        candidate_counts=(64,), query_labels_per_episode=4, max_support=16,
+        background_windows=1, max_memory_windows=512, alias_episode_fraction=1.0,
+    )
+    with pytest.raises(ValueError, match="every candidate"):
+        build_episode_plans(
+            table, list(range(70)), n_episodes=1, spec=spec, seed=37,
+            support_schedule=(16,),
+        )
 
 
 def test_pool_must_reserve_a_label_for_background():
@@ -322,6 +410,41 @@ def test_selection_restricts_rows_to_the_requested_batch_positions():
     )
     assert sorted(set(live.window.tolist())) == [1, 2]
     assert live.rows.feature.shape[0] == 2 * 3 * 2
+
+
+def test_shared_live_batch_is_exactly_the_per_episode_row_materialization():
+    from training.tokenizer.pretrain_episodic import prepare_live_batch
+
+    out, batch = _fake_encoder_output(B=8, P=2, N=2)
+    plans = [
+        EpisodePlan((0, 1), (10, 11), (0, 1), (12,), (0,), (13,), 1, (0,)),
+        EpisodePlan((2, 3), (20, 21), (0, 1), (22,), (1,), (23,), 1, (1,)),
+    ]
+    batch["labels"] = torch.tensor([0, 1, 0, 4, 2, 3, 3, 5])
+    shared, labels = prepare_live_batch(out, batch, plans, np.asarray([0, 4]), torch.device("cpu"))
+
+    for plan, offset in zip(plans, (0, 4)):
+        query_i, support_i, background_i = episode_row_roles(plan, row_offset=offset)
+        binding = episode_binding(plan, len(labels), row_offset=offset)
+        expected_query = live_sensor_rows(
+            out, batch, labels=labels, enrolled_candidate=binding, select=query_i,
+        )
+        expected_memory = live_sensor_rows(
+            out, batch, labels=labels, enrolled_candidate=binding,
+            select=torch.cat([support_i, background_i]),
+        )
+        query_end = offset + plan.n_query
+        episode_end = offset + len(plan.flat_positions())
+        actual_query = select_rows(shared, torch.nonzero(
+            shared.window.ge(offset) & shared.window.lt(query_end), as_tuple=True,
+        )[0])
+        actual_memory = select_rows(shared, torch.nonzero(
+            shared.window.ge(query_end) & shared.window.lt(episode_end), as_tuple=True,
+        )[0])
+        for actual, expected in ((actual_query, expected_query), (actual_memory, expected_memory)):
+            assert torch.equal(actual.window, expected.window)
+            for name in actual.rows.__dataclass_fields__:
+                assert torch.equal(getattr(actual.rows, name), getattr(expected.rows, name))
 
 
 def test_enrolled_evidence_wins_when_it_matches_the_query():

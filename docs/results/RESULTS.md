@@ -1,201 +1,179 @@
-# Results Index
+# Current Results
 
-> Project-wide index of measured results. Last updated 2026-08-22.
+> Last updated 2026-08-23. This file contains only the latest matched evaluation. Dated result
+> files are historical records and do not define the current headline.
 >
-> **CURRENT HEADLINE — [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md).** The
-> compact evidence engine (`halo_compact`, 1,010,790 params, d=128) against all seven baselines on
-> the shared `adaptation_v1` manifest, every method (`nearest`/`prototype`/`ridge`/`linear_head`)
-> at k=1,2,4,8,16 plus `zero_shot` at k=0, in both regimes. **Best in 35 of 40 enrollment
-> columns, including every specialized_novel column at every k**; zero-shot ordinary 36.95
-> (second by 0.06, and the only row scored with no fitted head); zero-shot specialized 8.75
-> (disclosed — the case enrollment exists for: one example takes it to ~43). Everything below
-> this banner predates that table.
->
-> Phase-B design status, run history, and adaptation tables live only in
-> [`PHASE_B_TRAINING_STATUS.md`](PHASE_B_TRAINING_STATUS.md). The historical step-zero analysis is
-> retained in [`PHASE_B_STEP0_CONTROL.md`](PHASE_B_STEP0_CONTROL.md). Neither file defines the current
-> model; that contract is [`../design/PHASE_B_TRAINING_INTENT.md`](../design/PHASE_B_TRAINING_INTENT.md).
+> **Implementation note (2026-08-24):** these are the latest completed results and evaluate the
+> retired candidate-residual attention mixer. The newly implemented scalar evidence reranker in
+> `docs/design/COMPACT_EVIDENCE_ENGINE.md` has passed smoke testing but has not yet produced a full
+> result. Do not attribute the tables below to that new reranker.
 
-## Headline comparison — compact evidence engine vs baselines (2026-08-22)
+## Protocol
 
-Manifest `adaptation_v1` (61 cells · 7 datasets · 5 seeds · execution-disjoint support/query),
-fingerprint-identical across every row. `halo_compact` =
-`training/tokenizer/outputs/long_4h_20260821/best.pt` (1,010,790 params, d=128 — the smallest
-features in the table). Macro-F1, coherent labels, dataset-macro. **Bold = best in column.**
-Full per-method/per-k/per-dataset detail: [`ADAPTATION_TABLE_20260822.md`](ADAPTATION_TABLE_20260822.md).
+The current HALO checkpoint is
+`training/tokenizer/outputs/e2e_compact_35k_20260823/best.pt`, selected at step 10,000 by the
+predeclared development metric after a 35,000-step run. Evaluation uses the fixed
+`adaptation_v1` manifest: seven held-out datasets, five seeds, execution-disjoint support and query,
+and no test-set training. CrossHAR and LIMU-BERT were retrained on the current 18-source corpus;
+LIMU-BERT includes the corrected accelerometer scale.
 
-### ordinary (4 everyday datasets)
+The strict result assembler validated 20,957 cells against the manifest, evaluation source, and
+checkpoint fingerprints. Macro F1 is averaged over seeds and protocol cells within each dataset,
+then equally over datasets. Complete generated tables and matched readout controls are in
+[`../../eval/adaptation_tables/e2e_compact_35k_20260823/RESULTS.md`](../../eval/adaptation_tables/e2e_compact_35k_20260823/RESULTS.md).
 
-| model | zero-shot k=0 | nearest k=1 | prototype k=1 | ridge k=1 | linear_head k=1 | prototype k=4 | ridge k=4 | linear_head k=16 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| halo_compact | 36.95 | **57.14** | **56.24** | **55.04** | **57.41** | **62.64** | **64.24** | 63.28 |
-| harnet | 33.82 | 48.64 | 47.34 | 48.21 | 51.35 | 52.95 | 57.48 | 59.73 |
-| unimts | 32.70 | 53.76 | 50.69 | 47.31 | 54.81 | 55.49 | 56.61 | **65.05** |
-| crosshar | **37.01** | 51.77 | 50.95 | 45.04 | 51.94 | 57.64 | 54.98 | 61.37 |
-| limubert | 27.60 | 54.39 | 53.21 | 42.61 | 54.26 | 61.13 | 54.61 | 60.29 |
-| imagebind | 11.38 | 45.29 | 43.02 | 43.38 | 45.17 | 48.76 | 54.79 | 55.94 |
-| normwear | 5.08 | 30.86 | 26.26 | 22.13 | 35.81 | 28.84 | 25.29 | 44.99 |
+## Zero-Shot Recognition
 
-### specialized_novel (3 clinical/rehab datasets)
+No labelled target-dataset execution is available at k=0. Each model uses its native zero-shot
+mechanism.
 
-| model | zero-shot k=0 | nearest k=1 | prototype k=1 | ridge k=1 | linear_head k=1 | prototype k=4 | ridge k=4 | linear_head k=16 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| halo_compact | 8.75 | **43.23** | **43.06** | **39.45** | **43.36** | **58.05** | **57.14** | **69.46** |
-| harnet | 11.40 | 32.62 | 30.83 | 29.85 | 34.72 | 41.79 | 47.36 | 66.37 |
-| unimts | **19.24** | 38.84 | 37.02 | 32.41 | 38.95 | 47.82 | 48.30 | 65.17 |
-| crosshar | 10.88 | 31.65 | 31.27 | 26.43 | 32.20 | 44.41 | 41.27 | 51.12 |
-| limubert | 9.11 | 31.99 | 29.90 | 16.84 | 28.95 | 37.07 | 27.91 | 39.96 |
-| imagebind | 8.15 | 28.60 | 27.29 | 26.16 | 29.19 | 34.27 | 36.73 | 48.53 |
-| normwear | 3.58 | 23.60 | 18.63 | 11.75 | 25.31 | 21.87 | 14.57 | 38.19 |
+| model | ordinary | specialized novel |
+|---|---:|---:|
+| CrossHAR | **37.70** | 11.22 |
+| **HALO native engine** | 35.11 | 17.17 |
+| HARNet | 33.82 | 11.40 |
+| UniMTS | 31.98 | **17.37** |
+| LIMU-BERT | 30.60 | 10.27 |
+| ImageBind | 11.38 | 8.15 |
+| NormWear | 5.08 | 3.58 |
 
-**halo_compact is best in 35 of 40 enrollment columns**, including every
-`specialized_novel` column at every k. Zero-shot ordinary 36.95 is second by 0.06 and is the
-only row produced with no fitted head (the engine's native retrieve→mix→vote rule); zero-shot
-specialized 8.75 is weak and disclosed — the bank holds no clinical motions, which is exactly
-what enrollment is for (one example takes it to ~43).
+## Label-Efficient Adaptation
 
-Caveats bound to this table: the `limubert` rows predate the 2026-08-22 accel-scale fix
-(`EVAL_HARNESS_AUDIT_20260822.md` F1) and may understate it — its backbone retrain is pending;
-the `unimts` zero-shot predates the label-text ensemble fix (F2). Enrollment methods read no
-label text, so those columns are unaffected. The Phase-A `halo` row is superseded and omitted.
-## Current Snapshot
+`k` is the number of independent labelled executions per candidate. Both HALO rows use the same
+learned representation: one uses native retrieve-mix-vote and the other uses one-nearest-neighbor.
+Every external encoder is frozen and uses the same one-nearest-neighbor rule. This is the primary
+deployment comparison because it requires no fitting and sees only the enrolled support executions.
+The generated report also gives complete support-only prototype and fitted-linear-head curves for
+every model; ridge is retained there as an additional diagnostic.
 
-| area | artifact/protocol | result | status |
-|---|---|---|---|
-| zero-shot baselines | v4, 93 labels, 7 datasets | HARNet 45.7 mean macro F1; CrossHAR 42.8; UniMTS 34.7 | historical completed table; predates the 18-source/166-label protocol |
-| historical Phase A | `phase_a_fixed_1s_rotation_20260817/best.pt` | selected step 27,000; seven-dataset fixed-1s transfer 0.509 versus old 0.617 | completed but rejected for the next Phase-B bank |
-| replacement Phase A | clean views, isolated retrieval rows, direct row VICReg, external-development selection | implementation complete; no trained result yet | pending training and controlled ablations |
-| parked relational Phase B | v22 and checkpoint study | learned adaptation exists, but usually trails identity/prototype/ridge | historical evidence only |
-| **current Phase B (compact engine)** | `ADAPTATION_TABLE_20260822.md`, `adaptation_v1`, 61 cells / 7 datasets / 5 seeds | **35/40 enrollment columns best; all specialized_novel; zero-shot ord 36.95 / spec 8.75** | current headline, scored through the shared harness |
-| superseded Phase B (evidence mixer) | `PHASE_B_MIXER_20260819.md`, held-out concepts + subjects, 3k steps | **0.5247 hard-mean macro-F1 vs 0.4053 frozen control (+0.119); k=0 0.3916 -> 0.5351** | first learned Phase-B component with a real gain; a scrambled-vocabulary control inverts it, so the gain is semantic. NOT yet scored through the eval harness |
-| current admissibility Phase B | matched adaptation v1, rank-8 Stage-2 step 1,000, five seeds | ordinary coherent k=1: 44.79 versus identity 45.71; specialized k=1: 28.62 versus 28.58; arbitrary labels exactly identity | complete seven-dataset result; adaptation exists, but learned admissibility has no held-out advantage |
+### Ordinary activities
 
-The Phase-B results below are bound to the historical Phase-A checkpoint
-`training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt`. It records 18 training
-datasets, `token_granularity='sensor'`, fixed one-second patches, and step 27,000. Its current
-rank-8 matched enrollment suite and controls are recorded in `PHASE_B_TRAINING_STATUS.md`. The corresponding
-`memory_bank.pt`, `resolvability.json`, and Stage-2 artifacts are bound to that checkpoint; older
-result JSON files remain historical and must not be mixed into the current table.
+| model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|---:|
+| LIMU-BERT / 1-NN | **56.91** | **61.95** | **65.24** | **64.89** | 61.55 |
+| **HALO / 1-NN** | 55.11 | 60.21 | 63.94 | 62.71 | 59.51 |
+| UniMTS / 1-NN | 50.69 | 56.20 | 61.01 | 62.22 | **62.68** |
+| CrossHAR / 1-NN | 50.54 | 54.43 | 59.58 | 58.70 | 57.39 |
+| HARNet / 1-NN | 47.34 | 50.51 | 53.20 | 52.66 | 50.69 |
+| ImageBind / 1-NN | 43.02 | 49.06 | 53.22 | 53.19 | 51.02 |
+| **HALO / native engine** | 45.02 | 46.00 | 45.66 | 45.44 | 44.38 |
+| NormWear / 1-NN | 26.26 | 29.56 | 32.92 | 35.35 | 37.11 |
 
-The 2026-08-17 Phase-A regression is now diagnosed as a recipe and representation-path problem. Its
-only active augmentation independently rotated the two VICReg views, forcing invariance to
-gravity-frame orientation. Dataset regressions were largest on orientation-sensitive SPAR (-0.209),
-Upper Limb Use (-0.178), and RealWorld (-0.142). The final logged JEPA/VICReg gradient cosine was
--0.901, but the complete 61-probe record is bimodal rather than uniformly conflicting (median
-+0.563; 34.4% negative). Gradient clipping was nevertheless active on every logged probe (median
-coefficient 0.091). Late encoder effective rank had median 39.1/256; the final 23.0 was unusually low
-but not representative of every probe. These facts reject “one bad final batch” as the explanation
-while avoiding the stronger unsupported claim that the objectives always cancel.
+### Specialized novel activities
 
-The replacement recipe removes source-fitted sensor statistics from the encoder trunk, exports
-sensor-isolated temporal rows before descriptor and cross-sensor mixing, applies half of VICReg
-directly to those rows, and starts with no augmentation. `best.pt` is selected every 2,000 steps by
-dataset-macro subject-disjoint kNN over MotionSense, RealWorld, and Shoaib development data using the
-actual rows Phase B stores. Rotation (shared and independent), rate, channel dropout,
-multi-resolution, and descriptor reconstruction are separate ablations.
+| model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|---:|
+| **HALO / 1-NN** | **42.76** | **43.91** | **56.76** | **60.06** | **62.12** |
+| UniMTS / 1-NN | 37.02 | 36.71 | 49.12 | 52.77 | 55.05 |
+| HARNet / 1-NN | 30.83 | 31.84 | 43.78 | 47.62 | 50.98 |
+| LIMU-BERT / 1-NN | 30.58 | 33.83 | 40.28 | 42.78 | 43.97 |
+| CrossHAR / 1-NN | 28.32 | 32.36 | 40.73 | 43.04 | 45.44 |
+| ImageBind / 1-NN | 27.29 | 29.59 | 35.43 | 38.29 | 40.56 |
+| **HALO / native engine** | 24.82 | 25.68 | 32.83 | 34.94 | 36.48 |
+| NormWear / 1-NN | 18.63 | 20.20 | 25.61 | 28.21 | 31.06 |
 
-Bounded 1,000-step pilots use seed 20260718 and retain the full 7,500-step LR/EMA schedule. They are
-screening evidence, not final comparisons:
+![Primary adaptation curves](figures/e2e_compact_35k_20260823/primary_adaptation_curves.png)
 
-| one-variable arm | development kNN BA | retrieval effective rank / 256 | JEPA/VICReg cosine at step 1,000 |
-|---|---:|---:|---:|
-| clean | 0.8244 | 87.4 | +0.455 |
-| shared SO(3), p=1 | **0.8297** | 84.4 | +0.401 |
-| independent SO(3), p=1 | **0.7392** | 57.7 | +0.564 |
-| shared rate augmentation, p=0.5 | 0.8216 | 90.5 | +0.622 |
-| shared channel dropout, p=0.3 | 0.8264 | 86.9 | +0.522 |
-| descriptor prediction, weight 0.5 | 0.8181 | 88.2 | +0.652 |
-| multi-resolution, batch 512 / step 2,000 | 0.8124 | **104.1** | +0.088 |
+## Matched Representation Result
 
-The clean, shared-rotation, rate, and dropout values are too close to rank from one seed. Independent
-rotation is not: it loses 0.0852 BA against clean and 0.0905 against the matched shared-rotation arm.
-This directly identifies invariance across rotations, rather than rotated input itself, as harmful.
-The full next run should start clean; shared rotation is the first follow-up. Rate, dropout, and
-descriptor prediction have not earned default complexity from this screen.
-The multi-resolution arm uses 2,000 steps so its 1.024 million sampled windows match the other
-arms' batch-1,024/step-1,000 exposure. It raises retrieval rank but lowers the development score by
-0.012; this is a useful follow-up, not sufficient evidence to enable it by default.
+The full generated report applies the same nearest, prototype, ridge, and linear-head readouts to
+every frozen representation. HALO+1-NN is second to LIMU-BERT on ordinary activities through k=8.
+On specialized novel activities, HALO is best at every k under every matched readout. For 1-NN its
+specialized curve is 42.76, 43.91, 56.76, 60.06, and 62.12, approximately 5.7-7.6 F1 above the
+next-best representation.
 
-The matched suite uses manifest fingerprint `1bd89d35f5ae`, five fixed episode seeds, seven held-out
-datasets, and six external representations. HALO Stage 2 scores 23.75 ordinary and 9.81 specialized
-macro F1 at semantic k=0. With enrollment, its ordinary curve is 44.79, 48.89, 51.36, 51.18, and
-49.32 for k=1,2,4,8,16. This is below identity retrieval at every point and below the strongest
-external frozen-feature linear head. Specialized activities are at identity parity through k=8 and
-fall 1.39 points below it at k=16. Full generated tables are in
-`eval/adaptation_tables/v1_d85761d_stage2/`.
+![Matched 1-NN representation curves](figures/e2e_compact_35k_20260823/knn_representation_curves.png)
 
-“Ordinary” denotes the four held-out population locomotion/daily-activity datasets. “Specialized
-novel” denotes the three held-out clinical, rehabilitation, and fine-grained upper-limb datasets; it
-is a predefined evaluation proxy, not a claim that every underlying movement is physically new. The
-complete model-by-k tables, including k=0, are in `PHASE_B_TRAINING_STATUS.md`.
+## Current Interpretation
 
-Under one matched fixed-one-second transfer protocol, the older sensor checkpoint scores 0.617 mean
-kNN balanced accuracy and the current checkpoint scores 0.509 across the same seven held-out datasets
-(-0.108). This removes evaluation patching as the explanation for the gap, but corpus and training
-recipe changes remain confounded. See
-`training/evidence/outputs/phase_a_checkpoint_selection_20260816/transfer_{old,new}_fixed1s.json`.
+The HALO representation is competitive on ordinary activities and strongest on the specialized
+novel regime. The native evidence engine does not improve on it: it loses roughly 10-26 F1 to
+one-nearest-neighbor over the same features. Current evidence therefore supports the representation
+result, but not a claim that learned retrieve-mix-vote is better than simple retrieval.
 
-On 16 internal held-concept validation episodes, the rebuilt rank-8 warm-start admissibility gate
-scores 0.380 mean macro F1 versus 0.592 for the same retrieval rule with admissibility set to one
-(-0.211). Gradient and finiteness checks pass, so this is currently a model-quality deficit rather
-than a dead training path. It is not an external benchmark result.
+## Decision: Simple Enrollment Readout
 
-## Historical Zero-Shot Table
+For the current model, **patch-level 1-NN is the design-of-record enrollment rule at k>=1**. End-to-end
+training has made the encoder sufficiently discriminative that the nearest enrolled patch is a strong
+decision rule. Every tested stage added after that retrieval weakens the result: support soft voting
+loses 2.8 ordinary and 5.6 specialized F1, and the learned attention mixer loses a further 11.7-12.9
+F1 even when it receives enrolled evidence only. The failure therefore cannot be attributed solely to
+noise from the corpus memory bank or acquisition descriptions.
 
-> **Protocol-stale for every model.** These cells are protocol v4 / 93 labels; the current
-> protocol is v5 / 166 labels, so `eval/assemble_table.py` rejects them as STALE rather than
-> mixing protocols. Refreshing needs a full re-run of all eight baselines (~19 min of cell time
-> plus ConSE head refits under the new vocabulary). The current, protocol-consistent zero-shot
-> numbers are the `zero_shot` sections of `ADAPTATION_TABLE_20260822.md`.
+This outcome has clear precedent in few-shot learning. [SimpleShot](https://arxiv.org/abs/1911.04623)
+found that normalized nearest-neighbor classification over a strong embedding was competitive with
+meta-learners. [Tian et al.](https://www.ecva.net/papers/eccv_2020/papers_ECCV/html/2118_ECCV_2020_paper.php)
+found that representation learning followed by a simple linear classifier outperformed contemporary
+few-shot methods. [Meta-Baseline](https://openaccess.thecvf.com/content/ICCV2021/html/Chen_Meta-Baseline_Exploring_Simple_Meta-Learning_for_Few-Shot_Learning_ICCV_2021_paper.html)
+similarly showed that a whole-classification-trained embedding with nearest-centroid cosine inference
+could outperform more elaborate episodic methods, and documented a trade-off between optimizing the
+few-shot episode objective and preserving broadly transferable features.
 
-The last complete baseline table contains 56 cells (8 models by 7 datasets), protocol v4, generated
-from `eval/results/` on 2026-08-06. It must not be mixed with current Phase-A or Phase-B results.
+The conclusion is deliberately scoped. It does not make 1-NN a zero-shot rule at k=0, where there is
+no enrolled target example, and it does not prove that all evidence aggregation is useless. Semantic
+top-64 corpus evidence recovers specialized performance relative to unrestricted corpus voting. It
+does establish a strict engineering criterion: a future mixer or memory rule is retained only if it
+beats fixed patch-level 1-NN on sealed development episodes, then confirms the gain on the held-out
+test protocol. Until that happens, the simple rule is both the strongest result and the clearest
+description of HALO's demonstrated adaptation behavior.
 
-| model | mean macro F1 |
-|---|---:|
-| HARNet | **45.7** |
-| HALO evidence, historical | 42.9 |
-| CrossHAR | 42.8 |
-| UniMTS | 34.7 |
-| HALO ConSE, historical | 34.4 |
-| LIMU-BERT | 32.2 |
-| ImageBind | 11.4 |
-| NormWear | 5.1 |
+## Acquisition-Description Ablation
 
-The two historical HALO rows do not identify the current sensor-granularity checkpoint and are not
-current headline values. The separate legacy 10-dataset zero-shot table has not been rerun; the
-current matched seven-dataset suite is reported above and in `PHASE_B_TRAINING_STATUS.md`.
+The config-free arm keeps modality and axis identity but removes device, placement, and gravity
+wording. Numerical sensor metadata and the engine's physical compatibility rules are unchanged.
+All three arms use the same fixed test manifest. The matched neutral arm used the same 35,000-step
+recipe and seed as the full arm; its development-selected checkpoint was step 20,000.
 
-## Phase-B Design Ledger
+| arm | engine ordinary k=0 | engine ordinary mean k>=1 | engine specialized k=0 | engine specialized mean k>=1 | 1-NN ordinary mean | 1-NN specialized mean |
+|---|---:|---:|---:|---:|---:|---:|
+| Full descriptions | **35.11** | **45.30** | **17.17** | **30.95** | 60.30 | 53.12 |
+| Neutral only at inference | 32.23 | 42.20 | 13.00 | 28.56 | 60.04 | 52.85 |
+| Trained and evaluated neutral | 32.99 | 40.51 | 8.05 | 18.79 | **61.44** | **55.56** |
 
-| design | result | interpretation |
-|---|---|---|
-| v19 coherent relational decoder | learned output far below retrieval-only identity | memorized training-vocabulary query signatures; did not use enrollment effectively |
-| v22 arbitrary-alias relational decoder | strong support-removal/shuffle effects; positive k-curve | learned support binding, but usually remained 3-5 F1 below prototype/ridge |
-| Phase-A 4k vs 30k relational study | 4k representation usually stronger; decoder rarely beat identity | more Phase-A training did not repair evidence interpretation |
-| frozen HARNet enrollment control | HALO identity retrieval led aggregate low-k cells | no evidence that HARNet alone removes the adaptation ceiling |
-| current per-sensor admissibility design | valid five-seed matched result; coherent test near or below identity, random-label path exactly identity | memory adaptation works, but learned admissibility has not improved the held-out result |
+![Acquisition-description ablation](figures/e2e_compact_35k_20260823/acquisition_text_ablation.png)
 
-Full historical tables, artifact paths, and their scope limits are in
-[`PHASE_B_TRAINING_STATUS.md`](PHASE_B_TRAINING_STATUS.md).
+Neutralizing text only at inference changes 1-NN by less than 0.5 F1 at every k, but lowers the
+native engine. Training without acquisition descriptions increases 1-NN by 1.3-2.4 F1 at every k;
+the gain appears on six of seven test datasets when averaged over k. The same arm substantially
+weakens the engine, especially on specialized activities. Thus the current acquisition text is not
+the source of HALO's representation advantage and may mildly hinder the representation, while the
+retrieve-mix-vote mechanism actively uses it. These conclusions separate encoder and engine effects;
+they do not show that the engine uses the descriptions optimally.
 
-## Completed Matched Readout
+This is one matched training seed per arm. Seed replicates are required before treating the
+1.3-2.4 F1 representation gain as a paper-level effect.
 
-The matched zero-shot, supervised-adaptation, and HALO-ablation protocol is defined in
-`../baselines/BASELINE_FAIRNESS_POLICY.md` Section 6. The 2026-08-17 readout records:
+## Retrieve-Mix-Vote Decomposition
 
-1. Exact Phase-A checkpoint, schema-5 bank fingerprint, active memory population, gate artifact, and
-   evaluation source fingerprint, including modality/gravity partition coverage.
-2. Gate extrapolation under held-out concept, stream, body-region, and dataset folds.
-3. k = 0, 1, 2, 4, 8 and supported k=16, split into ordinary population activities, specialized
-   novel activities, and a separate random-label binding control.
-4. Same/cross-subject and same/cross-configuration cells without pooling unsupported cohorts.
-5. Current-protocol coherent k=0 baselines; common frozen-feature supervised heads at positive k;
-   and admissibility-disabled, support-removed, label-shuffled, nearest-support, prototype, and ridge
-   controls on identical serialized manifests. Model-native end-to-end fine-tuning remains a
-   separate experiment and is not represented by the common head table.
-6. Subject-level paired bootstrap intervals and explicit candidate-roster coverage.
+This diagnostic uses the full-description checkpoint and the exact same seven-dataset, five-seed
+enrollment manifest as the headline result. Every arm receives identical query rows, enrolled
+executions, candidate labels, and (where applicable) corpus memory. Values below average equally
+over k=1,2,4,8,16 after averaging within each dataset.
 
-The current seven-dataset test roster has now been inspected under the current design. Any subsequent
-design selected using these results requires confirmation on a newly designated untouched holdout
-roster after the implementation and analysis are frozen.
+| mechanism | ordinary | specialized novel |
+|---|---:|---:|
+| Pooled execution 1-NN | 60.30 | 53.12 |
+| **Patch-level 1-NN** | **61.61** | **53.66** |
+| Enrolled patches, soft vote | 58.81 | 48.08 |
+| Enrolled patches, learned mixer | 47.12 | 35.19 |
+| Corpus memory only, semantic vote | 17.38 | 8.71 |
+| Enrollment + corpus with uniform corpus votes | 58.52 | 47.41 |
+| Enrollment + semantic corpus top-64 vote | 58.64 | 52.35 |
+| Enrollment + semantic corpus full-bank vote | 58.04 | 46.80 |
+| Full engine | 45.30 | 30.95 |
+
+![HALO retrieve-mix-vote decomposition](figures/e2e_compact_35k_20260823/halo_engine_decomposition.png)
+
+The encoder and patch retrieval are not the bottleneck: patch-level 1-NN slightly exceeds the
+pooled execution control. Replacing hard retrieval with a soft vote costs 2.8 ordinary and 5.6
+specialized F1. Semantic corpus evidence is useful when restricted to the top 64 rows, recovering
+4.3 specialized F1 relative to the support-only soft vote. Extending that semantic vote to the
+whole corpus bank loses 5.5 specialized F1.
+
+The largest defect is the learned attention mixer. Relative to its own full-bank base vote, it loses
+12.7 ordinary and 15.8 specialized F1. The support-only mixer also loses 11.7 and 12.9 F1 relative
+to the support-only soft vote, so this regression does not require corpus noise or acquisition-text
+conditioning. The trained mixer is systematically overriding useful retrieval decisions.
+
+The raw 360-cell artifact is
+[`../../eval/adaptation_results/e2e_compact_35k_20260823/halo_engine_decomposition.json`](../../eval/adaptation_results/e2e_compact_35k_20260823/halo_engine_decomposition.json).

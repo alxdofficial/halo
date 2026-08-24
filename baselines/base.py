@@ -23,6 +23,7 @@ bugs). No concrete baseline lives here yet; drop a ``<name>/adapter.py`` in to a
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -108,6 +109,48 @@ class BaselineAdapter:
     ) -> Tuple[List[str], dict]:
         """Predict from :meth:`window_features` without re-encoding the signal."""
         raise NotImplementedError(f"{self.name} cannot predict from cached window features")
+
+    def supports_native_enrollment(self) -> bool:
+        """Whether this model has a deployment-time enrollment mechanism of its own.
+
+        The shared nearest/prototype/ridge/linear-head controls operate on
+        :meth:`window_features`. A model with a native memory mechanism implements this hook so the
+        evaluator can score that mechanism on the exact same serialized episodes without teaching
+        the generic runner model-specific behavior.
+        """
+        return False
+
+    def predict_enrollment(
+        self,
+        query_stream: eval_data.EvalStream,
+        support_stream: eval_data.EvalStream,
+        plan: dict,
+        support_count: int,
+        candidate_texts: Sequence[str],
+        state,
+        device,
+        *,
+        seed: int,
+    ) -> Tuple[List[str], dict]:
+        """Native enrollment predictions aligned to ``plan['query_rows']``."""
+        raise NotImplementedError(f"{self.name} has no native enrollment mechanism")
+
+    def evaluation_artifacts(self, state) -> Dict[str, Path]:
+        """Named files whose content determines an evaluation result.
+
+        Adapters should include released/self-trained checkpoints and fitted heads. The runner
+        hashes these files into every result artifact; source hashes alone cannot detect a silently
+        replaced checkpoint.
+        """
+        return {}
+
+    def evaluation_source_paths(self) -> Sequence[Path]:
+        """Additional shared source trees that determine this adapter's predictions."""
+        return ()
+
+    def evaluation_config(self, state) -> dict:
+        """Small, JSON-serializable adapter settings that affect evaluation semantics."""
+        return {}
 
     def evaluate(
         self,

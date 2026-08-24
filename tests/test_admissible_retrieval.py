@@ -410,4 +410,4 @@ def test_a_top_k_wider_than_the_group_vocabulary_is_refused_at_construction():
 
     with pytest.raises(ValueError, match="co-membership groups"):
         EngineConfig(spec=AttentionSpec(d_model=16, n_heads=4), top_k=16,
-                     mixer=EvidenceMixerConfig(n_groups=4))
+                     mixing="attention", mixer=EvidenceMixerConfig(n_groups=4))

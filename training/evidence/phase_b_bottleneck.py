@@ -80,12 +80,12 @@ def main() -> int:
     engine = load_evidence_engine(args.run / "best.pt", encoder=encoder, device=device)
     engine.eval()
     print(f"loaded step {blob['step']}, top_k={engine.cfg.top_k}, "
-          f"readout={engine.cfg.mixer.readout}")
+          f"vote_scope={engine.cfg.vote_scope}, recording-level residual mixer")
 
     index = CorpusIndex(seed=args.seed, datasets=tuple(args.datasets))
     combined = list(index.train) + list(index.val)
     val_offset = len(index.train)
-    spec = EpisodeSpec(candidate_counts=(2, 4, 8, 16), queries_per_candidate=2, max_support=4,
+    spec = EpisodeSpec(candidate_counts=(2, 4, 8, 16), queries_per_candidate=2, max_support=16,
                        background_windows=1, alias_episode_fraction=0.0,
                        disjointness="stream", shared_query_stream=True)
     train_subject, val_subject = subject_ids_for(index, index.train), subject_ids_for(index, index.val)
@@ -153,10 +153,10 @@ def main() -> int:
             result = engine(query.rows, memory.rows, candidate_text, label_text,
                             generator=torch.Generator().manual_seed(0))
 
-            # Per-window model prediction, exactly as the trainer scores it.
-            mass = result["logits"].new_zeros((len(labels), len(plan.candidates)))
-            mass.index_add_(0, query.window, result["logits"])
-            per_window = mass[query_i.to(device)]
+            # The compact engine now returns one prediction per query recording directly.
+            if not torch.equal(result["query_window"], query_i.to(device)):
+                raise RuntimeError("engine query-recording order disagrees with the episode")
+            per_window = result["logits"]
 
             row_text = evidence_label_tokens(memory.rows, candidate_text, label_text)
             bank_evidence = (row_text @ candidate_text.T).clamp_min(0)      # (M, C)
@@ -164,10 +164,7 @@ def main() -> int:
         for local, slot in enumerate(plan.query_slot):
             truth.append(plan.candidates[slot])
             actual_pred.append(plan.candidates[int(per_window[local].argmax())])
-            rows_for_window = (query.window == query_i[local].to(device)).nonzero().flatten()
-            if not len(rows_for_window):
-                weight_pred.append(actual_pred[-1]); retrieve_pred.append(actual_pred[-1]); continue
-            retrieved = result["selected"][rows_for_window].reshape(-1).unique()
+            retrieved = result["selected"][local].unique()
 
             got = oracle_margins(bank_evidence[retrieved], slot)
             whole = oracle_margins(bank_evidence, slot)

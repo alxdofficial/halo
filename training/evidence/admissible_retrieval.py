@@ -412,7 +412,7 @@ def engine_vote(
     top_k: int | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """(S, C) candidate logits, one row per query sensor, from the trained engine.
+    """(W, C) candidate logits, one row per query recording, from the trained engine.
 
     Deployment is the ordinary forward pass. The engine retrieves top-k from the bank, mixes that
     shortlist and votes, exactly as it did on every training step — there is no deployment-only

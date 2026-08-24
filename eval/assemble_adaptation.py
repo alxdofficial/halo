@@ -10,7 +10,9 @@ from pathlib import Path
 
 import numpy as np
 
+import baselines
 from eval.enrollment_protocol import load_manifest
+from eval.run_adaptation_baselines import _source_fingerprint
 
 
 def _external_rows(payload: dict, manifest: dict) -> tuple[list[dict], list[dict]]:
@@ -45,63 +47,42 @@ def _external_rows(payload: dict, manifest: dict) -> tuple[list[dict], list[dict
     return rows, subjects
 
 
-def _halo_rows(payload: dict, manifest: dict) -> tuple[list[dict], list[dict]]:
-    model = "halo_learned_gate"
-    label_mode = "random_alias" if payload.get("random_aliases") else "coherent"
-    seed = int(payload.get("manifest_seed") or payload.get("seed", 0))
-    metric_fields = {
-        "learned": "f1_macro",
-        "identity": "identity_f1_macro",
-        "prototype": "prototype_f1_macro",
-        "ridge": "ridge_head_f1_macro",
-        "support_removed": "support_removed_f1_macro",
-        "support_shuffled": "support_label_shuffled_f1_macro",
-    }
-    rows, subjects = [], []
-    for key, result in payload["results"].items():
-        if result.get("status"):
-            continue
-        dataset = key.split("/", 1)[0]
-        regime = next(
-            name for name, datasets in manifest["action_regimes"].items() if dataset in datasets
-        )
-        k = int(result["support_count"])
-        common = {
-            "model": model,
-            "dataset": dataset,
-            "regime": regime,
-            "label_mode": label_mode,
-            "k": k,
-            "seed": seed,
-            "cell": "/".join(key.split("/")[:5]),
-        }
-        for method, field in metric_fields.items():
-            value = result.get(field)
-            if value is None:
-                continue
-            rows.append({**common, "method": method, "f1_macro": float(value)})
-            for subject, record in result.get("subject_results", {}).items():
-                if field in record and record[field] is not None:
-                    subjects.append({
-                        **common, "method": method, "subject": f"{dataset}:{subject}",
-                        "f1_macro": float(record[field]),
-                    })
-    return rows, subjects
-
-
 def load_rows(paths: list[Path], manifest: dict) -> tuple[list[dict], list[dict]]:
     rows, subjects = [], []
     for path in paths:
         payload = json.loads(path.read_text())
+        if "baseline" not in payload:
+            raise ValueError(
+                f"{path}: legacy model-specific result payload; rerun through "
+                "eval.run_adaptation_baselines"
+            )
+        if int(payload.get("schema_version", 0)) < 2:
+            raise ValueError(f"{path}: legacy result artifact; rerun with provenance schema 2")
+        model = payload["baseline"]
+        if model not in baselines.REGISTRY:
+            raise ValueError(f"{path}: unknown adapter {model!r} in current source tree")
+        current_source = _source_fingerprint(baselines.REGISTRY[model])
+        if payload.get("source_fingerprint") != current_source:
+            raise ValueError(
+                f"{path}: evaluation source changed; rerun {model} before assembling tables"
+            )
+        for name, artifact in payload.get("evaluation_artifacts", {}).items():
+            artifact_path = Path(artifact["path"])
+            if not artifact_path.exists():
+                raise ValueError(f"{path}: {name} artifact is missing: {artifact_path}")
+            import hashlib
+            digest = hashlib.sha256()
+            with artifact_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(8 << 20), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != artifact.get("sha256"):
+                raise ValueError(f"{path}: {name} artifact content changed; rerun {model}")
         actual = payload.get("manifest_fingerprint")
         if actual != manifest["manifest_fingerprint"]:
             raise ValueError(
                 f"{path}: manifest mismatch ({actual} != {manifest['manifest_fingerprint']})"
             )
-        parsed = (
-            _external_rows(payload, manifest) if "baseline" in payload
-            else _halo_rows(payload, manifest)
-        )
+        parsed = _external_rows(payload, manifest)
         rows.extend(parsed[0]); subjects.extend(parsed[1])
     return rows, subjects
 
@@ -145,7 +126,7 @@ def paired_deltas(subject_rows: list[dict], samples: int = 5_000) -> list[dict]:
             row["seed"], row["subject"],
         )
         indexed[(row["model"], row["method"])][key] = row["f1_macro"]
-    target_key = ("halo_learned_gate", "learned")
+    target_key = ("halo_compact", "evidence_engine")
     if target_key not in indexed:
         return []
     target = indexed[target_key]
@@ -169,7 +150,7 @@ def paired_deltas(subject_rows: list[dict], samples: int = 5_000) -> list[dict]:
             )
             draws = rng.choice(deltas, size=(samples, len(deltas)), replace=True).mean(1)
             output.append({
-                "target": "halo_learned_gate/learned",
+                "target": f"{target_key[0]}/{target_key[1]}",
                 "comparator": f"{comparator[0]}/{comparator[1]}",
                 "regime": regime,
                 "label_mode": label_mode,
@@ -187,7 +168,14 @@ def paired_deltas(subject_rows: list[dict], samples: int = 5_000) -> list[dict]:
 
 
 def _markdown(aggregates: list[dict]) -> str:
-    lines = ["# Matched adaptation results", ""]
+    lines = [
+        "# Matched adaptation results", "",
+        "`k` is the number of independent enrolled executions per candidate. External-model",
+        "linear heads are fine-tuned while their encoders remain frozen. Generic kNN/prototype/",
+        "ridge/linear-head controls use one equally weighted pooled vector per enrolled execution.",
+        "HALO's evidence engine instead consumes the enrolled executions' patch/sensor rows, which",
+        "is its deployed adaptation mechanism.", "",
+    ]
     panels = [
         ("Semantic zero-shot", lambda row: (
             row["label_mode"] == "coherent" and row["k"] == 0
@@ -195,14 +183,18 @@ def _markdown(aggregates: list[dict]) -> str:
                 row["model"] == "halo_learned_gate" and row["method"] in {"learned", "identity"}
             ))
         )),
-        ("Coherent label efficiency", lambda row: (
+        ("Primary coherent adaptation comparison", lambda row: (
             row["label_mode"] == "coherent" and row["k"] > 0
-            and ((row["model"] == "halo_learned_gate" and row["method"] == "learned")
-                 or (row["model"] != "halo_learned_gate" and row["method"] == "linear_head"))
+            and ((row["model"] == "halo_compact" and row["method"] == "evidence_engine")
+                 or (row["model"] != "halo_compact" and row["method"] == "linear_head"))
         )),
-        ("HALO coherent mechanism ablation", lambda row: (
-            row["model"] == "halo_learned_gate" and row["label_mode"] == "coherent"
+        ("HALO coherent mechanism controls", lambda row: (
+            row["model"] == "halo_compact" and row["label_mode"] == "coherent"
             and row["k"] > 0
+        )),
+        ("All frozen-representation controls", lambda row: (
+            row["label_mode"] == "coherent" and row["k"] > 0
+            and row["method"] in {"nearest", "prototype", "ridge", "linear_head"}
         )),
         ("Random-label binding", lambda row: (
             row["label_mode"] == "random_alias" and row["k"] > 0

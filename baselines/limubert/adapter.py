@@ -19,7 +19,7 @@ Ported from the working legacy adapter + ``evaluate_limubert.py``. Carried over:
     state_dict layout exactly so the self-pretrained checkpoint loads strict.
 
 LEAKAGE-SAFE HEAD-FIT (mirrors harnet): the head is fit on FROZEN backbone
-features (mean-pooled sequence embedding) over the 9 training datasets, selecting
+features (mean-pooled sequence embedding) over the current training corpus, selecting
 the best epoch on a SUBJECT-DISJOINT held-out fold. The fitted head is cached to
 ``baselines/limubert/limubert_conse_head.pt`` (gitignored) with a vocab stamp; it
 re-fits automatically if the global vocabulary changes.
@@ -253,6 +253,22 @@ class LiMUBERTAdapter(ConSEAdapter):
         head.eval()
         return {"backbone": backbone, "head": head, "temperature": temperature}
 
+    def evaluation_artifacts(self, state):
+        artifacts = {"backbone": _BACKBONE_CKPT, "conse_head": _HEAD_CACHE}
+        metadata = _BACKBONE_CKPT.with_suffix(".meta.json")
+        if metadata.exists():
+            artifacts["backbone_metadata"] = metadata
+        return artifacts
+
+    def evaluation_config(self, state):
+        return {
+            "input_rate_hz": prep.TARGET_HZ,
+            "input_samples": prep.TARGET_LEN,
+            "train_datasets": list(prep.TRAIN_DATASETS),
+            "head_fit_max_per_stream": HEAD_FIT_MAX_PER_STREAM,
+            "acceleration_convention": "g",
+        }
+
     def _load_backbone(self, device) -> nn.Module:
         if not _BACKBONE_CKPT.exists():
             raise FileNotFoundError(
@@ -265,13 +281,18 @@ class LiMUBERTAdapter(ConSEAdapter):
         meta_path = _BACKBONE_CKPT.with_suffix(".meta.json")
         import json as _json
         meta = _json.loads(meta_path.read_text()) if meta_path.exists() else {}
-        if meta.get("acc_convention") != "g":
+        if (meta.get("schema_version") != 1
+                or meta.get("acc_convention") != "g"
+                or meta.get("corpus_profile") != "expanded_phase_a"
+                or meta.get("recipe") != "full"
+                or meta.get("batch_size") != 128
+                or meta.get("max_per_stream") != 20_000
+                or tuple(meta.get("train_datasets", ())) != tuple(prep.TRAIN_DATASETS)):
             raise RuntimeError(
-                f"LiMU-BERT backbone at {_BACKBONE_CKPT} predates the 2026-08-22 accel-convention "
-                "fix (or lacks its stamp) — it was pretrained with accel divided by 9.8 on "
-                "grids already in g. Re-pretrain before scoring:\n"
-                "  python -m baselines.limubert.train --epochs 800 --batch-size 128 "
-                "--max-per-stream 20000 --gpu")
+                f"LiMU-BERT backbone at {_BACKBONE_CKPT} predates the acceleration-convention "
+                "fix, lacks a complete stamp, or does not match the locked expanded-corpus "
+                "recipe. Re-pretrain before scoring:\n"
+                "  python -m baselines.limubert.train --recipe full --gpu")
         backbone = _Backbone().to(device)
         sd = torch.load(str(_BACKBONE_CKPT), map_location=device, weights_only=True)
         backbone.load_state_dict(sd)

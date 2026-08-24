@@ -10,13 +10,18 @@ and `EVIDENCE_ENGINE_*` for anything they disagree on.
 > predictor and its artifacts — describes a design the code no longer implements.** The active
 > design is the compact evidence engine
 > ([`COMPACT_EVIDENCE_ENGINE.md`](COMPACT_EVIDENCE_ENGINE.md)): plain `cos(patch_q, patch_m)/0.07`
-> retrieval with **no gate**, hard top-64, a learned evidence mixer, a text-cosine vote, trained end
-> to end from random init at 1,010,790 parameters.
+> retrieval with **no gate**, a full-memory soft vote, and a top-64 scalar evidence reranker. The
+> reranker can change only one score per retrieved row; the final text/identity vote remains fixed.
+> At width 128 the end-to-end model has 869,900 trainable parameters, of which 228,108 belong to
+> Phase B. The primary experiment trains two 228,108-parameter rerankers from one identical frozen
+> encoder: a zero-shot head on k=0 and an enrollment head on k=1/2/4/8/16. End-to-end training and a
+> unified head remain explicit controls rather than the current default claim.
 >
 > **The thesis paragraph below needs the same care.** Its centrepiece — configuration calibrating
 > the *admissibility* of retrieved evidence, so a pocket phone cannot vote on an arm gesture — is
-> the claim the deleted gate was built to instantiate. There is currently **no admissibility
-> mechanism in the model at all**, and the measured result that retired it is in
+> the claim the deleted gate was built to instantiate. The current reranker can learn soft trust
+> from query/evidence descriptions, but has no separately fitted or hard admissibility gate. The
+> measured result that retired the explicit gate is in
 > `../results/PHASE_B_TRAINING_STATUS.md`: learned admissibility had no held-out advantage over
 > setting admissibility to one. Constraint 4 below ("learned readouts have lost to their closed
 > forms twice") is the honest frame, and the compact engine is the third attempt at beating them.

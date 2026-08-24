@@ -1,31 +1,14 @@
-"""Learned retrieval: one scalar per (query row, memory row) pair.
+"""Retrieval score: one scalar per (query row, memory row) pair.
+
+The active compact engine uses fixed normalized feature cosine. The optional factored learned
+scorer remains an explicit ablation and is constructed only with ``PairScorerConfig.learned=True``.
 
     score = f( query feature, query description, memory feature, memory description )
 
-WHAT THIS REPLACES
-------------------
-Retrieval used to be two hand-written pieces bolted together:
-
-1. a HARD compatibility filter that set the score to ``-inf`` unless modality matched and, for
-   accelerometers, the gravity convention matched;
-2. a cosine between L2-normalised feature vectors, divided by a fixed temperature.
-
-Both encode real facts. A gyroscope's angular rate is not commensurable with an accelerometer's
-proper acceleration, and a gravity-removed stream has |DC| about 0 against about 1 g, so comparing
-across that convention compares an artifact of preprocessing. The problem was never that the rules
-were wrong — it was that they were *stipulated*, so they could not improve, could not trade off
-against each other, and could not be checked against what the model actually needs.
-
-They are learnable now because the information they used is already in the inputs. The sensor
-description string carries modality and gravity convention verbatim — "a watch accelerometer on the
-left wrist; gravity removed; recorded alongside a gyroscope" — so a function of the two description
-vectors can express both rules, and can express them for acquisition configurations that were never
-in the corpus, through language rather than through a metadata table. That is the whole HALO claim
-applied to its own retrieval step.
-
-Because the constraint is now learned rather than enforced, whether it *was* learned becomes a
-measurement. :func:`physics_violation_rate` reports how often the selected top-k crosses a modality
-or gravity boundary; a model that has understood its descriptions drives it toward zero on its own.
+The historical engine also applied a hard compatibility filter before retrieval. The compact engine
+does not: it compares learned latent representations rather than raw physical quantities, and its
+full-memory soft vote deliberately leaves every row reachable. Modality and gravity remain explicit
+inputs to the evidence reasoner, while :func:`physics_violation_rate` measures cross-boundary use.
 
 HOW IT STARTS
 -------------
@@ -35,8 +18,8 @@ the score is the old cosine rule to within 2%, and any later difference is attri
 rather than to a different starting point. Neither scalar is frozen: ``base_gain`` may go to zero
 and hand the whole job to the learned head. Both are logged.
 
-The hard ``-inf`` filter is gone entirely. Nothing here can make a row unreachable, which matters
-because an unreachable row is one no gradient can ever recover.
+No hard mask is applied. This keeps credit assignment continuous and lets training determine whether
+cross-modality or cross-gravity evidence is useful in the shared Phase-A latent space.
 
 SHAPE OF THE LEARNED PART
 -------------------------
@@ -233,12 +216,7 @@ def physics_violation_rate(
     memory_modality: torch.Tensor,     # (M,)
     memory_gravity: torch.Tensor,      # (M,)
 ) -> dict[str, float]:
-    """How often learned retrieval selects a row the retired hard filter would have excluded.
-
-    This is a diagnostic, never a loss and never a mask. Falling toward zero is evidence that the
-    descriptions carry the constraint; staying high with good accuracy would be evidence that the
-    constraint mattered less than it was assumed to. Either outcome is a result.
-    """
+    """How often selected evidence crosses modality or accelerometer gravity convention."""
     modality = memory_modality[selected]
     gravity = memory_gravity[selected]
     modality_ok = modality == query_modality.unsqueeze(1)

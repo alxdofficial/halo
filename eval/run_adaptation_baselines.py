@@ -30,6 +30,7 @@ from eval.scoring import align_ground_truth_labels, classification_metrics
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = REPO / "eval" / "adaptation_results"
 METHODS = ("nearest", "prototype", "ridge", "linear_head")
+NATIVE_METHOD = "evidence_engine"
 LINEAR_HEAD_STEPS = 200
 LINEAR_HEAD_LR = 5e-2
 LINEAR_HEAD_WEIGHT_DECAY = 1e-3
@@ -43,15 +44,30 @@ def _atomic_write(path: Path, payload: dict) -> None:
     os.replace(temporary, path)
 
 
-def _source_fingerprint(baseline_name: str) -> str:
+def _source_fingerprint(adapter) -> str:
     digest = hashlib.sha256()
-    for relative in (
+    fixed = [
         "eval/run_adaptation_baselines.py",
         "eval/enrollment_protocol.py",
         "baselines/base.py",
-        f"baselines/{baseline_name}/adapter.py",
         "eval/scoring.py",
-    ):
+        "data/labels/global_labels.json",
+    ]
+    module_parts = type(adapter).__module__.split(".")
+    baseline_dir = REPO.joinpath(*module_parts[:-1])
+    baseline_sources = sorted(
+        path.relative_to(REPO).as_posix()
+        for path in baseline_dir.rglob("*.py")
+    ) if baseline_dir.exists() else [f"baselines/{adapter.name}/adapter.py"]
+    additional_sources = []
+    for source in adapter.evaluation_source_paths():
+        source = Path(source)
+        candidates = sorted(source.rglob("*.py")) if source.is_dir() else [source]
+        additional_sources.extend(
+            path.resolve().relative_to(REPO.resolve()).as_posix()
+            for path in candidates if path.exists()
+        )
+    for relative in sorted(set(fixed + baseline_sources + additional_sources)):
         digest.update(relative.encode())
         path = REPO / relative
         if path.exists():
@@ -60,6 +76,21 @@ def _source_fingerprint(baseline_name: str) -> str:
             # Synthetic test adapters need no repository file; production adapters always have one.
             digest.update(b"<adapter-source-unavailable>")
     return digest.hexdigest()
+
+
+def _file_fingerprint(path: Path) -> dict:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"evaluation artifact is missing: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 << 20), b""):
+            digest.update(chunk)
+    return {
+        "path": str(path.resolve()),
+        "sha256": digest.hexdigest(),
+        "bytes": path.stat().st_size,
+    }
 
 
 def _git_provenance() -> dict:
@@ -265,22 +296,21 @@ def score_positive_cell(
     linear_metadata = []
     for plan_index, plan in enumerate(plans):
         candidates = list(plan["candidate_names"])
-        support_rows = np.asarray([
-            row
-            for executions in plan["support_execution_rows"]
-            for execution_rows in executions[:support_count]
-            for row in execution_rows
-        ], dtype=np.int64)
-        support_positions = np.asarray([
-            position
-            for position, executions in enumerate(plan["support_execution_rows"])
-            for execution_rows in executions[:support_count]
-            for _ in execution_rows
-        ], dtype=np.int64)
         query_rows = np.asarray(plan["query_rows"], dtype=np.int64)
-        x = support_z[torch.as_tensor(support_rows, dtype=torch.long, device=device)]
+        # k is an execution budget. Collapse every enrolled execution to one normalized vector so a
+        # 56-window recording cannot outweigh a one-window recording in the generic controls.
+        execution_features = []
+        execution_positions = []
+        support_window_counts = []
+        for position, executions in enumerate(plan["support_execution_rows"]):
+            for execution_rows in executions[:support_count]:
+                row_index = torch.as_tensor(execution_rows, dtype=torch.long, device=device)
+                execution_features.append(F.normalize(support_z[row_index].mean(0), dim=0))
+                execution_positions.append(position)
+                support_window_counts.append(len(execution_rows))
+        x = torch.stack(execution_features)
         q = query_z[torch.as_tensor(query_rows, dtype=torch.long, device=device)]
-        y = torch.as_tensor(support_positions, dtype=torch.long, device=device)
+        y = torch.as_tensor(execution_positions, dtype=torch.long, device=device)
         if any(not bool(y.eq(index).any()) for index in range(len(candidates))):
             raise ValueError("every candidate must have at least one support window")
         centroids = torch.stack([
@@ -304,6 +334,9 @@ def score_positive_cell(
             "queries": len(query_rows),
             "query_executions": len(plan["query_execution_ids"]),
             "support_executions": int(len(candidates) * support_count),
+            "support_windows": int(sum(support_window_counts)),
+            "support_windows_per_execution_min": int(min(support_window_counts)),
+            "support_windows_per_execution_max": int(max(support_window_counts)),
         }
         for method, positions in predicted.items():
             values = names[positions].tolist()
@@ -329,6 +362,58 @@ def score_positive_cell(
                 truth_positions, positions, len(names)
             )
     return _score_predictions(all_truth, all_predictions, subject_records)
+
+
+def score_native_enrollment_cell(
+    adapter,
+    query_stream,
+    support_stream,
+    query_labels: np.ndarray,
+    plans: list[dict],
+    support_count: int,
+    candidate_texts: Sequence[str],
+    state,
+    device,
+    *,
+    seed: int,
+) -> dict:
+    """Score one model's native memory mechanism on the shared episode plans."""
+    all_truth: list[str] = []
+    all_predictions: list[str] = []
+    subject_records = {}
+    info_records = []
+    for plan_index, plan in enumerate(plans):
+        predictions, info = adapter.predict_enrollment(
+            query_stream, support_stream, plan, support_count, candidate_texts,
+            state, device, seed=seed + plan_index,
+        )
+        query_rows = np.asarray(plan["query_rows"], dtype=np.int64)
+        if len(predictions) != len(query_rows):
+            raise ValueError(
+                f"{adapter.name}: native enrollment returned {len(predictions)} predictions for "
+                f"{len(query_rows)} query windows"
+            )
+        truth = query_labels[query_rows].tolist()
+        all_truth.extend(truth)
+        all_predictions.extend(predictions)
+        subject_records[str(plan["subject"])] = {
+            "queries": len(query_rows),
+            "query_executions": len(plan["query_execution_ids"]),
+            "support_executions": int(len(plan["candidate_names"]) * support_count),
+            f"{NATIVE_METHOD}_f1_macro": classification_metrics(
+                truth, predictions,
+            )["f1_macro"],
+        }
+        info_records.append(info)
+    metrics = classification_metrics(all_truth, all_predictions)
+    return {
+        NATIVE_METHOD: {
+            "f1_macro": metrics["f1_macro"],
+            "balanced_accuracy": metrics["balanced_accuracy"],
+        },
+        "native_adapter_info": info_records,
+        "native_subject_results": subject_records,
+    }
 
 
 def score_zero_cell(adapter, stream, features, state, device, cell: dict) -> dict:
@@ -481,11 +566,39 @@ def run(
                     len(cell["candidate_names"]) * (query_z.shape[1] + 1)
                 )
                 for label_mode in label_modes:
-                    # Closed-form and supervised baseline rules use aliases solely as class IDs.
-                    # Their numerical prediction is intentionally identical across label modes.
+                    mode_scored = scored
+                    if adapter.supports_native_enrollment():
+                        aliases = active_payload.get("aliases", {})
+                        candidate_texts = (
+                            list(cell["candidate_names"])
+                            if label_mode == "coherent"
+                            else [aliases[name] for name in cell["candidate_names"]]
+                        )
+                        native_started = time.time()
+                        native = score_native_enrollment_cell(
+                            adapter, query_stream,
+                            load_stream(dataset, cell["support_stream"]), query_labels,
+                            plans, support_count, candidate_texts, state, resolved_device,
+                            seed=seed,
+                        )
+                        mode_scored = {
+                            **scored,
+                            NATIVE_METHOD: native[NATIVE_METHOD],
+                            "native_fit_and_predict_seconds": time.time() - native_started,
+                            "native_adapter_info": native["native_adapter_info"],
+                            "subject_results": {
+                                subject: {
+                                    **record,
+                                    **native["native_subject_results"].get(subject, {}),
+                                }
+                                for subject, record in scored["subject_results"].items()
+                            },
+                        }
+                    # Generic readouts use aliases only as class IDs and are intentionally identical
+                    # across label modes. A native semantic mechanism is re-run with the actual text.
                     key = f"{cell_id}/{label_mode}/seed{seed}/k{support_count}"
                     results[key] = {
-                        **scored,
+                        **mode_scored,
                         "kind": "enrollment",
                         "regime": cell["regime"],
                         "label_mode": label_mode,
@@ -497,15 +610,33 @@ def run(
         print(f"[{baseline_name}] {cell_id}: complete", flush=True)
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "baseline": baseline_name,
         "adapter": f"{type(adapter).__module__}.{type(adapter).__name__}",
         "manifest": str(manifest_path.resolve()),
         "manifest_fingerprint": manifest["manifest_fingerprint"],
-        "source_fingerprint": _source_fingerprint(baseline_name),
-        "methods": list(methods),
+        "source_fingerprint": _source_fingerprint(adapter),
+        "methods": list(methods) + ([NATIVE_METHOD] if adapter.supports_native_enrollment() else []),
+        "primary_positive_k_method": (
+            NATIVE_METHOD if adapter.supports_native_enrollment() else "linear_head"
+        ),
+        "evaluation_artifacts": {
+            name: _file_fingerprint(path)
+            for name, path in adapter.evaluation_artifacts(state).items()
+        },
+        "adapter_config": adapter.evaluation_config(state),
+        "support_protocol": {
+            "support_unit": manifest.get(
+                "support_unit", "independent_execution_per_candidate"
+            ),
+            "k_definition": "independent_enrolled_executions_per_candidate",
+            "generic_readout_representation": (
+                "one_normalized_mean_pooled_vector_per_enrolled_execution"
+            ),
+            "halo_native_representation": "all_patch_sensor_rows_from_enrolled_executions",
+        },
         "linear_head_recipe": {
-            "scope": "frozen_representation_target_head",
+            "scope": "linear_head_finetuning_on_frozen_representation",
             "optimizer": "AdamW",
             "steps": LINEAR_HEAD_STEPS,
             "learning_rate": LINEAR_HEAD_LR,
@@ -514,7 +645,7 @@ def run(
             "selection": "fixed_before_test_no_query_early_stopping",
         },
         "supervised_adaptation_scope": {
-            "primary": "frozen_representation_target_head",
+            "primary": "linear_head_finetuning_on_frozen_representation",
             "model_native_end_to_end": "optional_separate_experiment",
             "reason": "the common head scope is available to every baseline without architecture-specific tuning",
         },

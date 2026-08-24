@@ -1,7 +1,7 @@
 """Self-supervised LiMU-BERT pretraining ON OUR TRAINING CORPUS.
 
 LiMU-BERT ships no released weights; it is an SSL *method* (masked
-reconstruction). This script pools the 9 non-eval training datasets' grids into
+reconstruction). This script pools the design-of-record training datasets' grids into
 LiMU-BERT's input contract (6-ch acc+gyro, 20 Hz, 120 samples — see
 :mod:`baselines.limubert.prep`) and drives the UPSTREAM LiMU-BERT SSL pipeline
 (model + Trainer + masking, reused from
@@ -13,14 +13,14 @@ checkpoint ``baselines/limubert/limubert_backbone.pt`` that the adapter loads.
   * Run length is a CLI arg so a SMOKE run (few epochs, small subset) proves the
     pipeline end-to-end while the FULL run reproduces the paper-scale pretrain.
 
-FULL (paper-scale) pretrain — the deferred compute job:
+FULL same-data pretrain (published batch/objective; exposure matched after the
+18-source expansion):
 
-    python -m baselines.limubert.train --epochs 3200 --batch-size 128
+    python -m baselines.limubert.train --recipe full --gpu
 
 SMOKE (what we run to prove the wiring; under-trained by design):
 
-    python -m baselines.limubert.train --epochs 2 --batch-size 128 \
-        --max-per-stream 800
+    python -m baselines.limubert.train --recipe smoke --gpu
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,7 @@ LIMU_REPO = Path("/home/alex/code/HALO/legacy_code/auxiliary_repos/LIMU-BERT-Pub
 
 _HERE = Path(__file__).resolve().parent
 BACKBONE_CKPT = _HERE / "limubert_backbone.pt"
+METADATA_SCHEMA = 1
 
 
 def _seed_worker(worker_id):
@@ -62,32 +64,48 @@ def _seed_worker(worker_id):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Self-pretrain LiMU-BERT on our corpus")
-    ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--batch-size", type=int, default=128)
+    ap.add_argument("--recipe", choices=("smoke", "full"), default="smoke")
+    ap.add_argument("--epochs", type=int)
+    ap.add_argument("--batch-size", type=int)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=3431)
-    ap.add_argument("--max-per-stream", type=int, default=800,
-                    help="per-stream window cap. DEFAULT 800 = smoke; omitting KEEPS this cap. "
-                         "Pass 0 for the full corpus, or e.g. 20000 for the balanced corpus.")
+    ap.add_argument("--max-per-stream", type=int,
+                    help="per-stream window cap; 0 means uncapped")
     ap.add_argument("--gpu", action="store_true")
-    ap.add_argument("--num-workers", type=int, default=4,
+    ap.add_argument("--num-workers", type=int,
                     help="DataLoader workers. 0 = single-process masking (robust to CPU contention: "
                          "no worker-starvation stall, degrades gracefully instead of collapsing).")
+    ap.add_argument("--output", type=Path,
+                    help="checkpoint destination; defaults to the canonical adapter checkpoint")
     args = ap.parse_args(argv)
+
+    defaults = ({"epochs": 143, "batch_size": 128,
+                 "max_per_stream": 20_000, "num_workers": 4}
+                if args.recipe == "full" else
+                {"epochs": 2, "batch_size": 128,
+                 "max_per_stream": 800, "num_workers": 4})
+    for name, value in defaults.items():
+        if getattr(args, name) is None:
+            setattr(args, name, value)
 
     if str(LIMU_REPO) not in sys.path:
         sys.path.insert(0, str(LIMU_REPO))
     import models as lb_models
     import train as lb_train
     from config import PretrainModelConfig, TrainConfig, MaskConfig
-    from utils import LIBERTDataset4Pretrain, Preprocess4Mask, prepare_pretrain_dataset
+    from utils import LIBERTDataset4Pretrain, Preprocess4Mask
 
     device = torch.device("cuda" if (args.gpu and torch.cuda.is_available()) else "cpu")
     print(f"[limubert] device={device}")
+    if args.gpu and device.type != "cuda":
+        raise SystemExit("--gpu requested but CUDA is unavailable")
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.fp32_precision = "tf32"
+        torch.backends.cudnn.conv.fp32_precision = "tf32"
+    started = time.perf_counter()
 
     cap = args.max_per_stream or None
-    data = prep.build_pretrain_array(max_per_stream=cap, seed=args.seed)
-    labels = np.zeros((data.shape[0], data.shape[1], 2), dtype=np.float32)  # dummy (SSL)
+    data = prep.build_pretrain_array(max_per_stream=cap, seed=args.seed, shuffle=False)
     print(f"[limubert] corpus: {data.shape[0]} windows, shape {data.shape}")
 
     # 2026-08-22 audit F1: upstream's Preprocess4Normalization divides accel by 9.8 because its
@@ -106,7 +124,17 @@ def main(argv=None):
 
     # Normalization applied once above (value-identical); per-item work is now masking only.
     pipeline = [Preprocess4Mask(mask_cfg)]
-    d_train, _, d_test, _ = prepare_pretrain_dataset(data, labels, 0.8, seed=train_cfg.seed)
+    # Reproduce upstream's seeded 80/10/10 random partition without allocating
+    # labels that the self-supervised objective never consumes.
+    np.random.seed(train_cfg.seed)
+    random.seed(train_cfg.seed)
+    torch.manual_seed(train_cfg.seed)
+    order = np.arange(len(data))
+    np.random.shuffle(order)
+    n_train, n_val = int(0.8 * len(data)), int(0.1 * len(data))
+    d_train = data[order[:n_train]]
+    d_test = data[order[n_train:n_train + n_val]]
+    del data, order
     print(f"[limubert] train={len(d_train)} val={len(d_test)}")
 
     ds_train = LIBERTDataset4Pretrain(d_train, pipeline=pipeline)
@@ -125,9 +153,12 @@ def main(argv=None):
 
     model = lb_models.LIMUBertModel4Pretrain(model_cfg)
     criterion = nn.MSELoss(reduction="none")
-    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.lr)
+    adam_extra = {"fused": True} if device.type == "cuda" else {}
+    optimizer = torch.optim.Adam(model.parameters(), lr=train_cfg.lr, **adam_extra)
 
-    save_prefix = _HERE / "pretrain_run" / "model"
+    output = (args.output or BACKBONE_CKPT).resolve()
+    save_prefix = (_HERE / "pretrain_run" / "model" if args.output is None else
+                   output.parent / f"{output.stem}_run" / "model")
     save_prefix.parent.mkdir(parents=True, exist_ok=True)
     trainer = lb_train.Trainer(train_cfg, model, optimizer, str(save_prefix), device)
 
@@ -146,13 +177,28 @@ def main(argv=None):
 
     # Trainer.pretrain reloads the best state into `model`; save it as the
     # canonical checkpoint the adapter loads.
-    torch.save(model.state_dict(), str(BACKBONE_CKPT))
-    # Convention stamp (audit F1): the adapter refuses a backbone pretrained under a different
-    # accel convention, so the ÷9.8 fix cannot silently mix with an old-scale checkpoint.
-    BACKBONE_CKPT.with_suffix(".meta.json").write_text(
-        json.dumps({"acc_convention": "g", "epochs": args.epochs,
-                    "max_per_stream": args.max_per_stream, "seed": args.seed}) + "\n")
-    print(f"[limubert] saved backbone -> {BACKBONE_CKPT}")
+    torch.save(model.state_dict(), str(output))
+    metadata = {
+        "schema_version": METADATA_SCHEMA,
+        "model": "limubert",
+        "corpus_profile": "expanded_phase_a",
+        "acc_convention": "g",
+        "train_datasets": list(prep.TRAIN_DATASETS),
+        "input_contract": {"rate_hz": prep.TARGET_HZ, "samples": prep.TARGET_LEN,
+                           "channels": list(prep.SIX_CHANNELS), "acc_convention": "g"},
+        "recipe": args.recipe,
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.lr,
+        "max_per_stream": args.max_per_stream,
+        "seed": args.seed,
+        "train_windows": len(ds_train),
+        "validation_windows": len(ds_test),
+        "optimizer_steps": len(ld_train) * args.epochs,
+        "elapsed_seconds": time.perf_counter() - started,
+    }
+    output.with_suffix(".meta.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    print(f"[limubert] saved backbone -> {output}")
 
 
 if __name__ == "__main__":

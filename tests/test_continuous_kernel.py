@@ -84,6 +84,22 @@ def test_band_magnitudes_agree_across_sampling_rates(tokenizer, rate):
     assert correlation > 0.95, f"rate {rate}: correlation {correlation:.4f}"
 
 
+@pytest.mark.parametrize("rate", [20.0, 25.0, 50.0])
+def test_final_tokens_remain_comparable_across_sampling_rates(tokenizer, rate):
+    reference_patches, reference_len, reference_mask = _as_patches(
+        _band_limited_signal(100.0), 100.0)
+    candidate_patches, candidate_len, candidate_mask = _as_patches(
+        _band_limited_signal(rate), rate)
+    with torch.no_grad():
+        reference = tokenizer(reference_patches, 100.0, reference_len,
+                              patch_mask=reference_mask)
+        candidate = tokenizer(candidate_patches, rate, candidate_len,
+                              patch_mask=candidate_mask)
+    cosine = torch.nn.functional.cosine_similarity(
+        reference.flatten(), candidate.flatten(), dim=0)
+    assert float(cosine) > 0.95, f"rate {rate}: final-token cosine {float(cosine):.4f}"
+
+
 def test_token_count_depends_on_duration_not_on_rate(tokenizer):
     """6 s must give the same number of tokens at 20 Hz and at 100 Hz. Shape invariance is half
     the contract; values are the other half."""
@@ -164,6 +180,14 @@ def test_single_sample_window_produces_a_token_and_never_raises(tokenizer):
     assert torch.isfinite(out).all()
 
 
+def test_invalid_rate_and_length_fail_loudly(tokenizer):
+    patches = torch.randn(1, 2, 20, 1)
+    with pytest.raises(ValueError, match="positive rates"):
+        tokenizer(patches, 0.0, torch.full((1, 2), 20))
+    with pytest.raises(ValueError, match="cannot exceed"):
+        tokenizer(patches, 20.0, torch.tensor([[21, 20]]))
+
+
 def test_padded_region_cannot_leak_into_the_output(tokenizer):
     patches = torch.randn(1, 6, 60, 2)
     lengths = torch.full((1, 6), 60, dtype=torch.long)
@@ -208,23 +232,155 @@ def test_norm_statistics_round_trip(tokenizer):
     assert torch.isfinite(module.norm_mu).all() and (module.norm_sd > 0).all()
 
 
-def test_gradients_reach_the_sixteen_coefficients(tokenizer):
+def test_gradients_reach_every_analysis_parameter(tokenizer):
     module = ContinuousKernelTokenizer()
     patches, lengths, mask = _as_patches(_band_limited_signal(50.0), 50.0)
     module(patches, 50.0, lengths, patch_mask=mask).pow(2).mean().backward()
-    for name in ("cos_coeff", "sin_coeff", "log_sigma", "log_gain"):
+    for name in ("cos_coeff", "sin_coeff", "sigma_logit", "gain_logit"):
         grad = getattr(module, name).grad
         assert grad is not None and torch.isfinite(grad).all(), name
         assert grad.abs().sum() > 0, f"{name} received no gradient"
 
 
-def test_is_not_yet_wired_into_the_encoder():
-    """Deliberate: the module is ready to swap but NOT integrated, so an in-flight experiment
-    cannot be perturbed by it. Delete this test in the commit that adds the --frontend arm."""
-    import model.tokenizer.encoder as encoder_module
+def test_mixed_rate_batch_matches_separate_processing_and_batch_order():
+    """A sample's tokens must not inherit the first row's rate or reflection boundary."""
+    torch.manual_seed(0)
+    module = ContinuousKernelTokenizer().eval()
+    signals = [_band_limited_signal(rate) for rate in (20.0, 100.0)]
+    patches = torch.zeros(2, 6, 100, 1)
+    lengths = torch.zeros(2, 6, dtype=torch.long)
+    for row, (signal, rate) in enumerate(zip(signals, (20, 100))):
+        per = int(rate)
+        patches[row, :, :per, 0] = torch.from_numpy(signal.reshape(6, per))
+        lengths[row] = per
+    mask = torch.ones(2, 6, dtype=torch.bool)
+    rates = torch.tensor([20.0, 100.0])
+    with torch.no_grad():
+        together = module(patches, rates, lengths, patch_mask=mask)
+        separate = torch.cat([
+            module(patches[i:i + 1], rates[i], lengths[i:i + 1], patch_mask=mask[i:i + 1])
+            for i in range(2)
+        ])
+        reversed_batch = module(patches.flip(0), rates.flip(0), lengths.flip(0),
+                                patch_mask=mask.flip(0)).flip(0)
+    assert torch.allclose(together, separate, atol=2e-5, rtol=2e-5)
+    assert torch.allclose(together, reversed_batch, atol=2e-5, rtol=2e-5)
 
-    source = open(encoder_module.__file__).read()
-    assert "continuous_kernel" not in source
+
+def test_source_rate_controls_observability_and_output():
+    module = ContinuousKernelTokenizer().eval()
+    patches, lengths, mask = _as_patches(_band_limited_signal(50.0), 50.0)
+    with torch.no_grad():
+        native_25 = module.analyze(patches, 50.0, lengths, source_rate_hz=25.0,
+                                   patch_mask=mask)
+        native_50 = module.analyze(patches, 50.0, lengths, source_rate_hz=50.0,
+                                   patch_mask=mask)
+        out_25 = module.project(native_25)
+        out_50 = module.project(native_50)
+    assert (native_25["nyquist"] < native_50["nyquist"]).any()
+    assert not torch.allclose(out_25, out_50)
+
+
+def test_norm_calibration_excludes_absent_channels_and_padded_patches():
+    torch.manual_seed(0)
+    reference = ContinuousKernelTokenizer().eval()
+    masked = ContinuousKernelTokenizer().eval()
+    masked.load_state_dict(reference.state_dict())
+    patches, lengths, patch_mask = _as_patches(_band_limited_signal(50.0), 50.0)
+    reference.accumulate_norm_stats(
+        patches[:, :3], 50.0, lengths[:, :3], patch_mask=patch_mask[:, :3],
+        channel_mask=torch.ones(1, 1, dtype=torch.bool))
+    reference.finalize_norm_stats()
+
+    six_channels = torch.randn(1, 6, 50, 6) * 100.0
+    six_channels[..., 0] = patches[..., 0]
+    padded = patch_mask.clone()
+    padded[:, 3:] = False
+    padded_lengths = lengths.clone()
+    padded_lengths[:, 3:] = 0
+    masked.accumulate_norm_stats(
+        six_channels, 50.0, padded_lengths, patch_mask=padded,
+        channel_mask=torch.tensor([[True, False, False, False, False, False]]))
+    masked.finalize_norm_stats()
+    assert torch.allclose(reference.norm_mu, masked.norm_mu, atol=1e-6)
+    assert torch.allclose(reference.norm_sd, masked.norm_sd, atol=1e-6)
+    assert torch.allclose(reference.amp_mu, masked.amp_mu, atol=1e-6)
+    assert torch.allclose(reference.dc_mu, masked.dc_mu, atol=1e-6)
+
+
+def test_dc_and_amplitude_are_patch_local():
+    module = ContinuousKernelTokenizer().eval()
+    patches = torch.cat((torch.ones(1, 3, 20, 1), -torch.ones(1, 3, 20, 1)), dim=1)
+    lengths = torch.full((1, 6), 20, dtype=torch.long)
+    analysis = module.analyze(patches, 20.0, lengths)
+    assert torch.allclose(analysis["dc"].flatten(),
+                          torch.tensor([1., 1., 1., -1., -1., -1.]))
+    assert torch.allclose(analysis["amplitude"].flatten(),
+                          torch.full((6,), math.log(2.0)))
+
+
+def test_edge_support_is_per_kernel_and_measures_real_samples():
+    module = ContinuousKernelTokenizer().eval()
+    patches = torch.randn(1, 2, 50, 1)
+    lengths = torch.full((1, 2), 50, dtype=torch.long)
+    edge = module.analyze(patches, 50.0, lengths)["edge"]
+    assert edge.shape == (1, module.K, 2 * module.F)
+    assert 0.0 < float(edge[0, 0, 0]) < 0.75
+    assert float(edge[0, :, 0].std()) > 0.0
+    assert float(edge[0, 0, module.F]) > float(edge[0, 0, 0])
+
+
+def test_analysis_parameterization_is_bounded_and_regularized():
+    module = ContinuousKernelTokenizer()
+    with torch.no_grad():
+        module.sigma_logit.fill_(100.0)
+        module.gain_logit.fill_(-100.0)
+    assert (module._sigmas() <= module.sigma_max).all()
+    assert (module._sigmas() >= module.sigma_min).all()
+    assert (module._gains() <= module.gain_max).all()
+    assert (module._gains() >= 1.0 / module.gain_max).all()
+    assert torch.isfinite(module.adaptation_regularization())
+
+
+def test_sampling_geometry_deduplicates_repeated_fractional_phases():
+    module = ContinuousKernelTokenizer()
+    expected = {20.0: 2, 25.0: 8, 50.0: 4, 100.0: 2}
+    for rate, phase_count in expected.items():
+        geometry = module._frame_geometry(rate, 6, torch.device("cpu"))
+        assert geometry["u"].shape[0] == phase_count
+        assert geometry["phase_id"].shape[0] == 6 * module.F
+
+
+def test_runtime_telemetry_is_finite_and_only_collected_on_request():
+    module = ContinuousKernelTokenizer().eval()
+    patches, lengths, mask = _as_patches(_band_limited_signal(50.0), 50.0)
+    assert module.runtime_summary() == {}
+    module.request_runtime_telemetry()
+    with torch.no_grad():
+        module(patches, 50.0, lengths, patch_mask=mask)
+    summary = module.runtime_summary()
+    assert set(summary) == {
+        "frontend/observable_fraction", "frontend/edge_support_mean",
+        "frontend/response_std_mean", "frontend/dead_kernel_fraction",
+    }
+    assert all(math.isfinite(value) for value in summary.values())
+    assert 0.0 <= summary["frontend/dead_kernel_fraction"] <= 1.0
+
+
+def test_encoder_exposes_continuous_frontend_without_changing_token_contract():
+    from model.tokenizer.encoder import SetTokenizerEncoder
+
+    encoder = SetTokenizerEncoder(
+        d_model=32, num_layers=1, num_heads=4, dim_feedforward=64,
+        frontend="continuous", trunk="temporal", descriptor_prediction=False,
+    ).eval()
+    assert isinstance(encoder.filterbank, ContinuousKernelTokenizer)
+    patches = torch.randn(2, 2, 50, 3)
+    lengths = torch.tensor([[20, 20], [50, 50]])
+    with torch.no_grad():
+        tokens = encoder.tokenize(patches, torch.tensor([20.0, 50.0]), lengths)
+    assert tokens.shape == (2, 2, 3, 32)
+    assert torch.isfinite(tokens).all()
 
 
 def test_features_do_not_depend_on_how_long_the_rest_of_the_recording_was():

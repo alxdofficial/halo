@@ -1,183 +1,105 @@
 # Phase-B Evidence System
 
-The active Phase-B design is closed-form sensor-patch retrieval with a small admissibility gate. It
-does not train the parked relational decoder. The motivation and behavioral contract are in
-[`docs/design/PHASE_B_TRAINING_INTENT.md`](../../docs/design/PHASE_B_TRAINING_INTENT.md).
+The active Phase-B model is the compact end-to-end evidence engine described in
+[`docs/design/COMPACT_EVIDENCE_ENGINE.md`](../../docs/design/COMPACT_EVIDENCE_ENGINE.md). It does
+not require a prebuilt memory-bank artifact, a resolvability table, or an admissibility-gate fit.
 
-## Prerequisite
+## End-to-end experiment
 
-Use the completed Phase-A checkpoint with `token_granularity='sensor'`. The current selected source is
-`training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt` at step 27,000. The older
-`phase_a_headline/best.pt` checkpoint is channel-granular and cannot produce a valid Phase-B bank.
-
-## Build Artifacts
-
-Set the Phase-A checkpoint once:
+The active representation experiment trains the compact encoder and scalar evidence reranker
+together. `C` is the complete decision roster, while four labels per episode supply four query
+executions each. The other candidates are distractors that compete in the same cross-entropy loss
+without requiring additional sensor encodes.
 
 ```bash
-export HALO_CKPT=training/tokenizer/outputs/phase_a_fixed_1s_rotation_20260817/best.pt
+python -m training.tokenizer.pretrain_episodic \
+  --random-init \
+  --phase-b-regime unified \
+  --steps 35000 \
+  --warmup-steps 500 \
+  --episodes-per-step 8 \
+  --candidate-counts 8 16 32 64 \
+  --query-labels-per-episode 4 \
+  --queries-per-candidate 4 \
+  --bank-windows 512 \
+  --top-k 64 \
+  --val-every 1000 \
+  --val-episodes 32 \
+  --num-workers 8 \
+  --out training/tokenizer/outputs/<run-name>-e2e
 ```
 
-Build the schema-5 memory bank:
+Evaluation does not sample this training roster. The primary external protocol uses every eligible
+label in each test dataset as its fixed candidate set.
+
+## Specialized Phase-B heads
+
+The clean experiment loads one selected encoder checkpoint and trains two small scalar rerankers
+against that same frozen representation. This prevents one head's objective from changing the
+features seen by the other.
 
 ```bash
-python -m training.evidence.build_memory \
-  --checkpoint "$HALO_CKPT" \
-  --sensor-rows \
-  --device cuda \
-  --out training/evidence/outputs/memory_bank.pt
+# Semantic zero-shot head: k=0 only.
+python -m training.tokenizer.pretrain_episodic \
+  --checkpoint training/tokenizer/outputs/<phase-a-run>/best.pt \
+  --freeze-encoder \
+  --phase-b-regime zero-shot \
+  --steps 35000 \
+  --warmup-steps 500 \
+  --episodes-per-step 8 \
+  --queries-per-candidate 4 \
+  --bank-windows 512 \
+  --top-k 64 \
+  --val-every 1000 \
+  --val-episodes 32 \
+  --num-workers 8 \
+  --out training/tokenizer/outputs/<run-name>-zero-shot
+
+# Enrollment head: k=1/2/4/8/16 only, from the identical encoder checkpoint.
+python -m training.tokenizer.pretrain_episodic \
+  --checkpoint training/tokenizer/outputs/<phase-a-run>/best.pt \
+  --freeze-encoder \
+  --phase-b-regime enrollment \
+  --steps 35000 \
+  --warmup-steps 500 \
+  --episodes-per-step 8 \
+  --queries-per-candidate 4 \
+  --bank-windows 512 \
+  --top-k 64 \
+  --val-every 1000 \
+  --val-episodes 32 \
+  --num-workers 8 \
+  --out training/tokenizer/outputs/<run-name>-enrollment
 ```
 
-Measure train-only, per-sensor resolvability:
+Current defaults use clean one-second patches, four independent query executions for each of four
+queried labels, eight independent episodes per optimizer step, a
+512-window memory, full-bank voting, and a global top-64 shortlist for scalar evidence rescoring.
+Candidate rosters are 8/16/32/64. The zero-shot head sees only k=0; the enrollment head sees exact k
+values 1/2/4/8/16. Random aliases and signal augmentation are disabled unless explicitly requested.
+`--phase-b-regime unified` remains an explicit matched control, not the recommended final pair.
 
-```bash
-python -m training.evidence.resolvability \
-  --build \
-  --checkpoint "$HALO_CKPT" \
-  --device cuda \
-  --out training/evidence/outputs/resolvability.json
-```
+Use `--profile-steps 12` for a bounded real-corpus GPU profile and `--smoke` for a three-step
+integration check. Training telemetry is appended to `log.jsonl`; `best.pt` is selected on the
+held-out-concept coherent k-curve, and each validation record includes the same-checkpoint retrieval
+semantic-vote baseline, the enrolled-1NN reference wherever it is defined, and learned-minus-control
+margins.
 
-Fit the gate and bind it to the exact bank:
+## Frozen encoder comparison
 
-```bash
-python -m training.evidence.gate_predictor \
-  --fit \
-  --rank 8 \
-  --bank training/evidence/outputs/memory_bank.pt \
-  --out training/evidence/outputs/admissibility_gate.pt
-```
+The matched HARNet and UniMTS controls use the same episodes and evidence engine but keep their
+released backbones frozen. Their commands and completed results are in
+[`docs/results/ENCODER_COMPARISON_20260822.md`](../../docs/results/ENCODER_COMPARISON_20260822.md).
 
-Rank 8 is the current default. The held-out study below still reports ranks 1, 2, 4, and 8 so the
-capacity choice remains an explicit ablation rather than an unexamined constant.
+## Historical pipelines
 
-The fit command refuses a resolvability table containing Phase-B development or test datasets. The
-evaluation command refuses legacy stream-level tables, schema-3 banks, unbound gates, mismatched
-checkpoints, changed embedding paths, and malformed sensor foreign keys.
+The following modules reproduce superseded experiments and are not prerequisites for the active
+model:
 
-The files currently present at the default output paths are historical and are expected to fail
-these guards. Rebuild all three in the order above. A successful current build replaces the schema-3
-93-label bank with a schema-5 bank under the current 166-label vocabulary.
+- `build_memory.py`, `resolvability.py`, and `gate_predictor.py`: fitted admissibility-gate study;
+- `train_admissibility_gate.py`: optional historical gate refinement;
+- `train_patch_decoder.py` and `train_patch_confidence.py`: parked relational decoder and confidence
+  experiments.
 
-## Gate Generalization
-
-Run every held-out study into one artifact before external evaluation:
-
-```bash
-python -m training.evidence.gate_extrapolation \
-  --split all \
-  --ranks 1 2 4 8 \
-  --out training/evidence/outputs/gate_extrapolation.json
-```
-
-The table used to fit the gate is not an independent quality measure. Interpret held-out skill
-against the per-concept baseline, not only against a global constant. Separate invocations without
-distinct `--out` paths overwrite the same JSON, so do not run the four splits sequentially into the
-default path.
-
-## Enrollment Evaluation
-
-Run the development roster first:
-
-```bash
-python -m training.evidence.eval_enrollment \
-  --checkpoint "$HALO_CKPT" \
-  --bank training/evidence/outputs/memory_bank.pt \
-  --predictor training/evidence/outputs/admissibility_gate.pt \
-  --device cuda
-```
-
-Evaluate arbitrary names separately:
-
-```bash
-python -m training.evidence.eval_enrollment \
-  --checkpoint "$HALO_CKPT" \
-  --bank training/evidence/outputs/memory_bank.pt \
-  --predictor training/evidence/outputs/admissibility_gate.pt \
-  --device cuda \
-  --random-aliases
-```
-
-Use `--protocol-role test` only after development choices are fixed. Evaluation reports k = 0, 1,
-2, 4, and 8; full and partial enrollment; support removal; cyclic support-label shuffling; the same
-retrieval rule with admissibility disabled; prototypes; ridge heads; and genuine subject and
-configuration relations where the dataset supports them.
-
-### Frozen HARNet representation control
-
-To test whether enrollment performance is limited by HALO's representation rather than the evidence
-engine, score the official frozen HARNet-5 trunk on the same nested execution support plans:
-
-```bash
-python -m training.evidence.eval_harnet_enrollment \
-  --device cuda \
-  --protocol-role dev \
-  --support 1 2 4 8
-```
-
-This control fits no HARNet classifier and does not use HALO's evidence engine. It reports nearest
-support, normalized prototype, and deterministic ridge curves from identical support/query windows.
-The legacy versus corpus-matched HARNet distinction does not apply here because that distinction
-changes only the fitted ConSE head; the frozen released trunk is identical.
-
-`--gate-top-k` controls the number of returned rows per query patch and candidate; the default is 64.
-The evaluator currently constructs the searched population from 16 source windows per corpus label.
-These are different quantities, and both are written to the result JSON. `sensor_bias` similarity
-remains disabled in the active predictor.
-
-## Stage 2: Optional Gate Refinement
-
-Run Stage 2 only after the warm-start gate shows useful held-out extrapolation and external Stage-1
-performance. It freezes Phase A, memory features, cosine ranking, and voting, and updates only the
-small admissibility gate:
-
-```bash
-python -m training.evidence.train_admissibility_gate \
-  --bank training/evidence/outputs/memory_bank.pt \
-  --gate training/evidence/outputs/admissibility_gate.pt \
-  --out training/evidence/outputs/admissibility_stage2 \
-  --device cuda
-```
-
-Each training episode varies the candidate count, partial enrollment, support count, and coherent
-label paraphrases. Query and support windows come from distinct recorded executions. Candidate
-labels are removed from ordinary corpus memory; only the episode's selected supports are restored
-with explicit candidate bindings. Training uses a fully soft distribution over every physically
-compatible candidate-row choice in a bounded, label-balanced working memory, so rows outside
-deployment top-k still receive gradient. Validation applies top-k to the same continuous adjusted
-score used by training.
-
-The implementation keeps the immutable source rows on the GPU, embeds each sensor description once,
-and evaluates all query windows in an episode together. These are exact execution optimizations: the
-episode distribution, FP32 score, admissibility equation, and loss are unchanged. Cheap telemetry is
-written every 20 steps; the default full validation cadence is every 500 steps.
-
-The loss is candidate cross-entropy plus a small replay penalty on the train-only resolvability
-measurements. The replay term is an anchor on the meaning of admissibility, not a second prediction
-task. Telemetry reports gradient norms, gate spread, parameter drift, retrieval entropy, effective
-row count, and top-k validation against the same predictor with admissibility disabled.
-Use external Phase-B development datasets, not internal training loss or fitted table cells, to
-select whether the refined artifact replaces Stage 1.
-
-```bash
-python -m training.evidence.eval_enrollment \
-  --checkpoint "$HALO_CKPT" \
-  --bank training/evidence/outputs/memory_bank.pt \
-  --predictor training/evidence/outputs/admissibility_stage2/best.pt \
-  --protocol-role dev \
-  --device cuda \
-  --out training/evidence/outputs/admissibility_stage2/eval_dev.json
-```
-
-Do not use `train_patch_decoder.py` for gate refinement; that file reproduces the parked relational-
-decoder experiments.
-
-Default enrollment outputs include the predictor mode in the filename, for example
-`eval_enrollment_dev_admissibility_gate.json`. This prevents a parked relational run from silently
-overwriting a current-design result.
-
-## Archived Relational Experiments
-
-`train_patch_decoder.py`, the learned subspace retriever, the relational decoder, their telemetry,
-and their old checkpoints remain for reproducing earlier results. They are not the default Phase-B
-model and are not prerequisites for admissibility evaluation. Confidence calibration is also parked.
+Their persisted artifacts must not be passed to `pretrain_episodic.py` or described as the current
+HALO Phase-B model.

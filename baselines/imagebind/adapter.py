@@ -120,6 +120,16 @@ class ImageBindAdapter(CosineAdapter):
     # 6-ch accel+gyro, 200 Hz, 10 s window (short windows zero-padded internally).
     contract = InputContract(channels=_IMU_CHANNELS, rate_hz=TARGET_HZ, window_sec=PAD_LEN / TARGET_HZ)
 
+    def evaluation_artifacts(self, state):
+        return {"released_checkpoint": IMAGEBIND_CKPT, "text_vocabulary": BPE_PATH}
+
+    def evaluation_config(self, state):
+        return {
+            "input_rate_hz": TARGET_HZ,
+            "input_samples": PAD_LEN,
+            "input_channels": list(_IMU_CHANNELS),
+        }
+
     def setup(self, device):
         """Load frozen imagebind_huge (1024-d joint space) from the cached checkpoint."""
         import torch

@@ -122,6 +122,18 @@ def test_natively_accel_only_stream_has_no_phantom_gyro_metadata(index):
     assert item["sensor_placement"].shape == (1,)
 
 
+def test_neutral_acquisition_text_keeps_modality_but_removes_configuration(index):
+    key = next(key for key in index.train if all(index.refs[key.stream_i].mask))
+    item = PretrainDataset(
+        index, [key], augment=False, neutral_acquisition_text=True,
+    )[0]
+
+    assert item["sensor_texts"] == ["an accelerometer", "a gyroscope"]
+    assert all("wrist" not in text and "pocket" not in text and "gravity" not in text
+               for text in item["texts"])
+    assert item["sensor_id"].tolist() == [0, 0, 0, 1, 1, 1]
+
+
 def test_sensor_bias_retains_observation_support_bits():
     bias = stream_sensor_bias("wisdm", "phone_pocket", ["accel", "gyro"])
     support = bias[:, len(SENSOR_BIAS_FIELDS):]

@@ -15,7 +15,7 @@ Companion docs: `BASELINE_FAIRNESS_POLICY.md` (the treatment contract), `MOTIVAT
 | **LiMU-BERT** | Xu et al., SenSys 2021 | **No** (SSL recipe, ~62K params) | **self-pretrain on our corpus** |
 | **harnet / ssl-wearables** | Yuan et al., npj Digit. Med. 2024 | **Yes** (`harnet5/10/30`) | **frozen (released)** |
 | **UniMTS** | Zhang et al., NeurIPS 2024 | **Yes** (274 MB ckpt) | **frozen (released)** |
-| **NormWear** | Tang et al., arXiv 2412.09758 | **Yes** (194M + frozen 1.1B LLM) | **frozen (released)** |
+| **NormWear** | Luo et al., arXiv 2412.09758 | **Yes** (194M + frozen 1.1B LLM) | **frozen (released)** |
 | **ImageBind** | Girdhar et al., CVPR 2023 | **Yes** (`imagebind_huge`, 4.5 GB) | **frozen (released)** |
 
 All six are wired as auto-registered `baselines/<name>/adapter.py` adapters; the four frozen run
@@ -31,6 +31,23 @@ reconstruction, ~62K params). The *faithful* use of an SSL method is to pretrain
 data, so we self-pretrain both on **our** training corpus. This also makes them leakage-free (their
 released example checkpoints, where they exist, were pretrained on datasets that overlap our eval sets)
 and gives a genuine **same-data, same-protocol** comparison. They are small, so this is cheap.
+
+The locked expanded-corpus recipes are:
+
+```bash
+python -m baselines.crosshar.train --recipe full --gpu
+python -m baselines.limubert.train --recipe full --gpu
+```
+
+Both use the 18-source `EXPANDED_PHASE_A_TRAIN_DATASETS` roster with a 20,000-window
+per-stream cap. CrossHAR keeps its published batch 512, paired-axis augmentation,
+masked reconstruction, and final contrastive phase. LiMU-BERT keeps its published
+batch 128 and masked-reconstruction objective. The epoch counts preserve the number
+of examples seen by the validated 12-source runs after distributing those examples
+over the expanded corpus; literal paper epoch counts are not comparable because the
+pooled corpus is much larger than either paper's original pretraining set. Each new
+checkpoint carries a machine-readable corpus and input-contract stamp, and the
+adapters reject stale or mismatched checkpoints.
 
 **Frozen (harnet, UniMTS, NormWear).** These are **released foundation-model products** whose power *is*
 large-scale pretraining we cannot and should not reproduce:
@@ -87,8 +104,35 @@ checked against the upstream repo's own preprocessing code**, not against its pa
 
 ## 4. Evaluation & reporting design
 
+### 4a. What the published models put above their encoders
+
+The baseline papers do not support the claim that every successful HAR model needs an elaborate
+classification engine. Most of their novelty and parameter capacity is in representation learning;
+their final decision rules are usually small. There are two important exceptions: CrossHAR and
+LiMU-BERT use modest sequence models for supervised downstream adaptation, and NormWear learns a
+query-conditioned fusion module before its simple final distance comparison.
+
+| Baseline | Native published downstream decision rule | Where the model's main contribution lies | Our matched enrollment comparison |
+|---|---|---|---|
+| **harnet** | `feature -> Linear(512) -> ReLU -> Linear(classes)` (`EvaClassifier`); the paper either freezes the trunk or fine-tunes it | Large-scale accelerometer SSL and the ResNet feature extractor | Frozen encoder + 1-NN is primary; prototype and fitted heads are secondary controls |
+| **CrossHAR** | A one-layer Transformer over the pretrained sequence, mean pooling, then one linear class layer | Cross-dataset augmentation and hierarchical masked/contrastive pretraining | Frozen encoder + 1-NN is primary; our global-vocabulary ConSE probe is a separate k=0 bridge |
+| **LiMU-BERT** | Default `LIMU-GRU`: two small GRU stages followed by one linear class layer; the paper also compares alternate task heads | BERT-style masked IMU representation learning | Frozen encoder + 1-NN is primary; our global-vocabulary ConSE probe is a separate k=0 bridge |
+| **UniMTS** | Zero-shot: normalized IMU/text dot product with a learned temperature. Few/full-shot: one `Linear(512, classes)` layer, with the encoder frozen or fine-tuned | Simulated all-joint IMU pretraining and motion-text alignment | Frozen encoder + 1-NN is the matched k>=1 comparison; native cosine is used at k=0 |
+| **NormWear** | Query-conditioned MSiTF fusion, then minimum L1 distance to candidate text embeddings | Channel-independent wearable pretraining and signal/text alignment | Frozen fused representation + 1-NN is matched at k>=1; native L1 text matching is used at k=0 |
+| **ImageBind** | Zero-shot: normalized IMU/text similarity; standard downstream evaluation uses linear probes | Large-scale cross-modal binding in a shared embedding space | Frozen encoder + 1-NN is matched at k>=1; native cosine is used at k=0 |
+
+The implementation sources are the official
+[harnet](https://github.com/OxWearables/ssl-wearables),
+[CrossHAR](https://github.com/kingdomrush2/CrossHAR),
+[LiMU-BERT](https://github.com/dapowan/LIMU-BERT-Public),
+[UniMTS](https://github.com/xiyuanzh/UniMTS),
+[NormWear](https://github.com/Mobile-Sensing-and-UbiComp-Laboratory/NormWear), and
+[ImageBind](https://github.com/facebookresearch/ImageBind) repositories. This table describes each
+paper's native head; it must not be confused with our controlled readout comparison, which applies
+the same 1-NN, prototype, ridge, and fitted-linear protocols to every frozen representation.
+
 Three complementary comparisons — each answers a *different* question, and the design mirrors what all
-five baseline papers themselves do (technique attribution via within-method same-data ablation, never by
+six baseline papers themselves do (technique attribution via within-method same-data ablation, never by
 equalizing pretraining data across foundation models):
 
 1. **Frozen-SOTA bar** — harnet, UniMTS, NormWear run **frozen** on our held-out eval sets, each through

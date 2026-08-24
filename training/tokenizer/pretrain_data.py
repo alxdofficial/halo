@@ -600,10 +600,12 @@ class PretrainDataset(Dataset):
     def __init__(self, index: CorpusIndex, keys: list[WindowKey],
                  augment: bool = True, two_view: bool = False,
                  augmentation_config: AugmentationConfig | None = None,
-                 rotation_pairing: str = "shared"):
+                 rotation_pairing: str = "shared",
+                 neutral_acquisition_text: bool = False):
         self.index = index
         self.keys = keys
         self.two_view = two_view
+        self.neutral_acquisition_text = bool(neutral_acquisition_text)
         if rotation_pairing not in {"shared", "independent"}:
             raise ValueError("rotation_pairing must be 'shared' or 'independent'")
         cfg = (augmentation_config or AugmentationConfig.phase_a()) \
@@ -657,6 +659,7 @@ class PretrainDataset(Dataset):
         role_texts, sensor_texts, sensor_id = stream_sensor_texts(
             ref.dataset, ref.stream,
             has_accel=bool(any(ref.mask[:3])), has_gyro=bool(any(ref.mask[3:])),
+            neutral=self.neutral_acquisition_text,
         )
         return IMUSample(
             data=window,
@@ -737,7 +740,9 @@ class PretrainDataset(Dataset):
     def __getitem__(self, i: int) -> dict:
         key = self.keys[i]
         ref = self.index.refs[key.stream_i]
-        base_texts = stream_channel_descriptions(ref.dataset, ref.stream)
+        base_texts = stream_channel_descriptions(
+            ref.dataset, ref.stream, neutral=self.neutral_acquisition_text,
+        )
         slot = {c: k for k, c in enumerate(CHANNELS)}
         # Draw acquisition CONFIG once. Both VICReg views then independently draw only nuisance
         # variation from clones of that configured sample. This is both the intended semantics and

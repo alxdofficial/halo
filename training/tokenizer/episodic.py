@@ -7,14 +7,15 @@ The current trainer is ``training/tokenizer/pretrain_episodic.py`` and the curre
 plans, subject/stream-disjoint support, fixed-size stratified banks, grouped encoder batches, and
 conversion of live encoder output into ``SensorRows``.
 
-The compact engine performs learned retrieval, hard top-k selection, evidence attention, and voting.
-The closed-form scoring helpers retained near the middle of this file are historical evaluation
-controls only; the current trainer does not call them.
+The compact engine performs full-bank cosine voting, a global top-k evidence shortlist, recording-
+level attention, and a learned residual. The closed-form scoring helpers retained near the middle
+of this file are historical evaluation controls only; the current trainer does not call them.
 
 WHAT AN EPISODE CONTAINS
 ------------------------
-    C candidate labels
-    Q query windows per candidate      the things to be classified
+    C candidate labels                 the complete decision roster
+    A queried labels from that roster  the labels represented by this optimizer step
+    Q query windows per queried label  the things to be classified
     k support windows per ENROLLED candidate   the "enrolled" evidence (k=0 .. max_support)
     N background windows from labels OUTSIDE the candidate set, sized so support + background is
       a fixed bank capacity
@@ -63,10 +64,14 @@ VOTE_TEMPERATURE = 0.07
 class EpisodeSpec:
     """Shape of the episodes drawn each step. All counts are per episode."""
 
-    candidate_counts: tuple[int, ...] = (2, 4, 8, 16)
+    candidate_counts: tuple[int, ...] = (8, 16, 32, 64)
+    query_labels_per_episode: int = 4
     queries_per_candidate: int = 2
     max_support: int = 4
     background_windows: int = 16
+    #: Fixed memory capacity used to keep random partial enrollment feasible when C * k exceeds the
+    #: bank. None preserves the unconstrained standalone planner used by small unit tests.
+    max_memory_windows: int | None = None
     #: Fraction of positive-support episodes that replace canonical names with neutral episode-local
     #: aliases. Every candidate is enrolled in those episodes because an unseen arbitrary name with
     #: no support is information-theoretically unanswerable.
@@ -76,7 +81,7 @@ class EpisodeSpec:
     #:             regime HALO claims (unseen acquisition configurations). Measured on this corpus,
     #:             'subject' leaves a +42.4 point stream-identity lift for the correct answer.
     disjointness: str = "subject"
-    #: Draw EVERY candidate's queries from one acquisition stream. Combined with
+    #: Draw every active query from one acquisition stream. Combined with
     #: disjointness='stream' this drives the provenance lift to exactly zero: no support row shares
     #: any candidate's query stream, so device identity cannot favour one candidate over another.
     #: It is also what deployment looks like — one query arrives from one device.
@@ -85,12 +90,16 @@ class EpisodeSpec:
     def validate(self) -> None:
         if not self.candidate_counts or min(self.candidate_counts) < 2:
             raise ValueError("an episode needs at least two candidate labels")
+        if self.query_labels_per_episode < 1:
+            raise ValueError("query_labels_per_episode must be positive")
         if self.queries_per_candidate < 1:
             raise ValueError("queries_per_candidate must be positive")
         if self.max_support < 0:
             raise ValueError("max_support cannot be negative")
         if self.background_windows < 0:
             raise ValueError("background_windows cannot be negative")
+        if self.max_memory_windows is not None and self.max_memory_windows < 1:
+            raise ValueError("max_memory_windows must be positive when set")
         if not 0.0 <= self.alias_episode_fraction <= 1.0:
             raise ValueError("alias_episode_fraction must be in [0,1]")
         if self.disjointness not in {"subject", "stream"}:
@@ -117,7 +126,7 @@ class EpisodePlan:
     query_slot: tuple[int, ...]           # candidate slot each query belongs to
     support_positions: tuple[int, ...]
     support_slot: tuple[int, ...]         # candidate slot each support window is bound to
-    background_positions: tuple[int, ...]
+    background_positions: Sequence[int]
     support_k: int                        # requested k for this episode (0 = zero-shot episode)
     enrolled_slots: tuple[int, ...]       # candidate slots that actually received support
     label_mode: str = "coherent"          # coherent | random_alias
@@ -135,7 +144,10 @@ class EpisodePlan:
         return len(self.background_positions)
 
     def flat_positions(self) -> list[int]:
-        return list(self.query_positions + self.support_positions + self.background_positions)
+        # Background banks may use a compact integer array at production scale. Convert each field
+        # independently rather than relying on tuple concatenation.
+        return (list(self.query_positions) + list(self.support_positions)
+                + list(self.background_positions))
 
     def expected_labels(self) -> list[int]:
         """Label id per flat batch row for queries and support (background is unconstrained)."""
@@ -304,6 +316,8 @@ def build_episode_plans(
     query_table: dict[int, dict[int, np.ndarray]] | None = None,
     execution_ids: np.ndarray | None = None,
     alias_schedule: np.ndarray | None = None,
+    query_pool: Sequence[int] | None = None,
+    candidate_schedule: Sequence[int] | None = None,
 ) -> list[EpisodePlan]:
     """Materialise every episode up front.
 
@@ -311,10 +325,9 @@ def build_episode_plans(
     agree on which episode they are looking at, and a shared RNG advanced from two places is the
     classic way for them to silently disagree. A list is indexed by both, so they cannot.
 
-    ``support_schedule`` pins k round-robin instead of drawing it. VALIDATION MUST USE IT: with a
-    random draw the k cells a run reports depend on the seed and the episode count, so two arms are
-    not comparable and k=0 — the zero-shot canary this design exists to protect — can be absent
-    entirely. Training leaves it None; a random k there is the intended curriculum.
+    ``support_schedule`` pins k round-robin instead of drawing it. Both current training and
+    validation use the explicit 0/1/2/4/8/16 grid: validation needs matched cells, while training
+    must not let the many unreported integer values between them dilute the deployment conditions.
     """
     spec.validate()
     if spec.disjointness == "stream" and spec.max_support > 0 and stream_ids is None:
@@ -332,10 +345,43 @@ def build_episode_plans(
         )
     rng = np.random.default_rng(seed)
     pool_array = np.asarray(pool, dtype=np.int64)
+    query_pool_array = np.asarray(pool if query_pool is None else query_pool, dtype=np.int64)
+    if not set(query_pool_array.tolist()).issubset(set(pool_array.tolist())):
+        raise ValueError("query_pool must be a subset of the candidate-label pool")
+    if candidate_schedule is not None:
+        if len(candidate_schedule) != n_episodes:
+            raise ValueError("candidate_schedule must contain one count per episode")
+        if not set(int(value) for value in candidate_schedule).issubset(spec.candidate_counts):
+            raise ValueError("candidate_schedule contains a count outside EpisodeSpec")
     plans: list[EpisodePlan] = []
-    for _ in range(n_episodes):
-        n_candidates = int(rng.choice(spec.candidate_counts))
-        candidates = rng.choice(pool_array, n_candidates, replace=False).tolist()
+    for episode in range(n_episodes):
+        n_candidates = (
+            int(rng.choice(spec.candidate_counts)) if candidate_schedule is None
+            else int(candidate_schedule[episode])
+        )
+        n_query_labels = min(spec.query_labels_per_episode, n_candidates)
+        if len(query_pool_array) < n_query_labels:
+            raise ValueError(
+                f"episode needs {n_query_labels} query labels but its query pool has only "
+                f"{len(query_pool_array)}"
+            )
+        queried_labels = rng.choice(
+            query_pool_array, n_query_labels, replace=False,
+        ).astype(np.int64)
+        distractor_pool = pool_array[~np.isin(pool_array, queried_labels)]
+        n_distractors = n_candidates - n_query_labels
+        if len(distractor_pool) < n_distractors:
+            raise ValueError("candidate pool cannot supply the requested distractor labels")
+        distractors = rng.choice(
+            distractor_pool, n_distractors, replace=False,
+        ).astype(np.int64)
+        candidates_array = np.concatenate((queried_labels, distractors))
+        rng.shuffle(candidates_array)
+        candidates = candidates_array.tolist()
+        queried_set = set(int(value) for value in queried_labels)
+        queried_slots = {
+            slot for slot, label in enumerate(candidates) if int(label) in queried_set
+        }
         support_k = (int(rng.integers(0, spec.max_support + 1)) if support_schedule is None
                      else int(support_schedule[len(plans) % len(support_schedule)]))
         if support_k > spec.max_support:
@@ -353,22 +399,33 @@ def build_episode_plans(
             "random_alias"
             if support_k > 0 and rng.random() < alias_fraction else "coherent"
         )
-        enrolled = (
-            set(range(n_candidates))
-            if label_mode == "random_alias" else (
-                set() if support_k == 0 else set(
-                    rng.choice(n_candidates, int(rng.integers(1, n_candidates + 1)),
-                               replace=False).tolist()
-                )
+        enrollment_capacity = n_candidates
+        if support_k > 0 and spec.max_memory_windows is not None:
+            enrollment_capacity = min(
+                enrollment_capacity, spec.max_memory_windows // support_k,
+            )
+        if label_mode == "random_alias" and enrollment_capacity < n_candidates:
+            raise ValueError(
+                "random-alias episodes require every candidate to be enrolled, but C * k exceeds "
+                "the configured memory capacity"
+            )
+        enrolled = set(range(n_candidates)) if label_mode == "random_alias" else (
+            set() if support_k == 0 or enrollment_capacity == 0 else set(
+                rng.choice(
+                    n_candidates, int(rng.integers(1, enrollment_capacity + 1)), replace=False,
+                ).tolist()
             )
         )
 
         query_positions: list[int] = []
         query_slot: list[int] = []
+        query_subject_by_slot: dict[int, int] = {}
         support_positions: list[int] = []
         support_slot: list[int] = []
         actually_enrolled: list[int] = []
         for slot, label in enumerate(candidates):
+            if slot not in queried_slots:
+                continue
             by_subject = (query_table[int(label)] if query_table is not None
                           else table[int(label)])
             capable = sorted(
@@ -377,6 +434,7 @@ def build_episode_plans(
                 >= spec.queries_per_candidate
             )
             query_subject = int(rng.choice(capable))
+            query_subject_by_slot[slot] = query_subject
             rows = by_subject[query_subject]
             if execution_ids is None:
                 picked = rng.choice(rows, spec.queries_per_candidate, replace=False)
@@ -392,12 +450,17 @@ def build_episode_plans(
             query_positions.extend(int(v) for v in picked)
             query_slot.extend([slot] * spec.queries_per_candidate)
 
+        query_streams = (
+            np.unique(stream_ids[np.asarray(query_positions)])
+            if spec.disjointness == "stream" else np.asarray([], dtype=np.int64)
+        )
+        for slot, label in enumerate(candidates):
             if slot not in enrolled:
                 continue
             # Support is drawn from the label's FULL window set, not the (possibly stream-restricted)
             # query view — otherwise a shared-query-stream episode could only ever enroll on-device.
             other = [rows for subject, rows in table[int(label)].items()
-                     if subject != query_subject]
+                     if subject != query_subject_by_slot.get(slot)]
             if not other:
                 continue                   # eligibility guarantees this only when max_support == 0
             available = np.concatenate(other)
@@ -405,24 +468,26 @@ def build_episode_plans(
                 # Support must also come off a DIFFERENT device. Otherwise "which candidate's
                 # evidence was recorded on my hardware" answers the episode without recognising
                 # anything, and that is exactly the cue the cross-configuration claim forbids.
-                query_streams = np.unique(stream_ids[np.asarray(picked)])
                 available = available[~np.isin(stream_ids[available], query_streams)]
                 if not len(available):
                     continue               # nothing enrollable off-device for this candidate
             available_units = (
                 np.unique(execution_ids[available]) if execution_ids is not None else available
             )
-            take = min(support_k, len(available_units))
-            if take == 0:
+            # ``support_k`` is part of the reported experimental condition. Silently taking fewer
+            # executions makes a cell labelled k=16 an unknown mixture of k=1..16. Partial
+            # enrollment already permits a candidate to have no support, so leave an ineligible
+            # candidate unenrolled instead and keep k exact for every candidate that is enrolled.
+            if support_k == 0 or len(available_units) < support_k:
                 continue
-            chosen_units = rng.choice(available_units, take, replace=False)
+            chosen_units = rng.choice(available_units, support_k, replace=False)
             chosen = (
                 np.asarray([rng.choice(available[execution_ids[available] == execution])
                             for execution in chosen_units], dtype=np.int64)
                 if execution_ids is not None else chosen_units
             )
             support_positions.extend(int(v) for v in chosen)
-            support_slot.extend([slot] * take)
+            support_slot.extend([slot] * support_k)
             actually_enrolled.append(slot)
 
         background_positions: list[int] = []
@@ -476,6 +541,7 @@ def build_shared_stream_plans(
     support_schedule: tuple[int, ...] | None = None,
     execution_ids: np.ndarray | None = None,
     alias_schedule: np.ndarray | None = None,
+    candidate_schedule: Sequence[int] | None = None,
 ) -> list[EpisodePlan]:
     """Episodes whose every query comes from ONE acquisition stream.
 
@@ -492,8 +558,10 @@ def build_shared_stream_plans(
         raise ValueError("build_shared_stream_plans requires spec.shared_query_stream")
     rng = np.random.default_rng(seed)
     allowed = set(pool)
-    # A stream can host an episode only if it carries enough of the pool's labels with enough
-    # windows from a single subject to fill the queries.
+    required_queries = min(spec.query_labels_per_episode, min(spec.candidate_counts))
+    # A stream only has to carry the labels that supply queries. The remaining candidates are
+    # distractors drawn from the global concept pool, exactly as they are at deployment. Requiring
+    # all C labels on one stream made large-C episodes possible only on a few label-rich datasets.
     usable: dict[int, list[int]] = {}
     for stream, by_label in stream_table.items():
         labels = [
@@ -503,32 +571,21 @@ def build_shared_stream_plans(
                 >= spec.queries_per_candidate for rows in by_subject.values()
             )
         ]
-        # Same reservation as build_episode_plans: background comes from a label outside the
-        # candidate set, so the stream must carry at least one more label than the episode uses.
-        if len(labels) >= min(spec.candidate_counts) + (1 if spec.background_windows else 0):
+        if len(labels) >= required_queries:
             usable[int(stream)] = sorted(labels)
     if not usable:
         raise ValueError(
-            f"no acquisition stream carries {min(spec.candidate_counts)} eligible labels with "
+            f"no acquisition stream carries {required_queries} eligible query labels with "
             f"{spec.queries_per_candidate} windows from one subject; shared-query-stream episodes "
             "are not constructible on this corpus subset"
         )
     streams = sorted(usable)
-    # Draw the CANDIDATE COUNT first, then a stream that can supply it -- not the other way round.
-    #
-    # Choosing the stream first silently truncated the episode to whatever that stream happened to
-    # carry, and streams are label-poor (median 11 training labels; only 20 of 56 carry 16 or more).
-    # Measured on this corpus, that turned a uniform draw over {2,4,8,16} into 45% / 30% / 17% / 8%:
-    # nearly half of all episodes were binary, mean candidates 4.69 instead of 7.74, and chance
-    # accuracy 32.8% instead of 22.2%. Every reported number sat against that inflated floor, and
-    # C=16 -- the hardest cell -- was 8% of training.
-    #
-    # The cost of the fix is a bias in WHICH streams host the large-C episodes, since only the
-    # label-rich ones can. That is a narrower distortion than biasing task difficulty itself, and
-    # `stream_coverage` below reports it rather than leaving it implicit.
+    # Draw C first, then a stream that can supply only the active query labels. Candidate-only
+    # distractors do not consume encoder work and do not bias large-C episodes toward label-rich
+    # datasets.
     capable = {
         count: [s for s in streams
-                if len(usable[s]) - (1 if spec.background_windows else 0) >= count]
+                if len(usable[s]) >= min(spec.query_labels_per_episode, count)]
         for count in spec.candidate_counts
     }
     counts_available = tuple(c for c in spec.candidate_counts if capable[c])
@@ -537,11 +594,19 @@ def build_shared_stream_plans(
             f"no acquisition stream can supply any of the requested candidate counts "
             f"{spec.candidate_counts}"
         )
+    if candidate_schedule is not None:
+        if len(candidate_schedule) != n_episodes:
+            raise ValueError("candidate_schedule must contain one count per episode")
+        unavailable = set(int(value) for value in candidate_schedule) - set(counts_available)
+        if unavailable:
+            raise ValueError(f"candidate schedule requests unavailable counts {sorted(unavailable)}")
     plans: list[EpisodePlan] = []
     for episode in range(n_episodes):
-        n_candidates = int(rng.choice(counts_available))
+        n_candidates = (
+            int(rng.choice(counts_available)) if candidate_schedule is None
+            else int(candidate_schedule[episode])
+        )
         stream = int(rng.choice(capable[n_candidates]))
-        labels = usable[stream]
         episode_spec = dataclasses.replace(spec, candidate_counts=(n_candidates,))
         if alias_schedule is not None:
             episode_spec = dataclasses.replace(
@@ -550,10 +615,10 @@ def build_shared_stream_plans(
             support_schedule[len(plans) % len(support_schedule)],
         )
         plans.extend(build_episode_plans(
-            table, labels, n_episodes=1, spec=episode_spec,
+            table, pool, n_episodes=1, spec=episode_spec,
             seed=int(rng.integers(0, 2**31 - 1)), support_schedule=schedule,
             stream_ids=stream_ids, query_table=stream_table[stream],
-            execution_ids=execution_ids,
+            execution_ids=execution_ids, query_pool=usable[stream],
         ))
     return plans
 
@@ -692,10 +757,10 @@ def live_sensor_rows(
 ) -> LiveRows:
     """Flatten one encoded batch into ``SensorRows``, the deployment retrieval unit.
 
-    A retrieval row is one (patch, sensor) pair, exactly as ``build_memory`` stores them: rows are
-    taken from ``retrieval_tokens`` (sensor-isolated temporal attention, before descriptor
-    conditioning and before cross-sensor mixing), so an accelerometer row does not depend on whether
-    a gyroscope happened to coexist.
+    A retrieval row is one (patch, sensor) pair, exactly as ``build_memory`` stores it. Under the
+    active temporal trunk, ``retrieval_tokens`` is the final three-layer, descriptor-conditioned
+    temporal output. It remains sensor-isolated because that trunk never mixes sensor slots, so an
+    accelerometer row does not depend on whether a gyroscope happened to coexist.
 
     ``select`` restricts the flattening to a subset of batch rows (queries, support, background),
     which is how one forward pass serves all three roles.
@@ -703,8 +768,8 @@ def live_sensor_rows(
     tokens = out.get("retrieval_tokens")
     if tokens is None:
         raise KeyError(
-            "the encoder returned no retrieval_tokens; episodic training requires a "
-            "use_sensor_isolated_retrieval encoder (the rows Phase B deploys)"
+            "the encoder returned no retrieval_tokens; episodic training requires the per-sensor "
+            "patch rows that Phase B deploys"
         )
     present = out["sensor_present"]                                  # (B, N)
     patch_pad = batch["patch_padding_mask"].to(tokens.device)        # (B, P_source)

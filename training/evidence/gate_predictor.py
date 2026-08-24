@@ -123,6 +123,7 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
     from model.blocks import AttentionSpec
     from model.evidence.engine import EngineConfig, EvidenceEngine
     from model.evidence.evidence_mixer import EvidenceMixerConfig
+    from model.evidence.evidence_reranker import EvidenceRerankerConfig
     from model.evidence.retrieval_scorer import PairScorerConfig
 
     blob = torch.load(path, map_location="cpu", weights_only=False)
@@ -134,6 +135,13 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
         raise ValueError(
             "checkpoint carries engine weights but no engine_config; it cannot be rebuilt without "
             "guessing its shape, and a guess would report the wrong model under the right name"
+        )
+    has_reranker = "reranker.row_head.weight" in state
+    has_historical_mixer = "mixer.residual_head.weight" in state
+    if not has_reranker and not has_historical_mixer:
+        raise ValueError(
+            "checkpoint has evidence-engine weights but neither the current scalar reranker nor "
+            "the supported historical candidate-residual mixer"
         )
     scorer_cfg = dict(saved.get("scorer", {}))
     if "learned" not in scorer_cfg:
@@ -148,6 +156,9 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
         top_k=int(saved["top_k"]),
         scorer=PairScorerConfig(**saved.get("scorer", {})),
         mixer=EvidenceMixerConfig(**saved.get("mixer", {})),
+        reranker=EvidenceRerankerConfig(**saved.get("reranker", {})),
+        mixing=saved.get("mixing", "rerank" if has_reranker else "attention"),
+        vote_scope=saved.get("vote_scope", "bank"),
     )
     engine = EvidenceEngine(encoder, cfg)
     if encoder is not None:
@@ -700,17 +711,14 @@ def predict_bank_grouped(
             engine, query_rows, rows, candidate_text, label_text,
             top_k=top_k, generator=engine_generator,
         )
-    logits = grouped_sum(per_sensor)
+    logits = per_sensor if engine is not None else grouped_sum(per_sensor)
     # Arbitrary aliases intentionally disable semantic admissibility, so the learned and disabled
     # paths are identical by definition. Reusing the result avoids a redundant full retrieval pass
     # and makes that protocol invariant exact rather than merely expected.
-    identity_per_sensor = (
-        per_sensor
-        if not semantic_labels else vote(
-            scores, rows, candidate_text, label_text, torch.ones_like(adm),
-            top_k=top_k, temperature=temperature,
-            allow_corpus_text_vote=True,
-        )
+    identity_per_sensor = vote(
+        scores, rows, candidate_text, label_text, torch.ones_like(adm),
+        top_k=top_k, temperature=temperature,
+        allow_corpus_text_vote=semantic_labels,
     )
     aux = {
         "identity_logits": grouped_sum(identity_per_sensor),

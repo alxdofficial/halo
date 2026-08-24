@@ -88,7 +88,6 @@ def test_engine_checkpoint_round_trips_its_full_configuration(tmp_path):
 
     cfg = EngineConfig(spec=AttentionSpec(d_model=16, n_heads=4, ffn_mult=3, dropout=0.05),
                        trunk_layers=2, top_k=5)
-    cfg = cfg.with_readout("semantic")
     source = EvidenceEngine(None, cfg)
     path = tmp_path / "engine.pt"
     torch.save({"evidence_engine": source.state_dict(),

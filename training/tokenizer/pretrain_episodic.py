@@ -4,7 +4,8 @@ Each episode has its own candidate set, query executions, enrolled support, and 
 stratified memory bank.  Several episodes share one encoder forward for throughput, but never share
 candidate identities or attention.  The exact compact deployment path is optimized end to end:
 
-    temporal sensor encoder -> learned pair scorer -> hard top-k -> evidence mixer -> text vote
+    temporal sensor encoder -> full-bank cosine retrieval
+                            -> global top-k scalar evidence reranker -> fixed evidence vote
 
 The default input is clean.  Signal augmentation is an explicit experiment, not hidden in the
 reference recipe.
@@ -17,9 +18,14 @@ import dataclasses
 import hashlib
 import json
 import math
+import multiprocessing as mp
+import os
 import time
+from array import array
+from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -30,6 +36,7 @@ from data.scripts.augmentations import AugmentationConfig
 from model.blocks import AttentionSpec
 from model.evidence.engine import EngineConfig, EvidenceEngine
 from model.evidence.evidence_mixer import EvidenceMixerConfig
+from model.evidence.evidence_reranker import EvidenceRerankerConfig
 from model.evidence.retrieval_scorer import PairScorerConfig
 from model.tokenizer.encoder import SetTokenizerEncoder
 from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
@@ -46,12 +53,14 @@ from training.tokenizer.episodic import (
     episode_binding,
     episode_row_roles,
     label_window_table,
+    LiveRows,
     live_sensor_rows,
     macro_f1,
     matched_support_variants,
     retrieval_alignment_loss,
     provenance_lift,
     sample_bank_positions,
+    select_rows,
     sensor_modality_codes,
     stream_label_table,
 )
@@ -241,6 +250,24 @@ def encode_batch(encoder: SetTokenizerEncoder, batch: dict, device: torch.device
     return encoded
 
 
+_DEVICE_BATCH_FIELDS = (
+    "patches", "rates", "patch_len", "positions", "patch_durations", "channel_mask",
+    "patch_padding_mask", "sensor_id", "source_rates", "labels", "sensor_bias",
+)
+
+
+def batch_to_device(batch: dict, device: torch.device) -> dict:
+    """Issue one nonblocking transfer per tensor and reuse those tensors throughout the step."""
+    if device.type == "cpu":
+        return batch
+    moved = dict(batch)
+    for name in _DEVICE_BATCH_FIELDS:
+        value = moved.get(name)
+        if torch.is_tensor(value):
+            moved[name] = value.to(device, non_blocking=True)
+    return moved
+
+
 def _offset_plan(plan: EpisodePlan, offset: int) -> EpisodePlan:
     """Move query/support positions into a combined train+validation dataset."""
     return dataclasses.replace(
@@ -250,19 +277,55 @@ def _offset_plan(plan: EpisodePlan, offset: int) -> EpisodePlan:
     )
 
 
+_BANK_BUILD_STATE = None
+
+
+def _sample_training_bank(job: tuple[int, int]) -> array:
+    """Process worker for deterministic, compact training-bank construction."""
+    index, seed = job
+    plans, bank, bank_spec = _BANK_BUILD_STATE
+    plan = plans[index]
+    remaining = bank_spec.n_windows - plan.n_support
+    if remaining < 0:
+        raise ValueError(
+            f"episode support uses {plan.n_support} windows but the bank holds only "
+            f"{bank_spec.n_windows}"
+        )
+    positions = sample_bank_positions(
+        bank, spec=bank_spec, n_windows=remaining,
+        exclude_labels=plan.candidates, rng=np.random.default_rng(seed + index),
+    )
+    if positions and max(positions) >= 2 ** 32:
+        raise ValueError("corpus position exceeds the compact uint32 episode-plan format")
+    return array("I", positions)
+
+
 def _attach_training_banks(
     plans: list[EpisodePlan], bank, bank_spec: BankSpec, seed: int,
 ) -> list[EpisodePlan]:
-    rng = np.random.default_rng(seed)
-    out = []
-    for plan in plans:
-        n_background = bank_spec.n_windows - plan.n_support
-        positions = sample_bank_positions(
-            bank, spec=bank_spec, n_windows=n_background,
-            exclude_labels=plan.candidates, rng=rng,
-        )
-        out.append(dataclasses.replace(plan, background_positions=tuple(positions)))
-    return out
+    """Attach stratified banks, parallelizing only the large production build.
+
+    Fork workers share the read-only corpus tables and return compact uint32 arrays. Every episode
+    has its own seed, so results are deterministic and independent of worker scheduling. Small tests
+    and smoke runs stay serial, and platforms without fork retain the reference path.
+    """
+    global _BANK_BUILD_STATE
+    _BANK_BUILD_STATE = (plans, bank, bank_spec)
+    workers = min(8, max(1, (os.cpu_count() or 2) // 2))
+    use_pool = len(plans) >= 512 and workers > 1 and "fork" in mp.get_all_start_methods()
+    jobs = [(index, seed) for index in range(len(plans))]
+    try:
+        if use_pool:
+            with mp.get_context("fork").Pool(workers) as pool:
+                backgrounds = pool.map(_sample_training_bank, jobs, chunksize=32)
+        else:
+            backgrounds = [_sample_training_bank(job) for job in jobs]
+    finally:
+        _BANK_BUILD_STATE = None
+    return [
+        dataclasses.replace(plan, background_positions=background)
+        for plan, background in zip(plans, backgrounds)
+    ]
 
 
 def _matched_validation_plans(
@@ -281,7 +344,7 @@ def _matched_validation_plans(
         for variant in matched_support_variants(base, support_grid):
             keep = bank_spec.n_windows - variant.n_support
             out.append(dataclasses.replace(
-                variant, background_positions=tuple(full_background[:keep]),
+                variant, background_positions=array("I", full_background[:keep]),
             ))
     return out
 
@@ -308,26 +371,232 @@ def alias_curriculum(
     return (fraction * float(target)).astype(np.float64)
 
 
+def support_count_grid(max_support: int, regime: str = "unified") -> tuple[int, ...]:
+    """Support schedule for a unified, zero-shot-only, or enrollment-only Phase-B head."""
+    if regime not in {"unified", "zero-shot", "enrollment"}:
+        raise ValueError(f"unknown Phase-B regime: {regime}")
+    if regime == "zero-shot":
+        return (0,)
+    if regime == "enrollment" and max_support < 1:
+        raise ValueError("enrollment-only training requires max_support >= 1")
+    canonical = (0, 1, 2, 4, 8, 16)
+    values = [value for value in canonical if value <= max_support]
+    if max_support not in values:
+        values.append(max_support)
+    result = tuple(sorted(set(values)))
+    return tuple(value for value in result if value > 0) if regime == "enrollment" else result
+
+
+def episode_distribution(plans: list[EpisodePlan]) -> dict[str, object]:
+    """Compact, persisted audit of the actual task shapes sampled for a run."""
+    if not plans:
+        raise ValueError("cannot summarize an empty episode plan")
+
+    def counts(values) -> dict[str, int]:
+        return {str(key): int(value) for key, value in sorted(Counter(values).items())}
+
+    return {
+        "episodes": len(plans),
+        "candidate_count": counts(len(plan.candidates) for plan in plans),
+        "support_k": counts(plan.support_k for plan in plans),
+        "query_label_count": counts(len(set(plan.query_slot)) for plan in plans),
+        "query_windows": counts(plan.n_query for plan in plans),
+        "support_windows_mean": float(np.mean([plan.n_support for plan in plans])),
+        "support_windows_max": max(plan.n_support for plan in plans),
+        "enrolled_candidates_mean": float(np.mean([
+            len(plan.enrolled_slots) for plan in plans
+        ])),
+    }
+
+
 def _make_plans(
     table, stream_table, pool, spec, streams, executions, *, n_episodes, seed, schedule=None,
-    alias_schedule=None,
+    alias_schedule=None, candidate_schedule=None,
 ) -> list[EpisodePlan]:
     if spec.shared_query_stream:
         return build_shared_stream_plans(
             table, stream_table, pool, n_episodes=n_episodes, spec=spec, seed=seed,
             stream_ids=streams, support_schedule=schedule, execution_ids=executions,
-            alias_schedule=alias_schedule,
+            alias_schedule=alias_schedule, candidate_schedule=candidate_schedule,
         )
     return build_episode_plans(
         table, pool, n_episodes=n_episodes, spec=spec, seed=seed,
         support_schedule=schedule, stream_ids=streams, execution_ids=executions,
-        alias_schedule=alias_schedule,
+        alias_schedule=alias_schedule, candidate_schedule=candidate_schedule,
     )
+
+
+def grouped_candidate_schedule(
+    steps: int, episodes_per_step: int, candidate_counts: tuple[int, ...], seed: int,
+) -> np.ndarray:
+    """Balanced random step order with one tensor shape shared by every episode in a step."""
+    if steps < 1 or episodes_per_step < 1 or not candidate_counts:
+        raise ValueError("steps, episodes_per_step, and candidate_counts must be nonempty")
+    step_counts = np.resize(np.asarray(candidate_counts, dtype=np.int64), steps)
+    np.random.default_rng(seed).shuffle(step_counts)
+    return np.repeat(step_counts, episodes_per_step)
 
 
 def _grad_norm(parameters) -> float:
     gradients = [p.grad.detach().float().norm() for p in parameters if p.grad is not None]
     return float(torch.linalg.vector_norm(torch.stack(gradients))) if gradients else 0.0
+
+
+def prepare_live_batch(
+    encoded: dict, batch: dict, plans: list[EpisodePlan], offsets, device: torch.device,
+) -> tuple[LiveRows, torch.Tensor]:
+    """Flatten a shared encoder output once and attach every episode's support bindings.
+
+    Grouped episodes occupy disjoint contiguous ranges in the DataLoader batch. Re-flattening the
+    same encoded tensor separately for query and memory in every episode repeated modality checks,
+    descriptor normalization, nonzero scans, and small host-to-device copies eight times per default
+    optimizer step. One canonical row table is both cheaper and less likely to let role-specific
+    plumbing drift.
+    """
+    labels = batch["labels"].to(device, non_blocking=True)
+    binding_values: list[int] = []
+    expected_size = 0
+    for plan, offset in zip(plans, offsets):
+        if int(offset) != expected_size:
+            raise RuntimeError("grouped episode offsets are not contiguous")
+        binding_values.extend([-1] * plan.n_query)
+        binding_values.extend(int(slot) for slot in plan.support_slot)
+        binding_values.extend([-1] * plan.n_background)
+        expected_size += len(plan.flat_positions())
+    if expected_size != len(labels):
+        raise RuntimeError(
+            f"episode plans cover {expected_size} windows but the batch contains {len(labels)}"
+        )
+    binding = torch.tensor(binding_values, dtype=torch.long, device=device)
+    return live_sensor_rows(
+        encoded, batch, labels=labels, enrolled_candidate=binding,
+    ), labels
+
+
+def _live_episode_rows(
+    live: LiveRows, plan: EpisodePlan, row_offset: int,
+) -> tuple[LiveRows, LiveRows]:
+    """Slice one independent episode from the shared encoder-row table."""
+    window = live.window
+    query_end = row_offset + plan.n_query
+    episode_end = row_offset + len(plan.flat_positions())
+    query_rows = torch.nonzero(
+        window.ge(row_offset) & window.lt(query_end), as_tuple=True,
+    )[0]
+    memory_rows = torch.nonzero(
+        window.ge(query_end) & window.lt(episode_end), as_tuple=True,
+    )[0]
+    return select_rows(live, query_rows), select_rows(live, memory_rows)
+
+
+def _finish_episode(
+    result: dict,
+    plan: EpisodePlan,
+    query: LiveRows,
+    memory: LiveRows,
+    query_i: torch.Tensor,
+    label_text: torch.Tensor,
+    *,
+    aux_weight: float,
+    aux_temperature: float,
+    no_regression_weight: float,
+    reference_mode: str,
+) -> dict:
+    """Apply the common objective and telemetry contract to one engine result."""
+    expected_windows = query_i.to(result["query_window"].device)
+    if not torch.equal(result["query_window"], expected_windows):
+        raise RuntimeError(
+            "recording-level engine output and episode query order disagree; predictions would be "
+            "assigned to the wrong windows"
+        )
+    logits = result["logits"]
+    base_logits = result["base_logits"]
+    target = torch.tensor(plan.query_slot, dtype=torch.long, device=logits.device)
+    task_per_query = F.cross_entropy(logits, target, reduction="none")
+    base_per_query = F.cross_entropy(base_logits.detach(), target, reduction="none")
+    one_nn_logits = result["enrolled_1nn_logits"].detach()
+    one_nn_available = result["enrolled_1nn_available"]
+    one_nn_per_query = F.cross_entropy(one_nn_logits, target, reduction="none")
+    one_nn_valid = (
+        one_nn_available.gather(1, target.unsqueeze(1)).squeeze(1)
+        & one_nn_available.sum(dim=1).ge(2)
+    )
+    if reference_mode == "semantic_vote":
+        reference_per_query = base_per_query
+    elif reference_mode == "enrolled_1nn":
+        reference_per_query = torch.where(one_nn_valid, one_nn_per_query, base_per_query)
+    else:
+        raise ValueError(f"unknown no-regression reference: {reference_mode}")
+    no_regression = F.relu(task_per_query - reference_per_query).mean()
+    loss = task_per_query.mean() + float(no_regression_weight) * no_regression
+    aux = loss.new_zeros(())
+    if aux_weight:
+        aux = retrieval_alignment_loss(
+            result["scores"], query.rows.label, memory.rows.label, label_text,
+            temperature=aux_temperature,
+        )
+        loss = loss + aux_weight * aux
+    prediction = logits.argmax(dim=1)
+    base_prediction = base_logits.argmax(dim=1)
+    one_nn_prediction = one_nn_logits.argmax(dim=1)
+    out = {
+        "loss": loss,
+        "task_loss": float(task_per_query.mean().detach()),
+        "base_loss": float(base_per_query.mean().detach()),
+        "reference_loss": float(reference_per_query.mean().detach()),
+        "enrolled_1nn_loss": (
+            float(one_nn_per_query[one_nn_valid].mean().detach())
+            if bool(one_nn_valid.any()) else 0.0
+        ),
+        "no_regression_loss": float(no_regression.detach()),
+        "aux_loss": float(aux.detach()),
+        "truth": target.detach().cpu().tolist(),
+        "prediction": prediction.detach().cpu().tolist(),
+        "base_prediction": base_prediction.detach().cpu().tolist(),
+        "enrolled_1nn_prediction": one_nn_prediction.detach().cpu().tolist(),
+        "enrolled_1nn_valid": one_nn_valid.detach().cpu().tolist(),
+        "truth_label": [plan.candidates[int(slot)] for slot in target.detach().cpu()],
+        "prediction_label": [plan.candidates[int(slot)] for slot in prediction.detach().cpu()],
+        "support_k": plan.support_k,
+        "label_mode": plan.label_mode,
+        "memory_rows": len(memory.rows.feature),
+    }
+    if "stats" in result:
+        stats = dict(result["stats"])
+        selected_bound = memory.rows.enrolled_candidate[result["selected"]]
+        stats["retrieval/true_support_selected_share"] = float(
+            selected_bound.eq(target.unsqueeze(1)).float().mean()
+        )
+        stats["episode/accuracy"] = float(prediction.eq(target).float().mean())
+        stats["episode/base_accuracy"] = float(base_prediction.eq(target).float().mean())
+        stats["episode/enrolled_1nn_coverage"] = float(one_nn_valid.float().mean())
+        stats["episode/enrolled_1nn_accuracy"] = (
+            float(one_nn_prediction[one_nn_valid].eq(target[one_nn_valid]).float().mean())
+            if bool(one_nn_valid.any()) else 0.0
+        )
+        stats["episode/changed_to_correct"] = float(
+            ((prediction == target) & (base_prediction != target)).float().mean()
+        )
+        stats["episode/changed_to_wrong"] = float(
+            ((prediction != target) & (base_prediction == target)).float().mean()
+        )
+        stats["episode/prediction_changed"] = float(
+            prediction.ne(base_prediction).float().mean()
+        )
+        stats["episode/candidate_count"] = float(len(plan.candidates))
+        stats["episode/query_label_count"] = float(len(set(plan.query_slot)))
+        stats["episode/enrolled_candidate_count"] = float(len(plan.enrolled_slots))
+        query_slots = set(plan.query_slot)
+        stats["episode/enrolled_query_label_count"] = float(
+            len(query_slots & set(plan.enrolled_slots))
+        )
+        stats["episode/enrolled_distractor_count"] = float(
+            len(set(plan.enrolled_slots) - query_slots)
+        )
+        stats["episode/chance_accuracy"] = 1.0 / len(plan.candidates)
+        stats.update(representation_health(query.rows.feature, "query_repr"))
+        out["stats"] = stats
+    return out
 
 
 def run_episode(
@@ -339,16 +608,21 @@ def run_episode(
     device: torch.device,
     *,
     encoded_out: dict | None = None,
+    live_out: LiveRows | None = None,
+    labels_out: torch.Tensor | None = None,
     row_offset: int = 0,
     seed: int = 0,
     collect_stats: bool = False,
     aux_weight: float = 0.0,
     aux_temperature: float = 0.1,
+    no_regression_weight: float = 0.0,
+    reference_mode: str = "semantic_vote",
 ) -> dict:
     """Run one independent episode through the exact compact deployment rule."""
     if engine.encoder is None:
         raise ValueError("training requires an engine with an attached encoder")
-    labels = batch["labels"].to(device)
+    labels = (batch["labels"].to(device, non_blocking=True)
+              if labels_out is None else labels_out)
     expected = torch.tensor(plan.expected_labels(), dtype=labels.dtype, device=device)
     actual = labels[row_offset:row_offset + len(expected)]
     if not torch.equal(actual, expected):
@@ -356,14 +630,19 @@ def run_episode(
 
     encoded = encode_batch(engine.encoder, batch, device) if encoded_out is None else encoded_out
     query_i, support_i, background_i = episode_row_roles(plan, row_offset=row_offset)
-    binding = episode_binding(plan, len(labels), row_offset=row_offset).to(device)
-    query = live_sensor_rows(
-        encoded, batch, labels=labels, enrolled_candidate=binding, select=query_i,
-    )
-    memory = live_sensor_rows(
-        encoded, batch, labels=labels, enrolled_candidate=binding,
-        select=torch.cat([support_i, background_i]),
-    )
+    if live_out is None:
+        binding = episode_binding(plan, len(labels), row_offset=row_offset).to(device)
+        query = live_sensor_rows(
+            encoded, batch, labels=labels, enrolled_candidate=binding, select=query_i,
+        )
+        memory = live_sensor_rows(
+            encoded, batch, labels=labels, enrolled_candidate=binding,
+            select=torch.cat([support_i, background_i]),
+        )
+    else:
+        # Rows are ordered by their source-window index, and each episode is one contiguous batch
+        # range. Select row views without rebuilding layout metadata or normalizing descriptors.
+        query, memory = _live_episode_rows(live_out, plan, row_offset)
     if len(memory.rows.feature) == 0:
         raise RuntimeError("episode produced no live memory rows")
 
@@ -378,50 +657,105 @@ def run_episode(
         query.rows, memory.rows, labels_local.embeddings, label_text,
         generator=generator, collect_stats=collect_stats,
     )
+    return _finish_episode(
+        result, plan, query, memory, query_i, label_text,
+        aux_weight=aux_weight, aux_temperature=aux_temperature,
+        no_regression_weight=no_regression_weight, reference_mode=reference_mode,
+    )
 
-    # A query window contributes one row per valid (patch, sensor). Summing is the deployment vote
-    # over all observed evidence; the common scale cancels after taking log-mass for cross entropy.
-    window_mass = result["logits"].new_zeros((len(labels), len(plan.candidates)))
-    window_mass.index_add_(0, query.window, result["logits"])
-    mass = window_mass[query_i.to(device)]
-    target = torch.tensor(plan.query_slot, dtype=torch.long, device=device)
-    loss = F.cross_entropy((mass + 1e-8).log(), target)
-    aux = loss.new_zeros(())
-    if aux_weight:
-        # Supervises RETRIEVAL directly. The vote gradient alone reaches the scorer only through a
-        # near-uniform average over 64 rows, which measurement showed carries almost no ranking
-        # information; this is the signal that makes retrieval semantic rather than merely similar.
-        aux = retrieval_alignment_loss(
-            result["scores"], query.rows.label, memory.rows.label, label_text,
-            temperature=aux_temperature,
+
+def run_episode_group(
+    engine: EvidenceEngine,
+    plans: list[EpisodePlan],
+    offsets: Sequence[int],
+    live: LiveRows,
+    labels: torch.Tensor,
+    label_text: torch.Tensor,
+    alias_text: torch.Tensor,
+    *,
+    seed: int,
+    collect_stats: bool = False,
+    aux_weight: float = 0.0,
+    aux_temperature: float = 0.1,
+    no_regression_weight: float = 0.0,
+    reference_mode: str = "semantic_vote",
+) -> list[dict]:
+    """Run one same-C optimizer group through the vectorized active evidence path."""
+    if len(plans) != len(offsets) or len({len(plan.candidates) for plan in plans}) != 1:
+        raise ValueError("a vectorized optimizer group requires same-C plans and aligned offsets")
+    queries, memories, query_indices, candidate_texts, generators = [], [], [], [], []
+    for episode, (plan, offset) in enumerate(zip(plans, offsets)):
+        expected = torch.tensor(plan.expected_labels(), dtype=labels.dtype, device=labels.device)
+        actual = labels[int(offset):int(offset) + len(expected)]
+        if not torch.equal(actual, expected):
+            raise RuntimeError("episode plan and DataLoader batch disagree on query/support labels")
+        query_i, _support_i, _background_i = episode_row_roles(plan, row_offset=int(offset))
+        query, memory = _live_episode_rows(live, plan, int(offset))
+        if len(memory.rows.feature) == 0:
+            raise RuntimeError("episode produced no live memory rows")
+        local_seed = seed + episode
+        label_set = episode_label_set(
+            torch.tensor(plan.candidates, dtype=torch.long, device=labels.device),
+            label_text, mode=plan.label_mode, rng=np.random.default_rng(local_seed),
+            alias_embeddings=alias_text,
         )
-        loss = loss + aux_weight * aux
-    prediction = mass.argmax(dim=1)
-    out = {
-        "loss": loss,
-        "task_loss": float(F.cross_entropy((mass + 1e-8).log(), target).detach()),
-        "aux_loss": float(aux.detach()),
-        "truth": target.detach().cpu().tolist(),
-        "prediction": prediction.detach().cpu().tolist(),
-        "truth_label": [plan.candidates[int(slot)] for slot in target.detach().cpu()],
-        "prediction_label": [plan.candidates[int(slot)] for slot in prediction.detach().cpu()],
-        "support_k": plan.support_k,
-        "label_mode": plan.label_mode,
-        "memory_rows": len(memory.rows.feature),
-    }
-    if collect_stats:
-        stats = dict(result.get("stats", {}))
-        selected_bound = memory.rows.enrolled_candidate[result["selected"]]
-        query_target = torch.full((len(labels),), -1, dtype=torch.long, device=device)
-        query_target[query_i.to(device)] = target
-        row_target = query_target[query.window]
-        stats["retrieval/true_support_selected_share"] = float(
-            selected_bound.eq(row_target.unsqueeze(1)).float().mean()
+        queries.append(query)
+        memories.append(memory)
+        query_indices.append(query_i)
+        candidate_texts.append(label_set.embeddings)
+        generators.append(torch.Generator().manual_seed(local_seed))
+    engine_results = engine.forward_many(
+        [query.rows for query in queries], [memory.rows for memory in memories],
+        torch.stack(candidate_texts), label_text,
+        generators=generators, collect_stats=collect_stats,
+    )
+    return [
+        _finish_episode(
+            result, plan, query, memory, query_i, label_text,
+            aux_weight=aux_weight, aux_temperature=aux_temperature,
+            no_regression_weight=no_regression_weight, reference_mode=reference_mode,
         )
-        stats["episode/accuracy"] = float(prediction.eq(target).float().mean())
-        stats.update(representation_health(query.rows.feature, "query_repr"))
-        out["stats"] = stats
-    return out
+        for result, plan, query, memory, query_i
+        in zip(engine_results, plans, queries, memories, query_indices)
+    ]
+
+
+def training_group_results(
+    engine: EvidenceEngine,
+    batch: dict,
+    plans: list[EpisodePlan],
+    offsets: Sequence[int],
+    encoded: dict,
+    live: LiveRows,
+    labels: torch.Tensor,
+    label_text: torch.Tensor,
+    alias_text: torch.Tensor,
+    *,
+    seed: int,
+    collect_stats: bool,
+    args,
+) -> list[dict]:
+    """One switch between the optimized active path and its sequential test oracle."""
+    common = dict(
+        aux_weight=args.retrieval_aux_weight,
+        aux_temperature=args.retrieval_aux_temperature,
+        no_regression_weight=args.no_regression_weight,
+        reference_mode=args.reference_mode,
+    )
+    if not args.sequential_episodes:
+        return run_episode_group(
+            engine, plans, offsets, live, labels, label_text, alias_text,
+            seed=seed, collect_stats=collect_stats, **common,
+        )
+    return [
+        run_episode(
+            engine, batch, plan, label_text, alias_text, labels.device,
+            encoded_out=encoded, live_out=live, labels_out=labels,
+            row_offset=int(offset), seed=seed + episode,
+            collect_stats=collect_stats, **common,
+        )
+        for episode, (plan, offset) in enumerate(zip(plans, offsets))
+    ]
 
 
 def select_validation_metric(report: dict, *, include_aliases: bool) -> dict:
@@ -442,21 +776,31 @@ def validate(
     engine: EvidenceEngine, loader: DataLoader, plans: list[EpisodePlan],
     label_text: torch.Tensor, alias_text: torch.Tensor, device: torch.device, seed: int,
     episodes_per_batch: int, *, select_on_aliases: bool = True,
+    reference_mode: str = "semantic_vote",
 ) -> dict:
     engine.eval()
     cells: dict[tuple[str, int], tuple[list[int], list[int]]] = {}
+    base_cells: dict[tuple[str, int], tuple[list[int], list[int]]] = {}
+    candidate_cells: dict[tuple[str, int, int], tuple[list[int], list[int]]] = {}
+    base_candidate_cells: dict[tuple[str, int, int], tuple[list[int], list[int]]] = {}
+    one_nn_cells: dict[tuple[str, int], tuple[list[int], list[int]]] = {}
+    learned_on_one_nn_cells: dict[tuple[str, int], tuple[list[int], list[int]]] = {}
     losses: list[float] = []
     episode = 0
     for batch in loader:
+        batch = batch_to_device(batch, device)
         with _autocast(device):
             encoded = encode_batch(engine.encoder, batch, device)
             step_plans = plans[episode:episode + episodes_per_batch]
             offsets = np.cumsum([0] + [len(plan.flat_positions())
                                         for plan in step_plans[:-1]])
+            live, labels = prepare_live_batch(encoded, batch, step_plans, offsets, device)
             results = [
                 run_episode(
                     engine, batch, plan, label_text, alias_text, device,
-                    encoded_out=encoded, row_offset=int(offset), seed=seed + episode + local,
+                    encoded_out=encoded, live_out=live, labels_out=labels,
+                    row_offset=int(offset), seed=seed + episode + local,
+                    reference_mode=reference_mode,
                 )
                 for local, (plan, offset) in enumerate(zip(step_plans, offsets))
             ]
@@ -467,6 +811,34 @@ def validate(
             # slot 0 meant one stable class across episodes produces a plausible but meaningless F1.
             bucket[0].extend(result["truth_label"])
             bucket[1].extend(result["prediction_label"])
+            base_bucket = base_cells.setdefault((plan.label_mode, plan.support_k), ([], []))
+            base_bucket[0].extend(result["truth_label"])
+            base_bucket[1].extend([
+                plan.candidates[int(slot)] for slot in result["base_prediction"]
+            ])
+            candidate_key = (plan.label_mode, plan.support_k, len(plan.candidates))
+            candidate_bucket = candidate_cells.setdefault(candidate_key, ([], []))
+            candidate_bucket[0].extend(result["truth_label"])
+            candidate_bucket[1].extend(result["prediction_label"])
+            base_candidate_bucket = base_candidate_cells.setdefault(candidate_key, ([], []))
+            base_candidate_bucket[0].extend(result["truth_label"])
+            base_candidate_bucket[1].extend([
+                plan.candidates[int(slot)] for slot in result["base_prediction"]
+            ])
+            one_nn_bucket = one_nn_cells.setdefault((plan.label_mode, plan.support_k), ([], []))
+            learned_subset = learned_on_one_nn_cells.setdefault(
+                (plan.label_mode, plan.support_k), ([], []),
+            )
+            for truth, prediction, learned_prediction, valid in zip(
+                result["truth_label"], result["enrolled_1nn_prediction"],
+                result["prediction_label"],
+                result["enrolled_1nn_valid"],
+            ):
+                if valid:
+                    one_nn_bucket[0].append(truth)
+                    one_nn_bucket[1].append(plan.candidates[int(prediction)])
+                    learned_subset[0].append(truth)
+                    learned_subset[1].append(learned_prediction)
         episode += len(step_plans)
     if episode != len(plans):
         raise RuntimeError(f"validation consumed {episode} plans, expected {len(plans)}")
@@ -477,6 +849,45 @@ def validate(
         }
         for (mode, support), (truth, prediction) in sorted(cells.items())
     }
+    base_curve = {
+        f"{mode}/k={support}": {
+            "macro_f1": macro_f1(truth, prediction),
+            "queries": len(truth),
+        }
+        for (mode, support), (truth, prediction) in sorted(base_cells.items())
+    }
+    one_nn_curve = {
+        f"{mode}/k={support}": {
+            "macro_f1": macro_f1(truth, prediction),
+            "queries": len(truth),
+        }
+        for (mode, support), (truth, prediction) in sorted(one_nn_cells.items())
+        if truth
+    }
+    learned_on_one_nn_curve = {
+        f"{mode}/k={support}": {
+            "macro_f1": macro_f1(truth, prediction),
+            "queries": len(truth),
+        }
+        for (mode, support), (truth, prediction) in sorted(learned_on_one_nn_cells.items())
+        if truth
+    }
+    candidate_curve = {
+        f"{mode}/C={candidate_count}/k={support}": {
+            "macro_f1": macro_f1(truth, prediction),
+            "queries": len(truth),
+        }
+        for (mode, support, candidate_count), (truth, prediction)
+        in sorted(candidate_cells.items())
+    }
+    base_candidate_curve = {
+        f"{mode}/C={candidate_count}/k={support}": {
+            "macro_f1": macro_f1(truth, prediction),
+            "queries": len(truth),
+        }
+        for (mode, support, candidate_count), (truth, prediction)
+        in sorted(base_candidate_cells.items())
+    }
     coherent = [row["macro_f1"] for key, row in curve.items() if key.startswith("coherent/")]
     aliases = [row["macro_f1"] for key, row in curve.items() if key.startswith("random_alias/")]
     report = {
@@ -484,10 +895,44 @@ def validate(
         "curve": curve,
         "coherent_mean_macro_f1": float(np.mean(coherent)) if coherent else 0.0,
         "alias_mean_macro_f1": float(np.mean(aliases)) if aliases else 0.0,
+        "base_curve": base_curve,
+        "curve_by_candidate_count": candidate_curve,
+        "base_curve_by_candidate_count": base_candidate_curve,
+        "enrolled_1nn_curve": one_nn_curve,
+        "learned_on_enrolled_1nn_subset_curve": learned_on_one_nn_curve,
+        "reference_mode": reference_mode,
     }
-    # Alias behavior remains visible as a diagnostic in every run. It may influence checkpoint
-    # ordering only when alias episodes are actually present in the training objective; otherwise
-    # random fluctuations in an unsupported task can reject a better coherent checkpoint.
+    report["learned_minus_base"] = {
+        key: curve[key]["macro_f1"] - base_curve[key]["macro_f1"] for key in curve
+    }
+    coherent_delta = [
+        value for key, value in report["learned_minus_base"].items()
+        if key.startswith("coherent/")
+    ]
+    report["coherent_mean_learned_minus_base"] = (
+        float(np.mean(coherent_delta)) if coherent_delta else 0.0
+    )
+    report["learned_minus_enrolled_1nn"] = {
+        key: learned_on_one_nn_curve[key]["macro_f1"] - row["macro_f1"]
+        for key, row in one_nn_curve.items() if key in learned_on_one_nn_curve
+    }
+    one_nn_delta = [
+        value for key, value in report["learned_minus_enrolled_1nn"].items()
+        if key.startswith("coherent/")
+    ]
+    report["coherent_mean_learned_minus_enrolled_1nn"] = (
+        float(np.mean(one_nn_delta)) if one_nn_delta else 0.0
+    )
+    total_queries = sum(row["queries"] for row in curve.values())
+    report["enrolled_1nn_reference_queries"] = sum(
+        row["queries"] for row in one_nn_curve.values()
+    )
+    report["enrolled_1nn_reference_coverage"] = (
+        report["enrolled_1nn_reference_queries"] / max(total_queries, 1)
+    )
+    # Alias behavior influences checkpoint ordering only when alias episodes are present in the
+    # objective. Runs with the default coherent-only objective do not spend periodic validation
+    # compute on an unsupported task; arbitrary-activity evaluation is a separate sealed protocol.
     select_validation_metric(report, include_aliases=select_on_aliases)
     engine.train()
     if engine.encoder is not None and not any(
@@ -530,6 +975,7 @@ def profile_training(
         timing = step > 5                                   # warmup steps excluded
         t0 = mark()
         batch = next(iterator)
+        batch = batch_to_device(batch, device)
         t1 = mark()
         optimizer.zero_grad(set_to_none=True)
         with _autocast(device):
@@ -538,12 +984,11 @@ def profile_training(
             start = (step - 1) * args.episodes_per_step
             plans = train_plans[start:start + args.episodes_per_step]
             offsets = np.cumsum([0] + [len(plan.flat_positions()) for plan in plans[:-1]])
-            results = [
-                run_episode(engine, batch, plan, label_text, alias_text, device,
-                            encoded_out=encoded, row_offset=int(offset),
-                            seed=args.seed + step * 10_000 + episode)
-                for episode, (plan, offset) in enumerate(zip(plans, offsets))
-            ]
+            live, labels = prepare_live_batch(encoded, batch, plans, offsets, device)
+            results = training_group_results(
+                engine, batch, plans, offsets, encoded, live, labels, label_text, alias_text,
+                seed=args.seed + step * 10_000, collect_stats=False, args=args,
+            )
             loss = torch.stack([result["loss"] for result in results]).mean()
         t3 = mark()
         loss.backward()
@@ -574,6 +1019,7 @@ def profile_training(
     with profile(activities=activities) as prof:
         for step in range(3):
             batch = next(iterator)
+            batch = batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
             with _autocast(device):
                 encoded = encode_batch(encoder, batch, device)
@@ -581,19 +1027,25 @@ def profile_training(
                 plans = train_plans[start:start + args.episodes_per_step]
                 offsets = np.cumsum([0] + [len(plan.flat_positions())
                                             for plan in plans[:-1]])
-                loss = torch.stack([
-                    run_episode(engine, batch, plan, label_text, alias_text, device,
-                                encoded_out=encoded, row_offset=int(offset),
-                                seed=args.seed + step)["loss"]
-                    for episode, (plan, offset) in enumerate(zip(plans, offsets))
-                ]).mean()
+                live, labels = prepare_live_batch(encoded, batch, plans, offsets, device)
+                results = training_group_results(
+                    engine, batch, plans, offsets, encoded, live, labels,
+                    label_text, alias_text, seed=args.seed + step,
+                    collect_stats=False, args=args,
+                )
+                loss = torch.stack([result["loss"] for result in results]).mean()
             loss.backward()
             optimizer.step()
     sort = "cuda_time_total" if device.type == "cuda" else "cpu_time_total"
     print(prof.key_averages().table(sort_by=sort, row_limit=14))
 
 
-def _random_encoder(device: torch.device, frontend: str = "fixed") -> tuple[SetTokenizerEncoder, dict]:
+def _random_encoder(
+    device: torch.device,
+    frontend: str = "fixed",
+    *,
+    neutral_acquisition_text: bool = False,
+) -> tuple[SetTokenizerEncoder, dict]:
     config = {
         "frontend": frontend,
         "d_model": 128,
@@ -608,6 +1060,7 @@ def _random_encoder(device: torch.device, frontend: str = "fixed") -> tuple[SetT
         "sensor_bias_dim": 14,
         "use_sensor_bias_conditioning": False,
         "use_sensor_isolated_retrieval": False,
+        "neutral_acquisition_text": bool(neutral_acquisition_text),
         "multiresolution": False,
         # Constructor bounds remain valid even though multiresolution is disabled. Keeping the
         # ordinary bounds makes this checkpoint reconstructible by the shared loader.
@@ -630,12 +1083,27 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--random-init", action="store_true")
+    parser.add_argument(
+        "--phase-b-regime", choices=("unified", "zero-shot", "enrollment"),
+        required=True,
+        help="episode objective for this head; the two specialized heads must share one frozen "
+             "encoder checkpoint",
+    )
     parser.add_argument("--datasets", nargs="+", default=list(TRAIN_DATASETS))
-    parser.add_argument("--steps", type=int, default=2000)
-    parser.add_argument("--episodes-per-step", type=int, default=4)
-    parser.add_argument("--candidate-counts", type=int, nargs="+", default=[2, 4, 8, 16])
-    parser.add_argument("--queries-per-candidate", type=int, default=2)
-    parser.add_argument("--max-support", type=int, default=4)
+    parser.add_argument("--steps", type=int, default=35_000)
+    parser.add_argument("--episodes-per-step", type=int, default=8)
+    parser.add_argument(
+        "--candidate-counts", type=int, nargs="+", default=[8, 16, 32, 64],
+        help="total candidate-label roster sizes sampled during training; only "
+             "--query-labels-per-episode of them supply queries",
+    )
+    parser.add_argument(
+        "--query-labels-per-episode", type=int, default=4,
+        help="candidate labels that supply query recordings in each episode; remaining candidates "
+             "are genuine distractors and still compete in the loss",
+    )
+    parser.add_argument("--queries-per-candidate", type=int, default=4)
+    parser.add_argument("--max-support", type=int, default=16)
     parser.add_argument("--bank-windows", type=int, default=512)
     # DEFAULT 0.0 (2026-08-22 decision): random-alias episodes are OUT of the training objective
     # for now — build the strongest coherent base first. Measured at seed 20260830 (20k steps,
@@ -653,48 +1121,66 @@ def main() -> None:
     parser.add_argument("--no-shared-query-stream", action="store_true")
     parser.add_argument("--holdout-label-fraction", type=float, default=0.2)
     parser.add_argument("--top-k", type=int, default=64)
-    parser.add_argument("--readout", choices=("weights", "semantic"), default="weights")
     # --- ablation ladder: substitute a fixed stand-in for one learnable stage at a time
     parser.add_argument("--retrieval", choices=("learned", "cosine"), default="cosine",
                         help="'cosine' replaces the learned pair scorer with the plain feature "
                              "cosine at a fixed temperature, registering no parameters")
-    parser.add_argument("--vote-scope", choices=("topk", "bank"), default="topk",
-                        help="'bank' votes over the whole memory while the mixer still sees only "
-                             "the top-k, so every row receives gradient instead of the ~1.3% per "
-                             "query that hard selection reaches")
-    parser.add_argument("--mixing", choices=("attention", "off"), default="attention",
-                        help="'off' removes the evidence mixer entirely: the weight is the "
-                             "retrieval score and the label vectors are the frozen row text")
+    parser.add_argument("--vote-scope", choices=("topk", "bank"), default="bank",
+                        help="'bank' votes over the whole memory while the reranker sees only "
+                             "the top-k; every row affects the normalized prediction, and every "
+                             "score path receives gradient when the encoder is trainable")
+    parser.add_argument("--mixing", choices=("rerank", "attention", "off"), default="rerank",
+                        help="'rerank' is the compact scalar evidence correction; 'attention' "
+                             "reconstructs historical candidate-residual checkpoints; 'off' is "
+                             "the fixed retrieval vote")
     parser.add_argument("--encoder-backbone", choices=("ours", "harnet", "unimts"), default="ours",
                         help="encoder-comparison arm; harnet/unimts are always frozen")
     parser.add_argument("--encoder-comparison", action="store_true",
                         help="use one sensor row per source window in all three encoder arms")
-    parser.add_argument("--frontend", choices=("fixed", "learnable"), default="fixed",
-                        help="'learnable' lets the filterbank's filter parameters train instead of "
-                             "staying at their physical initialisation (random-init runs only)")
-    parser.add_argument("--identity-gain", type=float, default=1.0,
-                        help="initial gain on the mixer's role/slot/group channels relative to "
+    parser.add_argument("--frontend", choices=("fixed", "learnable", "continuous"), default="fixed",
+                        help="HALO feature extractor: fixed physical filterbank, constrained-learnable "
+                             "filterbank, or continuous-time kernel bank (random-init runs only)")
+    parser.add_argument("--identity-gain", type=float, default=0.25,
+                        help="initial gain on role/slot/group channels relative to "
                              "content at 1.0; at 1.0 content is only a quarter of every token")
+    parser.add_argument("--reranker-layers", type=int, default=1,
+                        help="context layers in the active scalar evidence reranker")
+    parser.add_argument("--correction-gain-init", type=float, default=0.05,
+                        help="initial maximum scale of the bounded retrieval-score correction")
+    parser.add_argument("--max-score-correction", type=float, default=2.0,
+                        help="hard upper bound on each learned evidence-row score correction")
     parser.add_argument("--mixer-layers", type=int, default=2,
-                        help="0 keeps the readout but gives it uncontextualized tokens, which "
-                             "separates 'the readout helps' from 'attention helps'")
+                        help="layers in the historical candidate-residual mixer only")
     parser.add_argument("--encoder-lr", type=float, default=1e-4)
+    parser.add_argument("--frontend-lr-scale", type=float, default=0.1,
+                        help="learning-rate multiplier for continuous/constrained analysis parameters")
+    parser.add_argument("--frontend-reg-weight", type=float, default=1e-3,
+                        help="pull learned frontend analysis parameters toward their physical init")
     parser.add_argument("--engine-lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--warmup-steps", type=int, default=500)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--retrieval-aux-weight", type=float, default=0.0,
                         help="weight on the retrieval alignment loss (0 = the measured baseline)")
     parser.add_argument("--retrieval-aux-temperature", type=float, default=0.1)
+    parser.add_argument("--no-regression-weight", type=float, default=1.0,
+                        help="extra penalty when the learned residual gives the target more loss "
+                             "than its detached regime reference (semantic vote for zero-shot, "
+                             "enrolled 1NN where defined for enrollment)")
     parser.add_argument("--freeze-encoder", action="store_true")
     parser.add_argument("--augment", action="store_true")
+    parser.add_argument(
+        "--neutral-acquisition-text", action="store_true",
+        help="replace device/placement/gravity descriptions with modality-only sensor text; "
+             "the matched causal ablation keeps every signal, episode, and model setting fixed",
+    )
     parser.add_argument("--calib-batches", type=int, default=5,
                         help="episode batches used to fit frozen filterbank normalization for "
                              "--random-init; checkpoints must already carry fitted statistics")
-    parser.add_argument("--val-every", type=int, default=250)
+    parser.add_argument("--val-every", type=int, default=1000)
     parser.add_argument("--val-episodes", type=int, default=32)
     parser.add_argument("--telemetry-every", type=int, default=20)
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--val-seed", type=int, default=VAL_SEED,
@@ -703,6 +1189,11 @@ def main() -> None:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--profile-steps", type=int, default=0,
                         help="measure this many real steps (phase timers + op table), then exit")
+    parser.add_argument(
+        "--sequential-episodes", action="store_true",
+        help="debug/reference path: run each evidence episode separately instead of the equivalent "
+             "vectorized active path",
+    )
     args = parser.parse_args()
 
     if (args.checkpoint is None) == (not args.random_init):
@@ -713,35 +1204,83 @@ def main() -> None:
         parser.error("the three-arm encoder comparison starts from --random-init")
     if args.encoder_backbone != "ours" and args.frontend != "fixed":
         parser.error("--frontend applies only to the HALO encoder arm")
+    if args.encoder_backbone != "ours" and args.neutral_acquisition_text:
+        parser.error("--neutral-acquisition-text applies only to the HALO encoder arm")
     if args.encoder_backbone != "ours" and args.freeze_encoder:
         parser.error("the baseline projection must remain trainable in the encoder comparison")
+    if args.phase_b_regime != "unified" and (args.checkpoint is None or not args.freeze_encoder):
+        parser.error(
+            "specialized zero-shot/enrollment heads require --checkpoint and --freeze-encoder so "
+            "both heads use exactly the same stable representation"
+        )
+    if args.phase_b_regime == "zero-shot" and (
+        args.alias_episode_fraction or args.alias_warmup_steps or args.alias_ramp_steps
+    ):
+        parser.error(
+            "zero-shot episodes have no enrollment and cannot support random aliases; leave the "
+            "alias curriculum disabled"
+        )
     if args.encoder_comparison and args.augment:
         parser.error("the matched encoder comparison uses clean windows; omit --augment")
-    if (args.steps < 1 or args.episodes_per_step < 1 or args.bank_windows < 1
+    if args.retrieval != "cosine" or args.mixing != "rerank" or args.vote_scope != "bank":
+        args.sequential_episodes = True
+    if (args.steps < 1 or args.episodes_per_step < 1 or args.query_labels_per_episode < 1
+            or args.bank_windows < 1
             or args.calib_batches < 1):
-        parser.error("steps, episodes-per-step, bank-windows, and calib-batches must be positive")
+        parser.error(
+            "steps, episodes-per-step, query-labels-per-episode, bank-windows, and "
+            "calib-batches must be positive"
+        )
     if args.top_k > args.bank_windows:
         parser.error("--top-k cannot exceed --bank-windows")
-    # The mixer keeps every attention activation of a (C + 2 + 3k)-token sequence per query row for
-    # backward. At k=512 that OOMed a 24 GiB card 21 steps in; fail at parse time with arithmetic
-    # instead. Rough bound: rows_per_step * seq_len^2 * heads * 2 bytes for the attention maps.
-    seq = max(args.candidate_counts) + 2 + 3 * args.top_k
-    rows = args.episodes_per_step * max(args.candidate_counts) * args.queries_per_candidate * 2
-    attention_gib = rows * seq * seq * 4 * 2 * args.mixer_layers / 2 ** 30
+    effective_max_support = 0 if args.phase_b_regime == "zero-shot" else args.max_support
+    if effective_max_support > args.bank_windows:
+        parser.error(
+            "--max-support cannot exceed --bank-windows because even one enrolled candidate "
+            "would not fit in memory"
+        )
+    if (args.alias_episode_fraction > 0.0
+            and args.bank_windows < max(args.candidate_counts) * effective_max_support):
+        parser.error(
+            "random aliases require every candidate to be enrolled, so --bank-windows must be at "
+            "least max(candidate-counts) * max-support when aliases are enabled"
+        )
+    # Fail early when the selected reasoner's retained attention maps alone are implausibly large.
+    # The compact reranker uses one token per query/evidence row; the historical mixer used separate
+    # content and metadata tokens and therefore has a substantially longer sequence.
+    # One sequence per query recording. A six-second window has at most six one-second patches and
+    # two IMU modalities, each represented by a feature and description token.
+    seq = (max(args.candidate_counts) + 12 + args.top_k
+           if args.mixing == "rerank"
+           else max(args.candidate_counts) + 2 * 12 + 3 * args.top_k)
+    rows = (args.episodes_per_step
+            * min(args.query_labels_per_episode, max(args.candidate_counts))
+            * args.queries_per_candidate)
+    reasoner_layers = (args.reranker_layers if args.mixing == "rerank"
+                       else args.mixer_layers if args.mixing == "attention" else 0)
+    attention_gib = rows * seq * seq * 4 * 2 * reasoner_layers / 2 ** 30
     if attention_gib > 16:
         parser.error(
-            f"top_k={args.top_k} gives {seq}-token mixer sequences; the retained attention maps "
+            f"top_k={args.top_k} gives {seq}-token evidence sequences; retained attention maps "
             f"alone are ~{attention_gib:.0f} GiB for backward. Use --vote-scope bank for full "
             "gradient coverage at top-k cost instead of raising k."
         )
     if args.warmup_steps < 0 or args.warmup_steps > args.steps:
         parser.error("--warmup-steps must lie in [0, steps]")
+    if args.frontend_lr_scale <= 0 or args.frontend_reg_weight < 0:
+        parser.error("--frontend-lr-scale must be positive and --frontend-reg-weight nonnegative")
     if args.smoke:
         args.steps, args.val_every, args.val_episodes = 3, 3, 2
         args.warmup_steps, args.num_workers, args.calib_batches = 1, 0, 1
         args.datasets = ["uci_har", "wisdm", "mhealth", "pamap2"]
-        args.candidate_counts, args.max_support = [2, 4], 2
+        args.candidate_counts, args.query_labels_per_episode, args.max_support = [4, 8], 4, 2
         args.bank_windows, args.top_k = 32, 16
+
+    effective_max_support = 0 if args.phase_b_regime == "zero-shot" else args.max_support
+    reference_mode = (
+        "enrolled_1nn" if args.phase_b_regime == "enrollment" else "semantic_vote"
+    )
+    args.reference_mode = reference_mode
 
     device = torch.device(args.device if args.device != "cuda" or torch.cuda.is_available()
                           else "cpu")
@@ -768,12 +1307,16 @@ def main() -> None:
 
     base_spec = EpisodeSpec(
         candidate_counts=tuple(args.candidate_counts),
+        query_labels_per_episode=args.query_labels_per_episode,
         queries_per_candidate=args.queries_per_candidate,
-        max_support=args.max_support,
+        max_support=effective_max_support,
         # The episode planner requires a nonempty fallback on k=0. It is replaced below by the
         # fixed-size bank, and never reaches the DataLoader.
         background_windows=1,
-        alias_episode_fraction=args.alias_episode_fraction,
+        max_memory_windows=args.bank_windows,
+        alias_episode_fraction=(
+            0.0 if args.phase_b_regime == "zero-shot" else args.alias_episode_fraction
+        ),
         disjointness=args.disjointness,
         shared_query_stream=(args.disjointness == "stream" and not args.no_shared_query_stream),
     )
@@ -804,12 +1347,19 @@ def main() -> None:
         n_train, args.episodes_per_step, args.alias_episode_fraction,
         args.alias_warmup_steps, args.alias_ramp_steps,
     )
+    support_grid = support_count_grid(effective_max_support, args.phase_b_regime)
+    train_candidate_schedule = grouped_candidate_schedule(
+        args.steps, args.episodes_per_step, train_spec.candidate_counts, args.seed + 17,
+    )
     if train_alias is not None:
         print(f"[phase-b] alias curriculum: 0.0 for {args.alias_warmup_steps} steps, "
               f"ramp over {args.alias_ramp_steps} -> {args.alias_episode_fraction}", flush=True)
+    plan_started = time.perf_counter()
+    print(f"[phase-b] constructing {n_train:,} deterministic training episodes", flush=True)
     train_plans = _make_plans(
         train_table, train_stream_table, train_pool, train_spec, train_stream, train_execution,
-        n_episodes=n_train, seed=args.seed, alias_schedule=train_alias,
+        n_episodes=n_train, seed=args.seed, schedule=support_grid, alias_schedule=train_alias,
+        candidate_schedule=train_candidate_schedule,
     )
     bank_spec = BankSpec(n_windows=args.bank_windows)
     # A held-out concept is absent from the whole Phase-B objective, not merely absent as a query.
@@ -825,9 +1375,25 @@ def main() -> None:
         stream: by_label for stream, by_label in objective_bank_table.items() if by_label
     }
     train_bank = bank_index(objective_bank_table)
+    plan_seconds = time.perf_counter() - plan_started
+    bank_started = time.perf_counter()
     train_plans = _attach_training_banks(train_plans, train_bank, bank_spec, args.seed + 1)
+    bank_seconds = time.perf_counter() - bank_started
+    train_episode_distribution = episode_distribution(train_plans)
+    print(
+        f"[phase-b] episode plans ready: sampling={plan_seconds:.1f}s "
+        f"banks={bank_seconds:.1f}s",
+        flush=True,
+    )
+    print(
+        f"[phase-b] episode distribution: "
+        f"C={train_episode_distribution['candidate_count']} "
+        f"k={train_episode_distribution['support_k']} "
+        f"query-labels={train_episode_distribution['query_label_count']} "
+        f"max-support-windows={train_episode_distribution['support_windows_max']}",
+        flush=True,
+    )
 
-    support_grid = tuple(value for value in (0, 1, 2, 4) if value <= args.max_support)
     max_support = max(support_grid)
     coherent_base = _make_plans(
         val_table, val_stream_table, val_pool,
@@ -847,12 +1413,13 @@ def main() -> None:
     )
     alias_val = _matched_validation_plans(
         alias_base, positive_grid, train_bank, bank_spec, val_offset, args.val_seed + 5,
-    ) if positive_grid else []
+    ) if positive_grid and args.alias_episode_fraction > 0.0 else []
     val_plans = coherent_val + alias_val
 
     augmentation = AugmentationConfig.phase_b_generic() if args.augment else AugmentationConfig.none()
     dataset = PretrainDataset(
         index, combined_keys, augment=args.augment, augmentation_config=augmentation,
+        neutral_acquisition_text=args.neutral_acquisition_text,
     )
     collate = EpisodicCollate(MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS))
     loader_kwargs = dict(
@@ -873,6 +1440,11 @@ def main() -> None:
         checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
         encoder = build_encoder(checkpoint, device, training=True)
         config = dict(checkpoint["config"])
+        if bool(config.get("neutral_acquisition_text", False)) != args.neutral_acquisition_text:
+            parser.error(
+                "--neutral-acquisition-text must match the source checkpoint; mixing full and "
+                "neutral descriptions within one training run invalidates the ablation"
+            )
         source = str(args.checkpoint)
     else:
         if args.encoder_backbone != "ours":
@@ -897,7 +1469,10 @@ def main() -> None:
                 )
             config["backbone_source"] = source
         else:
-            encoder, config = _random_encoder(device, frontend=args.frontend)
+            encoder, config = _random_encoder(
+                device, frontend=args.frontend,
+                neutral_acquisition_text=args.neutral_acquisition_text,
+            )
             source = "random-init"
             if args.encoder_comparison:
                 encoder.retrieval_granularity = "window"
@@ -919,6 +1494,7 @@ def main() -> None:
         print(f"[phase-b] calibrating filterbank on {args.calib_batches} episode batches", flush=True)
         frontend.reset_norm_accumulator()
         for batch_index, batch in enumerate(train_loader):
+            batch = batch_to_device(batch, device)
             frontend.accumulate_norm_stats(
                 batch["patches"].to(device, non_blocking=True),
                 batch["rates"].to(device, non_blocking=True),
@@ -948,9 +1524,14 @@ def main() -> None:
         mixing=args.mixing,
         vote_scope=args.vote_scope,
         scorer=PairScorerConfig(learned=args.retrieval == "learned"),
-        mixer=EvidenceMixerConfig(n_groups=max(96, args.top_k + 2), readout=args.readout,
-                                  n_layers=args.mixer_layers,
+        mixer=EvidenceMixerConfig(n_groups=max(96, args.top_k + 2), n_layers=args.mixer_layers,
                                   identity_gain_init=args.identity_gain),
+        reranker=EvidenceRerankerConfig(
+            n_groups=max(96, args.top_k + 2), n_layers=args.reranker_layers,
+            identity_gain_init=args.identity_gain,
+            correction_gain_init=args.correction_gain_init,
+            max_correction=args.max_score_correction,
+        ),
     )
     # Released backbone constructors consume different amounts of random state. Reset at the exact
     # boundary of the shared evidence engine so all comparison arms receive identical scorer/mixer
@@ -969,17 +1550,48 @@ def main() -> None:
     )
 
     encoder_params = [p for p in encoder.parameters() if p.requires_grad]
+    frontend_params = (
+        [p for p in frontend.adaptation_parameters() if p.requires_grad]
+        if frontend is not None else []
+    )
+    frontend_param_ids = {id(parameter) for parameter in frontend_params}
+    encoder_base_params = [p for p in encoder_params if id(p) not in frontend_param_ids]
     scorer_params = [p for p in engine.scorer.parameters() if p.requires_grad]
-    mixer_params = ([p for p in engine.mixer.parameters() if p.requires_grad]
-                    if engine.mixer is not None else [])
+    reasoner = engine.reranker if engine.reranker is not None else engine.mixer
+    reasoner_params = ([p for p in reasoner.parameters() if p.requires_grad]
+                       if reasoner is not None else [])
+    if engine.reranker is not None:
+        reranker_output_params = [
+            engine.reranker.row_head.weight, engine.reranker.correction_gain_logit,
+        ]
+        reranker_stack_params = [
+            p for p in engine.reranker.stack.parameters() if p.requires_grad
+        ]
+        excluded = {id(p) for p in reranker_output_params + reranker_stack_params}
+        reranker_input_params = [
+            p for p in reasoner_params if id(p) not in excluded
+        ]
+    else:
+        reranker_input_params = reranker_stack_params = reranker_output_params = []
     # A ladder rung that substitutes a fixed stand-in leaves a stage with no parameters at all;
     # AdamW rejects an empty group, so only non-empty ones are handed over.
-    groups = [{"params": params, "lr": lr} for params, lr in
-              ((encoder_params, args.encoder_lr), (scorer_params, args.engine_lr),
-               (mixer_params, args.engine_lr)) if params]
+    groups = []
+    if encoder_base_params:
+        groups.append({"params": encoder_base_params, "lr": args.encoder_lr,
+                       "weight_decay": args.weight_decay, "name": "encoder"})
+    if frontend_params:
+        groups.append({"params": frontend_params,
+                       "lr": args.encoder_lr * args.frontend_lr_scale,
+                       "weight_decay": 0.0, "name": "frontend"})
+    if scorer_params:
+        groups.append({"params": scorer_params, "lr": args.engine_lr,
+                       "weight_decay": args.weight_decay, "name": "scorer"})
+    if reasoner_params:
+        groups.append({"params": reasoner_params, "lr": args.engine_lr,
+                       "weight_decay": args.weight_decay, "name": "reasoner"})
     if not groups:
         raise SystemExit("every stage is frozen; there is nothing to train")
-    optimizer = torch.optim.AdamW(groups, weight_decay=args.weight_decay)
+    optimizer = torch.optim.AdamW(groups)
 
     def lr_factor(step: int) -> float:
         if args.warmup_steps and step < args.warmup_steps:
@@ -1011,6 +1623,9 @@ def main() -> None:
         "train_concepts": train_pool,
         "heldout_concepts": val_pool,
         "episode_spec": dataclasses.asdict(train_spec),
+        "train_episode_distribution": train_episode_distribution,
+        "phase_b_regime": args.phase_b_regime,
+        "no_regression_reference": reference_mode,
         "bank_spec": dataclasses.asdict(bank_spec),
         "train_provenance_lift": provenance_lift(train_plans, train_stream),
         "parameters": engine.parameter_report(),
@@ -1033,6 +1648,8 @@ def main() -> None:
             "encoder": encoder.state_dict(),
             "evidence_engine": engine.state_dict(),
             "config": config,
+            "phase_b_regime": args.phase_b_regime,
+            "no_regression_reference": reference_mode,
             "label_ids": index.label_ids,
             "step": step,
             "selection_metric": report["selection_metric"],
@@ -1048,6 +1665,7 @@ def main() -> None:
         report = validate(
             engine, val_loader, val_plans, label_text, alias_text, device, args.val_seed + 10_000,
             val_group, select_on_aliases=args.alias_episode_fraction > 0.0,
+            reference_mode=reference_mode,
         )
         record({"step": step, "kind": "validation", **report})
         if report["selection_score"] > best["score"]:
@@ -1062,54 +1680,99 @@ def main() -> None:
 
     initial = run_validation(0)
     for step, batch in enumerate(train_loader, 1):
+        batch = batch_to_device(batch, device)
+        log_step = step == 1 or step % args.telemetry_every == 0
+        if frontend is not None and hasattr(frontend, "request_runtime_telemetry"):
+            frontend.request_runtime_telemetry(log_step)
         optimizer.zero_grad(set_to_none=True)
         with _autocast(device):
             encoded = encode_batch(encoder, batch, device)
             start = (step - 1) * args.episodes_per_step
             plans = train_plans[start:start + args.episodes_per_step]
             offsets = np.cumsum([0] + [len(plan.flat_positions()) for plan in plans[:-1]])
-            results = [
-                run_episode(
-                    engine, batch, plan, label_text, alias_text, device,
-                    encoded_out=encoded, row_offset=int(offset),
-                    seed=args.seed + step * 10_000 + episode,
-                    collect_stats=(step == 1 or step % args.telemetry_every == 0),
-                    aux_weight=args.retrieval_aux_weight,
-                    aux_temperature=args.retrieval_aux_temperature,
-                )
-                for episode, (plan, offset) in enumerate(zip(plans, offsets))
-            ]
+            live, labels = prepare_live_batch(encoded, batch, plans, offsets, device)
+            results = training_group_results(
+                engine, batch, plans, offsets, encoded, live, labels, label_text, alias_text,
+                seed=args.seed + step * 10_000,
+                collect_stats=(step == 1 or step % args.telemetry_every == 0), args=args,
+            )
             loss = torch.stack([result["loss"] for result in results]).mean()
+            frontend_reg = (
+                frontend.adaptation_regularization()
+                if frontend is not None else loss.new_zeros(())
+            )
+            loss = loss + args.frontend_reg_weight * frontend_reg
         loss.backward()
-        encoder_grad = _grad_norm(encoder_params)
-        scorer_grad = _grad_norm(scorer_params)
-        mixer_grad = _grad_norm(mixer_params)
+        # These diagnostics launch a reduction for every parameter tensor and synchronize when
+        # converted to Python floats. Compute them only on steps that will actually be recorded.
+        encoder_grad = _grad_norm(encoder_params) if log_step else 0.0
+        frontend_grad = _grad_norm(frontend_params) if log_step else 0.0
+        scorer_grad = _grad_norm(scorer_params) if log_step else 0.0
+        reasoner_grad = _grad_norm(reasoner_params) if log_step else 0.0
+        reranker_input_grad = _grad_norm(reranker_input_params) if log_step else 0.0
+        reranker_stack_grad = _grad_norm(reranker_stack_params) if log_step else 0.0
+        reranker_output_grad = _grad_norm(reranker_output_params) if log_step else 0.0
         preclip = float(torch.nn.utils.clip_grad_norm_(
             [p for group in groups for p in group["params"]], args.grad_clip,
         ))
         optimizer.step()
         scheduler.step()
 
-        if step == 1 or step % args.telemetry_every == 0:
+        if log_step:
             stats = [result.get("stats", {}) for result in results]
             keys = sorted({key for row in stats for key in row})
+            one_nn_pairs = [
+                (truth, prediction)
+                for result in results
+                for truth, prediction, valid in zip(
+                    result["truth"], result["enrolled_1nn_prediction"],
+                    result["enrolled_1nn_valid"],
+                ) if valid
+            ]
+            query_count = sum(len(result["truth"]) for result in results)
             row = {
                 "step": step,
                 "kind": "train",
                 "loss": float(loss.detach()),
                 "task_loss": float(np.mean([r["task_loss"] for r in results])),
                 "aux_loss": float(np.mean([r["aux_loss"] for r in results])),
+                "base_loss": float(np.mean([r["base_loss"] for r in results])),
+                "reference_loss": float(np.mean([r["reference_loss"] for r in results])),
+                "enrolled_1nn_loss": float(np.mean([
+                    r["enrolled_1nn_loss"] for r in results
+                ])),
+                "no_regression_loss": float(np.mean([
+                    r["no_regression_loss"] for r in results
+                ])),
                 "accuracy": float(np.mean([
                     np.mean(np.equal(result["truth"], result["prediction"])) for result in results
                 ])),
+                "enrolled_1nn_reference_coverage": len(one_nn_pairs) / max(query_count, 1),
+                "enrolled_1nn_accuracy": (
+                    float(np.mean([truth == prediction for truth, prediction in one_nn_pairs]))
+                    if one_nn_pairs else 0.0
+                ),
                 "encoder_grad_norm": encoder_grad,
+                "frontend_grad_norm": frontend_grad,
+                "frontend_reg": float(frontend_reg.detach()),
+                "frontend_reg_weighted": float(
+                    (args.frontend_reg_weight * frontend_reg).detach()),
                 "scorer_grad_norm": scorer_grad,
-                "mixer_grad_norm": mixer_grad,
+                "reasoner_grad_norm": reasoner_grad,
+                "reranker_input_grad_norm": reranker_input_grad,
+                "reranker_stack_grad_norm": reranker_stack_grad,
+                "reranker_output_grad_norm": reranker_output_grad,
                 "total_preclip_grad_norm": preclip,
                 "clip_coefficient": min(1.0, args.grad_clip / max(preclip, 1e-12)),
                 "lr": optimizer.param_groups[0]["lr"],
                 "elapsed_seconds": time.perf_counter() - started,
             }
+            row.update({f"lr_{group.get('name', index)}": group["lr"]
+                        for index, group in enumerate(optimizer.param_groups)})
+            if frontend is not None:
+                row.update(frontend.adaptation_summary())
+                if hasattr(frontend, "runtime_summary"):
+                    row.update(frontend.runtime_summary())
             row.update({key: float(np.mean([value[key] for value in stats if key in value]))
                         for key in keys})
             record(row)

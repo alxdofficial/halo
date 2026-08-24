@@ -2,12 +2,11 @@
 input contract both the SSL pretrain and the adapter consume).
 
 LiMU-BERT's verified input contract (BASELINES.md): 6-channel acc+gyro, 20 Hz,
-120 samples (= 6 s) per window; accelerometer divided by 9.8 -> g (gravity
-RETAINED), gyro raw, with the model's internal LayerNorm. Our training grids are
-stored at their native rate / window length / channel set, so this module maps a
-grid window to the 6-ch / 20 Hz / 120-sample shape (values kept in native g here;
-the ÷9.8 normalization is applied downstream by the adapter and the upstream SSL
-pipeline, NOT here):
+120 samples (= 6 s) per window; acceleration expressed in g (gravity retained),
+gyro in rad/s, with the model's internal LayerNorm. Upstream divides acceleration
+by 9.8 because its source arrays are in m/s²; our grids are already in g, so no
+second division is applied. This module maps each native grid window to the
+6-ch / 20 Hz / 120-sample shape:
 
   * 6 channels in a fixed ``acc_{x,y,z}, gyro_{x,y,z}`` order; accelerometer-only
     train sets (wisdm, unimib_shar, capture24) get their gyro channels
@@ -25,21 +24,16 @@ from typing import Iterator, List, Tuple
 import numpy as np
 from scipy.signal import resample_poly
 
+from data.scripts.curate.deployment_policy import EXPANDED_PHASE_A_TRAIN_DATASETS
 from eval import data as eval_data
 
 TARGET_HZ = 20
 TARGET_LEN = 120          # 6 s @ 20 Hz
 SIX_CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
 
-# The 12 non-eval training datasets — MUST match HALO's corpus for a valid comparison
-# (training/tokenizer/pretrain_data.py TRAIN_DATASETS). hapt DROPPED (UCI-HAR near-duplicate,
-# per-window NCC 0.98 → leakage); the 2026-07 expansion (sp_sw_har/nfi_fared/harmes/xrf_v2) ADDED.
-# Each stream's acc+gyro is mapped into the 6-ch/20 Hz contract; placement is irrelevant to this
-# layout-locked baseline, so xrf_v2's ear/glasses streams are just more valid 6-ch windows.
-TRAIN_DATASETS = [
-    "uci_har", "hhar", "pamap2", "wisdm", "kuhar", "unimib_shar",
-    "mhealth", "capture24", "sp_sw_har", "nfi_fared", "harmes", "xrf_v2",
-]
+# Same-data method arm: use the design-of-record Phase-A roster from the deployment
+# policy rather than maintaining a second list that can silently drift.
+TRAIN_DATASETS = tuple(EXPANDED_PHASE_A_TRAIN_DATASETS)
 
 
 def load_grid(dataset: str, stream: str):
@@ -102,10 +96,11 @@ def iter_train_streams(max_per_stream: int | None = None,
 
 
 def build_pretrain_array(max_per_stream: int | None = None,
-                         seed: int = 3431) -> np.ndarray:
+                         seed: int = 3431, *, shuffle: bool = True) -> np.ndarray:
     """Pool the training corpus into a single (N, 120, 6) array for SSL pretrain."""
     parts = [x6 for _, _, x6, _, _ in iter_train_streams(max_per_stream, seed)]
     data = np.concatenate(parts, axis=0)
-    rng = np.random.RandomState(seed)
-    perm = rng.permutation(len(data))
-    return data[perm]
+    if shuffle:
+        rng = np.random.RandomState(seed)
+        return data[rng.permutation(len(data))]
+    return data

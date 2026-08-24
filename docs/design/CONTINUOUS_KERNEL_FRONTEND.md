@@ -1,25 +1,33 @@
 # Continuous-time kernel front end — design brainstorm
 
-> ## ✅ BUILT — 2026-08-23. `model/tokenizer/continuous_kernel.py`, **not yet integrated.**
+> ## IMPLEMENTED AND INTEGRATED — 2026-08-24
 >
-> `ContinuousKernelTokenizer`, 49,344 parameters, drop-in contract identical to
-> `PhysicalFilterbankTokenizer`. 17 tests in `tests/test_continuous_kernel.py`; full suite 717.
+> `ContinuousKernelTokenizer` has 65,472 parameters (832 in the analysis bank) and is available as
+> `--frontend continuous` in Phase A and end-to-end episodic training. It uses the same encoder-facing
+> contract as `PhysicalFilterbankTokenizer`. The focused suite has 31 tests; the frontend plus encoder,
+> conditioning, sensor-folding, and episodic integration suite has 133 tests.
 >
-> **Deliberately NOT wired into `encoder.py` or `pretrain_episodic.py`** — there is no
-> `--frontend continuous` arm yet, so an in-flight experiment cannot be perturbed by it. A test
-> (`test_is_not_yet_wired_into_the_encoder`) asserts that and should be deleted in the commit that
-> adds the arm.
+> The integrated arm handles mixed stored/native rates, per-recording reflection boundaries,
+> source-rate observability, masked calibration, patch-local amplitude/DC, and per-kernel edge support.
+> Analysis parameters use a slower no-weight-decay optimizer group, physical-anchor regularization,
+> and dedicated gradient/drift telemetry. The current experiment contract is fixed one-second patches
+> with JEPA + VICReg; multi-resolution and physical-feature MAE are rejected rather than silently
+> misinterpreted.
 >
-> **Measured cross-rate agreement** against 100 Hz on a band-limited signal, anti-alias decimated to
-> each rate: **0.995 at 20 Hz · 0.997 at 25 Hz · 0.9998 at 50 Hz.** Perturbing one kernel's
-> coefficients drops it to 0.837, so the test discriminates rather than passing trivially.
+> **Current measured cross-rate agreement** against 100 Hz on a band-limited signal, anti-alias
+> decimated to each rate, is **0.989 at 20 Hz · 0.994 at 25 Hz · 0.999 at 50 Hz** over fully observable
+> analysis bands. Final-token cosine agreement is **0.991 · 0.993 · 0.999**, respectively.
 >
-> To integrate later: add `"continuous"` to the `--frontend` choices, construct it in
-> `SetTokenizerEncoder` beside the filterbank (the `analyze`/`project`/`accumulate_norm_stats`/
-> `finalize_norm_stats`/`reset_norm_accumulator` API matches), and run the cross-rate transfer
-> experiment in S7 — **not** an accuracy bake-off.
+> The next decision is the matched comparison in S7: physical filterbank versus continuous kernels
+> under identical data, encoder, objectives, seeds, and step budgets.
+>
+> Sections below preserve the design exploration that led to the implementation. Where an exploratory
+> proposal conflicts with this status block or the code, the status block and code are authoritative.
+> In particular, per-band decimation, ragged per-band frame rates, PCEN, and learnable low-pass pooling
+> are unimplemented future ablations. Historical synthetic-probe tables are not paper evidence until
+> their harness and artifacts are persisted and rerun against the integrated implementation.
 
-**Status: proposal, 2026-08-22. Nothing built.** A CNN whose kernels are defined as continuous
+**Original proposal: 2026-08-22; current implementation status is recorded above.** A CNN whose kernels are defined as continuous
 curves over *real time* (seconds), sampled at whatever rate the signal arrives at, so one set of
 weights convolves 20 Hz and 100 Hz recordings without resampling either.
 
@@ -890,7 +898,7 @@ spectral cues. The phase-randomised surrogate is the fair version; the first att
 
 - **No dead kernels** (0 of 32 with ~zero variance); per-kernel activation sd spans 0.0007–0.0996,
   which tracks where the probe signal actually has energy rather than indicating collapse.
-- **Gradients reach every learnable**, all finite. `sin_coeff` and `log_gain` start at exactly zero
+- **Gradients reach every learnable**, all finite. `sin_coeff` and `gain_logit` start at exactly zero
   by construction (Gabor init), so their gradient/weight ratio is undefined at step 0 — expected,
   and they receive non-zero gradient immediately.
 - Token output at init: mean +0.033, sd 0.454, |max| 1.20 — a healthy scale for the trunk.
@@ -911,7 +919,7 @@ spectral cues. The phase-randomised surrogate is the fair version; the first att
 **Parameter budget against the field:** analysis bank **832** vs SincNet ~160 (2/filter), LEAF ~320,
 CKConv 10–50k per layer (an implicit SIREN MLP). We sit between the constrained and free camps,
 which is where the literature puts small-data front ends — and we have 2.6× LEAF's analysis
-capacity. Note that **84% of the module's 49,600 parameters are the output projection**, though the
+capacity. Note that **88% of the module's 65,472 parameters are the output projection**, though the
 fixed filterbank is 99% projection, so this is the more balanced of the two.
 
 **Two open items, neither blocking:** PCEN instead of `log1p` (LEAF's reported win), and a learnable
