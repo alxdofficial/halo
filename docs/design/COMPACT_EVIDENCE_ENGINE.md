@@ -107,8 +107,15 @@ Signal augmentation and arbitrary label aliases are disabled by default.
 
 Episodes with the same candidate count are vectorized together. Padding is limited to query and
 memory row counts; masks prevent padded rows from entering candidate scores. A measured RTX 4090
-profile of the default shape used 1.86 GiB peak allocated memory and 39.2 ms per optimizer step before
-periodic validation.
+profile of the default shape used 1.86 GiB peak allocated memory. The completed 35,000-step run
+averaged 115 ms per optimizer step including periodic validation.
+
+Core episode plans are deterministic and cached under
+`$XDG_CACHE_HOME/halo/episode_plans` (normally `~/.cache/halo/episode_plans`). The cache key includes
+the exact corpus rows, split metadata, episode settings, schedules, seed, NumPy version, and planner
+source, so changed inputs rebuild rather than reuse stale plans. Cold builds use eight processes; a
+16,384-episode real-corpus benchmark took 14.6 seconds cold and 0.05 seconds warm.
+`HALO_EPISODE_PLAN_CACHE_DIR` may relocate the machine-local cache.
 
 ## Active command
 

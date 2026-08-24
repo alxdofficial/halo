@@ -135,6 +135,68 @@ def test_candidate_schedule_groups_shapes_without_sharing_episode_identity():
     }
 
 
+def test_episode_plan_cache_reuses_valid_plans_and_recovers_from_corruption(tmp_path):
+    from training.tokenizer.pretrain_episodic import _load_or_build_episode_plans
+
+    plan = EpisodePlan((0, 1), (2, 3), (0, 1), (), (), (4,), 0, ())
+    calls = []
+
+    def build():
+        calls.append(True)
+        return [plan]
+
+    manifest = {"schema": 1, "test": "same deterministic request"}
+    first, first_hit, path = _load_or_build_episode_plans(
+        tmp_path, "abc", manifest, 1, build,
+    )
+    second, second_hit, second_path = _load_or_build_episode_plans(
+        tmp_path, "abc", manifest, 1, build,
+    )
+    assert first == second == [plan]
+    assert not first_hit and second_hit
+    assert path == second_path
+    assert len(calls) == 1
+
+    path.write_bytes(b"not a pickle")
+    rebuilt, corrupt_hit, _ = _load_or_build_episode_plans(
+        tmp_path, "abc", manifest, 1, build,
+    )
+    assert rebuilt == [plan]
+    assert not corrupt_hit
+    assert len(calls) == 2
+
+
+def test_episode_plan_cache_identity_changes_with_sampling_inputs():
+    from training.tokenizer.pretrain_data import WindowKey
+    from training.tokenizer.pretrain_episodic import _episode_plan_cache_identity
+
+    kwargs = {
+        "keys": [WindowKey(0, 10, 1), WindowKey(1, 20, 2)],
+        "subjects": np.asarray([0, 1], dtype=np.int64),
+        "streams": np.asarray([3, 4], dtype=np.int64),
+        "executions": np.asarray([5, 6], dtype=np.int64),
+        "pool": [1, 2, 3],
+        "spec": EpisodeSpec(candidate_counts=(2,), queries_per_candidate=1,
+                            max_support=1, background_windows=1),
+        "n_episodes": 2,
+        "seed": 7,
+        "support_schedule": (0, 1),
+        "alias_schedule": None,
+        "candidate_schedule": (2, 2),
+    }
+    original, _ = _episode_plan_cache_identity(**kwargs)
+    repeated, _ = _episode_plan_cache_identity(**kwargs)
+    changed_seed, _ = _episode_plan_cache_identity(**{**kwargs, "seed": 8})
+    changed_key, _ = _episode_plan_cache_identity(**{
+        **kwargs, "keys": [WindowKey(0, 11, 1), WindowKey(1, 20, 2)],
+    })
+    changed_schedule, _ = _episode_plan_cache_identity(**{
+        **kwargs, "support_schedule": (1, 0),
+    })
+    assert original == repeated
+    assert len({original, changed_seed, changed_key, changed_schedule}) == 4
+
+
 def test_requested_support_count_is_not_silently_truncated():
     table, _, _ = _synthetic_table(per_cell=2)
     spec = _spec(max_support=8)

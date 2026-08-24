@@ -16,16 +16,18 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
+import inspect
 import json
 import math
 import multiprocessing as mp
 import os
+import pickle
 import time
 from array import array
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import torch
@@ -85,6 +87,8 @@ SEED = 20260818
 #: WHICH CONCEPTS the seed happened to hold out (16 to 23 of them across those runs). Pinning the
 #: draw makes two runs comparable; leaving it tied to --seed made every arm comparison read noise.
 VAL_SEED = 20260901
+EPISODE_PLAN_CACHE_SCHEMA = 1
+EPISODE_PLAN_CHUNK_SIZE = 512
 
 
 def _file_sha256(path: Path) -> str:
@@ -93,6 +97,133 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _episode_plan_cache_dir() -> Path:
+    """Machine-local cache root; override without adding a routine training knob."""
+    configured = os.environ.get("HALO_EPISODE_PLAN_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return root / "halo" / "episode_plans"
+
+
+def _array_sha256(values: np.ndarray) -> str:
+    """Content identity for an array used by deterministic episode sampling."""
+    contiguous = np.ascontiguousarray(values)
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.dtype).encode())
+    digest.update(str(contiguous.shape).encode())
+    digest.update(contiguous.tobytes())
+    return digest.hexdigest()
+
+
+def _episode_planner_source_sha256() -> str:
+    """Invalidate cached plans whenever their construction logic changes."""
+    objects = (
+        EpisodeSpec,
+        EpisodePlan,
+        build_episode_plans,
+        build_shared_stream_plans,
+        _make_plans,
+        _make_plan_chunk,
+        _build_training_core_plans,
+        grouped_candidate_schedule,
+        alias_curriculum,
+        support_count_grid,
+    )
+    source = "\n".join(inspect.getsource(value) for value in objects)
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
+def _episode_plan_cache_identity(
+    *,
+    keys,
+    subjects: np.ndarray,
+    streams: np.ndarray,
+    executions: np.ndarray,
+    pool: Sequence[int],
+    spec: EpisodeSpec,
+    n_episodes: int,
+    seed: int,
+    support_schedule: Sequence[int] | None,
+    alias_schedule: np.ndarray | None,
+    candidate_schedule: Sequence[int] | None,
+) -> tuple[str, dict[str, object]]:
+    """Return a complete, inspectable identity for a deterministic core-plan build."""
+    key_rows = np.fromiter(
+        (value for key in keys for value in (key.stream_i, key.window_i, key.label_id)),
+        dtype=np.int64,
+        count=len(keys) * 3,
+    ).reshape(len(keys), 3)
+    manifest: dict[str, object] = {
+        "schema": EPISODE_PLAN_CACHE_SCHEMA,
+        "planner_source_sha256": _episode_planner_source_sha256(),
+        "numpy_version": np.__version__,
+        "keys_sha256": _array_sha256(key_rows),
+        "subjects_sha256": _array_sha256(subjects),
+        "streams_sha256": _array_sha256(streams),
+        "executions_sha256": _array_sha256(executions),
+        "pool": [int(value) for value in pool],
+        "spec": dataclasses.asdict(spec),
+        "n_episodes": int(n_episodes),
+        "seed": int(seed),
+        "support_schedule": (
+            None if support_schedule is None else [int(value) for value in support_schedule]
+        ),
+        "alias_schedule_sha256": (
+            None if alias_schedule is None else _array_sha256(alias_schedule)
+        ),
+        "candidate_schedule_sha256": (
+            None if candidate_schedule is None
+            else _array_sha256(np.asarray(candidate_schedule, dtype=np.int64))
+        ),
+    }
+    serialized = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(serialized).hexdigest()[:24], manifest
+
+
+def _load_or_build_episode_plans(
+    cache_dir: Path | None,
+    cache_key: str,
+    manifest: dict[str, object],
+    n_expected: int,
+    builder: Callable[[], list[EpisodePlan]],
+) -> tuple[list[EpisodePlan], bool, Path | None]:
+    """Load deterministic core plans, rebuilding atomically after a miss or corrupt entry."""
+    cache_path = None if cache_dir is None else cache_dir / f"{cache_key}.pkl"
+    if cache_path is not None and cache_path.exists():
+        try:
+            with cache_path.open("rb") as handle:
+                payload = pickle.load(handle)
+            plans = payload["plans"]
+            if payload.get("manifest") != manifest:
+                raise ValueError("manifest mismatch")
+            if len(plans) != n_expected or not all(isinstance(plan, EpisodePlan) for plan in plans):
+                raise ValueError("plan count or type mismatch")
+            return plans, True, cache_path
+        except (EOFError, OSError, pickle.PickleError, TypeError, ValueError, KeyError) as exc:
+            print(f"[phase-b] ignoring invalid episode-plan cache {cache_path}: {exc}", flush=True)
+
+    plans = builder()
+    if len(plans) != n_expected:
+        raise RuntimeError(f"episode planner returned {len(plans)} plans, expected {n_expected}")
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = cache_path.with_name(f".{cache_path.name}.{os.getpid()}.tmp")
+        try:
+            with temporary.open("wb") as handle:
+                pickle.dump(
+                    {"manifest": manifest, "plans": plans},
+                    handle,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, cache_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return plans, False, cache_path
 
 
 def subject_ids_for(index: CorpusIndex, keys) -> np.ndarray:
@@ -389,6 +520,66 @@ def _make_plans(
         support_schedule=schedule, stream_ids=streams, execution_ids=executions,
         alias_schedule=alias_schedule, candidate_schedule=candidate_schedule,
     )
+
+
+_PLAN_BUILD_STATE = None
+
+
+def _make_plan_chunk(bounds: tuple[int, int]) -> list[EpisodePlan]:
+    """Build one deterministic core-plan chunk in a fork worker or the parent process."""
+    start, end = bounds
+    (table, stream_table, pool, spec, streams, executions, seed, support_schedule,
+     alias_schedule, candidate_schedule) = _PLAN_BUILD_STATE
+    local_support = (
+        None if support_schedule is None
+        else tuple(support_schedule[index % len(support_schedule)] for index in range(start, end))
+    )
+    local_alias = None if alias_schedule is None else alias_schedule[start:end]
+    local_candidates = (
+        None if candidate_schedule is None else candidate_schedule[start:end]
+    )
+    return _make_plans(
+        table, stream_table, pool, spec, streams, executions,
+        n_episodes=end - start,
+        # Fixed chunk boundaries and seeds make output independent of process count and scheduling.
+        seed=seed + start,
+        schedule=local_support,
+        alias_schedule=local_alias,
+        candidate_schedule=local_candidates,
+    )
+
+
+def _build_training_core_plans(
+    table, stream_table, pool, spec, streams, executions, *, n_episodes, seed, schedule=None,
+    alias_schedule=None, candidate_schedule=None,
+) -> list[EpisodePlan]:
+    """Build independent chunks in parallel without changing episode ordering or distributions."""
+    global _PLAN_BUILD_STATE
+    _PLAN_BUILD_STATE = (
+        table, stream_table, pool, spec, streams, executions, seed, schedule,
+        alias_schedule, candidate_schedule,
+    )
+    jobs = [
+        (start, min(start + EPISODE_PLAN_CHUNK_SIZE, n_episodes))
+        for start in range(0, n_episodes, EPISODE_PLAN_CHUNK_SIZE)
+    ]
+    workers = min(8, max(1, (os.cpu_count() or 2) // 2), len(jobs))
+    use_pool = n_episodes >= EPISODE_PLAN_CHUNK_SIZE and workers > 1 \
+        and "fork" in mp.get_all_start_methods()
+    try:
+        if use_pool:
+            print(
+                f"[phase-b] cold plan build: {workers} processes, "
+                f"{EPISODE_PLAN_CHUNK_SIZE}-episode deterministic chunks",
+                flush=True,
+            )
+            with mp.get_context("fork").Pool(workers) as pool_handle:
+                chunks = pool_handle.map(_make_plan_chunk, jobs, chunksize=1)
+        else:
+            chunks = [_make_plan_chunk(job) for job in jobs]
+    finally:
+        _PLAN_BUILD_STATE = None
+    return [plan for chunk in chunks for plan in chunk]
 
 
 def grouped_candidate_schedule(
@@ -1302,12 +1493,32 @@ def main() -> None:
     if train_alias is not None:
         print(f"[phase-b] alias curriculum: 0.0 for {args.alias_warmup_steps} steps, "
               f"ramp over {args.alias_ramp_steps} -> {args.alias_episode_fraction}", flush=True)
-    plan_started = time.perf_counter()
-    print(f"[phase-b] constructing {n_train:,} deterministic training episodes", flush=True)
-    train_plans = _make_plans(
-        train_table, train_stream_table, train_pool, train_spec, train_stream, train_execution,
-        n_episodes=n_train, seed=args.seed, schedule=support_grid, alias_schedule=train_alias,
+    plan_cache_key, plan_cache_manifest = _episode_plan_cache_identity(
+        keys=train_keys,
+        subjects=train_subject,
+        streams=train_stream,
+        executions=train_execution,
+        pool=train_pool,
+        spec=train_spec,
+        n_episodes=n_train,
+        seed=args.seed,
+        support_schedule=support_grid,
+        alias_schedule=train_alias,
         candidate_schedule=train_candidate_schedule,
+    )
+    plan_started = time.perf_counter()
+    print(f"[phase-b] preparing {n_train:,} deterministic training episodes", flush=True)
+    train_plans, plan_cache_hit, plan_cache_path = _load_or_build_episode_plans(
+        _episode_plan_cache_dir(),
+        plan_cache_key,
+        plan_cache_manifest,
+        n_train,
+        lambda: _build_training_core_plans(
+            train_table, train_stream_table, train_pool, train_spec,
+            train_stream, train_execution,
+            n_episodes=n_train, seed=args.seed, schedule=support_grid,
+            alias_schedule=train_alias, candidate_schedule=train_candidate_schedule,
+        ),
     )
     bank_spec = BankSpec(n_windows=args.bank_windows)
     # A held-out concept is absent from the whole Phase-B objective, not merely absent as a query.
@@ -1329,8 +1540,8 @@ def main() -> None:
     bank_seconds = time.perf_counter() - bank_started
     train_episode_distribution = episode_distribution(train_plans)
     print(
-        f"[phase-b] episode plans ready: sampling={plan_seconds:.1f}s "
-        f"banks={bank_seconds:.1f}s",
+        f"[phase-b] episode plans ready: core={plan_seconds:.1f}s "
+        f"({'cache hit' if plan_cache_hit else 'cache miss'}) banks={bank_seconds:.1f}s",
         flush=True,
     )
     print(
@@ -1553,6 +1764,14 @@ def main() -> None:
         "train_concepts": train_pool,
         "heldout_concepts": val_pool,
         "episode_spec": dataclasses.asdict(train_spec),
+        "episode_plan_cache": {
+            "schema": EPISODE_PLAN_CACHE_SCHEMA,
+            "key": plan_cache_key,
+            "hit": plan_cache_hit,
+            "path": str(plan_cache_path),
+            "core_seconds": plan_seconds,
+            "bank_seconds": bank_seconds,
+        },
         "train_episode_distribution": train_episode_distribution,
         "phase_b_regime": args.phase_b_regime,
         "no_regression_reference": reference_mode,

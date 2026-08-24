@@ -306,10 +306,10 @@ protocol documents are under `references/datasets/`.
 
 ## Phase B: compact end-to-end episodic training
 
-`pretrain_episodic.py` trains the current compact evidence engine through its deployment rule. Four
-independent episodes share one encoder forward but retain separate fixed-size memory banks,
-candidate sets, support, aliases, retrieval, and attention. The compact temporal sensor encoder,
-learned pair scorer, hard top-k selector, evidence mixer, and text vote are optimized together.
-Inputs are clean by default; `--augment` is an explicit ablation. Coherent-label and random-alias
-adaptation are validated separately. The single design of record is
-`docs/design/COMPACT_EVIDENCE_ENGINE.md`.
+`pretrain_episodic.py` trains the current recording-level evidence reranker through its deployment
+rule. Eight independent episodes share one encoder forward but retain separate fixed-size memory
+banks, candidate sets, queries, and support. The temporal sensor encoder produces one vector per
+six-second recording. Raw cosine retrieval is adjusted by one bounded learned scalar per
+query-memory pair before corrected nearest-neighbor classification. There is no top-k selector,
+attention mixer, or label voting stage. Inputs are clean by default; `--augment` is an explicit
+ablation. The single design of record is `docs/design/COMPACT_EVIDENCE_ENGINE.md`.

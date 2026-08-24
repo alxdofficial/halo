@@ -110,9 +110,11 @@ The repaired run completed without a non-finite loss or gradient. Development ma
 reranker's development margin over its exact raw full-memory control was also small: +0.0039 at the
 selected checkpoint. This is mild late overfitting rather than early convergence.
 
-Total wall time was 97.5 minutes: 29.8 minutes constructing 280,000 deterministic episode plans and
-approximately 67.7 minutes for initialization, validation, and GPU training. The serial episode
-planner and per-step CPU data preparation remain the main speed limitations.
+Total wall time was 97.5 minutes under the code used for this recorded run: 29.8 minutes constructing
+280,000 deterministic episode plans and approximately 67.7 minutes for initialization, validation,
+and GPU training. The planner has since been made deterministic-parallel and cacheable without
+changing episode semantics. A real-corpus benchmark projects about 6 minutes of cold setup and 2
+minutes of warm setup; per-step CPU data preparation remains the main training-time limitation.
 
 ## Current Conclusion
 

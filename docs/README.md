@@ -20,11 +20,10 @@
 
 ## Current Matched Results
 
-**2026-08-23.** The current model is the compact end-to-end evidence engine at
-`training/tokenizer/outputs/e2e_compact_35k_20260823/best.pt` (selected step 10,000). It and all six
-external encoders were scored on the same `adaptation_v1` manifest: seven held-out datasets, five
-seeds, and execution-disjoint support/query. CrossHAR and LIMU-BERT were retrained on the current
-18-source corpus before evaluation. Full tables and protocol details are in
+**2026-08-24.** The current model is the recording-level residual reranker at
+`training/tokenizer/outputs/e2e_recording_rerank_35k_v3_20260824/best.pt` (selected step 33,000). It
+and all six external encoders were scored on the same `adaptation_v1` manifest: seven held-out
+datasets, five seeds, and execution-disjoint support/query. Full tables and protocol details are in
 [`results/RESULTS.md`](results/RESULTS.md).
 
 ### Zero-shot, k = 0 — each model's own shipped mechanism
@@ -32,31 +31,28 @@ seeds, and execution-disjoint support/query. CrossHAR and LIMU-BERT were retrain
 | model | ordinary macro F1 | specialized-novel macro F1 |
 |---|---:|---:|
 | CrossHAR + ConSE | **37.70** | 11.22 |
-| **HALO compact engine** | 35.11 | 17.17 |
 | HARNet + ConSE | 33.82 | 11.40 |
 | UniMTS (own text tower) | 31.98 | **17.37** |
 | LiMU-BERT + ConSE | 30.60 | 10.27 |
+| **HALO native engine** | 20.72 | 9.72 |
 | ImageBind (own text tower) | 11.38 | 8.15 |
 | NormWear (L1 text match) | 5.08 | 3.58 |
 
-HALO's row uses the engine's native retrieve-mix-vote mechanism with no fitted test head.
+HALO's row uses the native corrected-nearest rule with no fitted test head. It is not competitive at
+k=0 in this run.
 
 ### Enrollment, k ≥ 1 — and the nuance that matters
 
-The current result separates the native engine from the representation controls. HALO+1-NN is
-second to LIMU-BERT on ordinary activities through k=8 and is best at every k on specialized
-activities. The same specialized advantage holds for prototype, ridge, and a fitted linear head.
-This supports the quality of the frozen HALO representation.
+The native engine scores 53.99/57.82/61.68/60.81/58.48 across ordinary k=1/2/4/8/16 and leads every
+compared method on specialized activities. Its exact learned reranking correction is nevertheless
+nearly neutral relative to raw full-memory 1-NN. LIMU-BERT 1-NN remains stronger on ordinary
+activities through k=8.
 
-The native evidence engine is materially worse: ordinary macro F1 is 45.02 at k=1 and remains near
-45 through k=16, versus 55.11-63.94 for HALO+1-NN. Specialized k=1 is 24.82 versus 42.76 for
-HALO+1-NN. The current evidence therefore does **not** support a claim that learned
-retrieve-mix-vote improves over simple retrieval. The completed acquisition-description ablation
-improves matched 1-NN by 1.3-2.4 F1 when descriptions are removed throughout training, but weakens
-the native engine. The completed retrieve-mix-vote decomposition localizes the largest regression
-to the learned attention mixer: it loses 12.7 ordinary and 15.8 specialized F1 relative to its own
-unmixed full-bank vote. Seed replication and a minimal retrieval-first engine are the next required
-experiments.
+The historical `69.46` in `ADAPTATION_TABLE_20260822.md` is HALO with a **fitted linear head** at
+specialized k=16; it is not a HALO 1-NN score. The directly comparable previous pooled-execution
+HALO 1-NN checkpoint scored 55.11-63.94 ordinary and 42.76-62.12 specialized. The current encoder is
+1.5-3.6 points lower on ordinary activities and about 6-7 points lower on specialized activities;
+the external baseline rows and sealed evaluation manifest did not change.
 
 ### Retracted — do not cite
 - the **49.5 "beats harnet"** evidence-decoder headline — retracted twice: first for eval-label text
