@@ -1,13 +1,14 @@
-"""Decompose HALO enrollment into retrieval, corpus-vote, and mixer stages.
+"""Decompose HALO into raw and learned recording-level nearest-neighbor retrieval.
 
-Every arm consumes the same serialized adaptation manifest and the same encoded query/support rows.
-This is a diagnostic of one trained checkpoint, not a new training or test-set selection path.
+Every arm consumes the same serialized adaptation manifest, query recordings, enrolled recordings,
+and frozen corpus bank.  The only intervention is whether memory contains support, corpus, or both,
+and whether the learned per-row correction is enabled.  This is a checkpoint diagnostic rather than
+a separate classifier or training path.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -29,18 +30,15 @@ from eval.scoring import align_ground_truth_labels, classification_metrics
 from model.evidence.rows import SensorRows
 
 
-# Keep method names explicit: these strings become the durable result-table row labels.
 METHODS = (
-    "support_patch_1nn",
-    "support_soft_vote",
-    "support_mixer",
-    "corpus_only_semantic_vote",
-    "full_uniform_corpus_vote",
-    "full_semantic_topk_vote",
-    "full_semantic_bank_vote",
-    "full_engine",
+    "support_raw_1nn",
+    "support_reranked_1nn",
+    "corpus_raw_1nn",
+    "corpus_reranked_1nn",
+    "full_raw_1nn",
+    "full_reranked_1nn",
 )
-QUERY_CHUNK = 4096
+QUERY_CHUNK = 1024
 
 
 def _take(rows: SensorRows, index: torch.Tensor) -> SensorRows:
@@ -50,52 +48,13 @@ def _take(rows: SensorRows, index: torch.Tensor) -> SensorRows:
     })
 
 
-def _recording_logits(row_mass: torch.Tensor, inverse: torch.Tensor) -> torch.Tensor:
-    n_recordings = int(inverse.max().item()) + 1
-    mass = row_mass.new_zeros((n_recordings, row_mass.shape[1]))
-    mass.index_add_(0, inverse, row_mass)
-    counts = torch.bincount(inverse, minlength=n_recordings).to(mass.dtype).unsqueeze(1)
-    return (mass / counts.clamp_min(1)).clamp_min(1e-8).log()
-
-
-def _support_hard_logits(result: dict, support: SensorRows, candidates: int) -> torch.Tensor:
-    nearest = result["scores"].argmax(dim=1)
-    bound = support.enrolled_candidate.to(nearest.device)[nearest]
-    if bool(bound.lt(0).any()) or bool(bound.ge(candidates).any()):
-        raise ValueError("support-only hard retrieval encountered an unbound support row")
-    row_mass = F.one_hot(bound, candidates).to(result["scores"].dtype)
-    return _recording_logits(row_mass, result["query_inverse"])
-
-
-def _uniform_corpus_logits(result: dict, memory: SensorRows, candidates: int) -> torch.Tensor:
-    """Use normal retrieval but make every corpus row an uninformative uniform vote."""
-    bound = memory.enrolled_candidate.to(result["scores"].device)
-    enrolled = F.one_hot(bound.clamp_min(0), candidates).to(result["scores"].dtype)
-    uniform = torch.full_like(enrolled, 1.0 / candidates)
-    row_vote = torch.where(bound.unsqueeze(1).ge(0), enrolled, uniform)
-    row_mass = torch.softmax(result["scores"].float(), dim=1) @ row_vote.float()
-    return _recording_logits(row_mass, result["query_inverse"])
-
-
-def _topk_base_logits(
-    result: dict,
-    memory: SensorRows,
-    candidate_text: torch.Tensor,
-    label_text: torch.Tensor,
-) -> torch.Tensor:
-    """Production top-k vote computed from the production engine's selected rows and scores."""
-    from model.evidence.engine import vote
-    from model.evidence.rows import evidence_label_tokens
-
-    selected = result["selected"][result["query_inverse"]]
-    labels = evidence_label_tokens(memory, candidate_text, label_text)
-    row_mass = vote(
-        result["scores"].gather(1, selected),
-        labels[selected],
-        candidate_text,
-        memory.enrolled_candidate.to(selected.device)[selected],
-    )
-    return _recording_logits(row_mass, result["query_inverse"])
+def _raw_and_reranked(result: dict) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the exact raw and corrected nearest-candidate logits from one engine call."""
+    raw = result["base_logits"]
+    reranked = result["logits"]
+    if raw.shape != reranked.shape or raw.dim() != 2:
+        raise ValueError("engine decomposition expected query-by-candidate recording logits")
+    return raw, reranked
 
 
 def predict_plan(
@@ -108,6 +67,7 @@ def predict_plan(
     *,
     seed: int,
 ) -> tuple[dict[str, list[str]], dict]:
+    del seed  # the active reranker has no stochastic identity or selection path
     query_rows, query_window, _, _ = adapter._stream_rows(query_stream, state)
     support_rows, support_window, _, _ = adapter._stream_rows(support_stream, state)
     memory, support_windows, enrolled_rows = adapter._append_enrollment(
@@ -116,7 +76,7 @@ def predict_plan(
     support_index = torch.nonzero(memory.enrolled_candidate.ge(0), as_tuple=True)[0]
     support = _take(memory, support_index)
     if len(support.feature) != enrolled_rows:
-        raise ValueError("the support-only decomposition did not isolate every enrolled row")
+        raise ValueError("support-only memory did not isolate every enrolled recording")
 
     candidates = list(plan["candidate_names"])
     candidate_text = F.normalize(
@@ -125,9 +85,6 @@ def predict_plan(
     ).to(state["device"])
     requested = [int(row) for row in plan["query_rows"]]
     predicted: dict[str, dict[int, str]] = {method: {} for method in METHODS}
-    full_generator = torch.Generator().manual_seed(int(seed))
-    support_generator = torch.Generator().manual_seed(int(seed))
-    corpus_generator = torch.Generator().manual_seed(int(seed))
 
     with torch.no_grad():
         for start in range(0, len(requested), QUERY_CHUNK):
@@ -137,37 +94,30 @@ def predict_plan(
             )
             row_index = torch.nonzero(torch.isin(query_window, wanted), as_tuple=True)[0]
             if not len(row_index):
-                raise ValueError("a decomposition query selected no sensor rows")
+                raise ValueError("a decomposition query selected no recording rows")
             query = _take(query_rows, row_index)
 
-            full = state["engine"](
-                query, memory, candidate_text, state["label_text"], generator=full_generator,
-            )
             support_result = state["engine"](
                 query, support, candidate_text, state["label_text"],
-                generator=support_generator,
             )
             corpus_result = state["engine"](
                 query, state["bank"], candidate_text, state["label_text"],
-                generator=corpus_generator,
             )
+            full_result = state["engine"](
+                query, memory, candidate_text, state["label_text"],
+            )
+            support_raw, support_reranked = _raw_and_reranked(support_result)
+            corpus_raw, corpus_reranked = _raw_and_reranked(corpus_result)
+            full_raw, full_reranked = _raw_and_reranked(full_result)
             logits = {
-                "support_patch_1nn": _support_hard_logits(
-                    support_result, support, len(candidates),
-                ),
-                "support_soft_vote": support_result["base_logits"],
-                "support_mixer": support_result["logits"],
-                "corpus_only_semantic_vote": corpus_result["base_logits"],
-                "full_uniform_corpus_vote": _uniform_corpus_logits(
-                    full, memory, len(candidates),
-                ),
-                "full_semantic_topk_vote": _topk_base_logits(
-                    full, memory, candidate_text, state["label_text"],
-                ),
-                "full_semantic_bank_vote": full["base_logits"],
-                "full_engine": full["logits"],
+                "support_raw_1nn": support_raw,
+                "support_reranked_1nn": support_reranked,
+                "corpus_raw_1nn": corpus_raw,
+                "corpus_reranked_1nn": corpus_reranked,
+                "full_raw_1nn": full_raw,
+                "full_reranked_1nn": full_reranked,
             }
-            windows = full["query_window"].cpu().tolist()
+            windows = full_result["query_window"].cpu().tolist()
             for method, values in logits.items():
                 positions = values.argmax(dim=1).cpu().tolist()
                 for window, position in zip(windows, positions, strict=True):
@@ -183,10 +133,10 @@ def predict_plan(
         method: [values[window] for window in requested]
         for method, values in predicted.items()
     }, {
-        "corpus_rows": int(len(state["bank"].feature)),
-        "enrolled_rows": int(enrolled_rows),
+        "corpus_recordings": int(len(state["bank"].feature)),
+        "enrolled_recordings": int(enrolled_rows),
         "enrolled_windows": int(support_windows),
-        "total_memory_rows": int(len(memory.feature)),
+        "total_memory_recordings": int(len(memory.feature)),
     }
 
 
@@ -284,8 +234,8 @@ def run(manifest_path: Path, out: Path, device: str) -> dict:
         print(f"[halo-decomposition] {cell_id}: complete", flush=True)
 
     result = {
-        "schema_version": 1,
-        "experiment": "halo_engine_decomposition",
+        "schema_version": 2,
+        "experiment": "halo_recording_reranker_decomposition",
         "manifest": str(manifest_path.resolve()),
         "manifest_fingerprint": manifest["manifest_fingerprint"],
         "methods": list(METHODS),

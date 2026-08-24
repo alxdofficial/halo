@@ -409,13 +409,14 @@ def build_episode_plans(
                 "random-alias episodes require every candidate to be enrolled, but C * k exceeds "
                 "the configured memory capacity"
             )
-        enrolled = set(range(n_candidates)) if label_mode == "random_alias" else (
-            set() if support_k == 0 or enrollment_capacity == 0 else set(
-                rng.choice(
-                    n_candidates, int(rng.integers(1, enrollment_capacity + 1)), replace=False,
-                ).tolist()
-            )
-        )
+        if label_mode == "random_alias":
+            enrollment_count = n_candidates
+        elif support_k == 0 or enrollment_capacity == 0:
+            enrollment_count = 0
+        else:
+            has_distractors = len(queried_slots) < n_candidates
+            minimum = 2 if enrollment_capacity >= 2 and has_distractors else 1
+            enrollment_count = int(rng.integers(minimum, enrollment_capacity + 1))
 
         query_positions: list[int] = []
         query_slot: list[int] = []
@@ -454,15 +455,14 @@ def build_episode_plans(
             np.unique(stream_ids[np.asarray(query_positions)])
             if spec.disjointness == "stream" else np.asarray([], dtype=np.int64)
         )
+        available_by_slot: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         for slot, label in enumerate(candidates):
-            if slot not in enrolled:
-                continue
             # Support is drawn from the label's FULL window set, not the (possibly stream-restricted)
             # query view — otherwise a shared-query-stream episode could only ever enroll on-device.
             other = [rows for subject, rows in table[int(label)].items()
                      if subject != query_subject_by_slot.get(slot)]
             if not other:
-                continue                   # eligibility guarantees this only when max_support == 0
+                continue
             available = np.concatenate(other)
             if spec.disjointness == "stream":
                 # Support must also come off a DIFFERENT device. Otherwise "which candidate's
@@ -470,7 +470,7 @@ def build_episode_plans(
                 # anything, and that is exactly the cue the cross-configuration claim forbids.
                 available = available[~np.isin(stream_ids[available], query_streams)]
                 if not len(available):
-                    continue               # nothing enrollable off-device for this candidate
+                    continue
             available_units = (
                 np.unique(execution_ids[available]) if execution_ids is not None else available
             )
@@ -480,6 +480,33 @@ def build_episode_plans(
             # candidate unenrolled instead and keep k exact for every candidate that is enrolled.
             if support_k == 0 or len(available_units) < support_k:
                 continue
+            available_by_slot[slot] = (available, available_units)
+
+        enrollable = sorted(available_by_slot)
+        if label_mode == "random_alias" and len(enrollable) != n_candidates:
+            # The sampled query stream can make a globally eligible label impossible to enroll.
+            # Keep a coherent episode rather than presenting an arbitrary name with no evidence.
+            label_mode = "coherent"
+        enrollment_count = min(enrollment_count, len(enrollable))
+        if enrollment_count:
+            query_choices = sorted(set(enrollable) & queried_slots)
+            distractor_choices = sorted(set(enrollable) - queried_slots)
+            mandatory: list[int] = []
+            if query_choices:
+                mandatory.append(int(rng.choice(query_choices)))
+            if enrollment_count >= 2 and distractor_choices:
+                mandatory.append(int(rng.choice(distractor_choices)))
+            remainder = sorted(set(enrollable) - set(mandatory))
+            extra = (
+                rng.choice(remainder, enrollment_count - len(mandatory), replace=False).tolist()
+                if enrollment_count > len(mandatory) else []
+            )
+            enrolled = set(mandatory + [int(value) for value in extra])
+        else:
+            enrolled = set()
+
+        for slot in sorted(enrolled):
+            available, available_units = available_by_slot[slot]
             chosen_units = rng.choice(available_units, support_k, replace=False)
             chosen = (
                 np.asarray([rng.choice(available[execution_ids[available] == execution])
@@ -740,10 +767,70 @@ def gravity_codes(modality: torch.Tensor, gravity_state: list) -> torch.Tensor:
 
 @dataclass(frozen=True)
 class LiveRows:
-    """Retrieval rows produced by one forward pass, plus the window each row came from."""
+    """Evidence rows produced by one forward pass, plus their source-window identity."""
 
     rows: SensorRows
     window: torch.Tensor          # (R,) batch row that produced this retrieval row
+
+
+def live_recording_rows(
+    out: dict,
+    batch: dict,
+    *,
+    labels: torch.Tensor,
+    enrolled_candidate: torch.Tensor,
+    select: torch.Tensor | None = None,
+) -> LiveRows:
+    """Build exactly one evidence row for each selected six-second model window.
+
+    The signal feature is the encoder's deployed pooled representation, which is also the feature
+    consumed by the matched 1-NN evaluation.  The acquisition descriptor is the normalized mean of
+    only the sensor descriptions that are actually present.  Keeping both at recording granularity
+    makes the raw-cosine path identical to the measured baseline and avoids reconstructing a window
+    approximately from patch rows after the fact.
+    """
+    feature = out.get("pooled")
+    descriptor = out.get("descriptor")
+    present = out.get("sensor_present")
+    if feature is None or descriptor is None or present is None:
+        raise KeyError("recording evidence requires pooled, descriptor, and sensor_present outputs")
+    if feature.dim() != 2 or descriptor.dim() != 3 or present.dim() != 2:
+        raise ValueError("recording evidence received malformed encoder outputs")
+    B, d = feature.shape
+    if descriptor.shape[:2] != present.shape or descriptor.shape[0] != B:
+        raise ValueError("sensor descriptors, presence mask, and pooled windows disagree")
+    if bool((~present.any(dim=1)).any()):
+        raise ValueError("a recording evidence row must contain at least one real sensor")
+
+    weight = present.unsqueeze(-1).to(descriptor.dtype)
+    recording_descriptor = (descriptor * weight).sum(dim=1) / weight.sum(dim=1).clamp_min(1.0)
+    recording_descriptor = F.normalize(recording_descriptor.float(), dim=-1)
+    labels = labels.to(feature.device)
+    enrolled_candidate = enrolled_candidate.to(feature.device)
+    if labels.shape != (B,) or enrolled_candidate.shape != (B,):
+        raise ValueError("labels and enrollment bindings must contain one value per recording")
+
+    chosen = (torch.arange(B, device=feature.device) if select is None
+              else select.to(device=feature.device, dtype=torch.long))
+    if chosen.numel() and (int(chosen.min()) < 0 or int(chosen.max()) >= B):
+        raise IndexError("recording evidence selection is outside the encoded batch")
+    # The legacy SensorRows container remains the common bank serialization contract.  Modality and
+    # gravity are no longer scored as scalar row properties because a recording may contain both
+    # accelerometer and gyroscope sensors; the complete acquisition configuration is represented by
+    # `descriptor` instead.
+    zeros = torch.zeros(len(chosen), dtype=torch.long, device=feature.device)
+    rows = SensorRows(
+        feature=feature.index_select(0, chosen),
+        descriptor=recording_descriptor.index_select(0, chosen),
+        bias=feature.new_zeros((len(chosen), 1)),
+        modality=zeros,
+        gravity=zeros,
+        label=labels.index_select(0, chosen),
+        dataset=zeros,
+        enrolled_candidate=enrolled_candidate.index_select(0, chosen),
+        source_window=chosen,
+    )
+    return LiveRows(rows=rows, window=chosen)
 
 
 def live_sensor_rows(

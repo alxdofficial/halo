@@ -12,6 +12,8 @@ Asserts the behaviours the contribution claims, not shapes:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -328,14 +330,7 @@ def _mixer_rows(R=40, C=4, V=9, d=16, seed=0):
     )
 
 
-def test_predict_routes_through_the_engine_when_given_one():
-    """The deployment entry point must run the trained forward pass, not a re-derivation of it.
-
-    There is deliberately no "starts at the closed-form rule" assertion here any more: the engine
-    replaces the hand-written retrieval rule rather than correcting it, so agreement at init would
-    be a coincidence to preserve rather than a property to check. What must hold is that the engine
-    is what produced the numbers.
-    """
+def test_recording_engine_returns_raw_and_corrected_nearest_scores():
     import torch.nn.functional as F
     from model.blocks import AttentionSpec
     from model.evidence.engine import EngineConfig, EvidenceEngine
@@ -343,71 +338,49 @@ def test_predict_routes_through_the_engine_when_given_one():
     torch.manual_seed(0)
     S, R, C, V, d = 3, 40, 4, 9, 16
     rows = _mixer_rows(R, C, V, d)
-    engine = EvidenceEngine(None, EngineConfig(
-        spec=AttentionSpec(d_model=d, n_heads=4), top_k=8,
-    )).eval()
+    rows = replace(rows, source_window=torch.arange(R))
+    engine = EvidenceEngine(None, EngineConfig(spec=AttentionSpec(d_model=d, n_heads=4))).eval()
     query_feature = F.normalize(torch.randn(S, d), dim=-1)
     query_descriptor = F.normalize(torch.randn(S, 384), dim=-1)
     candidate_text = F.normalize(torch.randn(C, 384), dim=-1)
     label_text = F.normalize(torch.randn(V, 384), dim=-1)
-    common = dict(
-        query_feature=query_feature, query_bias=torch.zeros(S, 1),
-        query_modality=torch.zeros(S, dtype=torch.long),
-        query_gravity=torch.zeros(S, dtype=torch.long),
-        rows=rows, candidate_text=candidate_text, label_text=label_text,
-        admissibility=torch.ones(S, R, C), query_descriptor=query_descriptor, top_k=8,
+    query = SensorRows(
+        feature=query_feature, descriptor=query_descriptor, bias=torch.zeros(S, 1),
+        modality=torch.zeros(S, dtype=torch.long), gravity=torch.zeros(S, dtype=torch.long),
+        label=torch.full((S,), -1), dataset=torch.zeros(S, dtype=torch.long),
+        enrolled_candidate=torch.full((S,), -1), source_window=torch.arange(S),
     )
     with torch.no_grad():
-        through_predict = predict(**common, engine=engine,
-                                  generator=torch.Generator().manual_seed(0))
-        direct = engine(
-            SensorRows(feature=query_feature, descriptor=query_descriptor,
-                       bias=torch.zeros(S, 1),
-                       modality=torch.zeros(S, dtype=torch.long),
-                       gravity=torch.zeros(S, dtype=torch.long),
-                       label=torch.full((S,), -1), dataset=torch.zeros(S, dtype=torch.long),
-                       enrolled_candidate=torch.full((S,), -1),
-                       source_window=torch.zeros(S, dtype=torch.long)),
-            rows, candidate_text, label_text, top_k=8,
-            generator=torch.Generator().manual_seed(0),
-        )["logits"]
-    assert torch.allclose(through_predict, merge_sensors(direct, None), atol=1e-6)
+        result = engine(query, rows, candidate_text, label_text)
+    assert result["logits"].shape == result["base_logits"].shape == (S, C)
+    assert result["scores"].shape == result["base_scores"].shape == (S, R)
 
 
 def test_predict_refuses_a_bank_without_source_window_provenance():
     """Without it every row looks like its own recording, and the co-membership channel that
     relates an accelerometer to the gyroscope beside it silently says nothing."""
     import torch.nn.functional as F
-    from dataclasses import replace
     from model.blocks import AttentionSpec
     from model.evidence.engine import EngineConfig, EvidenceEngine
 
     torch.manual_seed(0)
     S, R, C, V, d = 2, 24, 3, 7, 16
-    rows = replace(_mixer_rows(R, C, V, d), source_window=None)
-    engine = EvidenceEngine(None, EngineConfig(
-        spec=AttentionSpec(d_model=d, n_heads=4), top_k=4,
-    )).eval()
-    with pytest.raises(ValueError, match="source-window provenance"):
-        predict(
-            query_feature=F.normalize(torch.randn(S, d), dim=-1), query_bias=torch.zeros(S, 1),
-            query_modality=torch.zeros(S, dtype=torch.long),
-            query_gravity=torch.zeros(S, dtype=torch.long),
-            rows=rows, candidate_text=F.normalize(torch.randn(C, 384), dim=-1),
-            label_text=F.normalize(torch.randn(V, 384), dim=-1),
-            admissibility=torch.ones(S, R, C),
-            query_descriptor=F.normalize(torch.randn(S, 384), dim=-1), engine=engine,
+    memory = replace(_mixer_rows(R, C, V, d), source_window=None)
+    query = replace(
+        _mixer_rows(S, C, V, d), source_window=torch.arange(S),
+        enrolled_candidate=torch.full((S,), -1),
+    )
+    engine = EvidenceEngine(None, EngineConfig(spec=AttentionSpec(d_model=d, n_heads=4))).eval()
+    with pytest.raises(ValueError, match="source_window"):
+        engine(
+            query, memory, F.normalize(torch.randn(C, 384), dim=-1),
+            F.normalize(torch.randn(V, 384), dim=-1),
         )
 
 
-def test_a_top_k_wider_than_the_group_vocabulary_is_refused_at_construction():
-    """Wrapping would alias two distinct recordings onto one co-membership id — a wrong answer that
-    looks like a working one. The check sits in the config so it fires before a run starts rather
-    than on the first forward, halfway in."""
-    from model.blocks import AttentionSpec
+def test_recording_engine_has_no_top_k_or_mixer_configuration():
+    """The active model reranks every row and exposes no hidden legacy selection branch."""
     from model.evidence.engine import EngineConfig
-    from model.evidence.evidence_mixer import EvidenceMixerConfig
 
-    with pytest.raises(ValueError, match="co-membership groups"):
-        EngineConfig(spec=AttentionSpec(d_model=16, n_heads=4), top_k=16,
-                     mixing="attention", mixer=EvidenceMixerConfig(n_groups=4))
+    fields = set(EngineConfig.__dataclass_fields__)
+    assert fields.isdisjoint({"top_k", "mixing", "vote_scope", "mixer", "scorer"})

@@ -250,43 +250,41 @@ def test_runtime_acceleration_does_not_change_checkpoint_keys(harnet):
     assert not any("_compiled_net" in key or "_orig_mod" in key for key in harnet.state_dict())
 
 
-def test_halo_comparison_pool_is_duration_weighted_and_single_row():
-    from training.tokenizer.pretrain_episodic import _pool_retrieval_to_window
+def test_halo_comparison_uses_the_encoders_exact_pooled_recording_row():
+    from training.tokenizer.episodic import live_recording_rows
 
-    tokens = torch.tensor([1.0, 3.0, 99.0]).view(1, 3, 1, 1)
+    pooled = torch.tensor([[1.25, -0.5]])
     encoded = {
-        "retrieval_tokens": tokens,
+        "pooled": pooled,
         "sensor_present": torch.ones(1, 1, dtype=torch.bool),
+        "descriptor": torch.randn(1, 1, 384),
     }
     batch = {
-        "patch_padding_mask": torch.tensor([[True, True, False]]),
-        "patch_durations": torch.tensor([[1.0, 0.5, 0.0]]),
-        "sensor_id": torch.zeros(1, 6, dtype=torch.long),
-        "channel_mask": torch.tensor([[True, True, True, False, False, False]]),
-        "gravity_state": ["present"],
+        "labels": torch.tensor([3]),
     }
-    out = _pool_retrieval_to_window(encoded, batch)
-    assert out["retrieval_tokens"].shape == (1, 1, 1, 1)
-    assert out["retrieval_window_rows"] is True
-    assert torch.allclose(out["retrieval_tokens"].flatten(), torch.tensor([5.0 / 3.0]))
+    out = live_recording_rows(
+        encoded, batch, labels=batch["labels"], enrolled_candidate=torch.tensor([-1]),
+    )
+    assert out.rows.feature.shape == (1, 2)
+    assert torch.equal(out.rows.feature, pooled)
 
 
-def test_halo_comparison_uses_the_same_accel_only_compatibility_rule():
-    from training.tokenizer.pretrain_episodic import _pool_retrieval_to_window
+def test_halo_comparison_descriptor_uses_only_present_sensors():
+    from training.tokenizer.episodic import live_recording_rows
 
+    descriptor = torch.randn(2, 2, 384)
     encoded = {
-        "retrieval_tokens": torch.randn(2, 3, 2, 8),
-        "sensor_present": torch.ones(2, 2, dtype=torch.bool),
+        "pooled": torch.randn(2, 8),
+        "descriptor": descriptor,
+        "sensor_present": torch.tensor([[True, False], [True, True]]),
     }
-    batch = {
-        "patch_padding_mask": torch.ones(2, 3, dtype=torch.bool),
-        "patch_durations": torch.ones(2, 3),
-        "sensor_id": torch.tensor([[0, 0, 0, 1, 1, 1]] * 2),
-        "channel_mask": torch.ones(2, 6, dtype=torch.bool),
-        "gravity_state": ["present", "removed"],
-    }
-    out = _pool_retrieval_to_window(encoded, batch)
-    assert out["sensor_present"].tolist() == [[True, False], [False, False]]
+    labels = torch.tensor([1, 2])
+    out = live_recording_rows(
+        encoded, {}, labels=labels, enrolled_candidate=torch.tensor([-1, -1]),
+    )
+    expected = torch.stack((descriptor[0, 0], descriptor[1].mean(0)))
+    expected = torch.nn.functional.normalize(expected, dim=-1)
+    assert torch.allclose(out.rows.descriptor, expected, atol=1e-6)
 
 
 def test_comparison_corpus_excludes_incompatible_streams_before_planning():

@@ -2,10 +2,10 @@
 
 Each episode has its own candidate set, query executions, enrolled support, and fixed-size
 stratified memory bank.  Several episodes share one encoder forward for throughput, but never share
-candidate identities or attention.  The exact compact deployment path is optimized end to end:
+candidate identities or evidence scores.  The exact compact deployment path is optimized end to end:
 
-    temporal sensor encoder -> full-bank cosine retrieval
-                            -> global top-k scalar evidence reranker -> fixed evidence vote
+    temporal sensor encoder -> one pooled row per six-second window
+                            -> all-memory residual reranking -> corrected nearest neighbour
 
 The default input is clean.  Signal augmentation is an explicit experiment, not hidden in the
 reference recipe.
@@ -35,9 +35,7 @@ from torch.utils.data import DataLoader
 from data.scripts.augmentations import AugmentationConfig
 from model.blocks import AttentionSpec
 from model.evidence.engine import EngineConfig, EvidenceEngine
-from model.evidence.evidence_mixer import EvidenceMixerConfig
 from model.evidence.evidence_reranker import EvidenceRerankerConfig
-from model.evidence.retrieval_scorer import PairScorerConfig
 from model.tokenizer.encoder import SetTokenizerEncoder
 from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
 from training.tokenizer.episodic import (
@@ -54,14 +52,13 @@ from training.tokenizer.episodic import (
     episode_row_roles,
     label_window_table,
     LiveRows,
-    live_sensor_rows,
+    live_recording_rows,
     macro_f1,
     matched_support_variants,
     retrieval_alignment_loss,
     provenance_lift,
     sample_bank_positions,
     select_rows,
-    sensor_modality_codes,
     stream_label_table,
 )
 from training.tokenizer.eval_transfer import build_encoder
@@ -183,42 +180,6 @@ def replace_counts(spec: EpisodeSpec, pool_size: int) -> EpisodeSpec:
     return dataclasses.replace(spec, candidate_counts=counts)
 
 
-def _pool_retrieval_to_window(encoded: dict, batch: dict) -> dict:
-    """Duration-weight patch rows into the common one-row-per-sensor comparison contract."""
-    tokens = encoded.get("retrieval_tokens")
-    if tokens is None:
-        raise KeyError("encoder comparison requires retrieval_tokens")
-    B, P, _N, _d = tokens.shape
-    sensor_ids = batch["sensor_id"].to(tokens.device)
-    channel_mask = batch["channel_mask"].to(tokens.device)
-    modality = sensor_modality_codes(sensor_ids, channel_mask, _N)
-    full_accel = torch.stack([
-        ((sensor_ids[:, :3] == slot) & channel_mask[:, :3]).sum(dim=1).eq(3)
-        for slot in range(_N)
-    ], dim=1)
-    gravity_present = torch.tensor(
-        [state == "present" for state in batch["gravity_state"]],
-        dtype=torch.bool, device=tokens.device,
-    ).unsqueeze(1)
-    compatible = modality.eq(0) & full_accel & gravity_present
-    result = dict(encoded)
-    result["sensor_present"] = encoded["sensor_present"] & compatible
-    if encoded.get("retrieval_window_rows", False):
-        return result
-    patch_mask = batch["patch_padding_mask"].to(tokens.device)
-    if patch_mask.shape != (B, P):
-        raise ValueError("retrieval token and patch-mask shapes disagree before window pooling")
-    durations = batch.get("patch_durations")
-    weights = patch_mask.to(tokens.dtype)
-    if durations is not None:
-        weights = weights * durations.to(device=tokens.device, dtype=tokens.dtype)
-    pooled = (tokens * weights[:, :, None, None]).sum(dim=1)
-    pooled = pooled / weights.sum(dim=1).clamp_min(1e-6)[:, None, None]
-    result["retrieval_tokens"] = pooled.unsqueeze(1)
-    result["retrieval_window_rows"] = True
-    return result
-
-
 def encode_batch(encoder: SetTokenizerEncoder, batch: dict, device: torch.device) -> dict:
     """Encode every window from several independent episodes in one heterogeneous forward."""
     if encoder.trunk != "temporal" or encoder.token_granularity != "sensor":
@@ -245,8 +206,6 @@ def encode_batch(encoder: SetTokenizerEncoder, batch: dict, device: torch.device
         return_retrieval_tokens=True,
         **metadata,
     )
-    if getattr(encoder, "retrieval_granularity", "patch") == "window":
-        encoded = _pool_retrieval_to_window(encoded, batch)
     return encoded
 
 
@@ -406,6 +365,12 @@ def episode_distribution(plans: list[EpisodePlan]) -> dict[str, object]:
         "enrolled_candidates_mean": float(np.mean([
             len(plan.enrolled_slots) for plan in plans
         ])),
+        "enrolled_query_labels_mean": float(np.mean([
+            len(set(plan.query_slot) & set(plan.enrolled_slots)) for plan in plans
+        ])),
+        "enrolled_distractors_mean": float(np.mean([
+            len(set(plan.enrolled_slots) - set(plan.query_slot)) for plan in plans
+        ])),
     }
 
 
@@ -468,7 +433,7 @@ def prepare_live_batch(
             f"episode plans cover {expected_size} windows but the batch contains {len(labels)}"
         )
     binding = torch.tensor(binding_values, dtype=torch.long, device=device)
-    return live_sensor_rows(
+    return live_recording_rows(
         encoded, batch, labels=labels, enrolled_candidate=binding,
     ), labels
 
@@ -521,7 +486,7 @@ def _finish_episode(
         one_nn_available.gather(1, target.unsqueeze(1)).squeeze(1)
         & one_nn_available.sum(dim=1).ge(2)
     )
-    if reference_mode == "semantic_vote":
+    if reference_mode == "base_nearest":
         reference_per_query = base_per_query
     elif reference_mode == "enrolled_1nn":
         reference_per_query = torch.where(one_nn_valid, one_nn_per_query, base_per_query)
@@ -616,7 +581,7 @@ def run_episode(
     aux_weight: float = 0.0,
     aux_temperature: float = 0.1,
     no_regression_weight: float = 0.0,
-    reference_mode: str = "semantic_vote",
+    reference_mode: str = "base_nearest",
 ) -> dict:
     """Run one independent episode through the exact compact deployment rule."""
     if engine.encoder is None:
@@ -632,10 +597,10 @@ def run_episode(
     query_i, support_i, background_i = episode_row_roles(plan, row_offset=row_offset)
     if live_out is None:
         binding = episode_binding(plan, len(labels), row_offset=row_offset).to(device)
-        query = live_sensor_rows(
+        query = live_recording_rows(
             encoded, batch, labels=labels, enrolled_candidate=binding, select=query_i,
         )
-        memory = live_sensor_rows(
+        memory = live_recording_rows(
             encoded, batch, labels=labels, enrolled_candidate=binding,
             select=torch.cat([support_i, background_i]),
         )
@@ -678,7 +643,7 @@ def run_episode_group(
     aux_weight: float = 0.0,
     aux_temperature: float = 0.1,
     no_regression_weight: float = 0.0,
-    reference_mode: str = "semantic_vote",
+    reference_mode: str = "base_nearest",
 ) -> list[dict]:
     """Run one same-C optimizer group through the vectorized active evidence path."""
     if len(plans) != len(offsets) or len({len(plan.candidates) for plan in plans}) != 1:
@@ -776,7 +741,7 @@ def validate(
     engine: EvidenceEngine, loader: DataLoader, plans: list[EpisodePlan],
     label_text: torch.Tensor, alias_text: torch.Tensor, device: torch.device, seed: int,
     episodes_per_batch: int, *, select_on_aliases: bool = True,
-    reference_mode: str = "semantic_vote",
+    reference_mode: str = "base_nearest",
 ) -> dict:
     engine.eval()
     cells: dict[tuple[str, int], tuple[list[int], list[int]]] = {}
@@ -971,18 +936,31 @@ def profile_training(
               ("data_wait", "encode", "episodes", "backward", "optimizer")}
     measured = 0
     iterator = iter(train_loader)
+    group_cursor = 0
+
+    def next_profile_group():
+        nonlocal iterator, group_cursor
+        try:
+            batch = next(iterator)
+        except StopIteration:
+            iterator = iter(train_loader)
+            batch = next(iterator)
+        n_groups = len(train_plans) // args.episodes_per_step
+        group = group_cursor % n_groups
+        group_cursor += 1
+        start = group * args.episodes_per_step
+        return batch, train_plans[start:start + args.episodes_per_step]
+
     for step in range(1, args.profile_steps + 6):
         timing = step > 5                                   # warmup steps excluded
         t0 = mark()
-        batch = next(iterator)
+        batch, plans = next_profile_group()
         batch = batch_to_device(batch, device)
         t1 = mark()
         optimizer.zero_grad(set_to_none=True)
         with _autocast(device):
             encoded = encode_batch(encoder, batch, device)
             t2 = mark()
-            start = (step - 1) * args.episodes_per_step
-            plans = train_plans[start:start + args.episodes_per_step]
             offsets = np.cumsum([0] + [len(plan.flat_positions()) for plan in plans[:-1]])
             live, labels = prepare_live_batch(encoded, batch, plans, offsets, device)
             results = training_group_results(
@@ -1018,13 +996,11 @@ def profile_training(
         [ProfilerActivity.CUDA] if device.type == "cuda" else [])
     with profile(activities=activities) as prof:
         for step in range(3):
-            batch = next(iterator)
+            batch, plans = next_profile_group()
             batch = batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
             with _autocast(device):
                 encoded = encode_batch(encoder, batch, device)
-                start = (args.profile_steps + 5 + step) * args.episodes_per_step
-                plans = train_plans[start:start + args.episodes_per_step]
                 offsets = np.cumsum([0] + [len(plan.flat_positions())
                                             for plan in plans[:-1]])
                 live, labels = prepare_live_batch(encoded, batch, plans, offsets, device)
@@ -1120,37 +1096,21 @@ def main() -> None:
     parser.add_argument("--disjointness", choices=("subject", "stream"), default="stream")
     parser.add_argument("--no-shared-query-stream", action="store_true")
     parser.add_argument("--holdout-label-fraction", type=float, default=0.2)
-    parser.add_argument("--top-k", type=int, default=64)
-    # --- ablation ladder: substitute a fixed stand-in for one learnable stage at a time
-    parser.add_argument("--retrieval", choices=("learned", "cosine"), default="cosine",
-                        help="'cosine' replaces the learned pair scorer with the plain feature "
-                             "cosine at a fixed temperature, registering no parameters")
-    parser.add_argument("--vote-scope", choices=("topk", "bank"), default="bank",
-                        help="'bank' votes over the whole memory while the reranker sees only "
-                             "the top-k; every row affects the normalized prediction, and every "
-                             "score path receives gradient when the encoder is trainable")
-    parser.add_argument("--mixing", choices=("rerank", "attention", "off"), default="rerank",
-                        help="'rerank' is the compact scalar evidence correction; 'attention' "
-                             "reconstructs historical candidate-residual checkpoints; 'off' is "
-                             "the fixed retrieval vote")
     parser.add_argument("--encoder-backbone", choices=("ours", "harnet", "unimts"), default="ours",
                         help="encoder-comparison arm; harnet/unimts are always frozen")
     parser.add_argument("--encoder-comparison", action="store_true",
-                        help="use one sensor row per source window in all three encoder arms")
+                        help="compare the same recording-level engine across all encoder arms")
     parser.add_argument("--frontend", choices=("fixed", "learnable", "continuous"), default="fixed",
                         help="HALO feature extractor: fixed physical filterbank, constrained-learnable "
                              "filterbank, or continuous-time kernel bank (random-init runs only)")
-    parser.add_argument("--identity-gain", type=float, default=0.25,
-                        help="initial gain on role/slot/group channels relative to "
-                             "content at 1.0; at 1.0 content is only a quarter of every token")
-    parser.add_argument("--reranker-layers", type=int, default=1,
-                        help="context layers in the active scalar evidence reranker")
-    parser.add_argument("--correction-gain-init", type=float, default=0.05,
-                        help="initial maximum scale of the bounded retrieval-score correction")
-    parser.add_argument("--max-score-correction", type=float, default=2.0,
-                        help="hard upper bound on each learned evidence-row score correction")
-    parser.add_argument("--mixer-layers", type=int, default=2,
-                        help="layers in the historical candidate-residual mixer only")
+    parser.add_argument("--correction-gain-init", type=float, default=0.01,
+                        help="initial residual correction scale in raw cosine units")
+    parser.add_argument("--max-score-correction", type=float, default=0.5,
+                        help="hard bound on each recording-pair correction in cosine units")
+    parser.add_argument("--semantic-scale", type=float, default=1.0,
+                        help="penalty scale mapping a corpus recording label to candidate text")
+    parser.add_argument("--surrogate-temperature", type=float, default=0.05,
+                        help="smooth-max temperature used only for corrected-nearest gradients")
     parser.add_argument("--encoder-lr", type=float, default=1e-4)
     parser.add_argument("--frontend-lr-scale", type=float, default=0.1,
                         help="learning-rate multiplier for continuous/constrained analysis parameters")
@@ -1165,7 +1125,7 @@ def main() -> None:
     parser.add_argument("--retrieval-aux-temperature", type=float, default=0.1)
     parser.add_argument("--no-regression-weight", type=float, default=1.0,
                         help="extra penalty when the learned residual gives the target more loss "
-                             "than its detached regime reference (semantic vote for zero-shot, "
+                             "than its detached regime reference (raw nearest for zero-shot, "
                              "enrolled 1NN where defined for enrollment)")
     parser.add_argument("--freeze-encoder", action="store_true")
     parser.add_argument("--augment", action="store_true")
@@ -1222,8 +1182,6 @@ def main() -> None:
         )
     if args.encoder_comparison and args.augment:
         parser.error("the matched encoder comparison uses clean windows; omit --augment")
-    if args.retrieval != "cosine" or args.mixing != "rerank" or args.vote_scope != "bank":
-        args.sequential_episodes = True
     if (args.steps < 1 or args.episodes_per_step < 1 or args.query_labels_per_episode < 1
             or args.bank_windows < 1
             or args.calib_batches < 1):
@@ -1231,8 +1189,6 @@ def main() -> None:
             "steps, episodes-per-step, query-labels-per-episode, bank-windows, and "
             "calib-batches must be positive"
         )
-    if args.top_k > args.bank_windows:
-        parser.error("--top-k cannot exceed --bank-windows")
     effective_max_support = 0 if args.phase_b_regime == "zero-shot" else args.max_support
     if effective_max_support > args.bank_windows:
         parser.error(
@@ -1245,26 +1201,10 @@ def main() -> None:
             "random aliases require every candidate to be enrolled, so --bank-windows must be at "
             "least max(candidate-counts) * max-support when aliases are enabled"
         )
-    # Fail early when the selected reasoner's retained attention maps alone are implausibly large.
-    # The compact reranker uses one token per query/evidence row; the historical mixer used separate
-    # content and metadata tokens and therefore has a substantially longer sequence.
-    # One sequence per query recording. A six-second window has at most six one-second patches and
-    # two IMU modalities, each represented by a feature and description token.
-    seq = (max(args.candidate_counts) + 12 + args.top_k
-           if args.mixing == "rerank"
-           else max(args.candidate_counts) + 2 * 12 + 3 * args.top_k)
-    rows = (args.episodes_per_step
-            * min(args.query_labels_per_episode, max(args.candidate_counts))
-            * args.queries_per_candidate)
-    reasoner_layers = (args.reranker_layers if args.mixing == "rerank"
-                       else args.mixer_layers if args.mixing == "attention" else 0)
-    attention_gib = rows * seq * seq * 4 * 2 * reasoner_layers / 2 ** 30
-    if attention_gib > 16:
-        parser.error(
-            f"top_k={args.top_k} gives {seq}-token evidence sequences; retained attention maps "
-            f"alone are ~{attention_gib:.0f} GiB for backward. Use --vote-scope bank for full "
-            "gradient coverage at top-k cost instead of raising k."
-        )
+    if args.semantic_scale <= 0.0 or args.surrogate_temperature <= 0.0:
+        parser.error("--semantic-scale and --surrogate-temperature must be positive")
+    if not 0.0 < args.correction_gain_init < args.max_score_correction:
+        parser.error("correction gain must lie between zero and --max-score-correction")
     if args.warmup_steps < 0 or args.warmup_steps > args.steps:
         parser.error("--warmup-steps must lie in [0, steps]")
     if args.frontend_lr_scale <= 0 or args.frontend_reg_weight < 0:
@@ -1274,11 +1214,11 @@ def main() -> None:
         args.warmup_steps, args.num_workers, args.calib_batches = 1, 0, 1
         args.datasets = ["uci_har", "wisdm", "mhealth", "pamap2"]
         args.candidate_counts, args.query_labels_per_episode, args.max_support = [4, 8], 4, 2
-        args.bank_windows, args.top_k = 32, 16
+        args.bank_windows = 32
 
     effective_max_support = 0 if args.phase_b_regime == "zero-shot" else args.max_support
     reference_mode = (
-        "enrolled_1nn" if args.phase_b_regime == "enrollment" else "semantic_vote"
+        "base_nearest" if args.phase_b_regime == "zero-shot" else "enrolled_1nn"
     )
     args.reference_mode = reference_mode
 
@@ -1390,7 +1330,9 @@ def main() -> None:
         f"C={train_episode_distribution['candidate_count']} "
         f"k={train_episode_distribution['support_k']} "
         f"query-labels={train_episode_distribution['query_label_count']} "
-        f"max-support-windows={train_episode_distribution['support_windows_max']}",
+        f"max-support-windows={train_episode_distribution['support_windows_max']} "
+        f"mean-enrolled-query={train_episode_distribution['enrolled_query_labels_mean']:.2f} "
+        f"mean-enrolled-distractor={train_episode_distribution['enrolled_distractors_mean']:.2f}",
         flush=True,
     )
 
@@ -1520,15 +1462,9 @@ def main() -> None:
     engine_config = EngineConfig(
         spec=spec,
         trunk_layers=int(encoder.transformer.num_layers),
-        top_k=args.top_k,
-        mixing=args.mixing,
-        vote_scope=args.vote_scope,
-        scorer=PairScorerConfig(learned=args.retrieval == "learned"),
-        mixer=EvidenceMixerConfig(n_groups=max(96, args.top_k + 2), n_layers=args.mixer_layers,
-                                  identity_gain_init=args.identity_gain),
+        semantic_scale=args.semantic_scale,
+        surrogate_temperature=args.surrogate_temperature,
         reranker=EvidenceRerankerConfig(
-            n_groups=max(96, args.top_k + 2), n_layers=args.reranker_layers,
-            identity_gain_init=args.identity_gain,
             correction_gain_init=args.correction_gain_init,
             max_correction=args.max_score_correction,
         ),
@@ -1556,23 +1492,12 @@ def main() -> None:
     )
     frontend_param_ids = {id(parameter) for parameter in frontend_params}
     encoder_base_params = [p for p in encoder_params if id(p) not in frontend_param_ids]
-    scorer_params = [p for p in engine.scorer.parameters() if p.requires_grad]
-    reasoner = engine.reranker if engine.reranker is not None else engine.mixer
-    reasoner_params = ([p for p in reasoner.parameters() if p.requires_grad]
-                       if reasoner is not None else [])
-    if engine.reranker is not None:
-        reranker_output_params = [
-            engine.reranker.row_head.weight, engine.reranker.correction_gain_logit,
-        ]
-        reranker_stack_params = [
-            p for p in engine.reranker.stack.parameters() if p.requires_grad
-        ]
-        excluded = {id(p) for p in reranker_output_params + reranker_stack_params}
-        reranker_input_params = [
-            p for p in reasoner_params if id(p) not in excluded
-        ]
-    else:
-        reranker_input_params = reranker_stack_params = reranker_output_params = []
+    reranker_params = [p for p in engine.reranker.parameters() if p.requires_grad]
+    reranker_output_params = [
+        engine.reranker.head_out.weight, engine.reranker.correction_gain_logit,
+    ]
+    output_ids = {id(parameter) for parameter in reranker_output_params}
+    reranker_input_params = [p for p in reranker_params if id(p) not in output_ids]
     # A ladder rung that substitutes a fixed stand-in leaves a stage with no parameters at all;
     # AdamW rejects an empty group, so only non-empty ones are handed over.
     groups = []
@@ -1583,12 +1508,9 @@ def main() -> None:
         groups.append({"params": frontend_params,
                        "lr": args.encoder_lr * args.frontend_lr_scale,
                        "weight_decay": 0.0, "name": "frontend"})
-    if scorer_params:
-        groups.append({"params": scorer_params, "lr": args.engine_lr,
-                       "weight_decay": args.weight_decay, "name": "scorer"})
-    if reasoner_params:
-        groups.append({"params": reasoner_params, "lr": args.engine_lr,
-                       "weight_decay": args.weight_decay, "name": "reasoner"})
+    if reranker_params:
+        groups.append({"params": reranker_params, "lr": args.engine_lr,
+                       "weight_decay": args.weight_decay, "name": "reranker"})
     if not groups:
         raise SystemExit("every stage is frozen; there is nothing to train")
     optimizer = torch.optim.AdamW(groups)
@@ -1707,10 +1629,8 @@ def main() -> None:
         # converted to Python floats. Compute them only on steps that will actually be recorded.
         encoder_grad = _grad_norm(encoder_params) if log_step else 0.0
         frontend_grad = _grad_norm(frontend_params) if log_step else 0.0
-        scorer_grad = _grad_norm(scorer_params) if log_step else 0.0
-        reasoner_grad = _grad_norm(reasoner_params) if log_step else 0.0
+        reranker_grad = _grad_norm(reranker_params) if log_step else 0.0
         reranker_input_grad = _grad_norm(reranker_input_params) if log_step else 0.0
-        reranker_stack_grad = _grad_norm(reranker_stack_params) if log_step else 0.0
         reranker_output_grad = _grad_norm(reranker_output_params) if log_step else 0.0
         preclip = float(torch.nn.utils.clip_grad_norm_(
             [p for group in groups for p in group["params"]], args.grad_clip,
@@ -1757,10 +1677,8 @@ def main() -> None:
                 "frontend_reg": float(frontend_reg.detach()),
                 "frontend_reg_weighted": float(
                     (args.frontend_reg_weight * frontend_reg).detach()),
-                "scorer_grad_norm": scorer_grad,
-                "reasoner_grad_norm": reasoner_grad,
+                "reranker_grad_norm": reranker_grad,
                 "reranker_input_grad_norm": reranker_input_grad,
-                "reranker_stack_grad_norm": reranker_stack_grad,
                 "reranker_output_grad_norm": reranker_output_grad,
                 "total_preclip_grad_norm": preclip,
                 "clip_coefficient": min(1.0, args.grad_clip / max(preclip, 1e-12)),

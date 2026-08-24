@@ -5,14 +5,13 @@ Two faces, both from one checkpoint (default: the 2026-08-22 long-run best):
   * ``window_features`` — pooled frozen retrieval rows, consumed by the standard adaptation
     methods (nearest / prototype / ridge / linear_head). This row is apples-to-apples with the
     baselines' frozen-feature rows in ``eval/adaptation_results/v1_d85761d``.
-  * native zero-shot and enrollment — the engine's deployment rule: per-(patch,sensor) rows -> cosine top-64
-    over a frozen stratified training-corpus bank -> evidence mixer -> text vote over the
-    candidate labels. No head is fit; this is the mechanism the model ships with.
+  * native zero-shot and enrollment — one pooled row per six-second recording, raw cosine against
+    every corpus/enrollment row, a bounded learned correction for each pair, then corrected 1NN.
+    No head is fit at evaluation time; this is the mechanism the model ships with.
 
 The engine, encoder, bank construction and window aggregation are the training-time code paths
-(`load_evidence_engine`, `encode_dataset_detailed(export_sensor_rows=True)`, `SensorRows`,
-row-mass summation identical to ``run_episode``), so the number scored here is the deployed
-function, not a re-implementation.
+(`load_evidence_engine`, the encoder's exact pooled output, and `SensorRows`), so the number scored
+here is the deployed function rather than a re-implementation.
 
 Checkpoint: env ``HALO_COMPACT_CKPT`` (default ``training/tokenizer/outputs/
 e2e_compact_35k_20260823/best.pt``). Bank cache: ``baselines/halo_compact/bank_<fp>.pt`` (gitignored),
@@ -50,7 +49,7 @@ _NEUTRAL_ACQUISITION_TEXT = _env_flag("HALO_NEUTRAL_ACQUISITION_TEXT")
 
 BANK_WINDOWS = 512        # matches the training BankSpec deployment contract
 BANK_SEED = 20260822
-QUERY_CHUNK = 4096        # engine query rows per forward (memory bank held once)
+QUERY_CHUNK = 1024        # recording queries per forward (memory bank held once)
 
 
 def _ckpt_fp() -> str:
@@ -63,7 +62,7 @@ def _ckpt_sha256() -> str:
 
 @register
 class HALOCompactAdapter(BaselineAdapter):
-    """Compact evidence engine (retrieve -> mix -> vote), native input contract."""
+    """Compact recording-level residual reranker, native input contract."""
 
     name = "halo_compact"
     tier = "evidence"
@@ -120,7 +119,7 @@ class HALOCompactAdapter(BaselineAdapter):
 
     # ------------------------------------------------------------- corpus bank
     def _bank_rows(self, state):
-        """Stratified frozen memory bank: BANK_WINDOWS training-corpus windows -> SensorRows."""
+        """Stratified frozen memory bank with one pooled row per six-second window."""
         import torch as T
         from model.evidence.rows import SensorRows
 
@@ -144,7 +143,7 @@ class HALOCompactAdapter(BaselineAdapter):
         if cache.exists():
             payload = T.load(cache, map_location=device, weights_only=True)
             expected = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "checkpoint_sha256": _ckpt_sha256(),
                 "corpus_fingerprint": current_corpus,
                 "seed": BANK_SEED,
@@ -157,7 +156,7 @@ class HALOCompactAdapter(BaselineAdapter):
         from training.tokenizer.pretrain_data import (MultiScaleCollate, PretrainDataset,
                                                       PATCH_SECONDS)
         from training.tokenizer.pretrain_episodic import encode_batch
-        from training.tokenizer.episodic import EpisodicCollate, live_sensor_rows
+        from training.tokenizer.episodic import EpisodicCollate, live_recording_rows
 
         # round-robin over labels, then streams within a label: every label present, no stream
         # dominating — the same stratification intent as the training BankSpec.
@@ -195,7 +194,7 @@ class HALOCompactAdapter(BaselineAdapter):
                 batch = collate([dataset[p] for p in chunk])
                 out = encode_batch(state["encoder"], batch, device)
                 labels = batch["labels"].to(device)
-                live = live_sensor_rows(
+                live = live_recording_rows(
                     out, batch, labels=labels,
                     enrolled_candidate=T.full((len(chunk),), -1, dtype=T.long, device=device),
                 )
@@ -213,7 +212,7 @@ class HALOCompactAdapter(BaselineAdapter):
             offset += chunk_len
         merged["source_window"] = T.cat(source).detach()
         T.save({
-            "schema_version": 3,
+            "schema_version": 4,
             "checkpoint_sha256": _ckpt_sha256(),
             "corpus_fingerprint": current_corpus,
             "seed": BANK_SEED,
@@ -226,12 +225,11 @@ class HALOCompactAdapter(BaselineAdapter):
 
     # ------------------------------------------------------- eval-stream rows
     def _stream_rows(self, stream, state):
-        """Per-(patch,sensor) SensorRows for one eval stream + row->window map."""
+        """One pooled recording row per eval window, plus the exact pooled 1-NN feature matrix."""
         import torch as T
         from model.evidence.rows import SensorRows
         from training.tokenizer.eval_transfer import encode_dataset_detailed
         from training.tokenizer.pretrain_data import stream_sensor_texts
-        from training.tokenizer.episodic import sensor_modality_codes, gravity_codes
 
         key = (stream.dataset, stream.stream)
         if key in state["streams"]:
@@ -255,11 +253,10 @@ class HALOCompactAdapter(BaselineAdapter):
             gravity_state=gravity_state, channel_mask=stream.mask,
             dataset=stream.dataset, stream=stream.stream,
             neutral_text=_NEUTRAL_ACQUISITION_TEXT,
-            export_sensor_rows=True,
+            export_sensor_rows=False,
         )
-        feature = detailed["sensor_Z"].to(device)                    # (R, d)
-        window = detailed["sensor_window"].to(device).long()         # (R,)
-        slot = detailed["sensor_slot"].to(device).long()             # (R,)
+        feature = detailed["pooled"].to(device)                       # (N, d)
+        window = T.arange(len(feature), dtype=T.long, device=device)   # (N,)
 
         _, sensor_texts, sensor_id_list = stream_sensor_texts(
             stream.dataset, stream.stream,
@@ -270,21 +267,19 @@ class HALOCompactAdapter(BaselineAdapter):
         )
         descriptors = encoder.text_encoder.encode_pooled(sensor_texts, device=device)
         descriptors = F.normalize(descriptors.float(), dim=-1)       # (S, 384)
-        sensor_id = T.tensor(sensor_id_list, dtype=T.long, device=device).unsqueeze(0)
-        channel_mask = T.as_tensor(stream.mask, dtype=T.bool, device=device).unsqueeze(0)
-        modality_by_slot = sensor_modality_codes(
-            sensor_id, channel_mask, len(sensor_texts))[0]           # (S,)
-        gravity_by_slot = gravity_codes(
-            modality_by_slot.unsqueeze(0), [gravity_state])[0]
+        del sensor_id_list
+        recording_descriptor = F.normalize(descriptors.mean(dim=0, keepdim=True), dim=-1)
+        recording_descriptor = recording_descriptor.expand(len(feature), -1)
+        zeros = T.zeros(len(feature), dtype=T.long, device=device)
 
         rows = SensorRows(
             feature=feature,
-            descriptor=descriptors[slot],
+            descriptor=recording_descriptor,
             bias=feature.new_zeros((len(feature), 1)),
-            modality=modality_by_slot[slot],
-            gravity=gravity_by_slot[slot],
+            modality=zeros,
+            gravity=zeros,
             label=T.full((len(feature),), -1, dtype=T.long, device=device),
-            dataset=T.zeros(len(feature), dtype=T.long, device=device),
+            dataset=zeros,
             enrolled_candidate=T.full((len(feature),), -1, dtype=T.long, device=device),
             source_window=window,
         )
@@ -319,7 +314,7 @@ class HALOCompactAdapter(BaselineAdapter):
 
     @staticmethod
     def _append_enrollment(base, support, support_window, plan, support_count):
-        """Append every patch/sensor row from the selected enrolled executions."""
+        """Append one pooled memory row for every selected enrolled window."""
         import torch as T
         from model.evidence.rows import SensorRows
 
@@ -336,7 +331,7 @@ class HALOCompactAdapter(BaselineAdapter):
             wanted = T.as_tensor(selected_windows, dtype=T.long, device=support_window.device)
             row_index = T.nonzero(T.isin(support_window, wanted), as_tuple=True)[0]
             if not len(row_index):
-                raise ValueError(f"candidate {candidate} enrollment selected no sensor rows")
+                raise ValueError(f"candidate {candidate} enrollment selected no recording rows")
             pieces.append(HALOCompactAdapter._take_rows(support, row_index))
             bound_parts.append(T.full(
                 (len(row_index),), candidate, dtype=T.long, device=support.feature.device,
@@ -391,7 +386,7 @@ class HALOCompactAdapter(BaselineAdapter):
                 wanted = T.as_tensor(chunk_windows, dtype=T.long, device=query_window.device)
                 row_index = T.nonzero(T.isin(query_window, wanted), as_tuple=True)[0]
                 if not len(row_index):
-                    raise ValueError("native enrollment query selected no sensor rows")
+                    raise ValueError("native enrollment query selected no recording rows")
                 chunk = self._take_rows(query_rows, row_index)
                 result = state["engine"](
                     chunk, memory, candidate_text, state["label_text"], generator=generator,
@@ -409,7 +404,7 @@ class HALOCompactAdapter(BaselineAdapter):
             "corpus_rows": int(len(state["bank"].feature)),
             "enrolled_executions": int(len(canonical_candidates) * support_count),
             "enrolled_windows": int(support_windows),
-            "enrolled_sensor_rows": int(enrolled_rows),
+            "enrolled_recording_rows": int(enrolled_rows),
             "total_memory_rows": int(len(memory.feature)),
         }
 
@@ -419,7 +414,7 @@ class HALOCompactAdapter(BaselineAdapter):
         owner = state["feature_owner"].get(id(features))
         if owner is None:
             raise ValueError(
-                "halo_compact scores zero-shot with its native engine over per-sensor rows; the "
+                "halo_compact scores zero-shot with its native engine over recording rows; the "
                 "features passed here were not produced by this adapter's window_features")
         rows, window, n_windows, _ = state["streams"][owner]
         device = state["device"]
@@ -433,8 +428,7 @@ class HALOCompactAdapter(BaselineAdapter):
         generator = T.Generator().manual_seed(BANK_SEED)
         from model.evidence.rows import SensorRows
         with T.no_grad():
-            # Chunk whole recordings, never arbitrary rows: the recording-level mixer must see all
-            # patches and sensors belonging to one query together.
+            # Query rows are complete six-second recordings; chunking only partitions queries.
             unique_windows = T.unique(window, sorted=True)
             for start in range(0, len(unique_windows), QUERY_CHUNK):
                 chosen_windows = unique_windows[start:start + QUERY_CHUNK]

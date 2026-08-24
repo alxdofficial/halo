@@ -122,9 +122,7 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
     """
     from model.blocks import AttentionSpec
     from model.evidence.engine import EngineConfig, EvidenceEngine
-    from model.evidence.evidence_mixer import EvidenceMixerConfig
     from model.evidence.evidence_reranker import EvidenceRerankerConfig
-    from model.evidence.retrieval_scorer import PairScorerConfig
 
     blob = torch.load(path, map_location="cpu", weights_only=False)
     state = blob.get("evidence_engine")
@@ -136,29 +134,18 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
             "checkpoint carries engine weights but no engine_config; it cannot be rebuilt without "
             "guessing its shape, and a guess would report the wrong model under the right name"
         )
-    has_reranker = "reranker.row_head.weight" in state
-    has_historical_mixer = "mixer.residual_head.weight" in state
-    if not has_reranker and not has_historical_mixer:
+    if "reranker.head_out.weight" not in state:
         raise ValueError(
-            "checkpoint has evidence-engine weights but neither the current scalar reranker nor "
-            "the supported historical candidate-residual mixer"
+            "checkpoint does not contain the active recording-level all-memory reranker. "
+            "Evaluate historical voting checkpoints from their archived source revision."
         )
-    scorer_cfg = dict(saved.get("scorer", {}))
-    if "learned" not in scorer_cfg:
-        # Checkpoints written before the `learned` field default-drifted when the field's default
-        # later changed to False: a model TRAINED with the learned scorer would silently be rebuilt
-        # with the fixed cosine. The weights say which one was trained; believe them.
-        scorer_cfg["learned"] = "scorer.base_gain" in state
-    saved = {**saved, "scorer": scorer_cfg}
     cfg = EngineConfig(
         spec=AttentionSpec(**saved["spec"]),
         trunk_layers=int(saved.get("trunk_layers", 3)),
-        top_k=int(saved["top_k"]),
-        scorer=PairScorerConfig(**saved.get("scorer", {})),
-        mixer=EvidenceMixerConfig(**saved.get("mixer", {})),
+        semantic_scale=float(saved.get("semantic_scale", 1.0)),
+        surrogate_temperature=float(saved.get("surrogate_temperature", 0.05)),
+        telemetry_neighbors=int(saved.get("telemetry_neighbors", 8)),
         reranker=EvidenceRerankerConfig(**saved.get("reranker", {})),
-        mixing=saved.get("mixing", "rerank" if has_reranker else "attention"),
-        vote_scope=saved.get("vote_scope", "bank"),
     )
     engine = EvidenceEngine(encoder, cfg)
     if encoder is not None:

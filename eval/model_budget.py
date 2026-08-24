@@ -20,7 +20,6 @@ import torch
 
 from model.blocks import AttentionSpec
 from model.evidence.engine import EngineConfig, EvidenceEngine
-from model.evidence.evidence_mixer import EvidenceMixerConfig
 from model.evidence.evidence_reranker import EvidenceRerankerConfig
 from model.tokenizer.encoder import SetTokenizerEncoder
 
@@ -35,7 +34,7 @@ BASELINES = [
 ]
 
 
-def build(d_model: int, trunk_layers: int, reasoner_layers: int, top_k: int = 64,
+def build(d_model: int, trunk_layers: int, interaction_heads: int = 8,
           n_heads: int = 4, ffn_mult: int = 2) -> EvidenceEngine:
     spec = AttentionSpec(d_model=d_model, n_heads=n_heads, ffn_mult=ffn_mult, dropout=0.1)
     encoder = SetTokenizerEncoder(
@@ -45,37 +44,37 @@ def build(d_model: int, trunk_layers: int, reasoner_layers: int, top_k: int = 64
         trunk="temporal", descriptor_prediction=False,
     )
     cfg = EngineConfig(
-        spec=spec, trunk_layers=trunk_layers, top_k=top_k,
-        reranker=EvidenceRerankerConfig(n_layers=reasoner_layers),
+        spec=spec, trunk_layers=trunk_layers,
+        reranker=EvidenceRerankerConfig(n_interaction_heads=interaction_heads),
     )
     return EvidenceEngine(encoder, cfg)
 
 
 def main() -> int:
     grid = [
-        ("compact", 96, 2, 1),
-        ("small", 128, 3, 1),
-        ("medium", 160, 3, 1),
-        ("wide", 192, 4, 2),
+        ("compact", 96, 2, 4),
+        ("small", 128, 3, 8),
+        ("medium", 160, 3, 8),
+        ("wide", 192, 4, 12),
     ]
     print("HALO evidence engine — learnable parameters by part\n")
-    header = f"{'size':10s} {'d':>4s} {'trunk':>6s} {'reason':>6s} " + " ".join(
+    header = f"{'size':10s} {'d':>4s} {'trunk':>6s} {'pair h':>6s} " + " ".join(
         f"{name:>12s}" for name in
-        ("front end", "trunk", "scorer", "reranker", "TOTAL")
+        ("front end", "trunk", "reranker", "TOTAL")
     )
     print(header)
     print("-" * len(header))
-    for name, d_model, trunk_layers, reasoner_layers in grid:
-        engine = build(d_model, trunk_layers, reasoner_layers)
+    for name, d_model, trunk_layers, interaction_heads in grid:
+        engine = build(d_model, trunk_layers, interaction_heads)
         report = engine.parameter_report()
         front = sum(v for k, v in report.items()
                     if k.startswith("encoder.") and k != "encoder.transformer")
-        row = (f"{name:10s} {d_model:>4d} {trunk_layers:>6d} {reasoner_layers:>6d} "
+        row = (f"{name:10s} {d_model:>4d} {trunk_layers:>6d} {interaction_heads:>6d} "
                f"{front:>12,} {report['encoder.transformer']:>12,} "
-               f"{report['scorer']:>12,} {report['reranker']:>12,} {report['TOTAL']:>12,}")
+               f"{report['reranker']:>12,} {report['TOTAL']:>12,}")
         print(row)
 
-    engine = build(128, 3, 1)
+    engine = build(128, 3, 8)
     print(f"frozen text encoder (all-MiniLM-L6-v2, shared, never trained): "
           f"{engine.frozen_text_parameters():,}")
 
@@ -87,7 +86,7 @@ def main() -> int:
         text_s = f"{text:,}" if text is not None else "not measured"
         print(f"{label:14s} {sensor_s:>14s} {text_s:>14s}  {source}")
 
-    small = build(128, 3, 1).parameter_report()["TOTAL"]
+    small = build(128, 3, 8).parameter_report()["TOTAL"]
     print(f"\nHALO 'small' sensor-side total: {small:,} "
           f"({small / 5_189_956:.2f}x UniMTS's sensor tower, "
           f"{small / 62_646:.0f}x LIMU-BERT)")

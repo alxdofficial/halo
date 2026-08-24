@@ -29,6 +29,7 @@ from training.tokenizer.episodic import (
     episode_row_roles,
     gravity_codes,
     label_window_table,
+    live_recording_rows,
     live_sensor_rows,
     matched_support_variants,
     sensor_modality_codes,
@@ -246,6 +247,8 @@ def test_large_roster_partial_enrollment_respects_fixed_memory_capacity():
     for plan in plans:
         counts = [plan.support_slot.count(slot) for slot in plan.enrolled_slots]
         assert counts and set(counts) == {16}
+        assert set(plan.enrolled_slots) & set(plan.query_slot)
+        assert set(plan.enrolled_slots) - set(plan.query_slot)
 
 
 def test_random_alias_rejects_a_roster_that_cannot_be_fully_enrolled():
@@ -356,8 +359,10 @@ def test_partial_axis_triad_still_counts_as_one_sensor():
 # --------------------------------------------------------------------------------------------
 def _fake_encoder_output(B=4, P=3, N=2, d=8, requires_grad=False):
     tokens = torch.randn(B, P, N, d, requires_grad=requires_grad)
+    pooled = tokens.mean(dim=(1, 2))
     return {
         "retrieval_tokens": tokens,
+        "pooled": pooled,
         "sensor_present": torch.ones(B, N, dtype=torch.bool),
         "descriptor": torch.randn(B, N, 384),
     }, {
@@ -426,10 +431,10 @@ def test_shared_live_batch_is_exactly_the_per_episode_row_materialization():
     for plan, offset in zip(plans, (0, 4)):
         query_i, support_i, background_i = episode_row_roles(plan, row_offset=offset)
         binding = episode_binding(plan, len(labels), row_offset=offset)
-        expected_query = live_sensor_rows(
+        expected_query = live_recording_rows(
             out, batch, labels=labels, enrolled_candidate=binding, select=query_i,
         )
-        expected_memory = live_sensor_rows(
+        expected_memory = live_recording_rows(
             out, batch, labels=labels, enrolled_candidate=binding,
             select=torch.cat([support_i, background_i]),
         )
