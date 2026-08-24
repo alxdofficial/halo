@@ -20,10 +20,11 @@
 
 ## Current Matched Results
 
-**2026-08-24.** The promoted checkpoint is `PB-04-SET-SCALAR-1NN`, selected at step 10,000 from
-`training/tokenizer/outputs/e2e_pb04_fixed_filterbank_35k_20260824/best.pt`. It gives HALO's
-strongest zero-shot result. For k>=1, the supported deployment rule is 1-NN over enrolled
-executions; the learned retrieve-mix-vote readout is reported as an underperforming ablation.
+**2026-08-24.** The promoted checkpoint is `PB-04-CK-DENSE`, selected at step 13,000 from
+`training/tokenizer/outputs/e2e_pb04_continuous_dense_35k_20260824/best.pt`. It gives HALO's
+strongest zero-shot point estimate, although the seven-dataset difference from fixed PB-04 is not
+resolved statistically. For k>=1, the supported deployment rule is 1-NN over enrolled executions;
+the learned retrieve-mix-vote readout is reported as an underperforming ablation.
 
 PB-04 and all six external encoders were scored on the same sealed `adaptation_v1` manifest: seven
 held-out datasets, five seeds, and execution-disjoint support/query sets. Aggregate tables,
@@ -127,7 +128,7 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   simultaneity claim about the ten new sources.
 
 ## `results/` — the measured record
-- [**RESULTS.md**](results/RESULTS.md) — **the current headline**: PB-04 zero-shot and 1-NN
+- [**RESULTS.md**](results/RESULTS.md) — **the current headline**: PB-04-CK-DENSE zero-shot and 1-NN
   enrollment against the complete external-model roster, all matched controls, every k, and
   per-dataset tables.
 - [ADAPTATION_TABLE_20260822.md](results/ADAPTATION_TABLE_20260822.md) — historical August 22 table;

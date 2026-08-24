@@ -22,11 +22,13 @@
 | `PB-01-FULL-MIX-VOTE` | 2026-08-23 | patch/sensor | two-layer set attention refines semantic evidence vectors | text-weighted evidence vote | 2/4/8/16 | dirty `5a23b44`, exact `source.patch` in run | historical, completed |
 | `PB-02-SCALAR-MIX-VOTE` | 2026-08-24 | patch/sensor | one-layer set attention emits one scalar per top-64 evidence row | text-weighted evidence vote | 8/16/32/64 | tag `phaseb-vector8-vote-20260824` | historical, completed |
 | `PB-03-PAIRWISE-1NN` | 2026-08-24 | one pooled six-second recording | independent pairwise MLP scalar for every memory row | corrected nearest neighbor | 8/16/32/64 | run source `8d60b86`; base tag `phaseb-recording-reranker-pretrain-20260824` | historical, previous best |
-| `PB-04-SET-SCALAR-1NN` | 2026-08-24 | one pooled six-second recording | one-layer set attention emits one scalar per top-64 evidence row | corrected nearest neighbor | 2/4/8/16 | tag `phaseb-contextual-scalar-reranker-20260824`; exact run patch persisted | **promoted best checkpoint; deploy with 1-NN enrollment** |
+| `PB-04-SET-SCALAR-1NN` | 2026-08-24 | one pooled six-second recording | one-layer set attention emits one scalar per top-64 evidence row | corrected nearest neighbor | 2/4/8/16 | tag `phaseb-contextual-scalar-reranker-20260824`; exact run patch persisted | completed fixed-front-end comparison |
+| `PB-04-CK-DENSE` | 2026-08-24 | one pooled six-second recording from continuous physical-time kernels + dense xyz CNN | same PB-04 scalar reranker | corrected nearest neighbor | 2/4/8/16 | implementation `659d9d9`; exact run patch persisted | **promoted zero-shot point estimate; deploy with 1-NN enrollment** |
 
-The architecture ID is stored in every new `run_config.json` and checkpoint under
-`phase_b_version`. Do not identify a run only as “latest,” “native engine,” or “the mixer.” Use the
-ID and checkpoint directory together.
+The Phase-B architecture ID is stored in every new `run_config.json` and checkpoint under
+`phase_b_version`. `PB-04-CK-DENSE` is a frontend arm of `PB-04-SET-SCALAR-1NN`, so its checkpoint
+retains the base Phase-B ID and records `frontend=continuous`. Do not identify a run only as
+“latest,” “native engine,” or “the mixer.” Use the registry ID and checkpoint directory together.
 
 ## What Changed
 
@@ -99,8 +101,24 @@ surrogate. Candidate counts return to 2/4/8/16.
 - shared external-model evaluation: `eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_shared/`
 - selected assembled evaluation: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/`
 - final assembled evaluation: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_last_full/`
-- status: promoted best checkpoint because it gives the strongest zero-shot result. Use 1-NN for
-  enrollment; retrieve-mix-vote remains an underperforming auxiliary readout.
+- status: completed fixed-front-end comparison. Use 1-NN for enrollment; retrieve-mix-vote remains
+  an underperforming auxiliary readout.
+
+### PB-04-CK-DENSE
+
+- selected checkpoint: `training/tokenizer/outputs/e2e_pb04_continuous_dense_35k_20260824/best.pt`
+- selected checkpoint SHA-256: `4699e43a09e66fb298ab9f42309e36b246e1269eac12389f64a360950e99985f`
+- selected step: 13,000 of 35,000
+- final checkpoint SHA-256: `cf887431d05becedf2abe78e6459336c58acb88453fe4c1d2f0a6a03977ba69a`
+- wall time: 5,588.31 seconds
+- exact source: base commit `6621d93`, run-local patch `5357f93f...`; implementation committed as
+  `659d9d9`
+- selected raw evaluation: `eval/adaptation_results/e2e_pb04_continuous_dense_35k_20260824_best/`
+- final raw evaluation: `eval/adaptation_results/e2e_pb04_continuous_dense_35k_20260824_last/`
+- selected assembled evaluation: `eval/adaptation_tables/e2e_pb04_continuous_dense_35k_20260824_best_full/`
+- final assembled evaluation: `eval/adaptation_tables/e2e_pb04_continuous_dense_35k_20260824_last_full/`
+- status: promoted because its zero-shot point estimate is the strongest HALO result. The gain over
+  fixed PB-04 is not resolved across seven datasets, and direct 1-NN is slightly lower.
 
 ## Failed Recording-Reranker Attempts
 
@@ -141,7 +159,8 @@ Result directories:
 - selected assembled: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/`
 - final assembled: `eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_last_full/`
 
-PB-03 outputs remain immutable as the previous-best comparison.
+The continuous run uses the same contract with `frontend: continuous`; its directories and hashes
+are listed above. PB-03 and fixed PB-04 outputs remain immutable comparisons.
 
 ## Legacy Pre-Compact Line
 

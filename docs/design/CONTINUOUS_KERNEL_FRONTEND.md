@@ -1014,3 +1014,25 @@ An isolated 512-window mixed-rate benchmark confirms the split: continuous analy
 while triad packing plus both dense convolutions and projection take 0.63 ms (5.66 ms complete
 forward). Further simplifying or compiling the ordinary CNN cannot materially change end-to-end
 time; optimization effort belongs in the physical-time analysis or the episode pipeline.
+
+## S17. Matched full-run result - 2026-08-24
+
+The dense continuous arm completed the same 35,000-step end-to-end PB-04 recipe as the fixed
+physical filterbank. It took 5,588 seconds and selected step 13,000. All 749 repository tests passed,
+all 32 kernels remained active, and the mean kernel-shape shift remained below 0.015.
+
+On the sealed seven-dataset evaluation, the selected continuous checkpoint changed the aggregate
+HALO results as follows:
+
+| readout | fixed frontend | continuous frontend | difference |
+|---|---:|---:|---:|
+| native zero-shot | 20.27 | **22.37** | +2.10 |
+| 1-NN, mean over k | **53.26** | 52.29 | -0.97 |
+| retrieve-mix-vote, mean over k | 45.78 | **49.75** | +3.97 |
+
+The result is heterogeneous. Continuous 1-NN improves SPAR by about 4.9 F1 averaged over k, but
+declines on the other six held-out datasets. Dataset-bootstrap intervals cross zero for the
+zero-shot change and for every 1-NN k. Continuous kernels therefore improve the zero-shot point
+estimate and make the learned reranker less harmful, but they do not improve the supported direct
+1-NN enrollment mechanism. This is a completed mixed result, not evidence that the continuous
+frontend should replace the fixed filterbank universally.
