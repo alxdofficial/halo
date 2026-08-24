@@ -968,11 +968,19 @@ def profile_training(
                 seed=args.seed + step * 10_000, collect_stats=False, args=args,
             )
             loss = torch.stack([result["loss"] for result in results]).mean()
+        if not bool(torch.isfinite(loss)):
+            shapes = [(len(plan.candidates), plan.support_k, plan.n_support)
+                      for plan in plans]
+            raise FloatingPointError(
+                f"non-finite profile loss at step {step}; episode (C,k,support)={shapes}"
+            )
         t3 = mark()
         loss.backward()
         t4 = mark()
         torch.nn.utils.clip_grad_norm_(
-            [p for group in optimizer.param_groups for p in group["params"]], args.grad_clip)
+            [p for group in optimizer.param_groups for p in group["params"]], args.grad_clip,
+            error_if_nonfinite=True,
+        )
         optimizer.step()
         scheduler.step()
         t5 = mark()
@@ -1139,7 +1147,7 @@ def main() -> None:
                              "--random-init; checkpoints must already carry fitted statistics")
     parser.add_argument("--val-every", type=int, default=1000)
     parser.add_argument("--val-episodes", type=int, default=32)
-    parser.add_argument("--telemetry-every", type=int, default=20)
+    parser.add_argument("--telemetry-every", type=int, default=1000)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=SEED)
@@ -1624,6 +1632,12 @@ def main() -> None:
                 if frontend is not None else loss.new_zeros(())
             )
             loss = loss + args.frontend_reg_weight * frontend_reg
+        if not bool(torch.isfinite(loss)):
+            shapes = [(len(plan.candidates), plan.support_k, plan.n_support)
+                      for plan in plans]
+            raise FloatingPointError(
+                f"non-finite training loss at step {step}; episode (C,k,support)={shapes}"
+            )
         loss.backward()
         # These diagnostics launch a reduction for every parameter tensor and synchronize when
         # converted to Python floats. Compute them only on steps that will actually be recorded.
@@ -1634,6 +1648,7 @@ def main() -> None:
         reranker_output_grad = _grad_norm(reranker_output_params) if log_step else 0.0
         preclip = float(torch.nn.utils.clip_grad_norm_(
             [p for group in groups for p in group["params"]], args.grad_clip,
+            error_if_nonfinite=True,
         ))
         optimizer.step()
         scheduler.step()

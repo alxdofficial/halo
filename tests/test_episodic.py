@@ -243,7 +243,8 @@ def test_large_roster_partial_enrollment_respects_fixed_memory_capacity():
         support_schedule=(16,),
     )
     assert all(plan.n_support <= 512 for plan in plans)
-    assert all(len(plan.enrolled_slots) <= 32 for plan in plans)
+    assert all(plan.n_support <= 496 for plan in plans)
+    assert all(len(plan.enrolled_slots) <= 31 for plan in plans)
     for plan in plans:
         counts = [plan.support_slot.count(slot) for slot in plan.enrolled_slots]
         assert counts and set(counts) == {16}

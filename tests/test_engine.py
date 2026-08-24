@@ -88,6 +88,22 @@ def test_many_weak_rows_cannot_outvote_one_strong_enrolled_match():
     assert result["logits"].argmax(1).item() == 0
 
 
+def test_candidate_without_any_evidence_is_finite_and_disabled():
+    engine = _engine()
+    query = _rows(2, seed=30)
+    # Every row is enrolled to candidate zero; candidate one has no corpus or support path.
+    memory = _rows(4, labels=[0, 0, 0, 0], bound=[0, 0, 0, 0], seed=31)
+    label_text, candidate = _texts(c=2)
+    result = engine(query, memory, candidate, label_text)
+    assert torch.isfinite(result["logits"]).all()
+    assert torch.equal(result["logits"][:, 1], torch.full((2,), -1e4))
+    F.cross_entropy(result["logits"], torch.zeros(2, dtype=torch.long)).backward()
+    assert all(
+        parameter.grad is None or torch.isfinite(parameter.grad).all()
+        for parameter in engine.parameters()
+    )
+
+
 def test_enrolled_binding_overrides_arbitrary_candidate_text():
     engine = _engine()
     with torch.no_grad():

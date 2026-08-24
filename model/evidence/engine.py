@@ -135,13 +135,21 @@ class EvidenceEngine(nn.Module):
         """Exact nearest forward value with an all-row smooth backward surrogate."""
         joint = score.unsqueeze(-1) + compatibility.unsqueeze(1)       # (E,Q,M,C)
         joint = joint.masked_fill(~memory_mask[:, None, :, None], float("-inf"))
+        available = torch.isfinite(joint).any(dim=2)
         hard, winner = joint.max(dim=2)
         tau = self.cfg.surrogate_temperature
-        soft = tau * torch.logsumexp(joint / tau, dim=2)
+        safe_joint = torch.where(
+            available.unsqueeze(2), joint, torch.zeros_like(joint),
+        )
+        soft = tau * torch.logsumexp(safe_joint / tau, dim=2)
+        disabled = torch.full_like(hard, -1e4)
+        hard = torch.where(available, hard, disabled)
+        soft = torch.where(available, soft, disabled)
         # Hard-forward / soft-backward: deployment and training make the same nearest decision, while
         # every finite row receives a gradient proportional to its smooth-max responsibility.
         logits = soft + (hard - soft).detach()
-        weight = torch.softmax(joint.float() / tau, dim=2)
+        weight = torch.softmax(safe_joint.float() / tau, dim=2)
+        weight = torch.where(available.unsqueeze(2), weight, torch.zeros_like(weight))
         entropy = -(weight * weight.clamp_min(1e-12).log()).sum(dim=2)
         return logits, winner, entropy, weight
 

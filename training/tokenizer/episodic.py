@@ -401,8 +401,14 @@ def build_episode_plans(
         )
         enrollment_capacity = n_candidates
         if support_k > 0 and spec.max_memory_windows is not None:
+            # A coherent partial-enrollment episode needs at least one corpus recording. Otherwise
+            # C=64,k=16 can fill all 512 rows with 32 supported candidates and leave every
+            # unsupported candidate with no finite path at all. Random aliases enroll every
+            # candidate, so they do not require this reserve.
+            corpus_reserve = 0 if label_mode == "random_alias" else 1
             enrollment_capacity = min(
-                enrollment_capacity, spec.max_memory_windows // support_k,
+                enrollment_capacity,
+                max(spec.max_memory_windows - corpus_reserve, 0) // support_k,
             )
         if label_mode == "random_alias" and enrollment_capacity < n_candidates:
             raise ValueError(
