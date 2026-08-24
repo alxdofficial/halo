@@ -128,8 +128,8 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
 
 ## `results/` — the measured record
 - [**RESULTS.md**](results/RESULTS.md) — **the current headline**: PB-04 zero-shot and 1-NN
-  enrollment against the complete external-model roster, all matched controls, both regimes, every
-  k, and per-dataset tables.
+  enrollment against the complete external-model roster, all matched controls, every k, and
+  per-dataset tables.
 - [ADAPTATION_TABLE_20260822.md](results/ADAPTATION_TABLE_20260822.md) — historical August 22 table;
   retained for auditability and explicitly superseded by `RESULTS.md`.
 - [EVAL_HARNESS_AUDIT_20260822.md](results/EVAL_HARNESS_AUDIT_20260822.md) — verification that the

@@ -43,6 +43,8 @@ def test_label_efficiency_excludes_random_alias_rows() -> None:
     assert "HARNet / ridge" in table
     assert "linear_head" not in table
     assert "50.00" not in table
+    assert "ordinary" not in table
+    assert "specialized" not in table
 
 
 def test_current_report_rejects_missing_matched_readout() -> None:
@@ -95,5 +97,7 @@ def test_per_dataset_table_keeps_datasets_separate() -> None:
 
     assert "#### Inclusive-HAR" in table
     assert "#### USC-HAD" in table
+    assert "ordinary" not in table
+    assert "specialized" not in table
     assert "| HALO / retrieve-mix-vote | **90.00** |" in table
     assert "| HALO / retrieve-mix-vote | **10.00** |" in table

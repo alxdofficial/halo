@@ -9,8 +9,9 @@
    representation, with HALO's retrieve-mix-vote mechanism shown separately.
 
 The input must come from :mod:`eval.assemble_adaptation`, which validates the manifest, source and
-checkpoint fingerprints before writing it. Aggregation is the mean over datasets within a regime,
-after averaging seeds within a dataset, so a dataset with more seeds does not outvote one with fewer.
+checkpoint fingerprints before writing it. Aggregation first averages seeds within each dataset and
+then gives every available dataset equal weight, so a dataset with more seeds does not outvote one
+with fewer.
 """
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ MODEL_NAMES = {
     "harnet": "HARNet", "crosshar": "CrossHAR", "unimts": "UniMTS",
     "limubert": "LIMU-BERT", "normwear": "NormWear", "imagebind": "ImageBind",
 }
-REGIMES = ("ordinary", "specialized_novel")
 REPORT_MODEL_ORDER = (
     "halo_compact", "limubert", "unimts", "crosshar", "harnet", "imagebind", "normwear",
 )
@@ -108,23 +108,22 @@ def _validate_current_cells(cells: list[dict]) -> None:
 
 def table_zero_shot(cells: list[dict]) -> str:
     out = ["## 1. Zero-shot", "",
-           "No labelled examples. Macro F1, mean over datasets.", ""]
+           "No labelled examples. Macro F1, equally averaged over all held-out datasets.", ""]
     scored = []
     for model in MODEL_NAMES:
-        per_regime = [
-            _dataset_macro([c for c in cells if c["model"] == model
-                            and c["method"] == "zero_shot" and c["regime"] == regime
-                            and c["label_mode"] == "coherent"])[0]
-            for regime in REGIMES
-        ]
-        scored.append((MODEL_NAMES[model], per_regime))
+        overall, _ = _dataset_macro([
+            c for c in cells
+            if c["model"] == model and c["method"] == "zero_shot"
+            and c["label_mode"] == "coherent"
+        ])
+        scored.append((MODEL_NAMES[model], [overall]))
     scored.sort(key=lambda r: -np.nanmean(r[1]))
-    out += _emit(["model"] + [r.replace("_", " ") for r in REGIMES], scored)
-    counts = {r: _dataset_macro([c for c in cells if c["method"] == "zero_shot"
-                                 and c["regime"] == r
-                                 and c["label_mode"] == "coherent"])[1]
-              for r in REGIMES}
-    out += ["", f"Datasets per regime: " + ", ".join(f"{r} {n}" for r, n in counts.items()), ""]
+    out += _emit(["model", "all datasets"], scored)
+    dataset_count = _dataset_macro([
+        c for c in cells
+        if c["method"] == "zero_shot" and c["label_mode"] == "coherent"
+    ])[1]
+    out += ["", f"Held-out datasets: {dataset_count}.", ""]
     return "\n".join(out)
 
 
@@ -150,20 +149,19 @@ def table_label_efficiency(cells: list[dict]) -> str:
            "readouts used for every representation: one-nearest-neighbor, support prototypes, "
            "and closed-form ridge regression. All readouts see only the enrolled support "
            "executions. Macro F1, mean over datasets.", ""]
-    for regime in REGIMES:
-        scored = []
-        for display_name, model, method in _enrollment_model_methods():
-            row = [
-                _dataset_macro([c for c in cells if c["model"] == model
-                                and c["method"] == method and c["regime"] == regime
-                                and c["label_mode"] == "coherent"
-                                and int(c["k"]) == k])[0]
-                for k in ks
-            ]
-            scored.append((display_name, row))
-        out += [f"### {regime.replace('_', ' ')}", ""]
-        out += _emit(["model"] + [f"k={k}" for k in ks], scored)
-        out.append("")
+    scored = []
+    for display_name, model, method in _enrollment_model_methods():
+        row = [
+            _dataset_macro([
+                c for c in cells
+                if c["model"] == model and c["method"] == method
+                and c["label_mode"] == "coherent" and int(c["k"]) == k
+            ])[0]
+            for k in ks
+        ]
+        scored.append((display_name, row))
+    out += _emit(["model"] + [f"k={k}" for k in ks], scored)
+    out.append("")
     return "\n".join(out)
 
 
@@ -190,28 +188,23 @@ def table_per_dataset(cells: list[dict]) -> str:
     out += _emit(["model"] + [DATASET_NAMES.get(d, d) for d in datasets], zero_rows)
     out.append("")
 
-    for regime in REGIMES:
-        out += [f"### {regime.replace('_', ' ')} enrollment", ""]
-        regime_datasets = sorted(
-            {c["dataset"] for c in cells if c["regime"] == regime},
-            key=lambda d: DATASET_NAMES.get(d, d),
-        )
-        for dataset in regime_datasets:
-            scored = []
-            for display_name, model, method in _enrollment_model_methods():
-                values = [
-                    _dataset_macro([
-                        c for c in cells
-                        if c["model"] == model and c["method"] == method
-                        and c["dataset"] == dataset and c["regime"] == regime
-                        and c["label_mode"] == "coherent" and int(c["k"]) == k
-                    ])[0]
-                    for k in ks
-                ]
-                scored.append((display_name, values))
-            out += [f"#### {DATASET_NAMES.get(dataset, dataset)}", ""]
-            out += _emit(["model / readout"] + [f"k={k}" for k in ks], scored)
-            out.append("")
+    out += ["### Enrollment by dataset", ""]
+    for dataset in datasets:
+        scored = []
+        for display_name, model, method in _enrollment_model_methods():
+            values = [
+                _dataset_macro([
+                    c for c in cells
+                    if c["model"] == model and c["method"] == method
+                    and c["dataset"] == dataset and c["label_mode"] == "coherent"
+                    and int(c["k"]) == k
+                ])[0]
+                for k in ks
+            ]
+            scored.append((display_name, values))
+        out += [f"#### {DATASET_NAMES.get(dataset, dataset)}", ""]
+        out += _emit(["model / readout"] + [f"k={k}" for k in ks], scored)
+        out.append("")
     return "\n".join(out)
 
 

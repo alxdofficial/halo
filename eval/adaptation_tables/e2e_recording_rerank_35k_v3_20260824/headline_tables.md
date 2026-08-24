@@ -2,77 +2,48 @@
 
 ## 1. Zero-shot
 
-No labelled examples. Macro F1, mean over datasets.
+No labelled examples. Macro F1, equally averaged over all held-out datasets.
 
-| model | ordinary | specialized novel |
-|---|---:|---:|
-| UniMTS | 31.98 | **17.37** |
-| CrossHAR | **37.70** | 11.22 |
-| HARNet | 33.82 | 11.40 |
-| LIMU-BERT | 30.60 | 10.27 |
-| HALO (ours) | 20.72 | 9.72 |
-| ImageBind | 11.38 | 8.15 |
-| NormWear | 5.08 | 3.58 |
+| model | all datasets |
+|---|---:|
+| CrossHAR | **26.35** |
+| UniMTS | 25.72 |
+| HARNet | 24.21 |
+| LIMU-BERT | 21.89 |
+| HALO (ours) | 16.01 |
+| ImageBind | 10.00 |
+| NormWear | 4.44 |
 
-Datasets per regime: ordinary 4, specialized_novel 3
+Held-out datasets: 7.
 
 ## 2. Label efficiency
 
 `k` is the number of independent enrolled executions per candidate. HALO is shown with its retrieve-mix-vote mechanism in addition to the same three non-gradient readouts used for every representation: one-nearest-neighbor, support prototypes, and closed-form ridge regression. All readouts see only the enrolled support executions. Macro F1, mean over datasets.
 
-### ordinary
-
 | model | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 53.99 | 57.82 | 61.68 | 60.81 | 58.48 |
-| HALO / 1-NN | 53.32 | 56.83 | 60.33 | 60.01 | 57.97 |
-| HALO / prototype | 53.32 | 55.50 | 58.10 | 57.56 | 55.74 |
-| HALO / ridge | 52.83 | 56.09 | 60.18 | 60.80 | 58.07 |
-| LIMU-BERT / 1-NN | 56.91 | **61.95** | **65.24** | **64.89** | 61.55 |
-| LIMU-BERT / prototype | **56.91** | 60.19 | 63.84 | 63.06 | 59.18 |
-| LIMU-BERT / ridge | 50.23 | 53.46 | 58.41 | 57.85 | 55.06 |
-| UniMTS / 1-NN | 50.69 | 56.20 | 61.01 | 62.22 | **62.68** |
-| UniMTS / prototype | 50.69 | 52.27 | 55.79 | 55.99 | 54.62 |
-| UniMTS / ridge | 47.66 | 49.84 | 53.62 | 54.67 | 54.16 |
-| CrossHAR / 1-NN | 50.54 | 54.43 | 59.58 | 58.70 | 57.39 |
-| CrossHAR / prototype | 50.54 | 54.04 | 58.17 | 56.69 | 55.61 |
-| CrossHAR / ridge | 42.99 | 45.84 | 50.32 | 50.62 | 50.38 |
-| HARNet / 1-NN | 47.34 | 50.51 | 53.20 | 52.66 | 50.69 |
-| HARNet / prototype | 47.34 | 49.52 | 52.93 | 52.39 | 50.40 |
-| HARNet / ridge | 46.73 | 49.16 | 53.55 | 53.97 | 52.73 |
-| ImageBind / 1-NN | 43.02 | 49.06 | 53.22 | 53.19 | 51.02 |
-| ImageBind / prototype | 43.02 | 47.12 | 48.70 | 46.39 | 44.54 |
-| ImageBind / ridge | 42.92 | 48.16 | 51.75 | 51.71 | 49.71 |
-| NormWear / 1-NN | 26.26 | 29.56 | 32.92 | 35.35 | 37.11 |
-| NormWear / prototype | 26.26 | 27.17 | 28.82 | 28.80 | 27.83 |
-| NormWear / ridge | 20.68 | 19.99 | 20.76 | 21.59 | 23.89 |
-
-### specialized novel
-
-| model | k=1 | k=2 | k=4 | k=8 | k=16 |
-|---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | **38.28** | **38.71** | **51.74** | **55.78** | **58.22** |
-| HALO / 1-NN | 36.78 | 37.88 | 50.00 | 53.25 | 55.35 |
-| HALO / prototype | 36.78 | 37.06 | 49.16 | 51.11 | 52.78 |
-| HALO / ridge | 35.61 | 36.14 | 49.17 | 52.85 | 57.74 |
-| LIMU-BERT / 1-NN | 30.58 | 33.83 | 40.28 | 42.78 | 43.97 |
-| LIMU-BERT / prototype | 30.58 | 33.36 | 38.76 | 40.38 | 41.66 |
-| LIMU-BERT / ridge | 27.56 | 30.75 | 36.07 | 38.25 | 40.39 |
-| UniMTS / 1-NN | 37.02 | 36.71 | 49.12 | 52.77 | 55.05 |
-| UniMTS / prototype | 37.02 | 36.49 | 47.87 | 50.19 | 50.91 |
-| UniMTS / ridge | 34.39 | 34.78 | 46.71 | 50.28 | 52.85 |
-| CrossHAR / 1-NN | 28.32 | 32.36 | 40.73 | 43.04 | 45.44 |
-| CrossHAR / prototype | 28.32 | 32.46 | 40.97 | 43.38 | 44.74 |
-| CrossHAR / ridge | 26.77 | 31.03 | 40.46 | 43.31 | 45.79 |
-| HARNet / 1-NN | 30.83 | 31.84 | 43.78 | 47.62 | 50.98 |
-| HARNet / prototype | 30.83 | 31.55 | 41.69 | 44.19 | 45.91 |
-| HARNet / ridge | 30.12 | 31.66 | 43.82 | 48.89 | 54.03 |
-| ImageBind / 1-NN | 27.29 | 29.59 | 35.43 | 38.29 | 40.56 |
-| ImageBind / prototype | 27.29 | 29.84 | 34.15 | 36.04 | 37.15 |
-| ImageBind / ridge | 26.24 | 29.85 | 35.15 | 39.35 | 43.00 |
-| NormWear / 1-NN | 18.63 | 20.20 | 25.61 | 28.21 | 31.06 |
-| NormWear / prototype | 18.63 | 18.14 | 21.50 | 21.76 | 21.05 |
-| NormWear / ridge | 14.68 | 14.24 | 18.43 | 19.35 | 19.67 |
+| HALO / retrieve-mix-vote | **47.26** | 49.63 | **58.36** | **59.14** | 58.38 |
+| HALO / 1-NN | 46.23 | 48.71 | 56.89 | 57.76 | 56.92 |
+| HALO / prototype | 46.23 | 47.59 | 55.12 | 55.41 | 54.56 |
+| HALO / ridge | 45.45 | 47.54 | 56.51 | 58.15 | 57.94 |
+| LIMU-BERT / 1-NN | 45.63 | **49.90** | 56.92 | 57.52 | 54.52 |
+| LIMU-BERT / prototype | 45.63 | 48.69 | 55.48 | 55.50 | 52.17 |
+| LIMU-BERT / ridge | 40.51 | 43.73 | 50.96 | 51.32 | 49.19 |
+| UniMTS / 1-NN | 44.83 | 47.85 | 57.04 | 59.07 | **59.63** |
+| UniMTS / prototype | 44.83 | 45.51 | 53.15 | 54.05 | 53.14 |
+| UniMTS / ridge | 41.97 | 43.38 | 51.32 | 53.21 | 53.64 |
+| CrossHAR / 1-NN | 41.02 | 44.97 | 53.30 | 53.48 | 52.61 |
+| CrossHAR / prototype | 41.02 | 44.79 | 52.43 | 52.25 | 51.26 |
+| CrossHAR / ridge | 36.04 | 39.49 | 47.03 | 48.19 | 48.55 |
+| HARNet / 1-NN | 40.26 | 42.51 | 50.06 | 50.98 | 50.81 |
+| HARNet / prototype | 40.26 | 41.82 | 49.18 | 49.66 | 48.61 |
+| HARNet / ridge | 39.61 | 41.66 | 50.31 | 52.27 | 53.25 |
+| ImageBind / 1-NN | 36.28 | 40.72 | 47.29 | 48.22 | 46.83 |
+| ImageBind / prototype | 36.28 | 39.71 | 43.85 | 42.94 | 41.59 |
+| ImageBind / ridge | 35.77 | 40.31 | 46.22 | 47.59 | 47.02 |
+| NormWear / 1-NN | 22.99 | 25.55 | 30.49 | 32.97 | 34.69 |
+| NormWear / prototype | 22.99 | 23.30 | 26.38 | 26.46 | 25.12 |
+| NormWear / ridge | 18.11 | 17.53 | 19.98 | 20.84 | 22.21 |
 
 ## 3. Per-dataset performance
 
@@ -90,7 +61,7 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 | ImageBind | 18.84 | 5.69 | 11.78 | 13.02 | 6.02 | 7.64 | 6.97 |
 | NormWear | 8.60 | 0.76 | 6.10 | 5.11 | 4.82 | 1.80 | 3.87 |
 
-### ordinary enrollment
+### Enrollment by dataset
 
 #### Inclusive-HAR
 
@@ -118,6 +89,60 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 | NormWear / 1-NN | 25.94 | 26.52 | 27.57 | 29.30 | 30.66 |
 | NormWear / prototype | 25.94 | 25.76 | 26.42 | 26.95 | 26.06 |
 | NormWear / ridge | 25.12 | 24.66 | 24.85 | 24.50 | 23.02 |
+
+#### MoniPar
+
+| model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|---:|
+| HALO / retrieve-mix-vote | 41.66 | **46.52** | 41.05 | 44.45 | 47.16 |
+| HALO / 1-NN | 40.34 | 43.85 | 39.65 | 42.06 | 43.38 |
+| HALO / prototype | 40.34 | 43.54 | 39.88 | 41.00 | 42.23 |
+| HALO / ridge | 36.25 | 38.65 | 37.06 | 39.51 | 43.33 |
+| LIMU-BERT / 1-NN | 36.63 | 41.18 | 33.75 | 37.73 | 39.34 |
+| LIMU-BERT / prototype | 36.63 | 38.85 | 30.53 | 33.26 | 35.45 |
+| LIMU-BERT / ridge | 30.35 | 31.80 | 26.12 | 29.44 | 32.31 |
+| UniMTS / 1-NN | **43.31** | 45.65 | 41.32 | 42.65 | 43.00 |
+| UniMTS / prototype | **43.31** | 46.43 | **42.74** | 43.58 | 42.92 |
+| UniMTS / ridge | 38.84 | 42.36 | 40.44 | 42.62 | 43.99 |
+| CrossHAR / 1-NN | 38.16 | 42.25 | 38.35 | 40.83 | 42.74 |
+| CrossHAR / prototype | 38.16 | 42.37 | 40.05 | 42.08 | 43.01 |
+| CrossHAR / ridge | 36.94 | 42.48 | 40.58 | 42.83 | 44.85 |
+| HARNet / 1-NN | 34.65 | 40.09 | 39.89 | 44.27 | 47.46 |
+| HARNet / prototype | 34.65 | 38.73 | 37.23 | 39.18 | 40.65 |
+| HARNet / ridge | 34.47 | 40.72 | 41.70 | **46.97** | **51.30** |
+| ImageBind / 1-NN | 28.89 | 32.91 | 26.57 | 29.75 | 32.59 |
+| ImageBind / prototype | 28.89 | 30.20 | 24.18 | 25.76 | 26.82 |
+| ImageBind / ridge | 26.86 | 30.14 | 24.70 | 29.37 | 32.83 |
+| NormWear / 1-NN | 23.22 | 26.55 | 25.00 | 27.62 | 30.29 |
+| NormWear / prototype | 23.22 | 23.88 | 21.06 | 22.30 | 22.03 |
+| NormWear / ridge | 16.70 | 17.74 | 17.80 | 20.36 | 21.90 |
+
+#### SPAR
+
+| model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
+|---|---:|---:|---:|---:|---:|
+| HALO / retrieve-mix-vote | **57.79** | **57.48** | **62.42** | **67.12** | 69.29 |
+| HALO / 1-NN | 54.94 | 55.29 | 60.36 | 64.45 | 67.32 |
+| HALO / prototype | 54.94 | 54.88 | 58.43 | 61.22 | 63.32 |
+| HALO / ridge | 55.29 | 56.71 | 61.28 | 66.19 | **72.16** |
+| LIMU-BERT / 1-NN | 35.63 | 45.39 | 46.81 | 47.83 | 48.59 |
+| LIMU-BERT / prototype | 35.63 | 45.22 | 46.99 | 47.51 | 47.86 |
+| LIMU-BERT / ridge | 35.34 | 44.50 | 46.02 | 47.07 | 48.46 |
+| UniMTS / 1-NN | 52.86 | 50.65 | 56.92 | 62.89 | 67.11 |
+| UniMTS / prototype | 52.86 | 48.67 | 53.00 | 56.81 | 58.89 |
+| UniMTS / ridge | 51.25 | 48.30 | 52.99 | 57.94 | 61.72 |
+| CrossHAR / 1-NN | 31.83 | 39.05 | 43.10 | 45.25 | 48.14 |
+| CrossHAR / prototype | 31.83 | 38.11 | 41.89 | 44.67 | 46.48 |
+| CrossHAR / ridge | 30.60 | 36.67 | 40.35 | 43.80 | 46.74 |
+| HARNet / 1-NN | 45.09 | 42.97 | 47.67 | 50.98 | 54.51 |
+| HARNet / prototype | 45.09 | 42.42 | 46.15 | 49.20 | 51.17 |
+| HARNet / ridge | 43.88 | 41.72 | 45.95 | 50.80 | 56.77 |
+| ImageBind / 1-NN | 36.58 | 41.74 | 44.29 | 46.82 | 48.53 |
+| ImageBind / prototype | 36.58 | 41.98 | 44.13 | 46.31 | 47.48 |
+| ImageBind / ridge | 35.94 | 42.17 | 45.61 | 49.32 | 53.16 |
+| NormWear / 1-NN | 22.69 | 23.82 | 26.22 | 28.80 | 31.82 |
+| NormWear / prototype | 22.69 | 21.53 | 21.95 | 21.23 | 20.07 |
+| NormWear / ridge | 20.30 | 18.86 | 19.06 | 18.35 | 17.45 |
 
 #### TNDA-HAR
 
@@ -199,62 +224,6 @@ These tables use the same protocol as the aggregate results. Values are macro F1
 | NormWear / 1-NN | 26.59 | 30.92 | 35.05 | 39.64 | n/a |
 | NormWear / prototype | 26.59 | 28.35 | 29.24 | 30.06 | n/a |
 | NormWear / ridge | 14.96 | 13.79 | 13.11 | 14.27 | n/a |
-
-### specialized novel enrollment
-
-#### MoniPar
-
-| model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
-|---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 41.66 | **46.52** | 41.05 | 44.45 | 47.16 |
-| HALO / 1-NN | 40.34 | 43.85 | 39.65 | 42.06 | 43.38 |
-| HALO / prototype | 40.34 | 43.54 | 39.88 | 41.00 | 42.23 |
-| HALO / ridge | 36.25 | 38.65 | 37.06 | 39.51 | 43.33 |
-| LIMU-BERT / 1-NN | 36.63 | 41.18 | 33.75 | 37.73 | 39.34 |
-| LIMU-BERT / prototype | 36.63 | 38.85 | 30.53 | 33.26 | 35.45 |
-| LIMU-BERT / ridge | 30.35 | 31.80 | 26.12 | 29.44 | 32.31 |
-| UniMTS / 1-NN | **43.31** | 45.65 | 41.32 | 42.65 | 43.00 |
-| UniMTS / prototype | **43.31** | 46.43 | **42.74** | 43.58 | 42.92 |
-| UniMTS / ridge | 38.84 | 42.36 | 40.44 | 42.62 | 43.99 |
-| CrossHAR / 1-NN | 38.16 | 42.25 | 38.35 | 40.83 | 42.74 |
-| CrossHAR / prototype | 38.16 | 42.37 | 40.05 | 42.08 | 43.01 |
-| CrossHAR / ridge | 36.94 | 42.48 | 40.58 | 42.83 | 44.85 |
-| HARNet / 1-NN | 34.65 | 40.09 | 39.89 | 44.27 | 47.46 |
-| HARNet / prototype | 34.65 | 38.73 | 37.23 | 39.18 | 40.65 |
-| HARNet / ridge | 34.47 | 40.72 | 41.70 | **46.97** | **51.30** |
-| ImageBind / 1-NN | 28.89 | 32.91 | 26.57 | 29.75 | 32.59 |
-| ImageBind / prototype | 28.89 | 30.20 | 24.18 | 25.76 | 26.82 |
-| ImageBind / ridge | 26.86 | 30.14 | 24.70 | 29.37 | 32.83 |
-| NormWear / 1-NN | 23.22 | 26.55 | 25.00 | 27.62 | 30.29 |
-| NormWear / prototype | 23.22 | 23.88 | 21.06 | 22.30 | 22.03 |
-| NormWear / ridge | 16.70 | 17.74 | 17.80 | 20.36 | 21.90 |
-
-#### SPAR
-
-| model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
-|---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | **57.79** | **57.48** | **62.42** | **67.12** | 69.29 |
-| HALO / 1-NN | 54.94 | 55.29 | 60.36 | 64.45 | 67.32 |
-| HALO / prototype | 54.94 | 54.88 | 58.43 | 61.22 | 63.32 |
-| HALO / ridge | 55.29 | 56.71 | 61.28 | 66.19 | **72.16** |
-| LIMU-BERT / 1-NN | 35.63 | 45.39 | 46.81 | 47.83 | 48.59 |
-| LIMU-BERT / prototype | 35.63 | 45.22 | 46.99 | 47.51 | 47.86 |
-| LIMU-BERT / ridge | 35.34 | 44.50 | 46.02 | 47.07 | 48.46 |
-| UniMTS / 1-NN | 52.86 | 50.65 | 56.92 | 62.89 | 67.11 |
-| UniMTS / prototype | 52.86 | 48.67 | 53.00 | 56.81 | 58.89 |
-| UniMTS / ridge | 51.25 | 48.30 | 52.99 | 57.94 | 61.72 |
-| CrossHAR / 1-NN | 31.83 | 39.05 | 43.10 | 45.25 | 48.14 |
-| CrossHAR / prototype | 31.83 | 38.11 | 41.89 | 44.67 | 46.48 |
-| CrossHAR / ridge | 30.60 | 36.67 | 40.35 | 43.80 | 46.74 |
-| HARNet / 1-NN | 45.09 | 42.97 | 47.67 | 50.98 | 54.51 |
-| HARNet / prototype | 45.09 | 42.42 | 46.15 | 49.20 | 51.17 |
-| HARNet / ridge | 43.88 | 41.72 | 45.95 | 50.80 | 56.77 |
-| ImageBind / 1-NN | 36.58 | 41.74 | 44.29 | 46.82 | 48.53 |
-| ImageBind / prototype | 36.58 | 41.98 | 44.13 | 46.31 | 47.48 |
-| ImageBind / ridge | 35.94 | 42.17 | 45.61 | 49.32 | 53.16 |
-| NormWear / 1-NN | 22.69 | 23.82 | 26.22 | 28.80 | 31.82 |
-| NormWear / prototype | 22.69 | 21.53 | 21.95 | 21.23 | 20.07 |
-| NormWear / ridge | 20.30 | 18.86 | 19.06 | 18.35 | 17.45 |
 
 #### Upper Limb Use
 

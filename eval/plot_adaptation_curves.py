@@ -28,8 +28,6 @@ MODEL_NAMES = {
     "imagebind": "ImageBind",
 }
 KS = (1, 2, 4, 8, 16)
-REGIMES = (("ordinary", "Ordinary activities"),
-           ("specialized_novel", "Specialized novel activities"))
 COLORS = {
     "HALO / retrieve-mix-vote": "#c43c39",
     "HALO / 1-NN": "#111111",
@@ -48,12 +46,12 @@ def _load(path: Path) -> list[dict]:
 
 
 def _dataset_macro(
-    rows: list[dict], *, model: str, method: str, regime: str, k: int,
+    rows: list[dict], *, model: str, method: str, k: int,
 ) -> float:
     by_dataset: dict[str, list[float]] = defaultdict(list)
     for row in rows:
         if (row["model"] == model and row["method"] == method
-                and row["regime"] == regime and row["label_mode"] == "coherent"
+                and row["label_mode"] == "coherent"
                 and int(row["k"]) == k):
             by_dataset[row["dataset"]].append(float(row["f1_macro"]))
     if not by_dataset:
@@ -61,8 +59,8 @@ def _dataset_macro(
     return float(np.mean([np.mean(values) for values in by_dataset.values()]))
 
 
-def _curve(rows: list[dict], model: str, method: str, regime: str) -> list[float]:
-    return [_dataset_macro(rows, model=model, method=method, regime=regime, k=k) for k in KS]
+def _curve(rows: list[dict], model: str, method: str) -> list[float]:
+    return [_dataset_macro(rows, model=model, method=method, k=k) for k in KS]
 
 
 def _style_axes(ax, title: str) -> None:
@@ -83,23 +81,22 @@ def _save(fig, out_dir: Path, stem: str) -> None:
 
 
 def plot_knn(rows: list[dict], out_dir: Path) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(11.2, 4.3), sharey=True)
-    for ax, (regime, title) in zip(axes, REGIMES, strict=True):
-        for model, name in MODEL_NAMES.items():
-            values = _curve(rows, model, "nearest", regime)
-            ax.plot(
-                range(len(KS)), values, marker="o", markersize=4,
-                linewidth=2.8 if model == "halo_compact" else 1.5,
-                color=COLORS[name], label=name, zorder=5 if model == "halo_compact" else 2,
-            )
-        _style_axes(ax, title)
-    axes[0].set_ylabel("Macro F1")
-    handles, labels = axes[0].get_legend_handles_labels()
+    fig, ax = plt.subplots(figsize=(7.3, 4.8))
+    for model, name in MODEL_NAMES.items():
+        values = _curve(rows, model, "nearest")
+        ax.plot(
+            range(len(KS)), values, marker="o", markersize=4,
+            linewidth=2.8 if model == "halo_compact" else 1.5,
+            color=COLORS[name], label=name, zorder=5 if model == "halo_compact" else 2,
+        )
+    _style_axes(ax, "All held-out datasets")
+    ax.set_ylabel("Macro F1")
+    handles, labels = ax.get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=7, frameon=False,
                bbox_to_anchor=(0.5, -0.02), fontsize=8.5)
     fig.suptitle("Matched 1-NN comparison of frozen representations", fontsize=13,
                  fontweight="semibold", y=1.02)
-    fig.subplots_adjust(bottom=0.23, wspace=0.09)
+    fig.subplots_adjust(bottom=0.23)
     _save(fig, out_dir, "knn_representation_curves")
 
 
@@ -110,24 +107,23 @@ def plot_primary(rows: list[dict], out_dir: Path) -> None:
         *((MODEL_NAMES[model], model, "nearest")
           for model in MODEL_NAMES if model != "halo_compact"),
     ]
-    fig, axes = plt.subplots(1, 2, figsize=(11.2, 4.3), sharey=True)
-    for ax, (regime, title) in zip(axes, REGIMES, strict=True):
-        for name, model, method in series:
-            halo = model == "halo_compact"
-            ax.plot(
-                range(len(KS)), _curve(rows, model, method, regime),
-                marker="o", markersize=4, linewidth=2.8 if halo else 1.4,
-                linestyle="--" if method == "evidence_engine" else "-",
-                color=COLORS[name], label=name, zorder=5 if halo else 2,
-            )
-        _style_axes(ax, title)
-    axes[0].set_ylabel("Macro F1")
-    handles, labels = axes[0].get_legend_handles_labels()
+    fig, ax = plt.subplots(figsize=(7.3, 4.8))
+    for name, model, method in series:
+        halo = model == "halo_compact"
+        ax.plot(
+            range(len(KS)), _curve(rows, model, method),
+            marker="o", markersize=4, linewidth=2.8 if halo else 1.4,
+            linestyle="--" if method == "evidence_engine" else "-",
+            color=COLORS[name], label=name, zorder=5 if halo else 2,
+        )
+    _style_axes(ax, "All held-out datasets")
+    ax.set_ylabel("Macro F1")
+    handles, labels = ax.get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=4, frameon=False,
                bbox_to_anchor=(0.5, -0.08), fontsize=8.5)
     fig.suptitle("Label-efficient adaptation: HALO retrieve-mix-vote and matched 1-NN", fontsize=13,
                  fontweight="semibold", y=1.02)
-    fig.subplots_adjust(bottom=0.27, wspace=0.09)
+    fig.subplots_adjust(bottom=0.27)
     _save(fig, out_dir, "primary_adaptation_curves")
 
 

@@ -1,7 +1,7 @@
 # Current Best Results
 
 > Last updated 2026-08-24. `PB-04-SET-SCALAR-1NN` is the promoted HALO checkpoint because it gives
-> the strongest zero-shot result and a small ordinary-activity 1-NN improvement. Its deployed
+> the strongest overall zero-shot result among the HALO checkpoints. Its deployed
 > enrollment readout is 1-NN; retrieve-mix-vote is retained and reported as an auxiliary ablation.
 
 **Result set:** `PB-04-SET-SCALAR-1NN` selected checkpoint. See the
@@ -31,15 +31,15 @@ tables are in
 No labelled target-dataset execution is available at k=0. Each model uses its native zero-shot
 mechanism.
 
-| model | ordinary | specialized novel |
-|---|---:|---:|
-| CrossHAR | **37.70** | 11.22 |
-| HARNet | 33.82 | 11.40 |
-| UniMTS | 31.98 | **17.37** |
-| LIMU-BERT | 30.60 | 10.27 |
-| **HALO PB-04** | 26.99 | 11.32 |
-| ImageBind | 11.38 | 8.15 |
-| NormWear | 5.08 | 3.58 |
+| model | all held-out datasets |
+|---|---:|
+| CrossHAR | **26.35** |
+| UniMTS | 25.72 |
+| HARNet | 24.21 |
+| LIMU-BERT | 21.89 |
+| **HALO PB-04** | 20.27 |
+| ImageBind | 10.00 |
+| NormWear | 4.44 |
 
 HALO is not competitive at k=0. The current design should therefore be described as an enrollment
 adaptation system, not as a leading semantic zero-shot classifier.
@@ -52,65 +52,39 @@ chooses the corrected nearest candidate. For every encoder, the table also repor
 non-gradient enrollment rules: pooled-execution 1-NN, support prototypes, and closed-form ridge.
 Each sees only the enrolled support executions. Linear-head fitting is excluded from the main table.
 
-### Ordinary activities
-
 | model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
 |---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 48.86 | 51.50 | 55.18 | 53.59 | 51.58 |
-| **HALO / 1-NN** | 53.72 | 57.91 | 60.85 | 60.62 | 58.74 |
-| HALO / prototype | 53.72 | 57.82 | 58.82 | 59.01 | 55.22 |
-| HALO / ridge | 52.53 | 56.47 | 57.93 | 58.19 | 55.78 |
-| LIMU-BERT / 1-NN | 56.91 | **61.95** | **65.24** | **64.89** | 61.55 |
-| LIMU-BERT / prototype | **56.91** | 60.19 | 63.84 | 63.06 | 59.18 |
-| LIMU-BERT / ridge | 50.23 | 53.46 | 58.41 | 57.85 | 55.06 |
-| UniMTS / 1-NN | 50.69 | 56.20 | 61.01 | 62.22 | **62.68** |
-| UniMTS / prototype | 50.69 | 52.27 | 55.79 | 55.99 | 54.62 |
-| UniMTS / ridge | 47.66 | 49.84 | 53.62 | 54.67 | 54.16 |
-| CrossHAR / 1-NN | 50.54 | 54.43 | 59.58 | 58.70 | 57.39 |
-| CrossHAR / prototype | 50.54 | 54.04 | 58.17 | 56.69 | 55.61 |
-| CrossHAR / ridge | 42.99 | 45.84 | 50.32 | 50.62 | 50.38 |
-| HARNet / 1-NN | 47.34 | 50.51 | 53.20 | 52.66 | 50.69 |
-| HARNet / prototype | 47.34 | 49.52 | 52.93 | 52.39 | 50.40 |
-| HARNet / ridge | 46.73 | 49.16 | 53.55 | 53.97 | 52.73 |
-| ImageBind / 1-NN | 43.02 | 49.06 | 53.22 | 53.19 | 51.02 |
-| ImageBind / prototype | 43.02 | 47.12 | 48.70 | 46.39 | 44.54 |
-| ImageBind / ridge | 42.92 | 48.16 | 51.75 | 51.71 | 49.71 |
-| NormWear / 1-NN | 26.26 | 29.56 | 32.92 | 35.35 | 37.11 |
-| NormWear / prototype | 26.26 | 27.17 | 28.82 | 28.80 | 27.83 |
-| NormWear / ridge | 20.68 | 19.99 | 20.76 | 21.59 | 23.89 |
+| HALO / retrieve-mix-vote | 41.28 | 42.87 | 48.85 | 48.22 | 47.68 |
+| **HALO / 1-NN** | **46.13** | 48.59 | 56.62 | 57.77 | 57.19 |
+| HALO / prototype | **46.13** | 48.41 | 54.27 | 55.00 | 52.53 |
+| HALO / ridge | 45.30 | 47.35 | 54.19 | 55.92 | 56.03 |
+| LIMU-BERT / 1-NN | 45.63 | **49.90** | 56.92 | 57.52 | 54.52 |
+| LIMU-BERT / prototype | 45.63 | 48.69 | 55.48 | 55.50 | 52.17 |
+| LIMU-BERT / ridge | 40.51 | 43.73 | 50.96 | 51.32 | 49.19 |
+| UniMTS / 1-NN | 44.83 | 47.85 | **57.04** | **59.07** | **59.63** |
+| UniMTS / prototype | 44.83 | 45.51 | 53.15 | 54.05 | 53.14 |
+| UniMTS / ridge | 41.97 | 43.38 | 51.32 | 53.21 | 53.64 |
+| CrossHAR / 1-NN | 41.02 | 44.97 | 53.30 | 53.48 | 52.61 |
+| CrossHAR / prototype | 41.02 | 44.79 | 52.43 | 52.25 | 51.26 |
+| CrossHAR / ridge | 36.04 | 39.49 | 47.03 | 48.19 | 48.55 |
+| HARNet / 1-NN | 40.26 | 42.51 | 50.06 | 50.98 | 50.81 |
+| HARNet / prototype | 40.26 | 41.82 | 49.18 | 49.66 | 48.61 |
+| HARNet / ridge | 39.61 | 41.66 | 50.31 | 52.27 | 53.25 |
+| ImageBind / 1-NN | 36.28 | 40.72 | 47.29 | 48.22 | 46.83 |
+| ImageBind / prototype | 36.28 | 39.71 | 43.85 | 42.94 | 41.59 |
+| ImageBind / ridge | 35.77 | 40.31 | 46.22 | 47.59 | 47.02 |
+| NormWear / 1-NN | 22.99 | 25.55 | 30.49 | 32.97 | 34.69 |
+| NormWear / prototype | 22.99 | 23.30 | 26.38 | 26.46 | 25.12 |
+| NormWear / ridge | 18.11 | 17.53 | 19.98 | 20.84 | 22.21 |
 
-### Specialized novel activities
-
-| model / readout | k=1 | k=2 | k=4 | k=8 | k=16 |
-|---|---:|---:|---:|---:|---:|
-| HALO / retrieve-mix-vote | 31.18 | 31.38 | 36.18 | 37.48 | 41.83 |
-| **HALO / 1-NN** | 36.01 | 36.18 | 48.16 | 52.07 | 54.85 |
-| HALO / prototype | 36.01 | 35.86 | 45.16 | 46.98 | 48.49 |
-| HALO / ridge | 35.65 | 35.21 | 46.70 | 51.37 | **56.41** |
-| LIMU-BERT / 1-NN | 30.58 | 33.83 | 40.28 | 42.78 | 43.97 |
-| LIMU-BERT / prototype | 30.58 | 33.36 | 38.76 | 40.38 | 41.66 |
-| LIMU-BERT / ridge | 27.56 | 30.75 | 36.07 | 38.25 | 40.39 |
-| UniMTS / 1-NN | 37.02 | 36.71 | 49.12 | 52.77 | 55.05 |
-| UniMTS / prototype | 37.02 | 36.49 | 47.87 | 50.19 | 50.91 |
-| UniMTS / ridge | 34.39 | 34.78 | 46.71 | 50.28 | 52.85 |
-| CrossHAR / 1-NN | 28.32 | 32.36 | 40.73 | 43.04 | 45.44 |
-| CrossHAR / prototype | 28.32 | 32.46 | 40.97 | 43.38 | 44.74 |
-| CrossHAR / ridge | 26.77 | 31.03 | 40.46 | 43.31 | 45.79 |
-| HARNet / 1-NN | 30.83 | 31.84 | 43.78 | 47.62 | 50.98 |
-| HARNet / prototype | 30.83 | 31.55 | 41.69 | 44.19 | 45.91 |
-| HARNet / ridge | 30.12 | 31.66 | 43.82 | 48.89 | 54.03 |
-| ImageBind / 1-NN | 27.29 | 29.59 | 35.43 | 38.29 | 40.56 |
-| ImageBind / prototype | 27.29 | 29.84 | 34.15 | 36.04 | 37.15 |
-| ImageBind / ridge | 26.24 | 29.85 | 35.15 | 39.35 | 43.00 |
-| NormWear / 1-NN | 18.63 | 20.20 | 25.61 | 28.21 | 31.06 |
-| NormWear / prototype | 18.63 | 18.14 | 21.50 | 21.76 | 21.05 |
-| NormWear / ridge | 14.68 | 14.24 | 18.43 | 19.35 | 19.67 |
+Seven datasets contribute at k=1 and k=2, six at k=4 and k=8, and five at k=16 because the sealed
+protocol never reuses an execution to manufacture a larger support set.
 
 ![Primary adaptation curves](figures/e2e_set_scalar_1nn_35k_20260824_best/primary_adaptation_curves.png)
 
 PB-04's 1-NN readout is the promoted enrollment mechanism. Retrieve-mix-vote is below 1-NN at every
-k and is reported to make that negative result explicit. LIMU-BERT remains strongest on ordinary
-activities through k=8, while PB-04 is competitive with UniMTS on specialized activities.
+k and is reported to make that negative result explicit. The per-dataset tables below show where
+the aggregate differences originate.
 
 ## Per-Dataset Performance
 
@@ -136,24 +110,24 @@ PB-04 trained for 35,000 steps in 4,314 seconds. The predeclared development met
 10,000. Both that checkpoint and the final step were evaluated on the same sealed manifest. Values
 below are mean macro F1; positive-k columns average k=1,2,4,8,16.
 
-| checkpoint / readout | ordinary k=0 | ordinary k>0 | specialized k=0 | specialized k>0 |
-|---|---:|---:|---:|---:|
-| PB-03 retrieve-mix-vote | 20.72 | **58.56** | 9.72 | **48.55** |
-| PB-03 1-NN | - | 57.69 | - | 46.65 |
-| PB-04 best retrieve-mix-vote | 26.99 | 52.14 | 11.32 | 35.61 |
-| PB-04 best 1-NN | - | 58.37 | - | 45.45 |
-| PB-04 last retrieve-mix-vote | 29.44 | 46.59 | 8.12 | 25.97 |
-| PB-04 last 1-NN | - | 56.89 | - | 45.34 |
+| checkpoint / readout | k=0 | mean k>0 |
+|---|---:|---:|
+| PB-03 retrieve-mix-vote | 16.01 | **54.55** |
+| PB-03 1-NN | - | 53.30 |
+| PB-04 best retrieve-mix-vote | 20.27 | 45.78 |
+| PB-04 best 1-NN | - | 53.26 |
+| PB-04 last retrieve-mix-vote | **20.30** | 38.65 |
+| PB-04 last 1-NN | - | 52.30 |
 
-PB-04 is promoted for its stronger zero-shot performance. Its selected encoder is also modestly
-better under ordinary 1-NN (+0.67 F1), although specialized 1-NN is lower (-1.20 F1). The learned
+PB-04 is promoted for its stronger zero-shot performance over PB-03. Its selected encoder and PB-03
+are effectively tied under the overall 1-NN enrollment average (53.26 versus 53.30). The learned
 mechanism is far below its own 1-NN control, and late training makes that gap larger. Therefore the
 promoted model is PB-04 with 1-NN enrollment, not PB-04 retrieve-mix-vote. Full tables are in
 [`e2e_set_scalar_1nn_35k_20260824_best_full/headline_tables.md`](../../eval/adaptation_tables/e2e_set_scalar_1nn_35k_20260824_best_full/headline_tables.md).
 
 ## Learned Readout Finding
 
-Across both regimes and every k, PB-04 retrieve-mix-vote is below PB-04 1-NN. This is consistent
+At every k, PB-04 retrieve-mix-vote is below PB-04 1-NN. This is consistent
 with the prior PB-03 decomposition, where most of the apparent native gain came from retaining
 individual recording rows rather than from learned score correction. No current experiment shows
 that a learned Phase-B mixer improves a matched nearest-neighbor decision.
@@ -162,9 +136,9 @@ that a learned Phase-B mixer improves a matched nearest-neighbor decision.
 
 PB-04 completed 35,000 finite steps in 71.9 minutes. Development macro F1 rose from 0.2010 before
 training to 0.3642 at step 10,000, then ended at 0.3353. External evaluation confirms that the
-selected checkpoint is preferable: the final checkpoint loses 3.6-6.8 F1 on ordinary
-retrieve-mix-vote and 7.2-13.3 F1 on specialized retrieve-mix-vote. Encoder-only 1-NN changes much
-less, so late training primarily overfits the learned correction.
+selected checkpoint is preferable: the final checkpoint loses 5.5-8.9 F1 on the aggregate
+retrieve-mix-vote curve. Encoder-only 1-NN changes much less, so late training primarily overfits
+the learned correction.
 
 ## Current Conclusion
 
