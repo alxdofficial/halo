@@ -5,10 +5,8 @@
       --out docs/results/TABLES.md
 
 1. Zero-shot: HALO against every baseline, no labelled examples.
-2. Label efficiency: the same no-fitting 1-NN readout for every representation, with HALO's native
-   evidence engine shown separately.
-3. Additional matched readouts: support-only prototype and fitted linear head for every
-   representation, plus ridge as a diagnostic.
+2. Label efficiency: the same non-gradient 1-NN, prototype, and ridge readouts for every
+   representation, with HALO's retrieve-mix-vote mechanism shown separately.
 
 The input must come from :mod:`eval.assemble_adaptation`, which validates the manifest, source and
 checkpoint fingerprints before writing it. Aggregation is the mean over datasets within a regime,
@@ -25,11 +23,14 @@ from pathlib import Path
 import numpy as np
 
 MODEL_NAMES = {
-    "halo_compact": "HALO (ours, compact engine)",
+    "halo_compact": "HALO (ours)",
     "harnet": "HARNet", "crosshar": "CrossHAR", "unimts": "UniMTS",
     "limubert": "LIMU-BERT", "normwear": "NormWear", "imagebind": "ImageBind",
 }
 REGIMES = ("ordinary", "specialized_novel")
+REPORT_MODEL_ORDER = (
+    "halo_compact", "limubert", "unimts", "crosshar", "harnet", "imagebind", "normwear",
+)
 
 
 def _emit(header: list[str], rows: list[tuple[str, list[float]]], higher_better=True) -> list[str]:
@@ -81,6 +82,19 @@ def _validate_current_cells(cells: list[dict]) -> None:
             "HALO evidence-engine enrollment rows are missing; pooled-feature controls cannot be "
             "used as the current HALO headline"
         )
+    required_readouts = {"nearest", "prototype", "ridge"}
+    missing_readouts = {
+        (model, method)
+        for model in MODEL_NAMES
+        for method in required_readouts
+        if not any(
+            row["model"] == model and row["method"] == method and int(row["k"]) > 0
+            for row in cells
+        )
+    }
+    if missing_readouts:
+        formatted = ", ".join(f"{model}/{method}" for model, method in sorted(missing_readouts))
+        raise ValueError(f"current report is missing matched enrollment readouts: {formatted}")
 
 
 def table_zero_shot(cells: list[dict]) -> str:
@@ -109,18 +123,22 @@ def table_label_efficiency(cells: list[dict]) -> str:
     ks = sorted({int(c["k"]) for c in cells if int(c["k"]) > 0})
     out = ["## 2. Label efficiency", "",
            "`k` is the number of independent enrolled executions per candidate. HALO is shown "
-           "with both its native evidence engine and one-nearest-neighbor over the same learned "
-           "representation. Every external model uses the same one-nearest-neighbor rule, which "
-           "requires no fitting and sees only the enrolled support executions. Macro F1, mean "
-           "over datasets.", ""]
+           "with its retrieve-mix-vote mechanism in addition to the same three non-gradient "
+           "readouts used for every representation: one-nearest-neighbor, support prototypes, "
+           "and closed-form ridge regression. All readouts see only the enrolled support "
+           "executions. Macro F1, mean over datasets.", ""]
     for regime in REGIMES:
         scored = []
-        model_methods = [
-            ("HALO (ours, native engine)", "halo_compact", "evidence_engine"),
-            ("HALO (ours, 1-NN)", "halo_compact", "nearest"),
-            *((f"{MODEL_NAMES[model]} / 1-NN", model, "nearest")
-              for model in MODEL_NAMES if model != "halo_compact"),
-        ]
+        model_methods = []
+        readout_names = {"nearest": "1-NN", "prototype": "prototype", "ridge": "ridge"}
+        for model in REPORT_MODEL_ORDER:
+            display_model = "HALO" if model == "halo_compact" else MODEL_NAMES[model]
+            if model == "halo_compact":
+                model_methods.append(("HALO / retrieve-mix-vote", model, "evidence_engine"))
+            model_methods.extend(
+                (f"{display_model} / {display_method}", model, method)
+                for method, display_method in readout_names.items()
+            )
         for display_name, model, method in model_methods:
             row = [
                 _dataset_macro([c for c in cells if c["model"] == model
@@ -130,44 +148,9 @@ def table_label_efficiency(cells: list[dict]) -> str:
                 for k in ks
             ]
             scored.append((display_name, row))
-        scored.sort(key=lambda r: -np.nanmean(r[1]))
         out += [f"### {regime.replace('_', ' ')}", ""]
         out += _emit(["model"] + [f"k={k}" for k in ks], scored)
         out.append("")
-    return "\n".join(out)
-
-
-def table_representation_controls(cells: list[dict]) -> str:
-    methods = ("prototype", "linear_head", "ridge")
-    ks = sorted({int(c["k"]) for c in cells if int(c["k"]) > 0})
-    out = [
-        "## 3. Additional matched readouts", "",
-        "These comparisons apply the same readout to each model's exposed latent representation. "
-        "Each enrolled execution contributes one equally weighted, normalized pooled vector. "
-        "Prototype forms class centroids from enrolled supports only and never accesses query "
-        "examples. `linear_head` fits only a linear classifier on those supports. Ridge is retained "
-        "as an additional diagnostic.", "",
-    ]
-    for regime in REGIMES:
-        for method in methods:
-            scored = []
-            for model in MODEL_NAMES:
-                values = [
-                    _dataset_macro([
-                        c for c in cells
-                        if c["model"] == model and c["method"] == method
-                        and c["regime"] == regime and c["label_mode"] == "coherent"
-                        and int(c["k"]) == k
-                    ])[0]
-                    for k in ks
-                ]
-                scored.append((MODEL_NAMES[model], values))
-            if not any(any(value == value for value in values) for _, values in scored):
-                continue
-            scored.sort(key=lambda row: -np.nanmean(row[1]))
-            out += [f"### {regime.replace('_', ' ')}: {method}", ""]
-            out += _emit(["model"] + [f"k={k}" for k in ks], scored)
-            out.append("")
     return "\n".join(out)
 
 
@@ -183,7 +166,6 @@ def main() -> None:
         "# Results", "",
         table_zero_shot(cells),
         table_label_efficiency(cells),
-        table_representation_controls(cells),
     ])
     print(text)
     if args.out:

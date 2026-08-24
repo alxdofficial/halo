@@ -30,6 +30,7 @@ from eval.scoring import align_ground_truth_labels, classification_metrics
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = REPO / "eval" / "adaptation_results"
 METHODS = ("nearest", "prototype", "ridge", "linear_head")
+DEFAULT_METHODS = ("nearest", "prototype", "ridge")
 NATIVE_METHOD = "evidence_engine"
 LINEAR_HEAD_STEPS = 200
 LINEAR_HEAD_LR = 5e-2
@@ -456,7 +457,7 @@ def run(
     manifest_path: Path,
     device: str,
     out: Path,
-    methods: Sequence[str] = METHODS,
+    methods: Sequence[str] = DEFAULT_METHODS,
     label_modes: Sequence[str] = ("coherent", "random_alias"),
     loaded_manifest: dict | None = None,
 ) -> dict:
@@ -618,7 +619,7 @@ def run(
         "source_fingerprint": _source_fingerprint(adapter),
         "methods": list(methods) + ([NATIVE_METHOD] if adapter.supports_native_enrollment() else []),
         "primary_positive_k_method": (
-            NATIVE_METHOD if adapter.supports_native_enrollment() else "linear_head"
+            NATIVE_METHOD if adapter.supports_native_enrollment() else "nearest"
         ),
         "evaluation_artifacts": {
             name: _file_fingerprint(path)
@@ -643,11 +644,11 @@ def run(
             "weight_decay": LINEAR_HEAD_WEIGHT_DECAY,
             "initialization": "normalized_class_prototypes",
             "selection": "fixed_before_test_no_query_early_stopping",
-        },
+        } if "linear_head" in methods else None,
         "supervised_adaptation_scope": {
-            "primary": "linear_head_finetuning_on_frozen_representation",
+            "primary": "not_in_default_report",
             "model_native_end_to_end": "optional_separate_experiment",
-            "reason": "the common head scope is available to every baseline without architecture-specific tuning",
+            "reason": "the main enrollment report uses only non-gradient matched readouts",
         },
         "setup_seconds": setup_seconds,
         "elapsed_seconds": time.time() - started,
@@ -668,7 +669,7 @@ def main() -> None:
     parser.add_argument("--baselines", nargs="+", required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
-    parser.add_argument("--methods", nargs="*", choices=METHODS, default=list(METHODS))
+    parser.add_argument("--methods", nargs="*", choices=METHODS, default=list(DEFAULT_METHODS))
     parser.add_argument("--label-modes", nargs="*", choices=("coherent", "random_alias"),
                         default=["coherent", "random_alias"])
     args = parser.parse_args()

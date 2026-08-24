@@ -140,6 +140,12 @@ def test_frozen_adaptation_controls_learn_separable_support():
         np.testing.assert_array_equal(values, [0, 1])
 
 
+def test_default_report_readouts_do_not_fit_a_linear_head():
+    from eval.run_adaptation_baselines import DEFAULT_METHODS
+
+    assert DEFAULT_METHODS == ("nearest", "prototype", "ridge")
+
+
 def test_positive_controls_weight_executions_not_their_window_counts():
     # Candidate A has one long x-axis execution and one short y-axis execution. Equal execution
     # weighting puts its prototype at 45 degrees; pooling all windows would incorrectly let the

@@ -1,30 +1,23 @@
-from eval.build_results_tables import MODEL_NAMES, table_label_efficiency
+import pytest
+
+from eval.build_results_tables import MODEL_NAMES, _validate_current_cells, table_label_efficiency
 
 
 def test_label_efficiency_excludes_random_alias_rows() -> None:
     cells = [
         {
             "model": model,
-            "method": "evidence_engine" if model == "halo_compact" else "nearest",
+            "method": method,
             "regime": regime,
             "label_mode": "coherent",
             "dataset": "example",
             "k": "1",
-            "f1_macro": "80.0" if model == "halo_compact" else "40.0",
+            "f1_macro": "80.0" if method == "evidence_engine" else "40.0",
         }
         for model in MODEL_NAMES
         for regime in ("ordinary", "specialized_novel")
-    ] + [
-        {
-            "model": "halo_compact",
-            "method": "nearest",
-            "regime": regime,
-            "label_mode": "coherent",
-            "dataset": "example",
-            "k": "1",
-            "f1_macro": "70.0",
-        }
-        for regime in ("ordinary", "specialized_novel")
+        for method in (("evidence_engine", "nearest", "prototype", "ridge")
+                       if model == "halo_compact" else ("nearest", "prototype", "ridge"))
     ] + [
         {
             "model": "halo_compact",
@@ -39,6 +32,26 @@ def test_label_efficiency_excludes_random_alias_rows() -> None:
 
     table = table_label_efficiency(cells)
 
-    assert "| HALO (ours, native engine) | **80.00** |" in table
+    assert "| HALO / retrieve-mix-vote | **80.00** |" in table
     assert "HARNet / 1-NN" in table
+    assert "HARNet / prototype" in table
+    assert "HARNet / ridge" in table
+    assert "linear_head" not in table
     assert "50.00" not in table
+
+
+def test_current_report_rejects_missing_matched_readout() -> None:
+    cells = [
+        {
+            "model": model,
+            "method": method,
+            "k": "1",
+        }
+        for model in MODEL_NAMES
+        for method in (("evidence_engine", "nearest", "prototype", "ridge")
+                       if model == "halo_compact" else ("nearest", "prototype", "ridge"))
+        if not (model == "harnet" and method == "ridge")
+    ]
+
+    with pytest.raises(ValueError, match="harnet/ridge"):
+        _validate_current_cells(cells)

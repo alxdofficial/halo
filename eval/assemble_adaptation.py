@@ -171,10 +171,9 @@ def _markdown(aggregates: list[dict]) -> str:
     lines = [
         "# Matched adaptation results", "",
         "`k` is the number of independent enrolled executions per candidate. External-model",
-        "linear heads are fine-tuned while their encoders remain frozen. Generic kNN/prototype/",
-        "ridge/linear-head controls use one equally weighted pooled vector per enrolled execution.",
-        "HALO's evidence engine instead consumes the enrolled executions' patch/sensor rows, which",
-        "is its deployed adaptation mechanism.", "",
+        "1-NN, prototype, and ridge controls use one equally weighted pooled vector per enrolled",
+        "execution and require no gradient fitting. HALO's retrieve-mix-vote mechanism instead",
+        "consumes the enrolled executions' patch/sensor rows.", "",
     ]
     panels = [
         ("Semantic zero-shot", lambda row: (
@@ -183,21 +182,15 @@ def _markdown(aggregates: list[dict]) -> str:
                 row["model"] == "halo_learned_gate" and row["method"] in {"learned", "identity"}
             ))
         )),
-        ("Primary coherent adaptation comparison", lambda row: (
+        ("Coherent adaptation comparison", lambda row: (
             row["label_mode"] == "coherent" and row["k"] > 0
-            and ((row["model"] == "halo_compact" and row["method"] == "evidence_engine")
-                 or (row["model"] != "halo_compact" and row["method"] == "linear_head"))
-        )),
-        ("HALO coherent mechanism controls", lambda row: (
-            row["model"] == "halo_compact" and row["label_mode"] == "coherent"
-            and row["k"] > 0
-        )),
-        ("All frozen-representation controls", lambda row: (
-            row["label_mode"] == "coherent" and row["k"] > 0
-            and row["method"] in {"nearest", "prototype", "ridge", "linear_head"}
+            and (row["method"] in {"nearest", "prototype", "ridge"}
+                 or (row["model"] == "halo_compact" and row["method"] == "evidence_engine"))
         )),
         ("Random-label binding", lambda row: (
             row["label_mode"] == "random_alias" and row["k"] > 0
+            and (row["method"] in {"nearest", "prototype", "ridge"}
+                 or (row["model"] == "halo_compact" and row["method"] == "evidence_engine"))
         )),
     ]
     for title, include in panels:
@@ -208,8 +201,13 @@ def _markdown(aggregates: list[dict]) -> str:
         lines.extend([f"## {title}", "", "| regime | model | method | k | macro F1 | datasets |",
                       "|---|---|---:|---:|---:|---:|"])
         for row in selected:
+            method = (
+                "retrieve-mix-vote"
+                if row["model"] == "halo_compact" and row["method"] == "evidence_engine"
+                else "1-NN" if row["method"] == "nearest" else row["method"]
+            )
             lines.append(
-                f"| {row['regime']} | {row['model']} | {row['method']} | {row['k']} | "
+                f"| {row['regime']} | {row['model']} | {method} | {row['k']} | "
                 f"{row['f1_macro']:.2f} | {row['datasets']} |"
             )
         if not selected:

@@ -3,8 +3,8 @@
 The two outputs answer different questions and must remain separate:
 
 1. ``knn_representation_curves`` applies the same 1-NN readout to every representation.
-2. ``primary_adaptation_curves`` shows the deployed HALO engine beside the same no-fitting 1-NN
-   rule on every frozen representation.
+2. ``primary_adaptation_curves`` shows HALO retrieve-mix-vote beside the same no-fitting 1-NN rule
+   on every frozen representation.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ KS = (1, 2, 4, 8, 16)
 REGIMES = (("ordinary", "Ordinary activities"),
            ("specialized_novel", "Specialized novel activities"))
 COLORS = {
-    "HALO / native engine": "#c43c39",
+    "HALO / retrieve-mix-vote": "#c43c39",
     "HALO / 1-NN": "#111111",
     "HALO": "#111111",
     "HARNet": "#2878b5",
@@ -105,7 +105,7 @@ def plot_knn(rows: list[dict], out_dir: Path) -> None:
 
 def plot_primary(rows: list[dict], out_dir: Path) -> None:
     series = [
-        ("HALO / native engine", "halo_compact", "evidence_engine"),
+        ("HALO / retrieve-mix-vote", "halo_compact", "evidence_engine"),
         ("HALO / 1-NN", "halo_compact", "nearest"),
         *((MODEL_NAMES[model], model, "nearest")
           for model in MODEL_NAMES if model != "halo_compact"),
@@ -125,7 +125,7 @@ def plot_primary(rows: list[dict], out_dir: Path) -> None:
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=4, frameon=False,
                bbox_to_anchor=(0.5, -0.08), fontsize=8.5)
-    fig.suptitle("Label-efficient adaptation: native HALO and matched 1-NN", fontsize=13,
+    fig.suptitle("Label-efficient adaptation: HALO retrieve-mix-vote and matched 1-NN", fontsize=13,
                  fontweight="semibold", y=1.02)
     fig.subplots_adjust(bottom=0.27, wspace=0.09)
     _save(fig, out_dir, "primary_adaptation_curves")
