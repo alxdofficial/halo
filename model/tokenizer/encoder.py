@@ -2,8 +2,10 @@
 
 Assembly (build plan M3; EVIDENCE_ENGINE.md §5.2.1):
 
-    device-frame IMU patches ── PhysicalFilterbankTokenizer ──> channel features (B,P,C,d)
-                                  └─ SensorFold(xyz) ─────────> sensor tokens (B,P,S,d)
+    device-frame IMU patches ── fixed filterbank ──> axis features ── SensorFold(xyz) ─┐
+                           └── continuous kernels ──> dense xyz sensor CNN ────────────┤
+                                                                                       ▼
+                                                                         sensor tokens (B,P,S,d)
                                                       │
     sensor description ──frozen LM──> gated projection ──────> acquisition semantics
                                                       │
@@ -108,6 +110,12 @@ class SetTokenizerEncoder(nn.Module):
         )
         if frontend not in {"fixed", "learnable", "continuous"}:
             raise ValueError("frontend must be 'fixed', 'learnable', or 'continuous'")
+        if frontend == "continuous" and token_granularity != "sensor":
+            raise ValueError(
+                "the continuous frontend jointly models each xyz triad and therefore requires "
+                "token_granularity='sensor'"
+            )
+        self.frontend = frontend
         # Attribute stays named `filterbank` for checkpoint compatibility.
         if frontend == "continuous":
             # dft_size is padding capacity for the physical FFT, not a continuous-kernel setting.
@@ -128,7 +136,11 @@ class SetTokenizerEncoder(nn.Module):
             # DESIGN OF RECORD: a sensor is one modality triad. Folding xyz into one token makes the
             # role text ("x"/"y"/"z") redundant — axis identity becomes positional inside the token —
             # and sensor descriptions get a learnable projection over frozen text embeddings.
-            self.sensor_fold = SensorFold(d_model=d_model, dropout=dropout)
+            # The continuous front end already fuses a fixed xyz triad with a dense CNN.  The
+            # physical filterbank still emits per-axis rows and needs the separate fold.
+            self.sensor_fold = (
+                None if frontend == "continuous" else SensorFold(d_model=d_model, dropout=dropout)
+            )
             self.descriptor_proj = ConditioningProjection(384, d_model, dropout=dropout,
                                                           gate_bias_init=gate_bias_init)
             if self.use_sensor_bias_conditioning:
@@ -207,10 +219,11 @@ class SetTokenizerEncoder(nn.Module):
     # text embeddings ONCE and only re-runs the cheap transformer tail.
 
     def tokenize(self, patches, sampling_rate_hz, patch_len_samples, channel_mask=None,
-                 source_rate_hz=None) -> torch.Tensor:
-        """Sensor tokens (B, P, C, d) — identical across masked/clean views. The filterbank emits
-        per-channel tokens the encoder masks downstream, so channel_mask is unused here (accepted
-        for a stable call signature).
+                 source_rate_hz=None, sensor_id=None, n_sensors=None) -> torch.Tensor:
+        """Signal tokens identical across masked/clean views.
+
+        The physical filterbank returns ``(B,P,C,d)`` axis tokens.  The continuous front end
+        jointly projects fixed xyz slots and returns ``(B,P,S,d)`` sensor tokens directly.
 
         Spectral analysis is an explicit FP32 island. The learned projection runs in the caller's
         autocast context, so CUDA training gets Tensor Core FP16 without exposing FFT power or
@@ -221,6 +234,11 @@ class SetTokenizerEncoder(nn.Module):
                 patches.float(), sampling_rate_hz, patch_len_samples,
                 source_rate_hz=source_rate_hz,
             )
+        if getattr(self.filterbank, "emits_sensor_tokens", False):
+            return self.filterbank.project(
+                token_in, sensor_id=sensor_id, channel_mask=channel_mask,
+                n_sensors=n_sensors,
+            )
         return self.filterbank.project(token_in)
 
     def analyze(self, patches, sampling_rate_hz, patch_len_samples, source_rate_hz=None):
@@ -228,8 +246,14 @@ class SetTokenizerEncoder(nn.Module):
         return self.filterbank.analyze(patches, sampling_rate_hz, patch_len_samples,
                                        source_rate_hz=source_rate_hz)
 
-    def project_tokens(self, token_in) -> torch.Tensor:
+    def project_tokens(self, token_in, *, sensor_id=None, channel_mask=None,
+                       n_sensors=None) -> torch.Tensor:
         """Apply THIS encoder's learnable filterbank projection to a shared analysis."""
+        if getattr(self.filterbank, "emits_sensor_tokens", False):
+            return self.filterbank.project(
+                token_in, sensor_id=sensor_id, channel_mask=channel_mask,
+                n_sensors=n_sensors,
+            )
         return self.filterbank.project(token_in)
 
     def encode_texts(
@@ -509,7 +533,7 @@ class SetTokenizerEncoder(nn.Module):
         """
         if sensor_id is None or sensor_descriptors is None:
             raise ValueError("sensor granularity requires sensor_id and sensor_descriptors")
-        B, P, C, d = channel_tokens.shape
+        B, P, token_count, d = channel_tokens.shape
         # `sensor_text_embs` may be UNIQUE rows (U,S_tok,384) with `sensor_text_ids` (B,N) indexing
         # them — the hot path dedupes text, so a batch holds at most a few distinct descriptions.
         # The per-sample sensor count therefore comes from the id table, never from the embedding.
@@ -517,7 +541,21 @@ class SetTokenizerEncoder(nn.Module):
         N = sensor_text_ids.shape[1] if sensor_text_ids is not None else sensor_descriptors.shape[1]
         sensor_id = sensor_id.to(device=channel_tokens.device, dtype=torch.long)
 
-        tokens, folded_mask = self.sensor_fold(channel_tokens, sensor_id, channel_mask, n_sensors=N)
+        if getattr(self.filterbank, "emits_sensor_tokens", False):
+            if token_count != N:
+                raise ValueError(
+                    f"continuous frontend emitted {token_count} sensor slots, expected {N}"
+                )
+            if channel_mask is None:
+                raise ValueError("continuous sensor projection requires channel_mask")
+            tokens = channel_tokens
+            folded_mask = self.filterbank.sensor_presence(sensor_id, channel_mask, N)
+        else:
+            if self.sensor_fold is None:
+                raise RuntimeError("physical axis tokens require SensorFold")
+            tokens, folded_mask = self.sensor_fold(
+                channel_tokens, sensor_id, channel_mask, n_sensors=N,
+            )
         # A sensor is present iff it has a live channel AND a real (non-padding) description.
         sensor_present = folded_mask
         if sensor_text_ids is not None:
@@ -660,21 +698,20 @@ class SetTokenizerEncoder(nn.Module):
         return_retrieval_tokens: bool = True,
         retrieval_only: bool = False,
     ) -> dict[str, torch.Tensor]:
-        sensor_tokens = self.tokenize(
-            patches,
-            sampling_rate_hz,
-            patch_len_samples,
-            source_rate_hz=source_rate_hz,
-        )
-        device = sensor_tokens.device
         s_embs = s_masks = None
         if self.token_granularity == "sensor":
             # Sensor granularity always uses the factored text sources, but only the SENSOR half:
             # role text is redundant once xyz is folded into one token (axis identity is positional).
             if sensor_texts is None or sensor_id is None:
                 raise ValueError("sensor granularity requires sensor_texts and sensor_id")
+            device = patches.device
             sensor_descriptors, sensor_text_ids = self.encode_sensor_descriptors_unique(
                 sensor_texts, device,
+            )
+            sensor_tokens = self.tokenize(
+                patches, sampling_rate_hz, patch_len_samples,
+                channel_mask=channel_mask, source_rate_hz=source_rate_hz,
+                sensor_id=sensor_id, n_sensors=sensor_text_ids.shape[1],
             )
             return self._encode_sensor(
                 sensor_tokens, None, None, positions,
@@ -687,6 +724,11 @@ class SetTokenizerEncoder(nn.Module):
                 return_retrieval_tokens=return_retrieval_tokens,
                 retrieval_only=retrieval_only,
             )
+        sensor_tokens = self.tokenize(
+            patches, sampling_rate_hz, patch_len_samples,
+            channel_mask=channel_mask, source_rate_hz=source_rate_hz,
+        )
+        device = sensor_tokens.device
         if retrieval_only:
             raise ValueError("retrieval_only is implemented only for sensor-granularity tokens")
         if self.text_conditioning == "factored":

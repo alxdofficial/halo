@@ -367,20 +367,88 @@ def test_runtime_telemetry_is_finite_and_only_collected_on_request():
     assert 0.0 <= summary["frontend/dead_kernel_fraction"] <= 1.0
 
 
-def test_encoder_exposes_continuous_frontend_without_changing_token_contract():
+def test_encoder_exposes_continuous_frontend_as_one_token_per_sensor():
     from model.tokenizer.encoder import SetTokenizerEncoder
 
     encoder = SetTokenizerEncoder(
         d_model=32, num_layers=1, num_heads=4, dim_feedforward=64,
         frontend="continuous", trunk="temporal", descriptor_prediction=False,
+        token_granularity="sensor",
     ).eval()
     assert isinstance(encoder.filterbank, ContinuousKernelTokenizer)
     patches = torch.randn(2, 2, 50, 3)
     lengths = torch.tensor([[20, 20], [50, 50]])
+    channel_mask = torch.ones(2, 3, dtype=torch.bool)
+    sensor_id = torch.zeros(2, 3, dtype=torch.long)
     with torch.no_grad():
-        tokens = encoder.tokenize(patches, torch.tensor([20.0, 50.0]), lengths)
-    assert tokens.shape == (2, 2, 3, 32)
+        tokens = encoder.tokenize(
+            patches, torch.tensor([20.0, 50.0]), lengths,
+            channel_mask=channel_mask, sensor_id=sensor_id, n_sensors=1,
+        )
+    assert tokens.shape == (2, 2, 1, 32)
     assert torch.isfinite(tokens).all()
+
+
+def test_dense_sensor_cnn_keeps_modalities_separate_and_marks_missing_axes():
+    torch.manual_seed(0)
+    module = ContinuousKernelTokenizer(d_model=32).eval()
+    patches = torch.randn(1, 2, 50, 6)
+    lengths = torch.full((1, 2), 50, dtype=torch.long)
+    sensor_id = torch.tensor([[0, 0, 0, 1, 1, 1]])
+    both = torch.ones(1, 6, dtype=torch.bool)
+    missing_acc_y = both.clone()
+    missing_acc_y[:, 1] = False
+    analysis = module.analyze(patches, 50.0, lengths)
+    with torch.no_grad():
+        complete = module.project(
+            analysis, sensor_id=sensor_id, channel_mask=both, n_sensors=2,
+        )
+        missing = module.project(
+            analysis, sensor_id=sensor_id, channel_mask=missing_acc_y, n_sensors=2,
+        )
+    assert complete.shape == (1, 2, 2, 32)
+    # Removing an accelerometer axis changes its token but cannot alter the gyroscope token.
+    assert not torch.allclose(complete[:, :, 0], missing[:, :, 0])
+    assert torch.allclose(complete[:, :, 1], missing[:, :, 1], atol=1e-6)
+
+
+def test_accel_only_padding_cannot_overwrite_live_sensor_presence():
+    module = ContinuousKernelTokenizer(d_model=32).eval()
+    patches = torch.randn(2, 2, 50, 6)
+    lengths = torch.full((2, 2), 50, dtype=torch.long)
+    # This is the loader's established accel-only contract: absent gyro slots keep a valid id and
+    # are excluded by channel_mask rather than by a sentinel sensor id.
+    sensor_id = torch.zeros(2, 6, dtype=torch.long)
+    channel_mask = torch.tensor([[True, True, True, False, False, False]]).expand(2, -1)
+    with torch.no_grad():
+        tokens = module(
+            patches, 50.0, lengths, sensor_id=sensor_id,
+            channel_mask=channel_mask, n_sensors=1,
+        )
+    assert tokens.shape == (2, 2, 1, 32)
+    assert module.sensor_presence(sensor_id, channel_mask, 1).all()
+
+
+def test_dense_sensor_frontend_has_no_dead_trainable_parameters():
+    torch.manual_seed(4)
+    module = ContinuousKernelTokenizer(d_model=32)
+    patches = torch.randn(2, 3, 50, 6)
+    lengths = torch.full((2, 3), 50, dtype=torch.long)
+    sensor_id = torch.tensor([[0, 0, 0, 1, 1, 1]]).expand(2, -1)
+    channel_mask = torch.ones(2, 6, dtype=torch.bool)
+    output = module(
+        patches, 50.0, lengths, sensor_id=sensor_id,
+        channel_mask=channel_mask, n_sensors=2,
+    )
+    output.square().mean().backward()
+    dead = []
+    for name, parameter in module.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if (parameter.grad is None or not torch.isfinite(parameter.grad).all()
+                or float(parameter.grad.abs().sum()) == 0.0):
+            dead.append(name)
+    assert not dead, f"trainable parameters without a finite nonzero gradient: {dead}"
 
 
 def test_features_do_not_depend_on_how_long_the_rest_of_the_recording_was():

@@ -1,8 +1,7 @@
 """Continuous-time kernel tokenizer (CKT) — a rate-flexible, shape-preserving front end.
 
-Design of record: `docs/design/CONTINUOUS_KERNEL_FRONTEND.md`. **Not yet wired into the encoder** —
-this module is standalone and tested in isolation so it can be swapped in as a `--frontend` arm
-without disturbing a running experiment.
+Design of record: `docs/design/CONTINUOUS_KERNEL_FRONTEND.md`. This module is integrated as the
+`--frontend continuous` arm in Phase A and end-to-end episodic training.
 
 WHAT IT IS
 ----------
@@ -12,7 +11,7 @@ normalised time `u = t/T_k` as a truncated Fourier series with `M` harmonics::
 
     w_k(u) = exp(-u^2 / 2 sigma_k^2) * sum_{m=1..M} [ a_km cos(2 pi m u) + b_km sin(2 pi m u) ]
 
-`M = 8` gives **16 coefficients per kernel**. Three properties fall out of this basis, and each one
+`M = 12` gives **24 coefficients per kernel**. Three properties fall out of this basis, and each one
 solves a problem a spline-through-control-points would leave open:
 
 * harmonic `m` sits at exactly `m / T_k` Hz, so **band-limiting is a coefficient mask** rather than a
@@ -96,11 +95,16 @@ CK_T_MAX_S = 2.0           # a 4 s kernel in a 6 s window is 67% edge-padded; 2.
 CK_FRAMES_PER_SECOND = 8   # output frame rate: 125 ms, resolves the arm-swing and step scales
 CK_NYQUIST_MARGIN = 0.9    # == FB_NYQUIST_MARGIN
 CK_ENVELOPE_SIGMA = 0.22   # Gaussian envelope width in normalised time
-CK_FRAME_CHUNK = 8         # frames processed per gather; bounds peak memory, does not change results
+CK_FRAME_CHUNK = 24        # amortize gather/einsum launches while keeping allocator pressure modest
 
 
 class ContinuousKernelTokenizer(nn.Module):
-    """Bank of continuous-time band-pass kernels + a small depthwise-separable stack."""
+    """Continuous-time kernels followed by a conventional dense sensor-triad CNN.
+
+    The physical kernels are shared across axes.  Their responses are then packed into fixed xyz
+    slots for each accelerometer or gyroscope before the learned CNN, so the CNN can model joint
+    directional motion without mixing distinct sensors or placements.
+    """
 
     def __init__(
         self,
@@ -113,7 +117,7 @@ class ContinuousKernelTokenizer(nn.Module):
         t_min: float = CK_T_MIN_S,
         t_max: float = CK_T_MAX_S,
         frames_per_second: int = CK_FRAMES_PER_SECOND,
-        conv_channels: Tuple[int, int] = (64, 64),
+        conv_channels: Tuple[int, int] = (64, 128),
         nyquist_margin: float = CK_NYQUIST_MARGIN,
         envelope_sigma: float = CK_ENVELOPE_SIGMA,
         gabor_init: bool = True,
@@ -134,6 +138,8 @@ class ContinuousKernelTokenizer(nn.Module):
         self.envelope_sigma = float(envelope_sigma)
         self.norm = norm
         self.learnable = True
+        self.emits_sensor_tokens = True
+        self.axes_per_sensor = 3
         self._geometry_cache: dict[tuple, dict[str, torch.Tensor]] = {}
         self._telemetry_requested = False
         self._runtime_summary: dict[str, torch.Tensor] = {}
@@ -196,26 +202,25 @@ class ContinuousKernelTokenizer(nn.Module):
             self.register_buffer(f"_{name}_acc_sqsum", torch.zeros((), dtype=torch.float64),
                                  persistent=False)
 
-        # --- depthwise-separable stack on the fixed real-time grid (see design doc S10) ---
+        # --- ordinary dense CNN over all xyz kernel responses on the fixed real-time grid ---
         c1, c2 = conv_channels
-        self.dw1 = nn.Conv1d(self.K, self.K, 3, stride=2, padding=1, groups=self.K)
-        self.pw1 = nn.Conv1d(self.K, c1, 1)
+        self.conv1 = nn.Conv1d(self.axes_per_sensor * self.K, c1, 3, stride=2, padding=1)
         # LayerNorm over the CHANNEL dim at each frame -- never over time. `GroupNorm(1, C)` looks
         # equivalent but pools over (C, L), which makes a frame's features depend on how long the
         # rest of the recording was: measured, a 2 s and a 6 s window sharing their first 2 s got
         # tokens differing by 2.43 for that shared span. That is a duration fingerprint, the same
         # class of leak as a rate fingerprint, and it is what design-doc Rule 5 forbids.
         self.ln1 = nn.LayerNorm(c1)
-        self.dw2 = nn.Conv1d(c1, c1, 3, stride=1, padding=1, groups=c1)
-        self.pw2 = nn.Conv1d(c1, c2, 1)
+        self.conv2 = nn.Conv1d(c1, c2, 3, stride=1, padding=1)
         self.ln2 = nn.LayerNorm(c2)
         self.frames_per_token = self.F // 2                      # after the single stride-2
         self.in_dim = (c2 * self.frames_per_token   # ORDERED frames — the point of the design
                        + self.K                     # nyquist mask
                        + self.K                     # resolution flag
                        + self.K * self.frames_per_token  # per-kernel, per-frame real support
-                       + 1                          # amplitude
-                       + 1)                         # signed DC
+                       + self.axes_per_sensor       # per-axis amplitude
+                       + self.axes_per_sensor       # per-axis signed DC
+                       + self.axes_per_sensor)      # axis-validity bits
         self.proj = nn.Linear(self.in_dim, self.d_model)
 
     def _normalised_coefficients(self) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -551,9 +556,12 @@ class ContinuousKernelTokenizer(nn.Module):
             group_magnitude, group_edge, group_valid = self._analyze_rate_group(
                 window.index_select(0, rows), total.index_select(0, rows), P,
                 float(rate), float(source_rate))
-            magnitude = magnitude.index_copy(0, rows, group_magnitude)
-            edge_support = edge_support.index_copy(0, rows, group_edge)
-            frame_valid = frame_valid.index_copy(0, rows, group_valid)
+            # These destinations are freshly allocated assembly buffers. Updating them in place
+            # avoids copying the complete batch once per physical-rate group; IndexCopyBackward
+            # still carries gradients from every group into the learned kernels and signal path.
+            magnitude.index_copy_(0, rows, group_magnitude)
+            edge_support.index_copy_(0, rows, group_edge)
+            frame_valid.index_copy_(0, rows, group_valid)
         compressed = torch.log1p(magnitude)
         nyq, res = self.masks(rates, duration, source_rates)
         amplitude, dc = self._patch_summaries(patches, patch_len_samples, patch_mask)
@@ -650,48 +658,159 @@ class ContinuousKernelTokenizer(nn.Module):
         self.finalize_norm_stats(eps)
 
     # ------------------------------------------------------------------ projection to tokens
-    def project(self, analysis: dict) -> torch.Tensor:
+    def _sensor_layout(
+        self,
+        batch: int,
+        channels: int,
+        device: torch.device,
+        sensor_id: torch.Tensor | None,
+        channel_mask: torch.Tensor | None,
+        n_sensors: int | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """Return the fixed sensor/axis slot for each channel and the live sensor mask."""
+        if sensor_id is None:
+            sensor_id = (torch.arange(channels, device=device) // self.axes_per_sensor).view(1, -1)
+            sensor_id = sensor_id.expand(batch, -1)
+        else:
+            sensor_id = sensor_id.to(device=device, dtype=torch.long)
+        if sensor_id.shape != (batch, channels):
+            raise ValueError(
+                f"sensor_id must have shape {(batch, channels)}, got {tuple(sensor_id.shape)}"
+            )
+        if channel_mask is None:
+            channel_mask = torch.ones(batch, channels, dtype=torch.bool, device=device)
+        else:
+            channel_mask = channel_mask.to(device=device, dtype=torch.bool)
+        if channel_mask.shape != (batch, channels):
+            raise ValueError(
+                f"channel_mask must have shape {(batch, channels)}, got {tuple(channel_mask.shape)}"
+            )
+        inferred = (channels + self.axes_per_sensor - 1) // self.axes_per_sensor
+        sensors = int(n_sensors if n_sensors is not None else inferred)
+        if sensors <= 0:
+            raise ValueError("n_sensors must be positive")
+        ids_valid = (~channel_mask | ((sensor_id >= 0) & (sensor_id < sensors))).all()
+        if device.type == "cpu":
+            if not bool(ids_valid):
+                raise ValueError("a live channel maps outside the available sensor descriptions")
+        else:
+            torch._assert_async(
+                ids_valid, "a live channel maps outside the available sensor descriptions",
+            )
+
+        # Channel order is the global [acc xyz, gyro xyz] contract.  Using channel position rather
+        # than a live-channel ordinal preserves y/z when x is dropped instead of shifting them left.
+        axis = torch.arange(channels, device=device).remainder(self.axes_per_sensor)
+        slot = sensor_id * self.axes_per_sensor + axis.view(1, channels)
+        live_slot = torch.where(channel_mask, slot, torch.full_like(slot, -1))
+        if device.type == "cpu":
+            for row in range(batch):
+                values = live_slot[row][live_slot[row] >= 0]
+                if values.unique().numel() != values.numel():
+                    raise ValueError("two live channels map to the same sensor-axis slot")
+        # Reduce with OR, never overwrite: accel-only streams intentionally give their six padded
+        # channel slots sensor id 0 and rely on channel_mask to mark gyro absent.  A plain scatter
+        # would let a later False gyro slot overwrite the earlier True accelerometer slot.
+        membership = F.one_hot(
+            sensor_id.clamp(0, sensors - 1), num_classes=sensors,
+        ).to(torch.bool)
+        sensor_present = (membership & channel_mask.unsqueeze(-1)).any(dim=1)
+        return slot, channel_mask, sensor_present, sensors
+
+    @staticmethod
+    def _pack_axis_values(
+        values: torch.Tensor, slot: torch.Tensor, live: torch.Tensor, slots: int,
+    ) -> torch.Tensor:
+        """Pack (B,...,C) values into fixed sensor-axis slots without breaking gradients."""
+        batch, channels = slot.shape
+        middle = values.shape[1:-1]
+        source = values * live.view(batch, *((1,) * len(middle)), channels).to(values.dtype)
+        out = values.new_zeros(batch, *middle, slots + 1)
+        trash = torch.full_like(slot, slots)
+        target = torch.where(live, slot, trash)
+        index = target.view(batch, *((1,) * len(middle)), channels).expand_as(source)
+        out.scatter_(dim=-1, index=index, src=source)
+        return out[..., :slots]
+
+    def sensor_presence(
+        self, sensor_id: torch.Tensor, channel_mask: torch.Tensor, n_sensors: int,
+    ) -> torch.Tensor:
+        """Public presence helper used by the encoder after direct sensor-token projection."""
+        batch, channels = sensor_id.shape
+        _, _, present, _ = self._sensor_layout(
+            batch, channels, sensor_id.device, sensor_id, channel_mask, n_sensors,
+        )
+        return present
+
+    def project(
+        self,
+        analysis: dict,
+        *,
+        sensor_id: torch.Tensor | None = None,
+        channel_mask: torch.Tensor | None = None,
+        n_sensors: int | None = None,
+    ) -> torch.Tensor:
         compressed = analysis["compressed"]                                      # (B,C,K,f)
         B, C, K, n_frames = compressed.shape
         P = analysis["n_patches"]
+        slot, live, _, sensors = self._sensor_layout(
+            B, C, compressed.device, sensor_id, channel_mask, n_sensors,
+        )
+        total_slots = sensors * self.axes_per_sensor
         if self.norm == "frozen":
             compressed = (compressed - self.norm_mu.view(1, 1, K, 1)) / self.norm_sd.view(1, 1, K, 1)
         compressed = compressed * analysis["nyquist"].view(B, 1, K, 1)
-        x = compressed.reshape(B * C, K, n_frames)
-        x = self.pw1(self.dw1(x))
+        # (B,C,K,T) -> (B,S,xyz,K,T).  The extra trash slot receives absent channels and is sliced.
+        source = compressed * live.view(B, C, 1, 1).to(compressed.dtype)
+        packed = compressed.new_zeros(B, total_slots + 1, K, n_frames)
+        target = torch.where(live, slot, torch.full_like(slot, total_slots))
+        packed.scatter_(1, target.view(B, C, 1, 1).expand(B, C, K, n_frames), source)
+        x = packed[:, :total_slots].reshape(B * sensors, self.axes_per_sensor * K, n_frames)
+        x = self.conv1(x)
         x = F.gelu(self.ln1(x.transpose(1, 2)).transpose(1, 2))
-        x = self.pw2(self.dw2(x))
-        x = F.gelu(self.ln2(x.transpose(1, 2)).transpose(1, 2))                  # (B*C, c2, f/2)
+        x = self.conv2(x)
+        x = F.gelu(self.ln2(x.transpose(1, 2)).transpose(1, 2))                  # (B*S, c2, f/2)
         c2, reduced = x.shape[1], x.shape[2]
         per_token = max(reduced // P, 1)
-        x = x[:, :, :per_token * P].reshape(B, C, c2, P, per_token)
+        x = x[:, :, :per_token * P].reshape(B, sensors, c2, P, per_token)
         # ORDERED flatten: a rising and a falling ramp must be different inputs. An order-invariant
         # pool (mean/max/std) cannot distinguish them, which would re-destroy the sub-second
         # structure this front end exists to keep.
-        ordered = x.permute(0, 3, 1, 2, 4).reshape(B, P, C, c2 * per_token)
-        metadata_dim = 2 * K + K * self.frames_per_token + 2
+        ordered = x.permute(0, 3, 1, 2, 4).reshape(B, P, sensors, c2 * per_token)
+        metadata_dim = 2 * K + K * self.frames_per_token + 3 * self.axes_per_sensor
         if ordered.shape[-1] < self.in_dim - metadata_dim:
             pad = self.in_dim - metadata_dim - ordered.shape[-1]
             ordered = F.pad(ordered, (0, pad))
-        nyq = analysis["nyquist"].view(B, 1, 1, K).expand(B, P, C, K)
-        res = analysis["resolution"].view(B, 1, 1, K).expand(B, P, C, K)
+        nyq = analysis["nyquist"].view(B, 1, 1, K).expand(B, P, sensors, K)
+        res = analysis["resolution"].view(B, 1, 1, K).expand(B, P, sensors, K)
         edge = F.avg_pool1d(analysis["edge"], kernel_size=2, stride=2)            # (B,K,f/2)
         edge = edge[..., :per_token * P].reshape(B, K, P, per_token)
         edge = edge.permute(0, 2, 1, 3).reshape(B, P, 1, K * per_token)
-        edge = edge.expand(B, P, C, K * per_token)
+        edge = edge.expand(B, P, sensors, K * per_token)
         if edge.shape[-1] < K * self.frames_per_token:
             edge = F.pad(edge, (0, K * self.frames_per_token - edge.shape[-1]))
         edge = edge[..., :K * self.frames_per_token]
-        amplitude = analysis["amplitude"].unsqueeze(-1)
-        dc = analysis["dc"].unsqueeze(-1)
+        amplitude = analysis["amplitude"]
+        dc = analysis["dc"]
         if self.norm == "frozen":
             amplitude = (amplitude - self.amp_mu) / self.amp_sd
             dc = (dc - self.dc_mu) / self.dc_sd
+        amplitude = self._pack_axis_values(amplitude, slot, live, total_slots).reshape(
+            B, P, sensors, self.axes_per_sensor)
+        dc = self._pack_axis_values(dc, slot, live, total_slots).reshape(
+            B, P, sensors, self.axes_per_sensor)
+        validity = live.new_zeros(B, total_slots + 1)
+        validity.scatter_(1, target, live)
+        validity = validity[:, :total_slots].reshape(B, 1, sensors, self.axes_per_sensor)
+        validity = validity.expand(B, P, sensors, self.axes_per_sensor).to(ordered.dtype)
         features = torch.cat([ordered[..., :self.in_dim - metadata_dim],
-                              nyq, res, edge, amplitude, dc], dim=-1)
+                              nyq, res, edge, amplitude, dc, validity], dim=-1)
         return self.proj(features)
 
     def forward(self, patches, sampling_rate_hz, patch_len_samples=None,
-                source_rate_hz=None, patch_mask=None) -> torch.Tensor:
+                source_rate_hz=None, patch_mask=None, sensor_id=None,
+                channel_mask=None, n_sensors=None) -> torch.Tensor:
         return self.project(self.analyze(patches, sampling_rate_hz, patch_len_samples,
-                                         source_rate_hz=source_rate_hz, patch_mask=patch_mask))
+                                         source_rate_hz=source_rate_hz, patch_mask=patch_mask),
+                            sensor_id=sensor_id, channel_mask=channel_mask,
+                            n_sensors=n_sensors)

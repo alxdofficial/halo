@@ -905,11 +905,21 @@ def embed_stratified(model: PipelineAModel, loader: DataLoader, device, per_labe
             source_rates = batch.get("source_rates", batch["rates"]).to(
                 device, non_blocking=True,
             )
+            projection_sensor_id = (
+                batch["sensor_id"].to(device, non_blocking=True)
+                if sensor_granularity else None
+            )
+            projection_n_sensors = (
+                max(map(len, batch["sensor_texts"])) if sensor_granularity else None
+            )
+            projection_channel_mask = batch["channel_mask"].to(device, non_blocking=True)
             with torch.amp.autocast(
                 device.type, enabled=device.type == "cuda", dtype=torch.float16,
             ):
                 sensor_tokens = model.encoder.tokenize(
-                    patches, rates, plen, source_rate_hz=source_rates,
+                    patches, rates, plen, channel_mask=projection_channel_mask,
+                    source_rate_hz=source_rates, sensor_id=projection_sensor_id,
+                    n_sensors=projection_n_sensors,
                 )
             sensor_descriptors = sensor_text_embs = sensor_text_masks = None
             role_text_ids = sensor_text_ids = None
@@ -978,10 +988,9 @@ def module_grad_norms(model) -> dict:
     if getattr(model, "mae_head", None) is not None:
         mods.append(("mae_head", model.mae_head))
     if model.encoder.token_granularity == "sensor":
-        mods.extend((
-            ("sensor_fold", model.encoder.sensor_fold),
-            ("descriptor_projection", model.encoder.descriptor_proj),
-        ))
+        if model.encoder.sensor_fold is not None:
+            mods.append(("sensor_fold", model.encoder.sensor_fold))
+        mods.append(("descriptor_projection", model.encoder.descriptor_proj))
         if model.encoder.descriptor_head is not None:
             mods.append(("descriptor_head", model.encoder.descriptor_head))
         if model.encoder.use_sensor_bias_conditioning:
@@ -1808,16 +1817,21 @@ def main() -> None:
                   if "resolution_ids_b" in batch else None)
         cmask_b = batch["channel_mask_b"].to(device, non_blocking=True)
         ppad_b = batch["patch_padding_mask_b"].to(device, non_blocking=True)
+        sensor_granularity = cfg.token_granularity == "sensor"
+        sid_b = (batch["sensor_id_b"].to(device, non_blocking=True)
+                 if sensor_granularity else None)
         tokens_b = model.encoder.tokenize(
             p_b, r_b, pl_b,
-            source_rate_hz=batch.get("source_rates_b", r_b).to(device, non_blocking=True))
-        sensor_granularity = cfg.token_granularity == "sensor"
+            channel_mask=cmask_b,
+            source_rate_hz=batch.get("source_rates_b", r_b).to(device, non_blocking=True),
+            sensor_id=sid_b,
+            n_sensors=(max(map(len, batch["sensor_texts_b"]))
+                       if sensor_granularity else None))
         sensor_descriptors_b = None
         if sensor_granularity:
             sensor_descriptors_b, sensor_text_ids_b = \
                 model.encoder.encode_sensor_descriptors_unique(batch["sensor_texts_b"], device)
             te_b = tm_b = role_ids_b = ste_b = stm_b = None
-            sid_b = batch["sensor_id_b"].to(device, non_blocking=True)
         elif cfg.text_conditioning == "factored":
             te_b, tm_b, role_ids_b, ste_b, stm_b, sensor_text_ids_b = \
                 model.encoder.encode_texts_factored_unique(
@@ -1999,7 +2013,17 @@ def main() -> None:
                                     ))
                 enc_channel_mask = channel_mask
                 enc_texts = batch["texts"]
-            sensor_tokens = model.encoder.project_tokens(student_analysis)
+            projection_sensor_id = (
+                batch["sensor_id"].to(device, non_blocking=True)
+                if sensor_granularity else None
+            )
+            projection_n_sensors = (
+                max(map(len, batch["sensor_texts"])) if sensor_granularity else None
+            )
+            sensor_tokens = model.encoder.project_tokens(
+                student_analysis, sensor_id=projection_sensor_id,
+                channel_mask=enc_channel_mask, n_sensors=projection_n_sensors,
+            )
             # Config-text conditioning, built ONCE and reused by the clean and masked encode passes.
             # per_channel (default): per-channel descriptions -> (B,C,S,384); UNCHANGED from before.
             # factored: ROLE text -> text_embs/text_masks; the per-sensor IDENTITY carried separately
@@ -2016,7 +2040,7 @@ def main() -> None:
                         )
                 text_embs = text_masks = role_text_ids = None
                 sensor_text_embs = sensor_text_masks = None
-                enc_sensor_id = batch["sensor_id"].to(device, non_blocking=True)
+                enc_sensor_id = projection_sensor_id
             elif cfg.text_conditioning == "factored":
                 (text_embs, text_masks, role_text_ids,
                  sensor_text_embs, sensor_text_masks, sensor_text_ids) = \
@@ -2096,7 +2120,10 @@ def main() -> None:
                                 source_rate_hz=batch.get("source_rates", rates).to(
                                     device, non_blocking=True),
                             )
-                    teacher_sensor_tokens = jepa_teacher.project_tokens(teacher_analysis)
+                    teacher_sensor_tokens = jepa_teacher.project_tokens(
+                        teacher_analysis, sensor_id=projection_sensor_id,
+                        channel_mask=enc_channel_mask, n_sensors=projection_n_sensors,
+                    )
                     teacher_clean = jepa_teacher.encode(
                         teacher_sensor_tokens, text_embs, text_masks, positions,
                         patch_durations=patch_durations,

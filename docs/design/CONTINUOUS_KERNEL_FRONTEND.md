@@ -2,10 +2,12 @@
 
 > ## IMPLEMENTED AND INTEGRATED — 2026-08-24
 >
-> `ContinuousKernelTokenizer` has 65,472 parameters (832 in the analysis bank) and is available as
-> `--frontend continuous` in Phase A and end-to-end episodic training. It uses the same encoder-facing
-> contract as `PhysicalFilterbankTokenizer`. The focused suite has 31 tests; the frontend plus encoder,
-> conditioning, sensor-folding, and episodic integration suite has 133 tests.
+> `ContinuousKernelTokenizer` has 135,808 parameters (832 in the analysis bank) and is available as
+> `--frontend continuous` in Phase A and end-to-end episodic training. The current implementation
+> emits one token per physical sensor directly: shared continuous kernels analyze xyz separately,
+> then an ordinary dense CNN jointly models the triad. Accelerometer and gyroscope remain separate.
+> See **S16** for the authoritative shape trace and measured cost. Earlier sections preserve the
+> design history; their pooled and depthwise-separable projections are superseded.
 >
 > The integrated arm handles mixed stored/native rates, per-recording reflection boundaries,
 > source-rate observability, masked calibration, patch-local amplitude/DC, and per-kernel edge support.
@@ -16,7 +18,8 @@
 >
 > **Current measured cross-rate agreement** against 100 Hz on a band-limited signal, anti-alias
 > decimated to each rate, is **0.989 at 20 Hz · 0.994 at 25 Hz · 0.999 at 50 Hz** over fully observable
-> analysis bands. Final-token cosine agreement is **0.991 · 0.993 · 0.999**, respectively.
+> analysis bands. Final-token cosine agreement for the dense-triad design is
+> **0.993 · 0.995 · 0.999**, respectively.
 >
 > The next decision is the matched comparison in S7: physical filterbank versus continuous kernels
 > under identical data, encoder, objectives, seeds, and step budgets.
@@ -430,6 +433,9 @@ So: **one continuous layer, magnitude, compression, pool to a token.** Depth sta
 
 ## S8.2 If you stack anyway — the rules
 
+> Historical design constraints. S16 supersedes Rules 3 and 7 by moving xyz fusion into the front
+> end itself while retaining separate accelerometer and gyroscope tokens.
+
 Should the shallow arm win and you want to spend depth on the front end, these are the constraints,
 and the first one is the only truly novel constraint in the design.
 
@@ -569,7 +575,7 @@ it is the claim.
 
 ---
 
-# S10. Why ordinary convs above layer 1, the shape trace, and the cost correction
+# S10. Historical depthwise design (superseded by S16)
 
 ## S10.1 Why layers 2+ are ordinary, not continuous
 
@@ -925,3 +931,86 @@ fixed filterbank is 99% projection, so this is the more balanced of the two.
 **Two open items, neither blocking:** PCEN instead of `log1p` (LEAF's reported win), and a learnable
 low-pass pooling instead of the strided conv. Both are ablations for after the front end has earned
 its place.
+
+## S15. Training performance audit - 2026-08-24
+
+Measured on the RTX 4090 with the PB-04 end-to-end recipe: eight independent episodes per optimizer
+step, 512 memory windows per episode, four query labels, and candidate counts 2/4/8/16.
+
+| frontend | profiled step | sustained step | peak allocated VRAM | 35k training core |
+|---|---:|---:|---:|---:|
+| fixed physical filterbank | 86.4 ms | 105-106 ms | 1.86 GiB | 61-62 min |
+| continuous, previous 8-frame chunks | 162.6 ms | not rerun | 4.28 GiB | about 95 min (estimate) |
+| **continuous, 24-frame chunks + in-place rate assembly** | **147.5 ms** | **152 ms** | **4.27 GiB** | **about 89 min** |
+
+The retained optimization is numerically exact against the previous implementation: mixed
+20/50/100 Hz token outputs are identical and analysis-parameter gradient differences are below
+`1e-11`. TensorFloat-32 and a BF16 kernel contraction were tested but not retained: neither reduced
+the complete step materially. Compiling only the fixed-grid projection reduced that isolated block
+from 1.98 to 1.27 ms for 512 windows, but dynamic shapes fail in the current PyTorch compiler and
+static compilation would require multiple fragile graphs for training and validation.
+
+The remaining large optimization is structural: the dense native-rate contraction evaluates every
+kernel over the longest two-second tap extent. A fast path based on span buckets or anti-aliased
+per-band decimation could reduce this work, but it changes the implementation substantially and must
+be validated as a separate optimization before use in the matched frontend comparison.
+
+## S16. Dense xyz sensor CNN - implemented 2026-08-24
+
+The previous projection processed each axis independently with depthwise temporal convolution and
+only mixed frequency bands pointwise. It then relied on `SensorFold` to combine three already-pooled
+axis vectors. That was efficient, but it limited the front end's ability to learn ordinary joint-axis
+motion patterns. The current arm uses the direct CNN design:
+
+```
+native xyz samples
+  -> same 32 continuous physical-time kernels on each axis
+  -> (xyz * 32) = 96 response channels at 8 frames/second
+  -> dense Conv1d(96 -> 64, kernel 3, stride 2) + per-frame LayerNorm + GELU
+  -> dense Conv1d(64 -> 128, kernel 3, stride 1) + per-frame LayerNorm + GELU
+  -> four ordered frames per one-second patch: 128 * 4 = 512 values
+  -> nyquist(32) + resolution(32) + edge support(128)
+     + axis amplitude(3) + signed DC(3) + axis validity(3)
+  -> Linear(713 -> d_model)
+  -> one token per accelerometer or gyroscope
+```
+
+The CNN never crosses a physical sensor boundary. A six-channel stream produces one accelerometer
+token and one gyroscope token; an accelerometer-only stream produces one token. Fixed xyz slots and
+three validity bits preserve which axis is absent. The continuous arm therefore bypasses the older
+`SensorFold`; the fixed physical filterbank still uses it unchanged.
+
+Parameter budget:
+
+| component | parameters |
+|---|---:|
+| continuous analysis bank | 832 |
+| dense convolutions + per-frame norms | 43,584 |
+| `Linear(713 -> 128)` | 91,392 |
+| **total** | **135,808** |
+
+Correctness verification covers mixed 20/25/50/100 Hz batches, source-rate observability, missing
+axes, accelerometer-only padding, modality isolation, finite gradients through every trainable
+parameter, the complete Phase-A student/EMA path, and end-to-end episodic training. The repository
+suite passes 746 tests.
+
+Measured on the RTX 4090 with the same full PB-04 profile as S15 (8 episodes, 512 memory windows per
+episode, 12 measured steps):
+
+| projection | profiled step | peak allocated VRAM | estimated 35k core |
+|---|---:|---:|---:|
+| old per-axis depthwise projection | 147.5 ms | 4.27 GiB | about 86 min from profiled time |
+| **dense xyz sensor CNN** | **129.0 ms** | **3.89 GiB** | **about 75 min from profiled time** |
+
+The direct design is faster despite using dense convolutions because it reduces the learned CNN
+batch from one sequence per live axis to one sequence per sensor. Encoding is 53.2 ms (41.2% of the
+step), backward is 39.1 ms (30.3%), episode logic is 20.0 ms, data wait is 8.4 ms, and optimizer work
+is 8.4 ms. Dense convolutions run through the ordinary optimized CUDA convolution path; there is no
+remaining projection-specific Python loop or per-axis kernel launch to remove. The larger remaining
+cost is the native-rate continuous analysis itself, for which span-bucketed evaluation or safe
+per-band decimation remains a separate, higher-risk optimization.
+
+An isolated 512-window mixed-rate benchmark confirms the split: continuous analysis takes 4.74 ms,
+while triad packing plus both dense convolutions and projection take 0.63 ms (5.66 ms complete
+forward). Further simplifying or compiling the ordinary CNN cannot materially change end-to-end
+time; optimization effort belongs in the physical-time analysis or the episode pipeline.
