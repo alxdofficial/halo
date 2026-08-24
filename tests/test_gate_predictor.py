@@ -84,7 +84,7 @@ def test_engine_checkpoint_round_trips_its_full_configuration(tmp_path):
     wrong model under the right name, and that is worse than failing to load."""
     from dataclasses import asdict
     from model.blocks import AttentionSpec
-    from model.evidence.engine import EngineConfig, EvidenceEngine
+    from model.evidence.engine import PHASE_B_VERSION, EngineConfig, EvidenceEngine
 
     cfg = EngineConfig(
         spec=AttentionSpec(d_model=16, n_heads=4, ffn_mult=3, dropout=0.05),
@@ -95,7 +95,8 @@ def test_engine_checkpoint_round_trips_its_full_configuration(tmp_path):
     )
     source = EvidenceEngine(None, cfg)
     path = tmp_path / "engine.pt"
-    torch.save({"evidence_engine": source.state_dict(),
+    torch.save({"phase_b_version": PHASE_B_VERSION,
+                "evidence_engine": source.state_dict(),
                 "config": {"engine_config": asdict(cfg)}}, path)
     loaded = load_evidence_engine(path)
     assert loaded.cfg == cfg
@@ -104,7 +105,7 @@ def test_engine_checkpoint_round_trips_its_full_configuration(tmp_path):
 
 
 def test_an_engine_checkpoint_without_its_config_refuses_to_load(tmp_path):
-    from model.evidence.engine import EvidenceEngine
+    from model.evidence.engine import PHASE_B_VERSION, EvidenceEngine
 
     path = tmp_path / "engine.pt"
     torch.save({"evidence_engine": EvidenceEngine(None).state_dict(), "config": {}}, path)
@@ -115,15 +116,31 @@ def test_an_engine_checkpoint_without_its_config_refuses_to_load(tmp_path):
 def test_an_engine_checkpoint_with_missing_model_weights_refuses_to_load(tmp_path):
     """`strict=False` is allowed only to omit an unattached encoder, not engine parameters."""
     from dataclasses import asdict
-    from model.evidence.engine import EvidenceEngine
+    from model.evidence.engine import PHASE_B_VERSION, EvidenceEngine
 
     engine = EvidenceEngine(None)
     state = engine.state_dict()
     state.pop(next(key for key in state if key.startswith("reranker.")))
     path = tmp_path / "broken_engine.pt"
-    torch.save({"evidence_engine": state,
+    torch.save({"phase_b_version": PHASE_B_VERSION,
+                "evidence_engine": state,
                 "config": {"engine_config": asdict(engine.cfg)}}, path)
     with pytest.raises(RuntimeError, match="missing"):
+        load_evidence_engine(path)
+
+
+def test_a_historical_engine_version_refuses_to_load_as_the_active_model(tmp_path):
+    from dataclasses import asdict
+    from model.evidence.engine import EvidenceEngine
+
+    engine = EvidenceEngine(None)
+    path = tmp_path / "historical.pt"
+    torch.save({
+        "phase_b_version": "PB-03-PAIRWISE-1NN",
+        "evidence_engine": engine.state_dict(),
+        "config": {"engine_config": asdict(engine.cfg)},
+    }, path)
+    with pytest.raises(ValueError, match="historical checkpoints"):
         load_evidence_engine(path)
 
 
@@ -481,13 +498,17 @@ def test_engine_checkpoints_survive_a_config_default_change(tmp_path):
     """A default reranker checkpoint can omit its nested config without changing behaviour."""
     from dataclasses import asdict
     from model.blocks import AttentionSpec
-    from model.evidence.engine import EngineConfig, EvidenceEngine
+    from model.evidence.engine import PHASE_B_VERSION, EngineConfig, EvidenceEngine
 
     cfg = EngineConfig(spec=AttentionSpec(d_model=16, n_heads=4))
     source = EvidenceEngine(None, cfg)
     payload = asdict(cfg)
     del payload["reranker"]
     path = tmp_path / "engine.pt"
-    torch.save({"evidence_engine": source.state_dict(), "config": {"engine_config": payload}}, path)
+    torch.save({
+        "phase_b_version": PHASE_B_VERSION,
+        "evidence_engine": source.state_dict(),
+        "config": {"engine_config": payload},
+    }, path)
     loaded = load_evidence_engine(path)
     assert loaded.cfg == cfg

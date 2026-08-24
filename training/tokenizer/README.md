@@ -309,7 +309,8 @@ protocol documents are under `references/datasets/`.
 `pretrain_episodic.py` trains the current recording-level evidence reranker through its deployment
 rule. Eight independent episodes share one encoder forward but retain separate fixed-size memory
 banks, candidate sets, queries, and support. The temporal sensor encoder produces one vector per
-six-second recording. Raw cosine retrieval is adjusted by one bounded learned scalar per
-query-memory pair before corrected nearest-neighbor classification. There is no top-k selector,
-attention mixer, or label voting stage. Inputs are clean by default; `--augment` is an explicit
-ablation. The single design of record is `docs/design/COMPACT_EVIDENCE_ENGINE.md`.
+six-second recording. Raw cosine retrieves 64 rows. Candidate, query, and retrieved-evidence tokens
+share one unordered attention layer, whose only output is one bounded scalar correction per evidence
+row before corrected nearest-neighbor classification. It cannot refine vectors, emit candidate
+logits, or vote. Inputs are clean by default; `--augment` is an explicit ablation. The single design
+of record is `docs/design/COMPACT_EVIDENCE_ENGINE.md`.

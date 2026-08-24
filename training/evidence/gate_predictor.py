@@ -121,7 +121,7 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
     closed-form path would report the wrong model under the right name.
     """
     from model.blocks import AttentionSpec
-    from model.evidence.engine import EngineConfig, EvidenceEngine
+    from model.evidence.engine import PHASE_B_VERSION, EngineConfig, EvidenceEngine
     from model.evidence.evidence_reranker import EvidenceRerankerConfig
 
     blob = torch.load(path, map_location="cpu", weights_only=False)
@@ -134,9 +134,15 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
             "checkpoint carries engine weights but no engine_config; it cannot be rebuilt without "
             "guessing its shape, and a guess would report the wrong model under the right name"
         )
-    if "reranker.head_out.weight" not in state:
+    saved_version = blob.get("phase_b_version") or saved.get("phase_b_version")
+    if saved_version != PHASE_B_VERSION:
         raise ValueError(
-            "checkpoint does not contain the active recording-level all-memory reranker. "
+            f"checkpoint architecture is {saved_version!r}, but the active evaluator accepts only "
+            f"{PHASE_B_VERSION!r}. Evaluate historical checkpoints from their tagged source."
+        )
+    if "reranker.row_head.weight" not in state:
+        raise ValueError(
+            "checkpoint does not contain the active recording-level contextual reranker. "
             "Evaluate historical voting checkpoints from their archived source revision."
         )
     cfg = EngineConfig(
@@ -144,6 +150,7 @@ def load_evidence_engine(path, encoder=None, device="cpu"):
         trunk_layers=int(saved.get("trunk_layers", 3)),
         semantic_scale=float(saved.get("semantic_scale", 1.0)),
         surrogate_temperature=float(saved.get("surrogate_temperature", 0.05)),
+        top_k=int(saved.get("top_k", 64)),
         telemetry_neighbors=int(saved.get("telemetry_neighbors", 8)),
         reranker=EvidenceRerankerConfig(**saved.get("reranker", {})),
     )

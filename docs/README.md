@@ -20,7 +20,7 @@
 
 ## Current Matched Results
 
-**2026-08-24.** The current model is the recording-level residual reranker at
+**2026-08-24.** The latest completed result is the recording-level pairwise reranker at
 `training/tokenizer/outputs/e2e_recording_rerank_35k_v3_20260824/best.pt` (selected step 33,000). It
 and all six external encoders were scored on the same `adaptation_v1` manifest: seven held-out
 datasets, five seeds, and execution-disjoint support/query. Full tables and protocol details are in
@@ -89,9 +89,10 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
 
 **The two phases, as built**
 - [**COMPACT_EVIDENCE_ENGINE.md**](design/COMPACT_EVIDENCE_ENGINE.md) — **the live architecture**:
-  filterbank → temporal trunk (d=128, one row per (patch, sensor)) → plain cosine → top-64 →
-  evidence mixer → text vote, 1,010,790 parameters, with its change log. **When any design doc
-  disagrees with this one about Phase B, this one wins.**
+  filterbank → temporal trunk (d=128, one row per six-second recording) → cosine top-64 → one
+  unordered candidate/query/evidence mixer → one scalar correction per evidence row → corrected
+  nearest neighbor. There is no vector refinement or text vote. **When any design doc disagrees
+  with this one about Phase B, this one wins.**
 - [**DESIGN_AUDIT_20260821.md**](design/DESIGN_AUDIT_20260821.md) — the stage-by-stage verification
   record: what is proven by test or measurement, what is an open risk, and the four methodology
   rules (each of which was violated once, at cost).

@@ -378,9 +378,10 @@ def test_predict_refuses_a_bank_without_source_window_provenance():
         )
 
 
-def test_recording_engine_has_no_top_k_or_mixer_configuration():
-    """The active model reranks every row and exposes no hidden legacy selection branch."""
+def test_recording_engine_exposes_only_the_scalar_mixer_shortlist_policy():
+    """The active engine has one shortlist and no legacy vector-mixing or voting modes."""
     from model.evidence.engine import EngineConfig
 
     fields = set(EngineConfig.__dataclass_fields__)
-    assert fields.isdisjoint({"top_k", "mixing", "vote_scope", "mixer", "scorer"})
+    assert EngineConfig().top_k == 64
+    assert fields.isdisjoint({"mixing", "vote_scope", "mixer", "scorer"})

@@ -64,7 +64,7 @@ VOTE_TEMPERATURE = 0.07
 class EpisodeSpec:
     """Shape of the episodes drawn each step. All counts are per episode."""
 
-    candidate_counts: tuple[int, ...] = (8, 16, 32, 64)
+    candidate_counts: tuple[int, ...] = (2, 4, 8, 16)
     query_labels_per_episode: int = 4
     queries_per_candidate: int = 2
     max_support: int = 4

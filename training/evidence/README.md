@@ -1,11 +1,11 @@
 # Phase-B evidence system
 
-The active Phase-B implementation is the recording-level residual reranker described in
+The active Phase-B implementation is the recording-level contextual scalar reranker described in
 [`docs/design/COMPACT_EVIDENCE_ENGINE.md`](../../docs/design/COMPACT_EVIDENCE_ENGINE.md).
 
-It requires no prebuilt memory artifact, resolvability table, admissibility-gate fit, top-k setting,
-or attention mixer. The trainer builds independent episode memories directly from the Phase-A corpus
-and optimizes the encoder and reranker together.
+It requires no prebuilt memory artifact, resolvability table, or admissibility-gate fit. The trainer
+builds independent episode memories directly from the Phase-A corpus and optimizes the encoder and
+reranker together. The only retrieval policy is a fixed 64-row cosine shortlist.
 
 ## End-to-end training
 
@@ -15,7 +15,7 @@ python -m training.tokenizer.pretrain_episodic \
   --phase-b-regime unified \
   --steps 35000 \
   --episodes-per-step 8 \
-  --candidate-counts 8 16 32 64 \
+  --candidate-counts 2 4 8 16 \
   --query-labels-per-episode 4 \
   --queries-per-candidate 4 \
   --max-support 16 \
@@ -28,7 +28,7 @@ python -m training.tokenizer.pretrain_episodic \
 
 Current defaults use clean one-second patches, eight independent episodes per optimizer step, 16
 query recordings per episode, and one recording row for every six-second query or memory window.
-Candidate rosters are 8/16/32/64 and support counts are 0/1/2/4/8/16. Random aliases and signal
+Candidate rosters are 2/4/8/16 and support counts are 0/1/2/4/8/16. Random aliases and signal
 augmentation are disabled unless explicitly requested.
 
 Use `--profile-steps 12` for a bounded real-corpus GPU profile and `--smoke` for a three-step

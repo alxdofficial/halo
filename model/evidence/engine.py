@@ -1,9 +1,9 @@
-"""Recording-level HALO evidence engine: cosine retrieval, residual reranking, corrected 1-NN.
+"""Recording-level HALO evidence engine: cosine retrieval, contextual reranking, corrected 1-NN.
 
-One query row and one memory row represent one six-second model window.  Every memory row receives a
-small learned correction conditioned on the query and memory signal/configuration pair.  Candidate
-scores are maxima over corrected, label-compatible neighbors.  A smooth-max surrogate supplies
-gradients to all rows during training; the forward value is the exact corrected-nearest score.
+One query row and one memory row represent one six-second model window. Candidate, query, and
+retrieved-evidence tokens share one unordered attention set, but the mixer can emit only a scalar
+correction per evidence row. Candidate scores are maxima over corrected, label-compatible neighbors.
+A smooth-max surrogate supplies gradients beyond the hard winner during training.
 """
 
 from __future__ import annotations
@@ -20,12 +20,16 @@ from .evidence_reranker import EvidenceReranker, EvidenceRerankerConfig
 from .rows import SensorRows
 
 
+PHASE_B_VERSION = "PB-04-SET-SCALAR-1NN"
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     spec: AttentionSpec = field(default_factory=AttentionSpec)
     trunk_layers: int = 3
     semantic_scale: float = 1.0
     surrogate_temperature: float = 0.05
+    top_k: int = 64
     telemetry_neighbors: int = 8
     reranker: EvidenceRerankerConfig = field(default_factory=EvidenceRerankerConfig)
 
@@ -34,6 +38,8 @@ class EngineConfig:
             raise ValueError("semantic_scale must be positive")
         if self.surrogate_temperature <= 0.0:
             raise ValueError("surrogate_temperature must be positive")
+        if self.top_k < 1:
+            raise ValueError("top_k must be positive")
         if self.telemetry_neighbors < 1:
             raise ValueError("telemetry_neighbors must be positive")
 
@@ -73,7 +79,7 @@ def enrolled_1nn_logits(
 
 
 class EvidenceEngine(nn.Module):
-    """Residual all-memory reranking with a corrected-nearest readout."""
+    """Contextual scalar reranking with a corrected-nearest readout."""
 
     def __init__(self, encoder: nn.Module | None, cfg: EngineConfig | None = None):
         super().__init__()
@@ -83,6 +89,8 @@ class EvidenceEngine(nn.Module):
 
     @staticmethod
     def _validate_recordings(rows: SensorRows, name: str) -> None:
+        if len(rows.feature) == 0:
+            raise ValueError(f"{name} must contain at least one recording")
         if rows.source_window is None:
             raise ValueError(f"{name} rows require source_window identity")
         if len(torch.unique(rows.source_window)) != len(rows.feature):
@@ -153,6 +161,28 @@ class EvidenceEngine(nn.Module):
         entropy = -(weight * weight.clamp_min(1e-12).log()).sum(dim=2)
         return logits, winner, entropy, weight
 
+    @staticmethod
+    def _memory_label_text(
+        memory_label: torch.Tensor,
+        memory_bound: torch.Tensor,
+        memory_mask: torch.Tensor,
+        candidate_text: torch.Tensor,
+        label_text: torch.Tensor,
+    ) -> torch.Tensor:
+        """Text attached to each corpus label or episode-local enrolled label."""
+        E, M = memory_label.shape
+        C = candidate_text.shape[1]
+        if bool((memory_bound >= C).any()):
+            raise ValueError("an enrolled recording is bound outside the candidate set")
+        if bool((memory_mask & memory_bound.lt(0) & memory_label.lt(0)).any()):
+            raise ValueError("an unbound corpus recording has no canonical label")
+        canonical = label_text[memory_label.clamp_min(0)]
+        bound = torch.gather(
+            candidate_text, 1,
+            memory_bound.clamp_min(0).unsqueeze(-1).expand(E, M, candidate_text.shape[-1]),
+        )
+        return torch.where(memory_bound.unsqueeze(-1).ge(0), bound, canonical)
+
     def _forward_batched(
         self,
         query_feature: torch.Tensor,
@@ -162,12 +192,24 @@ class EvidenceEngine(nn.Module):
         memory_label: torch.Tensor,
         memory_bound: torch.Tensor,
         memory_mask: torch.Tensor,
+        query_mask: torch.Tensor,
         candidate_text: torch.Tensor,
         label_text: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
+        memory_label_text = self._memory_label_text(
+            memory_label, memory_bound, memory_mask, candidate_text, label_text,
+        )
         reranked = self.reranker.forward_batched(
-            query_feature, query_descriptor, memory_feature, memory_descriptor,
-            memory_bound.ge(0) & memory_mask,
+            query_feature=query_feature,
+            query_descriptor=query_descriptor,
+            query_mask=query_mask,
+            memory_feature=memory_feature,
+            memory_descriptor=memory_descriptor,
+            memory_label_text=memory_label_text,
+            memory_enrolled=memory_bound.ge(0) & memory_mask,
+            memory_mask=memory_mask,
+            candidate_text=candidate_text,
+            top_k=self.cfg.top_k,
         )
         compatibility = self._compatibility(
             memory_label, memory_bound, memory_mask, candidate_text, label_text,
@@ -226,7 +268,7 @@ class EvidenceEngine(nn.Module):
             m_lengths, device=device,
         )[:, None]
         batched = self._forward_batched(
-            q_feature, q_descriptor, m_feature, m_descriptor, m_label, m_bound, m_mask,
+            q_feature, q_descriptor, m_feature, m_descriptor, m_label, m_bound, m_mask, q_mask,
             candidate_text, label_text,
         )
 
@@ -238,8 +280,7 @@ class EvidenceEngine(nn.Module):
             one_nn, available = enrolled_1nn_logits(
                 base_score, memory.enrolled_candidate, C,
             )
-            k = min(self.cfg.telemetry_neighbors, M)
-            selected = corrected_score.topk(k, dim=1).indices
+            selected = batched["selected"][episode, :Q, :min(self.cfg.top_k, M)]
             result = {
                 "logits": batched["logits"][episode, :Q],
                 "base_logits": batched["base_logits"][episode, :Q],
@@ -307,7 +348,7 @@ class EvidenceEngine(nn.Module):
             stats = self.reranker.telemetry()
             stats.update({
                 "retrieval/memory_recordings": float(base_score.shape[1]),
-                "retrieval/bank_coverage": 1.0,
+                "retrieval/bank_coverage": min(self.cfg.top_k, base_score.shape[1]) / base_score.shape[1],
                 "retrieval/base_score_std": float(base_score.std()),
                 "retrieval/acquisition_cosine_mean": float(descriptor_cosine.mean()),
                 "retrieval/top_recording_changed": float(top_before.ne(top_after).float().mean()),

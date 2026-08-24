@@ -1,11 +1,17 @@
-# Current Results
+# Latest Completed Results
 
-> Last updated 2026-08-24. This file describes only the current recording-level residual reranker.
-> Older dated artifacts are historical records and must not be attributed to this design.
+> Last updated 2026-08-24. These measurements belong to the completed pairwise recording-reranker
+> checkpoint named below. The active code now uses a contextual scalar reranker with C=2/4/8/16;
+> it has passed smoke testing but has not yet produced a full result. Do not attribute these numbers
+> to the new mixer.
+
+**Result set:** `PB-03-PAIRWISE-1NN`. See the
+[`Phase-B Version Registry`](PHASE_B_TRAINING_STATUS.md) for the exact checkpoint hash and for how it
+differs from the active `PB-04-SET-SCALAR-1NN` architecture.
 
 ## Protocol
 
-The current checkpoint is
+The latest completed checkpoint is
 `training/tokenizer/outputs/e2e_recording_rerank_35k_v3_20260824/best.pt`. It was trained end to end
 from random initialization for 35,000 steps and selected at step 33,000 using the predeclared
 development metric. Training used partial-enrollment episodes with candidate counts 8, 16, 32, and

@@ -1,7 +1,7 @@
 # Compact evidence engine
 
-Status: **recording-level residual reranker implemented, unit-tested, smoke-tested, and profiled;
-full training and held-out evaluation are pending.**
+Status: **recording-level contextual scalar reranker implemented, unit-tested, smoke-tested, and
+profiled; full training and held-out evaluation are pending.**
 
 This is the active Phase-B design. The previous patch-level retrieve-mix-vote model is preserved by
 the Git tag `phaseb-vector8-vote-20260824`; it is not an alternative path in the current trainer.
@@ -26,18 +26,22 @@ six-second query window -> encoder -> one pooled query vector
                                       v
                          cosine against every memory window
                                       |
-                  query and memory acquisition descriptions
+                          retrieve the nearest 64 rows
                                       |
                                       v
-                     small bounded correction for every row
+          one unordered set: candidates + query + retrieved evidence
+             (signal, acquisition description, and evidence label)
+                                      |
+                                      v
+                  one small bounded scalar correction per row
                                       |
                                       v
                          corrected nearest candidate
 ```
 
-There is no top-k selection, attention mixer, evidence vote, candidate-logit residual, or hard
-sensor-compatibility pool in the active model. Every memory row participates in training and at
-deployment.
+There is no evidence vote, candidate-logit residual, refined semantic vector, or hard
+sensor-compatibility pool. Attention is used only to contextualize the retrieved set before one
+scalar is read from each evidence row. The final rule remains corrected nearest neighbor.
 
 ## Recording rows
 
@@ -49,20 +53,21 @@ The row's acquisition description is the normalized mean of the frozen text embe
 that are actually present. It preserves device, placement, modality, units, and gravity convention
 without introducing source-specific numeric identifiers.
 
-## Residual reranker
+## Contextual scalar reranker
 
-For every query-memory pair, the reranker receives:
+Raw cosine retrieves at most 64 memory recordings per query. One set-attention layer then receives:
 
-- cosine similarity between normalized signal vectors;
-- cosine similarity between normalized acquisition-description vectors;
-- whether the memory row is enrolled rather than part of the corpus; and
-- eight learned low-dimensional interactions between signal and acquisition information.
+- every candidate-label text as a candidate-role token;
+- the query signal vector and acquisition description as a query-role token; and
+- each retrieved signal vector, acquisition description, evidence-label text, standardized raw
+  cosine score, and enrollment flag as an evidence-role token.
 
-A shared two-layer head produces one scalar. The correction is bounded by a hyperbolic tangent and a
-learned gain, then added to raw signal cosine. Inputs are normalized before the learned projections.
-The default gain starts at `0.01` cosine units and cannot exceed `0.5`. The output head has a small
-nonzero initialization, so the initial model is close to raw 1NN while every reranker component has a
-gradient from the first step.
+The set has no positional encoding, so candidate and evidence ordering cannot carry information. A
+shared head reads only the contextualized evidence tokens and emits one scalar per row. It cannot
+modify vectors or emit a candidate score. The correction is bounded by a hyperbolic tangent and a
+learned gain, then added to raw cosine. The gain starts at `0.05` cosine units and cannot exceed
+`0.5`. The output head has a small nonzero initialization, so every mixer component receives a
+gradient from the first step while the initial correction remains small.
 
 ## Candidate scoring
 
@@ -81,7 +86,9 @@ smooth rule is not used to produce deployment scores.
 
 ## Baseline preservation
 
-Every forward pass reports both learned logits and the unchanged raw-cosine logits. Training uses
+Every forward pass reports both learned logits and the unchanged raw-cosine logits. Non-shortlisted
+rows retain encoder gradients through the all-row smooth-maximum surrogate, but only shortlisted
+rows receive mixer corrections. Training uses
 candidate cross-entropy plus a no-regression penalty when the learned path gives the target more loss
 than its detached reference:
 
@@ -96,19 +103,21 @@ reports both `full_raw_1nn` and `full_reranked_1nn` from the same memory.
 ## Episode training
 
 Each optimizer step contains eight independent episodes. Every episode has its own candidate roster,
-queries, support bindings, distractors, and 512-recording memory. Four candidate labels supply four
-query recordings each; remaining candidates are distractors. Candidate counts cycle through
-8/16/32/64 and support counts through 0/1/2/4/8/16.
+queries, support bindings, distractors, and 512-recording memory. Up to four candidate labels supply
+four query recordings each; remaining candidates are distractors. Candidate counts cycle through
+2/4/8/16 and support counts through 0/1/2/4/8/16.
 
 Enrollment is partial and random. Support is sampled from different acquisition streams when the
-data permit it, and is never manually inserted into a selected retrieval set because there is no
-selection set. Corpus memory and enrolled rows are encoded by the current encoder in end-to-end runs.
+data permit it and is never manually inserted into the cosine shortlist. Corpus memory and enrolled
+rows are encoded by the current encoder in end-to-end runs.
 Signal augmentation and arbitrary label aliases are disabled by default.
 
 Episodes with the same candidate count are vectorized together. Padding is limited to query and
-memory row counts; masks prevent padded rows from entering candidate scores. A measured RTX 4090
-profile of the default shape used 1.86 GiB peak allocated memory. The completed 35,000-step run
-averaged 115 ms per optimizer step including periodic validation.
+memory row counts; masks prevent padded rows from entering retrieval or correction. On an RTX 4090,
+a synthetic worst-case evidence-engine pass at the default shape (8 episodes, 16 queries, 512 memory
+rows, 16 candidates, top 64) measured 7.7 ms for forward plus backward and 0.22 GiB peak allocated
+memory. This excludes the encoder and data pipeline. The three-step real-corpus smoke test completed
+without a non-finite loss or gradient.
 
 Core episode plans are deterministic and cached under
 `$XDG_CACHE_HOME/halo/episode_plans` (normally `~/.cache/halo/episode_plans`). The cache key includes

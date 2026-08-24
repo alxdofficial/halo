@@ -28,9 +28,9 @@ def _rows(n: int, d: int = 16, text: int = 384, *, labels=None, bound=None, seed
 
 def _engine(d=16, temperature=0.1):
     return EvidenceEngine(None, EngineConfig(
-        spec=AttentionSpec(d_model=d, n_heads=4), surrogate_temperature=temperature,
+        spec=AttentionSpec(d_model=d, n_heads=4, dropout=0.0),
+        surrogate_temperature=temperature, top_k=8,
         reranker=EvidenceRerankerConfig(
-            n_interaction_heads=4, interaction_dim=4, hidden_dim=16,
             correction_gain_init=0.01, max_correction=0.5,
         ),
     ))
@@ -45,7 +45,7 @@ def _texts(v=8, c=4, seed=2):
 def test_zero_correction_is_exact_raw_corrected_nearest():
     engine = _engine()
     with torch.no_grad():
-        engine.reranker.head_out.weight.zero_()
+        engine.reranker.row_head.weight.zero_()
     query = _rows(3, seed=3)
     memory = _rows(12, labels=torch.arange(12) % 4, seed=4)
     label_text, candidate = _texts()
@@ -71,7 +71,7 @@ def test_forward_value_is_hard_nearest_not_soft_vote():
 def test_many_weak_rows_cannot_outvote_one_strong_enrolled_match():
     engine = _engine()
     with torch.no_grad():
-        engine.reranker.head_out.weight.zero_()
+        engine.reranker.row_head.weight.zero_()
     d = 16
     query = _rows(1, d=d, seed=7)
     strong = F.normalize(query.feature.clone(), dim=-1)
@@ -107,7 +107,7 @@ def test_candidate_without_any_evidence_is_finite_and_disabled():
 def test_enrolled_binding_overrides_arbitrary_candidate_text():
     engine = _engine()
     with torch.no_grad():
-        engine.reranker.head_out.weight.zero_()
+        engine.reranker.row_head.weight.zero_()
     query = _rows(1, seed=10)
     memory = _rows(2, labels=[0, 0], bound=[1, 0], seed=11)
     memory.feature[0].copy_(query.feature[0])
@@ -176,6 +176,31 @@ def test_acquisition_descriptions_affect_corrections():
     assert not torch.allclose(after, before)
 
 
+def test_only_cosine_shortlist_receives_scalar_corrections():
+    engine = _engine().eval()
+    query = _rows(3, seed=40)
+    memory = _rows(20, labels=torch.arange(20) % 4, seed=41)
+    label_text, candidate = _texts()
+    result = engine(query, memory, candidate, label_text)
+    nonzero = result["score_correction"].ne(0)
+    selected = torch.zeros_like(nonzero)
+    selected.scatter_(1, result["selected"], True)
+    assert torch.equal(nonzero, selected)
+    assert result["selected"].shape == (3, engine.cfg.top_k)
+
+
+def test_candidate_and_evidence_label_text_reach_the_scalar_mixer():
+    engine = _engine().eval()
+    query = _rows(2, seed=42)
+    memory = _rows(10, labels=torch.arange(10) % 4, seed=43)
+    label_text, candidate = _texts()
+    before = engine(query, memory, candidate, label_text)["score_correction"]
+    changed_candidate = candidate.roll(1, dims=0)
+    changed_labels = label_text.roll(1, dims=0)
+    after = engine(query, memory, changed_candidate, changed_labels)["score_correction"]
+    assert not torch.allclose(after, before)
+
+
 def test_vectorized_many_matches_sequential():
     engine = _engine().eval()
     queries = [_rows(3, seed=20), _rows(2, seed=21)]
@@ -191,6 +216,20 @@ def test_vectorized_many_matches_sequential():
         assert torch.allclose(actual["logits"], expected, atol=1e-6)
 
 
+def test_batched_short_memory_never_exposes_padded_shortlist_rows():
+    engine = _engine().eval()
+    queries = [_rows(2, seed=44), _rows(2, seed=45)]
+    memories = [_rows(4, labels=torch.arange(4) % 4, seed=46),
+                _rows(12, labels=torch.arange(12) % 4, seed=47)]
+    label_text, candidate = _texts()
+    results = engine.forward_many(
+        queries, memories, torch.stack((candidate, candidate)), label_text,
+    )
+    assert results[0]["selected"].shape == (2, 4)
+    assert bool(results[0]["selected"].lt(4).all())
+    assert results[1]["selected"].shape == (2, engine.cfg.top_k)
+
+
 def test_duplicate_recording_rows_fail_loudly():
     engine = _engine()
     query = _rows(2)
@@ -198,6 +237,15 @@ def test_duplicate_recording_rows_fail_loudly():
     memory = _rows(4)
     label_text, candidate = _texts()
     with pytest.raises(ValueError, match="exactly one pooled row"):
+        engine(query, memory, candidate, label_text)
+
+
+def test_empty_recording_set_fails_loudly():
+    engine = _engine()
+    query = _rows(0)
+    memory = _rows(4)
+    label_text, candidate = _texts()
+    with pytest.raises(ValueError, match="at least one recording"):
         engine(query, memory, candidate, label_text)
 
 

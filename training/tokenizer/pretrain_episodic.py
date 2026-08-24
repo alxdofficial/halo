@@ -5,7 +5,7 @@ stratified memory bank.  Several episodes share one encoder forward for throughp
 candidate identities or evidence scores.  The exact compact deployment path is optimized end to end:
 
     temporal sensor encoder -> one pooled row per six-second window
-                            -> all-memory residual reranking -> corrected nearest neighbour
+                            -> contextual scalar reranking -> corrected nearest neighbour
 
 The default input is clean.  Signal augmentation is an explicit experiment, not hidden in the
 reference recipe.
@@ -36,7 +36,7 @@ from torch.utils.data import DataLoader
 
 from data.scripts.augmentations import AugmentationConfig
 from model.blocks import AttentionSpec
-from model.evidence.engine import EngineConfig, EvidenceEngine
+from model.evidence.engine import PHASE_B_VERSION, EngineConfig, EvidenceEngine
 from model.evidence.evidence_reranker import EvidenceRerankerConfig
 from model.tokenizer.encoder import SetTokenizerEncoder
 from training.evidence.episode_labels import encode_neutral_aliases, episode_label_set
@@ -1268,7 +1268,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=35_000)
     parser.add_argument("--episodes-per-step", type=int, default=8)
     parser.add_argument(
-        "--candidate-counts", type=int, nargs="+", default=[8, 16, 32, 64],
+        "--candidate-counts", type=int, nargs="+", default=[2, 4, 8, 16],
         help="total candidate-label roster sizes sampled during training; only "
              "--query-labels-per-episode of them supply queries",
     )
@@ -1302,7 +1302,7 @@ def main() -> None:
     parser.add_argument("--frontend", choices=("fixed", "learnable", "continuous"), default="fixed",
                         help="HALO feature extractor: fixed physical filterbank, constrained-learnable "
                              "filterbank, or continuous-time kernel bank (random-init runs only)")
-    parser.add_argument("--correction-gain-init", type=float, default=0.01,
+    parser.add_argument("--correction-gain-init", type=float, default=0.05,
                         help="initial residual correction scale in raw cosine units")
     parser.add_argument("--max-score-correction", type=float, default=0.5,
                         help="hard bound on each recording-pair correction in cosine units")
@@ -1713,7 +1713,7 @@ def main() -> None:
     encoder_base_params = [p for p in encoder_params if id(p) not in frontend_param_ids]
     reranker_params = [p for p in engine.reranker.parameters() if p.requires_grad]
     reranker_output_params = [
-        engine.reranker.head_out.weight, engine.reranker.correction_gain_logit,
+        engine.reranker.row_head.weight, engine.reranker.correction_gain_logit,
     ]
     output_ids = {id(parameter) for parameter in reranker_output_params}
     reranker_input_params = [p for p in reranker_params if id(p) not in output_ids]
@@ -1748,12 +1748,14 @@ def main() -> None:
     )
     provenance.pop("_patch", None)
     config.update({
+        "phase_b_version": PHASE_B_VERSION,
         "engine_config": dataclasses.asdict(engine_config),
         "train_datasets": list(args.datasets),
         "phase_b": {key: (str(value) if isinstance(value, Path) else value)
                     for key, value in vars(args).items()},
     })
     run_info = {
+        "phase_b_version": PHASE_B_VERSION,
         "source_checkpoint": source,
         "corpus": index.summary(),
         "effective_corpus": {
@@ -1794,6 +1796,7 @@ def main() -> None:
 
     def payload(step: int, report: dict) -> dict:
         return {
+            "phase_b_version": PHASE_B_VERSION,
             "encoder": encoder.state_dict(),
             "evidence_engine": engine.state_dict(),
             "config": config,
