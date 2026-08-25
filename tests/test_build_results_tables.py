@@ -5,6 +5,7 @@ from eval.build_results_tables import (
     _validate_current_cells,
     table_label_efficiency,
     table_per_dataset,
+    table_zero_shot,
 )
 
 
@@ -47,6 +48,30 @@ def test_label_efficiency_excludes_random_alias_rows() -> None:
     assert "specialized" not in table
 
 
+def test_report_excludes_self_pretrained_models_and_non_native_zero_shot() -> None:
+    cells = [
+        {
+            "model": model,
+            "method": "zero_shot",
+            "label_mode": "coherent",
+            "dataset": "example",
+            "k": "0",
+            "f1_macro": "50.0",
+        }
+        for model in (*MODEL_NAMES, "crosshar", "limubert")
+    ]
+
+    table = table_zero_shot(cells)
+
+    assert "HALO (ours)" in table
+    assert "UniMTS" in table
+    assert "ImageBind" in table
+    assert "NormWear" in table
+    assert "HARNet" not in table
+    assert "CrossHAR" not in table
+    assert "LIMU-BERT" not in table
+
+
 def test_current_report_rejects_missing_matched_readout() -> None:
     cells = [
         {
@@ -54,7 +79,7 @@ def test_current_report_rejects_missing_matched_readout() -> None:
             "method": method,
             "k": "1",
         }
-        for model in MODEL_NAMES
+        for model in (*MODEL_NAMES, "crosshar", "limubert")
         for method in (("evidence_engine", "nearest", "prototype", "ridge")
                        if model == "halo_compact" else ("nearest", "prototype", "ridge"))
         if not (model == "harnet" and method == "ridge")
@@ -101,3 +126,5 @@ def test_per_dataset_table_keeps_datasets_separate() -> None:
     assert "specialized" not in table
     assert "| HALO / retrieve-mix-vote | **90.00** |" in table
     assert "| HALO / retrieve-mix-vote | **10.00** |" in table
+    assert "CrossHAR" not in table
+    assert "LIMU-BERT" not in table

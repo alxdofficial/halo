@@ -1,6 +1,6 @@
 # Positioning — what the evidence engine is actually for
 
-> ## ⚠️ The ARGUMENT here is live. The NUMBERS are not.
+> ## The argument here is live. The numbers are not.
 > Every figure below (42.7 / 45.1 / 46.1 / 39.6–42.7) predates the vocabulary fix and was produced
 > under the **59-label** protocol on the `pretrain_fixed_mr` encoder. The current protocol is
 > **166 labels (v5 expanded Phase A)**. The last completed comparison was the historical
@@ -11,9 +11,8 @@
 > What remains current is §1–§4 (what the approach is *for*, and how to report it) and the
 > experiment designs in §5–§7.
 >
-> **Current numbers live in [`../results/ADAPTATION_TABLE_20260822.md`](../results/ADAPTATION_TABLE_20260822.md)**
-> (compact evidence engine, 1,010,790 params: best in 35/40 enrollment columns and every
-> clinical/rehab column; zero-shot ordinary 36.95, specialized 8.75). Two framing consequences
+> **Current numbers live only in [`../results/RESULTS.md`](../results/RESULTS.md).** The active paper
+> comparison uses only author-released external checkpoints. Two framing consequences
 > for this document:
 > 1. The strongest evidence is **few-shot enrollment**, not zero-shot. §1's "as a product claim:
 >    no / as a research claim: yes" split holds, and the enrollment result is the concrete form of
@@ -35,11 +34,9 @@
 ---
 
 
-> **Numbers in this section are superseded (2026-08-22).** Every figure in the table below
-> (39.6 / 42.7 / 45.1 / 46.1) is on `../README.md`'s do-not-cite list. Current same-purpose numbers:
-> ordinary k=0 **36.95** (2nd of 7, 0.06 behind crosshar 37.01) and specialized-novel **8.75**
-> (5th of 7), with a full k-curve to k=16 in `../results/ADAPTATION_TABLE_20260822.md`. The
-> *direction* of §1's argument survives for ordinary and **inverts for specialized**. Also re-derive
+> **Numbers in this section are superseded.** Every figure in the table below
+> (39.6 / 42.7 / 45.1 / 46.1) is on `../README.md`'s do-not-cite list. Use
+> `../results/RESULTS.md` for the current aggregate and per-dataset evidence. Also re-derive
 > or drop the "58,000× data ratio" — its 290–547 h figure comes from `archive/` and predates the
 > 2026-08 corpus expansion.
 

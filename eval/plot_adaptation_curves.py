@@ -21,9 +21,7 @@ import numpy as np
 MODEL_NAMES = {
     "halo_compact": "HALO",
     "harnet": "HARNet",
-    "crosshar": "CrossHAR",
     "unimts": "UniMTS",
-    "limubert": "LIMU-BERT",
     "normwear": "NormWear",
     "imagebind": "ImageBind",
 }
@@ -33,9 +31,7 @@ COLORS = {
     "HALO / 1-NN": "#111111",
     "HALO": "#111111",
     "HARNet": "#2878b5",
-    "CrossHAR": "#e07b20",
     "UniMTS": "#5a9f4b",
-    "LIMU-BERT": "#7655a3",
     "ImageBind": "#8c6d5c",
     "NormWear": "#6f7b83",
 }
@@ -92,7 +88,7 @@ def plot_knn(rows: list[dict], out_dir: Path) -> None:
     _style_axes(ax, "All held-out datasets")
     ax.set_ylabel("Macro F1")
     handles, labels = ax.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=7, frameon=False,
+    fig.legend(handles, labels, loc="lower center", ncol=5, frameon=False,
                bbox_to_anchor=(0.5, -0.02), fontsize=8.5)
     fig.suptitle("Matched 1-NN comparison of frozen representations", fontsize=13,
                  fontweight="semibold", y=1.02)

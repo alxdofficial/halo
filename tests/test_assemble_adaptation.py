@@ -1,4 +1,4 @@
-from eval.assemble_adaptation import paired_deltas
+from eval.assemble_adaptation import _markdown, paired_deltas
 
 
 def _row(*, model, method, label_mode, k, score, subject="dataset:s1"):
@@ -64,3 +64,24 @@ def test_paired_deltas_average_repeated_cells_within_subject():
 
     assert result["paired_subjects"] == 1
     assert result["delta_f1_macro"] == 0.0
+
+
+def test_zero_shot_markdown_omits_non_native_harnet_bridge():
+    aggregates = [
+        {
+            "model": model,
+            "method": "zero_shot",
+            "regime": "ordinary",
+            "label_mode": "coherent",
+            "k": 0,
+            "f1_macro": 25.0,
+            "datasets": 1,
+        }
+        for model in ("halo_compact", "harnet", "unimts")
+    ]
+
+    table = _markdown(aggregates)
+
+    assert "| ordinary | halo_compact | zero_shot |" in table
+    assert "| ordinary | unimts | zero_shot |" in table
+    assert "| ordinary | harnet | zero_shot |" not in table

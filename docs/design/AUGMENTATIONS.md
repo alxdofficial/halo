@@ -114,27 +114,20 @@ legitimately exclusive.
 | `channel_text_phrase` | paraphrases the per-channel placement/sensor text |
 | `channel_text_dropout` | drops channel metadata for robustness |
 
-## Two experiments, two policies
+## Comparison policy
 
-1. **Headline comparison table.** Each model uses **its own published training recipe** (faithfulness —
-   "each at its fullest," `BASELINE_FAIRNESS_POLICY.md`). We do not graft our augmentations onto anyone.
-2. **The conditioning demonstration** (the thesis, `MOTIVATION.md` §3). Train HALO **and the retrained
-   baselines** (CrossHAR, LiMU-BERT) with the **same Bucket-1 transform augmentation** (equal exposure).
-   At test time, apply the transform to the test data and give **only HALO** the acquisition descriptor.
-   The gap is then purely *test-time conditioning access* — architectural, not a data advantage.
-
-**Caveat.** Equal-exposure only works for the baselines we retrain (CrossHAR, LiMU-BERT); the **frozen**
-baselines (harnet, UniMTS, NormWear) are as-released, so the clean conditioning control is HALO vs the
-retrained baselines. Against frozen baselines the comparison is "off-the-shelf product vs HALO."
+The headline comparison uses only author-released external checkpoints, frozen and evaluated with
+their published input contracts. We do not graft HALO augmentations onto them or reproduce their
+pretraining. The causal augmentation and conditioning evidence therefore comes from within-HALO
+ablations: hold the corpus, checkpoint-selection rule, and evaluation manifest fixed while changing
+only the HALO augmentation or descriptor input under study.
 
 ## Fairness guardrails (from `MOTIVATION.md` §4)
 
 1. **Realistic transforms only** — orientation, gravity, placement, rate. Never an arbitrary corruption
    (channel scramble, additive garbage) engineered to break baselines; that is sabotage and reads as such.
-2. **Equal augmentation exposure** in the conditioning experiment — baselines see the same transformed
-   data; the only difference is being *told* the transform at test time.
+2. **One change per HALO ablation** — compare the same HALO training recipe with and without the
+   transform or conditioning signal; do not attribute a cross-model difference to augmentation.
 3. **Descriptor ≠ answer** — the acquisition descriptor never leaks the label or target distribution.
 
-This is consistent with `BASELINE_FAIRNESS_POLICY.md`'s asymmetry rule (never give one side more
-augmentation than the other): the symmetric bucket is applied to both sides; the HALO-only buckets are
-excluded because a fixed model *cannot consume them*, not because we are boosting HALO.
+This keeps augmentation attribution separate from the frozen-checkpoint baseline comparison.

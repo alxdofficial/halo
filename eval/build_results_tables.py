@@ -4,9 +4,9 @@
       --cells eval/adaptation_tables/<run>/cells.csv \
       --out docs/results/TABLES.md
 
-1. Zero-shot: HALO against every baseline, no labelled examples.
+1. Zero-shot: HALO against released-checkpoint baselines with a native zero-shot rule.
 2. Label efficiency: the same non-gradient 1-NN, prototype, and ridge readouts for every
-   representation, with HALO's retrieve-mix-vote mechanism shown separately.
+   released-checkpoint representation, with HALO's retrieve-mix-vote mechanism shown separately.
 
 The input must come from :mod:`eval.assemble_adaptation`, which validates the manifest, source and
 checkpoint fingerprints before writing it. Aggregation first averages seeds within each dataset and
@@ -25,12 +25,15 @@ import numpy as np
 
 MODEL_NAMES = {
     "halo_compact": "HALO (ours)",
-    "harnet": "HARNet", "crosshar": "CrossHAR", "unimts": "UniMTS",
-    "limubert": "LIMU-BERT", "normwear": "NormWear", "imagebind": "ImageBind",
+    "harnet": "HARNet", "unimts": "UniMTS", "normwear": "NormWear",
+    "imagebind": "ImageBind",
 }
 REPORT_MODEL_ORDER = (
-    "halo_compact", "limubert", "unimts", "crosshar", "harnet", "imagebind", "normwear",
+    "halo_compact", "unimts", "harnet", "imagebind", "normwear",
 )
+# HARNet has a released representation checkpoint but no native open-vocabulary decision rule.
+# Its locally fitted ConSE bridge is intentionally omitted from the paper's zero-shot comparison.
+ZERO_SHOT_MODEL_ORDER = ("halo_compact", "unimts", "imagebind", "normwear")
 DATASET_NAMES = {
     "inclusivehar": "Inclusive-HAR",
     "usc_had": "USC-HAD",
@@ -79,7 +82,7 @@ def _validate_current_cells(cells: list[dict]) -> None:
     missing = set(MODEL_NAMES) - present
     if missing:
         raise ValueError(
-            "current report requires the complete model roster; missing: "
+            "current report requires the released-checkpoint model roster; missing: "
             + ", ".join(sorted(missing))
         )
     if not any(
@@ -110,7 +113,7 @@ def table_zero_shot(cells: list[dict]) -> str:
     out = ["## 1. Zero-shot", "",
            "No labelled examples. Macro F1, equally averaged over all held-out datasets.", ""]
     scored = []
-    for model in MODEL_NAMES:
+    for model in ZERO_SHOT_MODEL_ORDER:
         overall, _ = _dataset_macro([
             c for c in cells
             if c["model"] == model and c["method"] == "zero_shot"
@@ -174,7 +177,7 @@ def table_per_dataset(cells: list[dict]) -> str:
     ]
     datasets = sorted({c["dataset"] for c in cells}, key=lambda d: DATASET_NAMES.get(d, d))
     zero_rows = []
-    for model in REPORT_MODEL_ORDER:
+    for model in ZERO_SHOT_MODEL_ORDER:
         values = [
             _dataset_macro([
                 c for c in cells

@@ -27,8 +27,8 @@ Pipeline order (fixed): `raw session → deployment_policy → accel_units → w
 Sampling-rate heterogeneity is **not** flattened in the corpus (it's a first-class comparison axis);
 rate is recorded per dataset. `build_grids` materialises **three** regimes (`_ALIGNMENTS`):
 
-- **`harmonised`** — resampled to **60 Hz**, 6-ch pad+mask, canonical labels. The fixed-rate crutch the
-  layout-locked baselines (CrossHAR/LiMU-BERT/harnet) require.
+- **`harmonised`** — resampled to **60 Hz**, 6-ch pad+mask, canonical labels. A compatibility export
+  for fixed-rate, fixed-layout analyses; it is not HALO's training source.
 - **`non_harmonised`** — native rate, native 3/6-ch, native labels. The raw eval/baseline source.
 - **`native`** — **native rate** (no resample), 6-ch pad+mask, canonical labels. **HALO's source:** the
   filterbank tokenizer is rate-invariant, so HALO trains on the corpus's REAL native rates (20/50/100 Hz)

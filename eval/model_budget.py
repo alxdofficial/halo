@@ -25,8 +25,6 @@ from model.tokenizer.encoder import SetTokenizerEncoder
 
 # (label, sensor-tower parameters, frozen text tower, how it was obtained)
 BASELINES = [
-    ("LIMU-BERT", 62_646, 0, "baselines/limubert/limubert_backbone.pt"),
-    ("CrossHAR", 62_646, 0, "baselines/crosshar/crosshar_backbone.pt"),
     ("UniMTS", 5_189_956, 63_428_097, "UniMTS.pth (sensor tower = `acc`, text = CLIP)"),
     ("HARNet5", None, 0, "checkpoint not resident; torch.hub ResNet-V2 1D"),
     ("NormWear", None, None, "checkpoint not resident; carries a clinical TinyLlama"),
@@ -88,8 +86,7 @@ def main() -> int:
 
     small = build(128, 3, 8).parameter_report()["TOTAL"]
     print(f"\nHALO 'small' sensor-side total: {small:,} "
-          f"({small / 5_189_956:.2f}x UniMTS's sensor tower, "
-          f"{small / 62_646:.0f}x LIMU-BERT)")
+          f"({small / 5_189_956:.2f}x UniMTS's sensor tower)")
     return 0
 
 

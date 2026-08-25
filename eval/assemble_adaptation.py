@@ -14,6 +14,8 @@ import baselines
 from eval.enrollment_protocol import load_manifest
 from eval.run_adaptation_baselines import _source_fingerprint
 
+NATIVE_ZERO_SHOT_MODELS = {"halo_compact", "unimts", "normwear", "imagebind"}
+
 
 def _external_rows(payload: dict, manifest: dict) -> tuple[list[dict], list[dict]]:
     model = payload["baseline"]
@@ -178,6 +180,7 @@ def _markdown(aggregates: list[dict]) -> str:
     panels = [
         ("Semantic zero-shot", lambda row: (
             row["label_mode"] == "coherent" and row["k"] == 0
+            and row["model"] in NATIVE_ZERO_SHOT_MODELS
             and (row["method"] == "zero_shot" or (
                 row["model"] == "halo_learned_gate" and row["method"] in {"learned", "identity"}
             ))

@@ -24,7 +24,7 @@ Fail-loud + complete discipline (ported from the legacy driver):
 Usage::
 
     python -m eval.run_baselines
-    python -m eval.run_baselines --baselines crosshar --datasets motionsense shoaib
+    python -m eval.run_baselines --baselines harnet --datasets motionsense shoaib
     python -m eval.run_baselines --device cuda
 """
 

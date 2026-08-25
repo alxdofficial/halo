@@ -11,7 +11,8 @@ from baselines.base import BaselineAdapter
 from eval.enrollment_protocol import ACTION_REGIMES, iter_cells, load_manifest
 
 
-PAPER_BASELINES = ("harnet", "crosshar", "limubert", "unimts", "imagebind", "normwear")
+PAPER_BASELINES = ("harnet", "unimts", "imagebind", "normwear")
+NATIVE_ZERO_SHOT_BASELINES = {"unimts", "imagebind", "normwear"}
 
 
 def audit(manifest_path: Path, baseline_names=PAPER_BASELINES) -> dict:
@@ -57,14 +58,15 @@ def audit(manifest_path: Path, baseline_names=PAPER_BASELINES) -> dict:
         baseline_status[name] = {
             "adapter": f"{type(adapter).__module__}.{type(adapter).__name__}",
             "frozen_features": features_overridden,
+            "reported_at_zero_shot": name in NATIVE_ZERO_SHOT_BASELINES,
             "candidate_override": candidates_overridden,
             "cached_feature_prediction": cached_prediction,
         }
         if not features_overridden:
             blockers.append(f"{name}: no frozen window feature interface")
-        if not candidates_overridden:
+        if name in NATIVE_ZERO_SHOT_BASELINES and not candidates_overridden:
             blockers.append(f"{name}: cannot score the manifest candidate roster")
-        if not cached_prediction:
+        if name in NATIVE_ZERO_SHOT_BASELINES and not cached_prediction:
             blockers.append(f"{name}: k=0 would require a second sensor encoding pass")
 
     enrollment = [cell for _, cell in iter_cells(manifest, kinds=["enrollment"])]

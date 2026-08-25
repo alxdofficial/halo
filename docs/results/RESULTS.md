@@ -1,6 +1,6 @@
 # Current Best Results
 
-> Last updated 2026-08-24. `PB-04-CK-DENSE` is the promoted HALO checkpoint because it gives
+> Last updated 2026-08-25. `PB-04-CK-DENSE` is the promoted HALO checkpoint because it gives
 > the strongest overall zero-shot point estimate among the HALO checkpoints. Its deployed
 > enrollment readout is 1-NN; retrieve-mix-vote is retained and reported as an auxiliary ablation.
 
@@ -23,21 +23,20 @@ k-shot meaning: every candidate receives exactly `k` independent enrolled execut
 cohort and candidate roster remain fixed across k. Macro F1 is averaged within each dataset and then
 equally across datasets.
 
-The strict assembler validated 7,997 coherent-label cells. Generated aggregate and per-dataset
+The strict assembler validated 5,815 cells from HALO and four author-released checkpoint baselines.
+Generated aggregate and per-dataset
 tables are in
 [`../../eval/adaptation_tables/e2e_pb04_continuous_dense_35k_20260824_best_full/headline_tables.md`](../../eval/adaptation_tables/e2e_pb04_continuous_dense_35k_20260824_best_full/headline_tables.md).
 
 ## Zero-Shot Recognition
 
-No labelled target-dataset execution is available at k=0. Each model uses its native zero-shot
-mechanism.
+No labelled target-dataset execution is available at k=0. The table includes only models with a
+native open-vocabulary mechanism. HARNet has a released representation checkpoint but no native
+open-vocabulary classifier, so it enters the enrollment comparison below but not this table.
 
 | model | all held-out datasets |
 |---|---:|
-| CrossHAR | **26.35** |
-| UniMTS | 25.72 |
-| HARNet | 24.21 |
-| LIMU-BERT | 21.89 |
+| UniMTS | **25.72** |
 | **HALO PB-04-CK-DENSE** | 22.37 |
 | ImageBind | 10.00 |
 | NormWear | 4.44 |
@@ -61,15 +60,9 @@ Each sees only the enrolled support executions. Linear-head fitting is excluded 
 | **HALO / 1-NN** | 45.44 | 47.31 | 55.70 | 56.47 | 56.53 |
 | HALO / prototype | 45.44 | 47.02 | 54.09 | 54.04 | 52.42 |
 | HALO / ridge | 44.26 | 46.08 | 54.33 | 55.19 | 55.56 |
-| LIMU-BERT / 1-NN | 45.63 | **49.90** | 56.92 | 57.52 | 54.52 |
-| LIMU-BERT / prototype | 45.63 | 48.69 | 55.48 | 55.50 | 52.17 |
-| LIMU-BERT / ridge | 40.51 | 43.73 | 50.96 | 51.32 | 49.19 |
-| UniMTS / 1-NN | 44.83 | 47.85 | **57.04** | **59.07** | **59.63** |
+| UniMTS / 1-NN | 44.83 | **47.85** | **57.04** | **59.07** | **59.63** |
 | UniMTS / prototype | 44.83 | 45.51 | 53.15 | 54.05 | 53.14 |
 | UniMTS / ridge | 41.97 | 43.38 | 51.32 | 53.21 | 53.64 |
-| CrossHAR / 1-NN | 41.02 | 44.97 | 53.30 | 53.48 | 52.61 |
-| CrossHAR / prototype | 41.02 | 44.79 | 52.43 | 52.25 | 51.26 |
-| CrossHAR / ridge | 36.04 | 39.49 | 47.03 | 48.19 | 48.55 |
 | HARNet / 1-NN | 40.26 | 42.51 | 50.06 | 50.98 | 50.81 |
 | HARNet / prototype | 40.26 | 41.82 | 49.18 | 49.66 | 48.61 |
 | HARNet / ridge | 39.61 | 41.66 | 50.31 | 52.27 | 53.25 |
@@ -93,7 +86,7 @@ The per-dataset tables below show that the change is highly dataset-dependent.
 ## Per-Dataset Performance
 
 The complete per-dataset report contains native zero-shot results and separate `retrieve-mix-vote`,
-1-NN, prototype, and ridge curves for every model on all seven held-out datasets:
+1-NN, prototype, and ridge curves for the active checkpoint roster on all seven held-out datasets:
 [`headline_tables.md`](../../eval/adaptation_tables/e2e_pb04_continuous_dense_35k_20260824_best_full/headline_tables.md#3-per-dataset-performance).
 The promoted HALO mechanism is summarized below; `n/a` means the sealed protocol could not form the
 requested support count without reusing an execution.

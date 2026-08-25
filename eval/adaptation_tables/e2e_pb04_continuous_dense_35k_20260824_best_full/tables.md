@@ -9,18 +9,12 @@ consumes the enrolled executions' patch/sensor rows.
 
 | regime | model | method | k | macro F1 | datasets |
 |---|---|---:|---:|---:|---:|
-| ordinary | crosshar | zero_shot | 0 | 37.70 | 4 |
 | ordinary | halo_compact | zero_shot | 0 | 31.37 | 4 |
-| ordinary | harnet | zero_shot | 0 | 33.82 | 4 |
 | ordinary | imagebind | zero_shot | 0 | 11.38 | 4 |
-| ordinary | limubert | zero_shot | 0 | 30.60 | 4 |
 | ordinary | normwear | zero_shot | 0 | 5.08 | 4 |
 | ordinary | unimts | zero_shot | 0 | 31.98 | 4 |
-| specialized_novel | crosshar | zero_shot | 0 | 11.22 | 3 |
 | specialized_novel | halo_compact | zero_shot | 0 | 10.37 | 3 |
-| specialized_novel | harnet | zero_shot | 0 | 11.40 | 3 |
 | specialized_novel | imagebind | zero_shot | 0 | 8.15 | 3 |
-| specialized_novel | limubert | zero_shot | 0 | 10.27 | 3 |
 | specialized_novel | normwear | zero_shot | 0 | 3.58 | 3 |
 | specialized_novel | unimts | zero_shot | 0 | 17.37 | 3 |
 
@@ -28,21 +22,6 @@ consumes the enrolled executions' patch/sensor rows.
 
 | regime | model | method | k | macro F1 | datasets |
 |---|---|---:|---:|---:|---:|
-| ordinary | crosshar | 1-NN | 1 | 50.54 | 4 |
-| ordinary | crosshar | 1-NN | 2 | 54.43 | 4 |
-| ordinary | crosshar | 1-NN | 4 | 59.58 | 4 |
-| ordinary | crosshar | 1-NN | 8 | 58.70 | 4 |
-| ordinary | crosshar | 1-NN | 16 | 57.39 | 3 |
-| ordinary | crosshar | prototype | 1 | 50.54 | 4 |
-| ordinary | crosshar | prototype | 2 | 54.04 | 4 |
-| ordinary | crosshar | prototype | 4 | 58.17 | 4 |
-| ordinary | crosshar | prototype | 8 | 56.69 | 4 |
-| ordinary | crosshar | prototype | 16 | 55.61 | 3 |
-| ordinary | crosshar | ridge | 1 | 42.99 | 4 |
-| ordinary | crosshar | ridge | 2 | 45.84 | 4 |
-| ordinary | crosshar | ridge | 4 | 50.32 | 4 |
-| ordinary | crosshar | ridge | 8 | 50.62 | 4 |
-| ordinary | crosshar | ridge | 16 | 50.38 | 3 |
 | ordinary | halo_compact | retrieve-mix-vote | 1 | 50.50 | 4 |
 | ordinary | halo_compact | retrieve-mix-vote | 2 | 52.68 | 4 |
 | ordinary | halo_compact | retrieve-mix-vote | 4 | 55.45 | 4 |
@@ -93,21 +72,6 @@ consumes the enrolled executions' patch/sensor rows.
 | ordinary | imagebind | ridge | 4 | 51.75 | 4 |
 | ordinary | imagebind | ridge | 8 | 51.71 | 4 |
 | ordinary | imagebind | ridge | 16 | 49.71 | 3 |
-| ordinary | limubert | 1-NN | 1 | 56.91 | 4 |
-| ordinary | limubert | 1-NN | 2 | 61.95 | 4 |
-| ordinary | limubert | 1-NN | 4 | 65.24 | 4 |
-| ordinary | limubert | 1-NN | 8 | 64.89 | 4 |
-| ordinary | limubert | 1-NN | 16 | 61.55 | 3 |
-| ordinary | limubert | prototype | 1 | 56.91 | 4 |
-| ordinary | limubert | prototype | 2 | 60.19 | 4 |
-| ordinary | limubert | prototype | 4 | 63.84 | 4 |
-| ordinary | limubert | prototype | 8 | 63.06 | 4 |
-| ordinary | limubert | prototype | 16 | 59.18 | 3 |
-| ordinary | limubert | ridge | 1 | 50.23 | 4 |
-| ordinary | limubert | ridge | 2 | 53.46 | 4 |
-| ordinary | limubert | ridge | 4 | 58.41 | 4 |
-| ordinary | limubert | ridge | 8 | 57.85 | 4 |
-| ordinary | limubert | ridge | 16 | 55.06 | 3 |
 | ordinary | normwear | 1-NN | 1 | 26.26 | 4 |
 | ordinary | normwear | 1-NN | 2 | 29.56 | 4 |
 | ordinary | normwear | 1-NN | 4 | 32.92 | 4 |
@@ -138,21 +102,6 @@ consumes the enrolled executions' patch/sensor rows.
 | ordinary | unimts | ridge | 4 | 53.62 | 4 |
 | ordinary | unimts | ridge | 8 | 54.67 | 4 |
 | ordinary | unimts | ridge | 16 | 54.16 | 3 |
-| specialized_novel | crosshar | 1-NN | 1 | 28.32 | 3 |
-| specialized_novel | crosshar | 1-NN | 2 | 32.36 | 3 |
-| specialized_novel | crosshar | 1-NN | 4 | 40.73 | 2 |
-| specialized_novel | crosshar | 1-NN | 8 | 43.04 | 2 |
-| specialized_novel | crosshar | 1-NN | 16 | 45.44 | 2 |
-| specialized_novel | crosshar | prototype | 1 | 28.32 | 3 |
-| specialized_novel | crosshar | prototype | 2 | 32.46 | 3 |
-| specialized_novel | crosshar | prototype | 4 | 40.97 | 2 |
-| specialized_novel | crosshar | prototype | 8 | 43.38 | 2 |
-| specialized_novel | crosshar | prototype | 16 | 44.74 | 2 |
-| specialized_novel | crosshar | ridge | 1 | 26.77 | 3 |
-| specialized_novel | crosshar | ridge | 2 | 31.03 | 3 |
-| specialized_novel | crosshar | ridge | 4 | 40.46 | 2 |
-| specialized_novel | crosshar | ridge | 8 | 43.31 | 2 |
-| specialized_novel | crosshar | ridge | 16 | 45.79 | 2 |
 | specialized_novel | halo_compact | retrieve-mix-vote | 1 | 35.84 | 3 |
 | specialized_novel | halo_compact | retrieve-mix-vote | 2 | 36.33 | 3 |
 | specialized_novel | halo_compact | retrieve-mix-vote | 4 | 46.55 | 2 |
@@ -203,21 +152,6 @@ consumes the enrolled executions' patch/sensor rows.
 | specialized_novel | imagebind | ridge | 4 | 35.15 | 2 |
 | specialized_novel | imagebind | ridge | 8 | 39.35 | 2 |
 | specialized_novel | imagebind | ridge | 16 | 43.00 | 2 |
-| specialized_novel | limubert | 1-NN | 1 | 30.58 | 3 |
-| specialized_novel | limubert | 1-NN | 2 | 33.83 | 3 |
-| specialized_novel | limubert | 1-NN | 4 | 40.28 | 2 |
-| specialized_novel | limubert | 1-NN | 8 | 42.78 | 2 |
-| specialized_novel | limubert | 1-NN | 16 | 43.97 | 2 |
-| specialized_novel | limubert | prototype | 1 | 30.58 | 3 |
-| specialized_novel | limubert | prototype | 2 | 33.36 | 3 |
-| specialized_novel | limubert | prototype | 4 | 38.76 | 2 |
-| specialized_novel | limubert | prototype | 8 | 40.38 | 2 |
-| specialized_novel | limubert | prototype | 16 | 41.66 | 2 |
-| specialized_novel | limubert | ridge | 1 | 27.56 | 3 |
-| specialized_novel | limubert | ridge | 2 | 30.75 | 3 |
-| specialized_novel | limubert | ridge | 4 | 36.07 | 2 |
-| specialized_novel | limubert | ridge | 8 | 38.25 | 2 |
-| specialized_novel | limubert | ridge | 16 | 40.39 | 2 |
 | specialized_novel | normwear | 1-NN | 1 | 18.63 | 3 |
 | specialized_novel | normwear | 1-NN | 2 | 20.20 | 3 |
 | specialized_novel | normwear | 1-NN | 4 | 25.61 | 2 |

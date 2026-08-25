@@ -10,7 +10,7 @@
 > 4. [**design/PHASE_B_TRAINING_INTENT.md**](design/PHASE_B_TRAINING_INTENT.md) — what Phase B is,
 >    why memory is an adaptation mechanism, and the evidence required before claiming it works.
 > 5. [**results/RESULTS.md**](results/RESULTS.md) — **the current headline result.** The current
->    HALO checkpoint and all six external encoders on the shared manifest, with the promoted 1-NN
+>    HALO checkpoint and four author-released external encoders on the shared manifest, with the promoted 1-NN
 >    readout separated from the learned retrieve-mix-vote ablation.
 > 6. [**results/PHASE_B_TRAINING_STATUS.md**](results/PHASE_B_TRAINING_STATUS.md) — the current
 >    Phase-B run history, matched tables, confirmed defects, and next-run requirements.
@@ -26,7 +26,8 @@ strongest zero-shot point estimate, although the seven-dataset difference from f
 resolved statistically. For k>=1, the supported deployment rule is 1-NN over enrolled executions;
 the learned retrieve-mix-vote readout is reported as an underperforming ablation.
 
-PB-04 and all six external encoders were scored on the same sealed `adaptation_v1` manifest: seven
+PB-04 and four author-released external encoders were scored on the same sealed `adaptation_v1`
+manifest: seven
 held-out datasets, five seeds, and execution-disjoint support/query sets. Aggregate tables,
 per-dataset tables, checkpoint comparisons, and the exact protocol are maintained only in
 [`results/RESULTS.md`](results/RESULTS.md) to prevent duplicate numbers from becoming stale.
@@ -129,14 +130,13 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
 
 ## `results/` — the measured record
 - [**RESULTS.md**](results/RESULTS.md) — **the current headline**: PB-04-CK-DENSE zero-shot and 1-NN
-  enrollment against the complete external-model roster, all matched controls, every k, and
+  enrollment against the released-checkpoint roster, all matched controls, every k, and
   per-dataset tables.
 - [ADAPTATION_TABLE_20260822.md](results/ADAPTATION_TABLE_20260822.md) — historical August 22 table;
   retained for auditability and explicitly superseded by `RESULTS.md`.
-- [EVAL_HARNESS_AUDIT_20260822.md](results/EVAL_HARNESS_AUDIT_20260822.md) — verification that the
-  eval path is sound and that every baseline is used as its developers intended. Two deviations
-  found and fixed in code (LiMU-BERT accel scale; UniMTS label text); LiMU-BERT needs a re-pretrain
-  before its row is valid again, and an adapter guard enforces that.
+- [EVAL_HARNESS_AUDIT_20260822.md](results/EVAL_HARNESS_AUDIT_20260822.md) — historical verification
+  of the broader evaluation path. The active paper comparison now excludes locally pretrained
+  external backbones; use `baselines/BASELINES.md` for the current roster.
 - [PHASE_B_DIAGNOSIS_20260820.md](results/PHASE_B_DIAGNOSIS_20260820.md) — why Phase-B training
   looked stuck. Its **mechanism** findings stand (retrieval ranks by acquisition configuration
   ×7.0; same-activity/different-device support rows at the 39th percentile; names-vs-signals
@@ -146,12 +146,11 @@ Any figure produced before the vocabulary fix (**59 labels**) is not comparable 
   history and the step-0 control that retired its headline. Also linked from `design/` above.
 
 ## `baselines/` — who we compare against
-- [BASELINES.md](baselines/BASELINES.md) — roster, verified input contracts, frozen-vs-self-train.
-  ⚠️ two contract statements were corrected on 2026-08-22 — see
-  [`results/EVAL_HARNESS_AUDIT_20260822.md`](results/EVAL_HARNESS_AUDIT_20260822.md).
+- [BASELINES.md](baselines/BASELINES.md) — released-checkpoint roster, verified input contracts, and
+  current zero-shot/enrollment reporting rules.
 - [BASELINE_FAIRNESS_POLICY.md](baselines/BASELINE_FAIRNESS_POLICY.md) — the treatment contract.
-  ⚠️ its "identical 6-channel 60 Hz tensor" invariant describes the design, **not** the executed
-  path (scoring runs `non_harmonised`); see the correction in its §2.
+  It defines the frozen-backbone, native-zero-shot, and shared-enrollment rules used by the current
+  paper comparison.
 
 ## [`archive/`](archive/README.md) — superseded records
 Ten documents that were authoritative when written and are not now: the pre-consolidation evidence
