@@ -33,7 +33,8 @@ subject-leakage trap already recorded against this corpus (hapt == uci_har, same
 RELATION TO THE EXISTING CODE
 -----------------------------
 The corpus index, dataset, and base collate are reused unchanged. The collate is wrapped to carry the
-gravity convention required by retrieval telemetry. See ``docs/design/COMPACT_EVIDENCE_ENGINE.md``.
+gravity convention required by retrieval telemetry. The historical design is indexed by
+``docs/LEGACY.md``.
 """
 
 from __future__ import annotations

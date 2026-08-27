@@ -14,7 +14,7 @@ regimes recorded separately:
 So a same-subject, same-exercise pair drawn from `ideal` and `self` is a genuine
 change-of-configuration, not a rotation we applied. It is also one of the few sources where an
 exercise recurs for the same subject in separate recordings, which is what session-level execution
-ids need (see docs/data/DATASET_EXPANSION_2026-08.md section 9).
+ids need (the historical audit is indexed by docs/LEGACY.md).
 
 Layout, verified against `downloads/x/dataset manual.pdf` (Banos & Toth, 2014) tables 3-5:
 

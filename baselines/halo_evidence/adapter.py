@@ -9,8 +9,8 @@ exact best config from the tier-1 sweep (`training.evidence.tier1_sweep`):
 Per window: encode -> cosine to the frozen memory bank -> softmax(sim/tau) retrieval weights ->
 each neighbour's (ensembled) label text votes for the candidate labels by cosine -> argmax.
 
-This is the do-no-harm FLOOR that every Tier-2 learned component must beat
-(docs/archive/EVIDENCE_ENGINE_TIER2.md §3). It reuses the SAME encoder and the SAME cached
+This is the historical do-no-harm floor described by the prior design (see ``docs/LEGACY.md``). It
+reuses the SAME encoder and the SAME cached
 memory bank as the decoder trainer, so the harness number is apples-to-apples with the
 learned decoder that will (must) replace it. Provenance-guarded: the encoder checkpoint's
 content hash must match the bank's backbone fingerprint or setup fails loud.

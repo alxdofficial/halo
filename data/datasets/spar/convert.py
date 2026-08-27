@@ -26,7 +26,7 @@ So repetitions here are ~2 s apart and are NOT independent sessions. A same-subj
 curve built by treating a repetition as an "execution" measures within-session binding, which is
 the adjacent-window regime `eval_enrollment`'s `window_level_ids` gate exists to refuse. Execution
 ids below are therefore emitted per FILE (one bout = one execution), which honestly yields k=1 per
-(subject, exercise, side). See docs/data/DATASET_EXPANSION_2026-08.md Section 9.
+(subject, exercise, side). See docs/data/APPLICATION_DATASETS.md.
 
 Labels keep this dataset's published clinical wording (held-out eval sets are zero-shot targets and
 are never merged into the training vocabulary).

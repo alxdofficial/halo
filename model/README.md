@@ -1,36 +1,28 @@
-# model
+# Model components
 
-The HALO model. Two subpackages, matching the two training phases in [`../training`](../training).
+## `tokenizer/` - movement representation
 
-## `tokenizer/` — the Phase-A representation (shared by everything)
+The active model component converts native-rate IMU data into temporal patch embeddings.
 
-| Module | Role |
+| module | role |
 |---|---|
-| `filterbank.py` | fixed physical-Hz constant-Q filterbank + signed per-channel DC/gravity feature |
+| `filterbank.py` | fixed physical-Hz filterbank and signed low-frequency/gravity features |
+| `continuous_kernel.py` | learned continuous physical-time convolutional frontend |
 | `preprocess.py` | gravity alignment and per-window preparation |
-| `transformer.py` | RoPE physical-time dual-branch transformer blocks |
-| `encoder.py` | the config-conditional set encoder over channel/patch tokens |
-| `channel_text.py` | channel-role + sensor-identity text conditioning (factored or per-channel) |
-| `primitives.py` | named diagnostic primitives (probes, not training targets) |
+| `sensor_tokens.py` | folds xyz channels into sensor-level tokens with validity masks |
+| `transformer.py` | temporal and optional cross-sensor contextualization in physical time |
+| `encoder.py` | representation interface returning tokens, per-patch vectors, and pooled vectors |
+| `channel_text.py` | optional acquisition-description conditioning |
+| `primitives.py` | interpretable physical diagnostics, not task labels |
 
-Rate-invariant and channel-independent: filters are placed in physical Hz, so a 25 Hz and a 100 Hz
-recording of the same motion land on the same features, and channels are encoded as a set rather
-than a fixed-width vector.
+The application design consumes timestamped **per-patch** vectors. Whole-recording pooling is a
+control, not the default, because it removes movement phase and prevents subsequence alignment.
 
-## `evidence/` — the Phase-B evidence engine
+## `evidence/` - historical classification experiments
 
-| Module | Role |
-|---|---|
-| `patch_retrieval.py` | per-query-patch retrieval over the memory bank, with learned EMA subspaces |
-| `relational_decoder.py` | candidate-aware attention over names, query patches, and evidence roles with balanced learned component scales |
-| `confidence.py` | parked correct-and-answerable confidence experiment; not in active Phase B |
+The evidence modules implement the prior candidate-label retrieval, reranking, and voting research.
+They remain for reproducibility but are not used by the movement-monitoring design. Tasks 1-3 use a
+shared sequence matcher and do not require candidate labels.
 
-Design of record:
-[`../docs/design/PHASE_B_TRAINING_INTENT.md`](../docs/design/PHASE_B_TRAINING_INTENT.md). Historical
-research and retracted branches live in
-[`../docs/archive/EVIDENCE_ENGINE.md`](../docs/archive/EVIDENCE_ENGINE.md) and
-[`../docs/archive/EVIDENCE_ENGINE_FINDINGS.md`](../docs/archive/EVIDENCE_ENGINE_FINDINGS.md).
-
-There is no InfoNCE label-alignment head. Activity-label language enters at Phase B through candidate
-content (and through the ConSE comparison bridge). Phase A remains activity-label-free while using
-acquisition-configuration language for channel roles and sensor identity.
+See [`../docs/design/DESIGN_OF_RECORD.md`](../docs/design/DESIGN_OF_RECORD.md) for the active model
+boundary and [`../training/README.md`](../training/README.md) for training policy.

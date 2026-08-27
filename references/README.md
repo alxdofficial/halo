@@ -1,7 +1,7 @@
 # References: datasets and baselines
 
-This tree stores the local primary-source material used to audit every dataset and published baseline
-in HALO. A usable entry contains:
+This tree stores the local primary-source material used to audit datasets and published encoders in
+HALO. A usable entry contains:
 
 - `citation.json`: title, authors/owner, year, venue, stable URLs, licence, and implementation notes.
 - `paper.pdf`, `webpage.html`, or another clearly named official technical document.
@@ -22,10 +22,17 @@ Dataset entries:
 `recgym`, `shoaib`, `sp_sw_har`, `tnda_har`, `uci_har`, `unimib_shar`, `usc_had`, `ut_complex`,
 `wisdm`, `xrf_v2`.
 
-Baseline entries:
+Baseline entries retained for representation comparison and historical reproduction:
 
 `crosshar`, `deepconvlstm`, `lanhar`, `limubert`, `llasa`, `moment`, `normwear`, `ssl-wearables`,
 `unimts`.
+
+## Application use
+
+A local publication proves provenance; it does not by itself make a dataset suitable for an
+application task. The active role of each source, including subject/session requirements and
+pretraining-overlap restrictions, is defined in
+[`../docs/data/APPLICATION_DATASETS.md`](../docs/data/APPLICATION_DATASETS.md).
 
 ## Scale-source evidence
 

@@ -10,7 +10,7 @@ channels as acc xyz then gyro xyz — confirmed at convert time by the per-row m
 sit near 1 g, gyro rows two orders higher). The paired `emg.npy` is not read.
 
 Two honest limitations, documented rather than engineered around
-(docs/data/DATASET_EXPANSION_2026-08.md section 8b):
+(docs/data/APPLICATION_DATASETS.md):
 
   * **Placement.** Muscle-belly electrodes on the thigh and calf are not a phone-pocket or
     watch-wrist deployment, so every stream here is `role="stress"` and is never mixed into the

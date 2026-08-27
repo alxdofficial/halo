@@ -7,7 +7,7 @@ same 8-exercise protocol **once a week**, usually on the same weekday at a simil
 Why this dataset is here (load-bearing): it is the ONLY source in the corpus with verified
 **across-session** structure for the same person and the same exercise. Every other rehabilitation
 set records one continuous bout per subject per exercise, which makes "enrollment" a within-session
-measurement (see docs/data/DATASET_EXPANSION_2026-08.md section 9). Here, one converted session =
+measurement (see docs/data/APPLICATION_DATASETS.md). Here, one converted session =
 one weekly visit, so the grid's execution ids (session-level, see eval/data.py) separate week 1 from
 week 5 by seven days. Enrol in week 1, recognize in week N.
 

@@ -326,7 +326,7 @@ STREAM_SPECS: Tuple[StreamSpec, ...] = (
                note="Apple Watch 2/3, 50 Hz, accel already g (gravity present) and gyro already "
                     "rad/s -- no unit conversion. One session = one continuous 20-repetition bout "
                     "(median 42 s), so enrollment from this source is within-session; see "
-                    "docs/data/DATASET_EXPANSION_2026-08.md section 9."),
+                    "docs/data/APPLICATION_DATASETS.md."),
     StreamSpec("spar", "watch_right_wrist", "watch", "the right wrist",
                _GENERIC_ACC, _GENERIC_GYRO, "present",
                session_contains=("_right_wrist",),

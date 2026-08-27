@@ -1,6 +1,6 @@
-"""Assemble the matched Phase-B method-comparison table from enrollment result files.
+"""Assemble the historical matched Phase-B method-comparison table from enrollment result files.
 
-The table that `docs/results/PHASE_B_TRAINING_STATUS.md` §4 reports was produced by a script that
+The prior result record is recoverable through `docs/LEGACY.md`. Its table was produced by a script that
 was never committed, and it aggregates as an unweighted mean over three cells. That weighting is
 not defensible here: RealWorld contributes 203 of 2,953 queries (6.9%) over 3 subjects with a
 2-way decision, yet carries a third of the reported number. This module replaces it with a

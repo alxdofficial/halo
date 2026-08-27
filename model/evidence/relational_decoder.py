@@ -1,6 +1,6 @@
-"""Relational evidence decoder — one attention stack over names, query and evidence.
+"""Historical relational evidence decoder - one attention stack over names, query and evidence.
 
-Implements `docs/design/PHASE_B_TRAINING_INTENT.md` §6. It replaced a vote/pool decoder whose
+The original design is recoverable through `docs/LEGACY.md`. It replaced a vote/pool decoder whose
 measured failure was structural rather than a matter of tuning: its pooling
 weight carried no candidate axis, so the *only* quantity separating candidate c from candidate c'
 was `cos(evidence label text, candidate text)` — a kernel whose off-diagonal mean on the corpus

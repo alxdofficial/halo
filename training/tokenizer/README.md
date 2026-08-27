@@ -1,7 +1,13 @@
-# Phase-A tokenizer pretraining
+# HALO representation pretraining
 
-Phase A trains the sensor representation consumed by the Phase-B evidence engine. The training
-loss is activity-label-free; labels are read only by validation probes.
+> **Application status, 2026-08-27:** this remains the implementation reference for training HALO's
+> encoder. The active movement-monitoring experiments begin with frozen checkpoints, and no new
+> pretraining is required before establishing raw-signal and released-encoder floors. References
+> below to Phase A and Phase B describe the historical training code, not the active downstream
+> application architecture.
+
+The trainer learns an activity-label-free sensor representation; labels are read only by validation
+probes.
 
 ## Objectives
 
@@ -155,9 +161,9 @@ upsampled 25 Hz signal from being treated as though it contains genuine 25 Hz sp
 attributable pilot sweeps. The batch-1024 defaults use conservative square-root LR scaling; weight
 decay and EMA momentum are adjusted so their cumulative effect remains approximately constant per
 sample relative to the batch-256 reference.
-Ten completed 7,500/15,000-step batch-1,024 arms now exist (2026-08-18); the recipe is no longer
-merely smoke-tested. Their results, and the reference points every future arm is measured against,
-are in [`docs/results/PHASE_A_RECOVERY_20260818.md`](../../docs/results/PHASE_A_RECOVERY_20260818.md).
+Ten completed 7,500/15,000-step batch-1,024 arms existed at the application branch point. Their
+historical result report is recoverable through [`docs/LEGACY.md`](../../docs/LEGACY.md); it is not
+an application result.
 
 **Trunk depth: 3, and this is the only setting the 2026-08-18 sweep established.** Main effect of
 depth 3 + jitter + scale over the 6-layer no-augmentation control was **+0.0157** on held-out
@@ -304,13 +310,9 @@ roster with `--datasets`; the roster is persisted in `run_config.json`. Before s
 `sensor_bias.json` with the identical ordered roster and `--data-seed`. Dataset publications and
 protocol documents are under `references/datasets/`.
 
-## Phase B: compact end-to-end episodic training
+## Downstream status
 
-`pretrain_episodic.py` trains the current recording-level evidence reranker through its deployment
-rule. Eight independent episodes share one encoder forward but retain separate fixed-size memory
-banks, candidate sets, queries, and support. The temporal sensor encoder produces one vector per
-six-second recording. Raw cosine retrieves 64 rows. Candidate, query, and retrieved-evidence tokens
-share one unordered attention layer, whose only output is one bounded scalar correction per evidence
-row before corrected nearest-neighbor classification. It cannot refine vectors, emit candidate
-logits, or vote. Inputs are clean by default; `--augment` is an explicit ablation. The single design
-of record is `docs/design/COMPACT_EVIDENCE_ENGINE.md`.
+`pretrain_episodic.py` and the Phase-B trainers are historical candidate-label experiments. The
+movement-monitoring branch consumes frozen temporal patch embeddings through the common sequence
+contract in [`docs/design/DESIGN_OF_RECORD.md`](../../docs/design/DESIGN_OF_RECORD.md). Do not add
+application logic to the episodic classifier.

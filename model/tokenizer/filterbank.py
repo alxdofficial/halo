@@ -2,7 +2,7 @@
 
 Ported verbatim from `legacy_code/model/feature_extractor.py` (the battle-tested V2
 tokenizer, with its unit-test suite at `tests/test_filterbank.py`) into the
-evidence-engine Phase-A front end; see docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md.
+HALO representation encoder; see docs/design/DESIGN_OF_RECORD.md.
 Key hyperparameters and the physics that pins each value are collected below
 so they are easy to find and hard to second-guess.
 
@@ -77,8 +77,8 @@ FB_RESOLUTION_MIN_CYCLES = 1.0
 
 class PhysicalFilterbankTokenizer(nn.Module):
     """
-    Physical-Hz constant-Q filterbank tokenizer (PHz-FB). Design rationale:
-    docs/archive/EVIDENCE_ENGINE.md §7 (tokenizer direction).
+    Physical-Hz constant-Q filterbank tokenizer (PHz-FB). The previous design rationale remains
+    available through docs/LEGACY.md; the active use is documented in DESIGN_OF_RECORD.md.
 
     Turns each native-rate, zero-padded patch of each channel into one d_model
     token, entirely in the *physical frequency* domain, so the representation is

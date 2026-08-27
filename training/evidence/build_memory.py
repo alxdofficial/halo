@@ -3,8 +3,8 @@
 This is the initial expensive pass in Phase B. We encode the training corpus with the frozen
 Pipeline-A encoder and cache pooled/patch vectors, metadata, and exact source pointers. Frozen
 Phase-B training operates on the cache. Optional ``ema_finetune`` training keeps the global cache
-detached and re-encodes only bounded selected source windows (see
-``docs/design/PHASE_A_B_AGREED_IMPLEMENTATION_PLAN.md``).
+detached and re-encodes only bounded selected source windows. The prior contract is indexed by
+``docs/LEGACY.md``.
 
 Cached bank (``memory_bank.pt``):
     Z          (N, d)  float16   pooled frozen-encoder embeddings (L2-normalizable downstream)

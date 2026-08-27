@@ -23,7 +23,7 @@ Pipeline order: **curate → assemble** (→ grids). `labels/`, `debug/`, and
 |---|---|
 | `canonical_labels.py` | unified **canonical** training vocabulary (merge synonyms) |
 | `label_augmentation.py` | per-dataset label synonyms + templates |
-| `build_global_label_mapping.py` | shared global label vocabulary (ConSE) |
+| `build_global_label_mapping.py` | legacy shared HAR label vocabulary; not used by the application tasks |
 
 ## `debug/` — per-session plots
 `visualization_utils.py`, `plot_sessions.py`
@@ -35,10 +35,11 @@ and generated artifacts under `eda/outputs/`. See [`eda/README.md`](eda/README.m
 ## top level
 | Module | Role |
 |---|---|
-| `augmentations.py` | physics + text augmentation curriculum |
+| `augmentations.py` | legacy representation-training augmentations; application matching starts from clean signals |
 | `download_datasets.py` | download raw datasets into `../datasets/<ds>/downloads/` (per-dataset entry point) |
 | `build_grids.py` | assemble converted sessions → windowed harmonised/non-harmonised grids |
 
 Per-dataset pieces (converter, `metadata.json`, `labels.json`) live under [`../datasets/<name>/`](../datasets).
-Harmonised vs non-harmonised: see `../../docs/baselines/BASELINE_FAIRNESS_POLICY.md` §2A and
-`../../docs/data/DATA_HETEROGENEITY.md`.
+The application timeline contract is in `../../docs/data/DATA_PIPELINE.md`; dataset task roles are in
+`../../docs/data/APPLICATION_DATASETS.md`. Harmonised versus native baseline inputs are documented in
+`../../docs/baselines/BASELINE_FAIRNESS_POLICY.md` and `../../docs/data/DATA_HETEROGENEITY.md`.

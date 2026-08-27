@@ -1,91 +1,79 @@
 # HALO
 
-**H**eterogeneity-**A**ware **L**anguage-aligned IMU model for **O**pen-set HAR.
+HALO is a research system for **personalized movement monitoring from wearable IMU data**. It uses
+pretrained temporal representations from phones, smartwatches, and compatible consumer wearables to
+support three application tasks:
 
-HALO is an IMU foundation model for **real-world phone/watch human activity recognition** under
-heterogeneous acquisition. A channel-independent, rate-invariant tokenizer produces per-patch
-embeddings that survive changes in sampling rate, channel set, and sensor placement; activities are
-then recognized **zero-shot** from natural-language label text — no per-dataset classifier.
+1. detect an arbitrary demonstrated movement in later continuous recordings;
+2. quantify how two executions of the same movement differ; and
+3. discover frequently recurring motion motifs in unlabeled occupational recordings.
 
-Training is two phases:
+The intended workflow is **demonstrate or discover, detect, compare, and track**. Rehabilitation is
+the primary application. Occupational monitoring is scoped to repetitive-motion exposure and drift;
+the system does not infer intent, fatigue, injury, or clinical improvement without external ground
+truth.
 
-- **Phase A** — label-free representation pretraining (JEPA + augmentation VICReg). Activity labels
-  never enter the loss. See [`training/tokenizer/README.md`](training/tokenizer/README.md).
-- **Phase B** — the evidence engine: retrieval over a memory bank of Phase-A patches, candidate-set
-  prediction, then separate reject-confidence calibration. See
-  [`docs/design/PHASE_B_TRAINING_INTENT.md`](docs/design/PHASE_B_TRAINING_INTENT.md).
+Read the active design in this order:
 
-This repo is a **clean rebuild** of the v2 work. It carries only the current, verified design; the
-prior tree lives beside it as `legacy_code/` (not part of this repo) and is mined for reference only.
+1. [`docs/design/MOTIVATION.md`](docs/design/MOTIVATION.md)
+2. [`docs/design/RESEARCH_TASKS.md`](docs/design/RESEARCH_TASKS.md)
+3. [`docs/design/DESIGN_OF_RECORD.md`](docs/design/DESIGN_OF_RECORD.md)
+4. [`docs/design/EVALUATION_PROTOCOL.md`](docs/design/EVALUATION_PROTOCOL.md)
+5. [`docs/design/IMPLEMENTATION_PLAN.md`](docs/design/IMPLEMENTATION_PLAN.md)
 
-## Design pillars
+## Current status
 
-- **Deployment-scoped data.** The primary corpus uses phone, watch, and bounded consumer-wearable
-  placements: pockets/waist, wrist/forearm, lower back, smart glasses/head, and earbud/ear. Each
-  stream contains accelerometer and trustworthy co-located gyroscope when available; accel-only
-  streams are explicitly masked. ECG, magnetometer, orientation, and unrelated body rigs are pruned.
-  See `data/scripts/curate/deployment_policy.py`.
-- **Two dataset versions.** From the curated stream we build a **harmonised** view (fixed 6-channel
-  `[acc_xyz, gyro_xyz]` canonical order, zero-pad + validity mask) and a **non-harmonised** view
-  (native 3/6-channel width). See `data/scripts/assembly/baseline_view.py`.
-- **Unit canonicalization.** Accelerometer values use `g` via a single source of truth
-  (`data/scripts/curate/accel_units.py`); iOS `userAcceleration` is rebuilt as `userAcc + gravity`
-  when a gravity vector exists. Gravity-removed streams (KU-HAR and XRF AirPods) are explicitly
-  described and masked from gravity-dependent behavior rather than being silently treated as total
-  acceleration.
-- **Tiered, faithful baseline comparison.** Heterogeneity is compared as a stack — **T0** base model,
-  **T1** rate, **T2** channels/placement, **T3** open-set labels — with an explicit faithfulness
-  contract for what may/may not be done to a baseline. See
-  [`docs/baselines/BASELINE_FAIRNESS_POLICY.md`](docs/baselines/BASELINE_FAIRNESS_POLICY.md).
+This branch, `application-motion-monitoring`, records the application pivot agreed on 2026-08-27.
+The encoder, data converters, released-checkpoint baseline adapters, and prior evaluation machinery
+already exist. The common `MotionSequence` export and the three application evaluators are planned
+but not yet implemented.
+
+The previous zero-shot, k-curve, and retrieve-mix-vote research remains recoverable from Git at the
+branch point, commit `32267b6`. It is not the design of record on this branch.
+
+## Technical foundation
+
+- **Data:** converters preserve subjects, sessions, timestamps, sensor units, placement, sampling
+  rate, gravity state, and channel validity. The new tasks must consume whole session timelines rather
+  than treating six-second training grids as independent recordings.
+- **HALO encoder:** physical-time frontend plus temporal patch embeddings and explicit acquisition
+  metadata.
+- **External representations:** author-released HARNet, UniMTS, NormWear, and ImageBind checkpoints,
+  used frozen through faithful adapters.
+- **Initial downstream methods:** raw-signal DTW, physical-feature alignment, latent subsequence
+  alignment, and matrix-profile-style motif discovery. Learned metric heads come later only if the
+  frozen floors identify a representation limitation.
 
 ## Layout
 
-Organized by concern (top-level folders, not a single Python package):
-
-```
-baselines/            # one subfolder per baseline: citation + paper, cloned repo (gitignored), adapter.py
+```text
+baselines/            # author-released checkpoint adapters and publications
 data/
-  datasets/           # one subfolder per dataset: downloads (gitignored), converter, metadata, channel descriptions
-  scripts/            # shared cross-dataset logic (imported as data.scripts.*), grouped by stage
-    curate/             # deployment_policy.py (device/channel/placement), accel_units.py (unit → g)
-    assembly/           # baseline_view.py (harmonised vs non-harmonised), assemble.py
-    labels/             # canonical vocabulary + global label mapping
+  datasets/           # downloads, converters, manifests, and channel descriptions
+  scripts/            # curation, units, assembly, quality checks, and EDA
 model/
-  tokenizer/          # filterbank + encoder + text conditioning (Phase A)
-  evidence/           # retrieval, evidence head, decoder, confidence (Phase B)
+  tokenizer/          # HALO representation encoder and frontends
+  evidence/           # historical classification experiments; not the active application design
 training/
-  tokenizer/          # Phase-A pretraining (JEPA + augmentation VICReg) + probes
-  evidence/           # Phase-B memory bank, episodic trainer/evaluator
-  diagnostics/        # cross-cutting analyses
-eval/                 # zero-shot / few-shot scoring, protocol stamping, table assembly
-experiments/          # isolated representation studies with their own configs and outputs
-docs/                 # design / data / baselines — see docs/README.md for the reading order
-tests/                # regression tests (green)
+  tokenizer/          # optional HALO representation pretraining and diagnostics
+  evidence/           # historical Phase-B trainers retained for reproducibility
+  diagnostics/        # representation diagnostics
+eval/                 # prior HAR evaluation plus future shared application protocol code
+docs/                 # active motivation, task, design, data, baseline, and result records
+tests/                # regression tests
 ```
 
-Each folder has a short README describing exactly what belongs in it.
-
-## Status
-
-All five layers below are **built and running**; the open questions are empirical, not structural.
-
-1. **Data** — 12 training datasets (20 streams, native-rate grids) + 7 held-out zero-shot test sets;
-   93-label canonical vocabulary. `docs/data/DATA_PIPELINE.md`.
-2. **Model** — physical-Hz filterbank tokenizer + config-conditional dual-branch encoder.
-3. **Phase A** — label-free JEPA + augmentation-VICReg pretraining.
-4. **Phase B** — memory bank + per-patch retrieval + candidate-CE predictor + confidence calibration.
-5. **Baselines + eval** — 8 models scored on 7 test sets under a stamped protocol;
-   `python -m eval.assemble_table`.
-
-⚠️ **Before citing any number, read `docs/archive/EVIDENCE_ENGINE_FINDINGS.md`.** Several headline
-claims have been retracted, and that doc — not this one — is the authoritative empirical position.
+Application code will live under `applications/motion_monitoring/` so it does not inherit candidate-
+label or Phase-B assumptions from the previous evaluation harness.
 
 ## Development
 
-Tests run against the interpreter in `legacy_code/.venv` (this tree has no `.venv` of its own):
+Use the project interpreter for torch, scipy, pandas, and h5py:
 
 ```bash
-/path/to/legacy_code/.venv/bin/python -m pytest tests -q
+/home/alex/code/HALO/legacy_code/.venv/bin/python -m pytest tests -q
 ```
 
-Data, checkpoints, and vendored baseline repos are gitignored and regenerated from source.
+Raw datasets, checkpoints, caches, and generated run artifacts remain gitignored. Design decisions
+and promoted result summaries are tracked so switching branches restores the corresponding research
+program without duplicating stale documents.

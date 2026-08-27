@@ -1,7 +1,12 @@
-# Data pipeline — source → grids
+# Data pipeline - source sessions, training grids, and application timelines
 
 How raw datasets become the gridded corpus. Every stage is one module in `data/scripts/` (see also
 `DATA_HETEROGENEITY.md` for the per-dataset rationale).
+
+> **Application requirement, 2026-08-27:** the six-second grids are an encoder-training and legacy
+> HAR representation. Tasks 1-3 operate on complete source-session timelines. Application loaders
+> must reconstruct overlapping temporal embeddings from the converted sessions, preserve real gaps
+> and event boundaries, and never treat six-second blocks as independent source recordings.
 
 ## Stages
 
@@ -10,7 +15,7 @@ How raw datasets become the gridded corpus. Every stage is one module in `data/s
 | 1 | **Convert** | `data/datasets/<ds>/convert.py` | `data/datasets/<ds>/sessions/*.parquet` + `manifest.json` + `labels.json` *(gitignored)* |
 | 2 | **Curate** | `curate/deployment_policy.py` | one phone/watch device stream, acc(+gyro), gravity reconstructed |
 | 3 | **Unit** | `curate/accel_units.py` | accelerometer → g |
-| 4 | **Assemble** | `assembly/assemble.py` | (resample →) window → one view per alignment (`Grid`) |
+| 4 | **Assemble** | `assembly/assemble.py` | (resample ->) window -> one training/evaluation view per alignment (`Grid`) |
 | 5 | **Orchestrate** | `build_grids.py` | per-stream grids under `data/datasets/<ds>/grids/<alignment>/<stream>/` |
 | 6 | **Screen** | `scan_implausible.py`, `scan_duplicates.py` | per-alignment exclusion caches in `data/quality/` |
 
@@ -18,14 +23,14 @@ How raw datasets become the gridded corpus. Every stage is one module in `data/s
 
 | alignment | rate | channels | labels | who consumes it |
 |---|---|---|---|---|
-| `native` | native (20/50/100 Hz) | 6-ch `[acc,gyro]` + mask | canonical | **Phase A and Phase B** — the rate-invariant filterbank trains here |
-
-Native grids retain all recording samples. They use non-overlapping contexts of at most six seconds;
-the final shorter context is right-padded on disk and accompanied by `lengths.npy`. HALO loaders slice
-to that valid length before augmentation and form fixed one-second patches, including one honest final
-short patch. The baseline grid regimes remain full-window only.
+| `native` | native (20/50/100 Hz) | 6-ch `[acc,gyro]` + mask | canonical | HALO representation training and historical evidence-engine experiments |
 | `harmonised` | 60 Hz | 6-ch `[acc,gyro]` + mask | canonical | layout-locked baselines that need a fixed rate |
 | `non_harmonised` | native | native 3/6-ch | native | the default `run_baselines` scoring alignment |
+
+Native grids retain the valid samples from each recording but partition them into non-overlapping
+contexts of at most six seconds. The final shorter context is right-padded on disk and accompanied by
+`lengths.npy`. HALO loaders slice to that valid length before augmentation and form fixed one-second
+patches, including one honest final short patch. The baseline grid regimes remain full-window only.
 
 `placement_strict` → phones only (drops the watch datasets).
 
@@ -33,6 +38,11 @@ Stage 6 is **not optional**. `CorpusIndex`, `build_memory`, `resolvability`, `se
 and `run_baselines` all load these caches with `require=True`: a missing or stale cache is a hard
 failure, because silently readmitting byte-identical stale-buffer windows would corrupt both training
 and scoring. Rebuild them after every grid rebuild, once per alignment you intend to use.
+
+The application path needs an equivalent session-level quality screen. It must map every rejected
+grid interval back to source time, reject duplicate or stale buffers before motif discovery, and
+retain the reason in the application manifest. Otherwise Task 3 could report a sensor replay defect
+as a highly recurrent human motion.
 
 ## Run
 
@@ -49,7 +59,7 @@ python -m data.scripts.scan_duplicates                    # (6) REQUIRED — nat
 python -m data.scripts.scan_implausible --alignment non_harmonised   # needed by run_baselines
 python -m data.scripts.scan_duplicates  --alignment non_harmonised   # needed by run_baselines
 
-python -m data.scripts.labels.build_global_label_mapping  # canonical ConSE vocabulary → data/labels/global_labels.json
+python -m data.scripts.labels.build_global_label_mapping  # legacy HAR vocabulary; not required by Tasks 1-3
 python -m data.scripts.curate.sensor_bias --build         # frozen per-sensor physics; Phase A fails closed without it
 ```
 
@@ -61,31 +71,6 @@ explicitly.
 
 `placement_strict` (phones only, "harmonised-strict") is not a separate build — it is the phone
 subset of the harmonised grids, selected at training time via `deployment_streams(placement_strict=True)`.
-
-## Historical status snapshot (2026-07-12)
-
-This section records the earlier converter milestone and is not the current Phase-A roster. The
-authoritative live roster, stream semantics, and measured corpus properties are in
-`DATA_HETEROGENEITY.md` and `training/tokenizer/README.md`.
-
-**11 datasets converted + verified end-to-end** on real downloads (harmonised 60 Hz 6-ch `[acc,gyro]` /
-non-harmonised native): motionsense, hapt, uci_har, pamap2, wisdm, mhealth, realworld, hhar, kuhar,
-unimib_shar (+ shoaib/inclusivehar/capture24 in progress). Verification invariants that passed:
-accelerometer median magnitude ≈ 1 g where gravity is present (uci_har 1.02, pamap2 1.00, hhar 0.99,
-realworld 1.00, …) and ≈ 0 where gravity is removed (kuhar 0.074); correct channel count + mask
-(acc-only sets show `mask=[T,T,T,F,F,F]`); 60 Hz harmonised; canonical labels; subjects present.
-
-**Provenance + downloader:** `data/scripts/download_datasets.py` encodes the verified sources (direct
-UCI/uni-mannheim URLs + Kaggle slugs). Gated: **mobiact** (Kaggle returns 403 until you accept the
-dataset terms on kaggle.com); shoaib/capture24/inclusivehar download via the scriptable URLs in the
-downloader notes. `harth` is downloaded but `role='stress'` (thigh/lower-back), so it is not in the
-primary `build_grids` output.
-
-**Pre-windowed datasets** (`metadata.json: pre_windowed: true`): uci_har (128-sample / 2.56 s segments)
-and unimib_shar (151-sample). These ship as fixed short segments too short for the 6 s corpus window,
-so `build_grids` treats each distributed segment as exactly one window. (kuhar uses its *continuous*
-`1.Raw_time_domian_data`, so it is windowed normally.) unimib's upstream Kaggle CSV lost the
-subject-map, so its splits collapse to a single pseudo-subject (documented, acceptable for a train set).
 
 ## Converter contract (the recipe every converter follows)
 

@@ -1032,8 +1032,8 @@ def main() -> None:
                              "RNG + step and continue the remaining steps)")
     parser.add_argument("--frontend", choices=("fixed", "learnable", "continuous"), default="fixed",
                         help="tokenizer arm. 'fixed' = physical-Hz constant-Q filterbank (default); "
-                             "'learnable' = the constrained-adaptive filterbank arm "
-                             "(docs/archive/LEARNABLE_TOKENIZER_ARM.md); 'continuous' = the "
+                             "'learnable' = the historical constrained-adaptive filterbank arm "
+                             "(see docs/LEGACY.md); 'continuous' = the "
                              "continuous-time temporal-kernel arm.")
     parser.add_argument("--text-conditioning", choices=("per_channel", "factored"), default=None,
                         help="config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). "

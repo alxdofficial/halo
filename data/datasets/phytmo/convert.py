@@ -75,7 +75,7 @@ MAX_GAP_SEC = 0.5
 # single samples (3-4% of rows, harmless), but the left-shin unit is 40% missing in runs of 3-5
 # samples. Interpolating 40% of a signal would be fabrication, so a trial is SKIPPED when any of its
 # four units exceeds either bound; isolated single-sample dropouts are interpolated. Everything else
-# from C02 survives. See docs/data/DATASET_EXPANSION_2026-08.md section 8b.
+# from C02 survives. See docs/data/APPLICATION_DATASETS.md and docs/LEGACY.md.
 MAX_NAN_RUN = 2
 MAX_NAN_FRACTION = 0.05
 

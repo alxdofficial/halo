@@ -34,7 +34,7 @@ get wrong:
 Transitions are short by construction (measured: 2.5-10 s per block, against a 6 s analysis window),
 so most transition blocks produce no grid rows. They are still converted — the session store is
 lossless and the window length is not a property of the data. See
-docs/data/DATASET_EXPANSION_2026-08.md section 8b.
+the historical audit indexed by docs/LEGACY.md.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ def recording_id(session_id: str) -> str:
     participant comes from the SAME single recording, so two blocks of the same activity are
     minutes apart within one bout and are not independent enrollment executions. Measured
     2026-08-11: 1.7x overcount. FORTH-TRACE therefore supports no same-subject enrollment curve,
-    which is a result, not a gap to fill (docs/data/DATASET_EXPANSION_2026-08.md section 8b).
+    which is a result, not a gap to fill (the historical audit is indexed by docs/LEGACY.md).
     """
     return session_id.split("_")[0]
 

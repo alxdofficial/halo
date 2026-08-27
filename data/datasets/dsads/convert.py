@@ -95,7 +95,7 @@ GYRO_RADS_MAX = 40.0             # p99.9 |w|; deg/s would be ~57x larger
 # The 3x rule cut 726 joins and lost 504 windows per placement; 312 of those cuts were on
 # recordings whose joins average the 50th percentile, i.e. false positives. The percentile rule
 # keeps a05/a06's real cuts and drops the rest. See
-# docs/data/DATASET_EXPANSION_AUDIT_2026-08-11.md section 1.5.
+# The historical converter audit is indexed by docs/LEGACY.md.
 JOIN_STEP_PERCENTILE = 99.9
 # If the TYPICAL join sat this high in the interior distribution the ordering itself would be wrong
 # and splitting would not save it — convert per segment instead.

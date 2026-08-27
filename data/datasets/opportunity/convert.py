@@ -19,7 +19,7 @@ is not physically possible). Both are therefore scaled by 1/1000 here, giving g 
 gesture — but the gestures are short by construction against a 6 s analysis window, so a window
 majority-vote over them mostly returns the null class. Locomotion (stand / walk / sit / lie) is the
 label that survives at this window length. The gesture cell is reported as unsupported rather than
-forced; see docs/data/DATASET_EXPANSION_2026-08.md section 8b.
+forced; the historical audit is indexed by docs/LEGACY.md.
 
 Opportunity is in `EXCLUDED_PRIMARY_DATASETS` for training on placement grounds — back and
 upper/lower-arm IMUs are not a phone-pocket or watch-wrist deployment.
@@ -70,7 +70,7 @@ def recording_id(session_id: str) -> str:
     Blocks of the same activity inside one run are seconds or minutes apart in a single recording,
     so they are NOT independent enrollment executions — treating them as such would measure
     adjacent-window binding. Measured 2026-08-11: 30 blocks per (subject, label) against 6 real
-    recordings, a 10.2x overcount. See docs/data/DATASET_EXPANSION_AUDIT_2026-08-11.md section 2.1.
+    recordings, a 10.2x overcount. The historical audit is indexed by docs/LEGACY.md.
     """
     return "_".join(session_id.split("_")[:2])
 

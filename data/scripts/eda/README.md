@@ -37,7 +37,7 @@ Every sampled example must record the random seed and enough provenance to
 recover its dataset, subject, session, activity, device stream, channels,
 sampling rate, window bounds, and source alignment.
 
-## Current commands
+## Existing commands
 
 ```bash
 python -m data.scripts.eda.inventory_streams
@@ -56,10 +56,11 @@ The gravity-aligned view estimates pitch/roll from mean acceleration, applies on
 rigid rotation to both co-located sensors, and then makes a unitless overlay after
 per-modality centering and RMS normalization. It does not infer yaw.
 
-The tokenizer view currently imports the authoritative physical-Hz filterbank
-from the sibling `legacy_code` repository because the clean repository does not
-yet contain HALO v2 model code. It plots pre-projection log-band energies only;
-it does not claim to show learned encoder embeddings or checkpoint behavior.
+The tokenizer-feature script is a historical EDA utility and still imports the
+reference physical-Hz filterbank from the sibling `legacy_code` repository. The
+current repository now contains HALO model code, but this script has not yet been
+migrated to its checkpoint interface. It plots pre-projection log-band energies only;
+it does not claim to show current learned encoder embeddings or checkpoint behavior.
 Raw device-frame input is the default. `--orientation gravity_aligned` is a
 sensitivity view because alignment changes the signed DC gravity/tilt features
 that the tokenizer intentionally preserves for static-posture discrimination.
@@ -86,9 +87,9 @@ which remains per-axis and orientation-sensitive.
 4. **Dataset/activity comparisons**: use shared canonical labels while retaining
    the original label when the selected grid exposes it, plus available
    acquisition metadata in the manifest.
-5. **HALO v2 tokenizer views**: compare token and encoder representations by
-   activity and dataset after the v2 tokenizer and checkpoint interface are
-   available in this repository.
+5. **Application representation views**: compare frozen encoder sequences, aligned
+   demonstrations, per-phase deviations, and recurrent motifs. These views remain
+   to be implemented under `applications/motion_monitoring/`.
 
 Primary figures use deployment-plausible phone or watch streams. Analyses of
 ankle, chest, ECG, magnetometer, or other pruned inputs must be explicitly

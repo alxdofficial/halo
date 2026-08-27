@@ -121,7 +121,7 @@ def recording_id(session_id: str) -> str:
     the same instant, reading as change-of-configuration transfer. Every other simultaneous-placement
     source in the corpus keeps the placement OUT of the event id for exactly this reason. Grouping
     both arms and every task block onto the subject's visit restores that guarantee.
-    See docs/data/DATASET_EXPANSION_AUDIT_2026-08-11.md section 2.2.
+    See docs/data/APPLICATION_DATASETS.md; the historical audit is indexed by docs/LEGACY.md.
     """
     return "_".join(session_id.split("_")[:2])
 

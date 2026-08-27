@@ -1,9 +1,14 @@
-# Data heterogeneity — per-dataset reference
+# Data heterogeneity - per-dataset reference
 
-> This doc is the *mechanics* of how we normalize heterogeneity. It is **not** a contribution claim:
-> reducing every dataset to ≤ 6 channels and resampling is deliberate deployment-realistic
-> preprocessing, not the pitch. For *why* HALO exists (language-conditioned open-set + acquisition-config
-> generalization — the part that is not cheap preprocessing) see [`MOTIVATION.md`](../design/MOTIVATION.md).
+> **Application status, 2026-08-27:** the verified unit, placement, rate, gravity, and channel
+> decisions below remain authoritative. The old train/eval role column describes encoder and HAR
+> provenance, not the new application split. Use
+> [`APPLICATION_DATASETS.md`](APPLICATION_DATASETS.md) for Tasks 1-3.
+
+> This doc is the mechanics of how we normalize heterogeneity. It is not a contribution claim.
+> Application measurements must nevertheless test whether session, remounting, and device variation
+> change the representation enough to mimic a movement change. See
+> [`MOTIVATION.md`](../design/MOTIVATION.md).
 
 Every non-obvious thing we do to a dataset is recorded here, so we never have to re-derive *why*.
 Three modules enforce these decisions in code; this doc is their prose rationale:

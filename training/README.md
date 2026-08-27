@@ -1,31 +1,38 @@
-# training
+# Training and diagnostics
 
-Two sequential phases. Phase A learns the representation without activity labels; Phase B learns to
-use retrieved evidence on top of a frozen Phase-A encoder.
+The application-motion-monitoring branch starts from frozen representations. Training is optional
+and is introduced only after non-parametric signal and representation floors are measured.
 
-## `tokenizer/` — Phase A (label-free representation pretraining)
+## `tokenizer/`
 
-Two universal objectives: **JEPA** (a masked student predicts an EMA teacher's clean contextual
-tokens) + **VICReg** over two augmentations of every window. Activity labels never enter the loss — only the
-validation probes. Full recipe, defaults, and ablation arms: [`tokenizer/README.md`](tokenizer/README.md).
+HALO representation pretraining, checkpoint loading, temporal representation export, and
+representation-health diagnostics. The existing JEPA/VICReg trainer remains useful for controlled
+within-HALO experiments, but the three application tasks do not require another pretraining run to
+begin.
 
-Entry points: `pretrain.py` (train), `pretrain_data.py` (corpus + temperature sampler),
-`losses_repr.py` (objectives), `objective_health.py` / `grad_check.py` (pre-launch checks),
-`eval_transfer.py` / `probe_robustness.py` / `probe_ceiling.py` (probes).
+See [`tokenizer/README.md`](tokenizer/README.md) for the implemented encoder recipe. Its Phase-A name
+is historical terminology; application code should call the output a representation checkpoint.
 
-## `evidence/` — Phase B (memory + evidence prediction)
+## `evidence/`
 
-Builds a patch-level memory bank from a frozen Phase-A checkpoint, retrieves per query patch, and
-trains one candidate-set predictor objective. No `UNKNOWN` candidate is introduced. A separate
-frozen-predictor confidence experiment exists but is parked and is not part of the current launch.
+Historical candidate-label, memory-bank, and retrieve-mix-vote experiments. They are retained so the
+previous published-result branch remains reproducible, but they are not the active downstream design.
+Do not extend these trainers for the new tasks.
 
-Entry points: `build_memory.py` (bank), `train_patch_decoder.py` (candidate-CE predictor),
-`eval_enrollment.py` (zero/full/partial support, same/cross-configuration evaluation, and matched
-controls), and the parked `train_patch_confidence.py` calibration experiment.
+The application path uses sequence matching, aligned difference measurement, and motif discovery in
+a new `applications/motion_monitoring/` package. If frozen representations fail, one small Siamese
+metric projection may be trained and shared by all three tasks.
 
-## `diagnostics/` — cross-cutting analyses
+## `diagnostics/`
 
-Baseline heterogeneity and zero-shot difficulty reports; artifacts under `diagnostics/outputs/`.
+Existing representation and provenance probes remain useful. New diagnostics should measure:
 
-Phase A is activity-label-free. Phase B may read labels attached to retrieved memory examples and
-the runtime candidate vocabulary.
+- cross-session same-motion versus different-motion separation;
+- remounting and device sensitivity;
+- temporal embedding rank and patch diversity;
+- verification calibration and false-match behavior;
+- target-absent false alarms; and
+- motif recurrence versus duplicate-buffer artifacts.
+
+Activity labels may be used to score hidden-label evaluation but do not enter the core application
+algorithms.

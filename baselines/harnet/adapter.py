@@ -70,7 +70,7 @@ ACC_CHANNELS = ("acc_x", "acc_y", "acc_z")
 SSL_HUB_REPO = "OxWearables/ssl-wearables"
 SSL_HUB_TAG = "v1.0.0"
 
-# --- head-fit CORPUS selection (F3, docs/archive/EVIDENCE_ENGINE_FINDINGS.md §6) ---------------
+# --- historical head-fit corpus selection (see docs/LEGACY.md) --------------------------------
 # Two legitimate and DIFFERENT comparisons. Report both; neither replaces the other.
 #   "legacy"  (default) — the 9-dataset corpus this baseline has always used. This is the
 #             OFF-THE-SHELF / deployment row: what a practitioner gets by downloading harnet
