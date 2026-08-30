@@ -35,8 +35,9 @@ Read the active design in this order:
 
 The application pivot agreed on 2026-08-27 is now the design of record on `main`. The encoder, data
 converters, released-checkpoint baseline adapters, application source acquisition, and seven
-lossless raw-timeline adapters exist. The common `MotionSequence` export and the four application
-evaluators are planned but not yet implemented.
+lossless raw-timeline adapters exist. Task 0 now has a tested native-time statistical detector,
+development-only calibration, and interval evaluation package. Its full calibration and held-out
+visual audit remain open. The common `MotionSequence` export and Tasks 1-3 remain planned.
 
 The previous zero-shot, k-curve, and retrieve-mix-vote research remains recoverable from Git at
 commit `32267b6` and branch `archive/pre-application-main-20260830`. It is not the design of record.

@@ -13,10 +13,10 @@ continuous native-rate IMU
     -> invalid-data mask
     -> physical motion evidence
     -> change points and hysteresis intervals
-    -> candidate events with confidence
+    -> candidate events with boundary evidence
 ```
 
-The output is a list of start times, end times, proposal scores, boundary confidence, and source
+The output is a list of start times, end times, proposal scores, boundary-change scores, and source
 provenance. It does not assign an activity name and cannot establish that a movement was intentional.
 Stillness, incidental movement, and deliberate work can only be separated to the extent that their
 sensor dynamics differ. A Task-1 reference, recurrence in Task 3, synchronized video, or human review
@@ -52,13 +52,16 @@ Every proposal contains:
 - start and end times in physical seconds;
 - the valid-sample fraction and any gap or clipping flags;
 - a motion-evidence score;
-- start- and end-boundary confidence;
+- start- and end-boundary change scores;
 - the physical features that triggered the proposal;
-- links to aligned raw signal and `MotionSequence` patches; and
+- stream identifiers and physical times that address the aligned raw signal and future
+  `MotionSequence` patches; and
 - an explicit `uncertain` state when the operating threshold is not met confidently.
 
-Overlapping proposals from synchronized sensor streams remain linked. They are not counted as
-independent events.
+The primary protocol selects one deployment-relevant stream before proposal. Multi-stream
+recordings therefore require an explicit stream identifier, and the implementation refuses to
+concatenate synchronized streams silently. A future multi-stream comparison may link overlapping
+proposals, but it must not count them as independent events.
 
 ## 4. Primary statistical pipeline
 
@@ -109,9 +112,11 @@ only a bounded margin around each rough boundary, then select the nearest change
 the combined evidence. This keeps the method conventional and prevents a distant unrelated change
 from replacing the event boundary. Compare GGS only through a tested reference implementation.
 
-Each boundary's confidence combines change magnitude, agreement across features, and stability under
-small changes to window duration and stride. Threshold-sensitive intervals are retained as uncertain
-rather than silently discarded.
+Each boundary carries a bounded but uncalibrated change score derived from the local PELT change
+magnitude or, without a supported change point, the local evidence jump. It must not be interpreted
+as a probability. Agreement across features and stability under small changes to window duration
+and stride are evaluation diagnostics, not silently folded into this score. Threshold-sensitive or
+weak-boundary intervals are retained as uncertain rather than silently discarded.
 
 ### 4.5 Proposal merging
 
@@ -215,22 +220,31 @@ include a direct timeline motif baseline. These controls expose proposal-stage f
 ## 10. Required visualizations
 
 1. a complete recording timeline with raw motion evidence, proposed intervals, and ground truth;
-2. zoomed boundary panels showing feature changes and confidence;
+2. zoomed boundary panels showing feature changes and boundary-change scores;
 3. event-recall versus false-proposals-per-hour curves only for exhaustively annotated background;
 4. boundary-error distributions per event duration and dataset;
 5. an over-/under-segmentation confusion summary; and
-6. a review strip of high-confidence true events, false proposals, and misses.
+6. a review strip of high-score true events, false proposals, and misses.
 
 The plots must show physical time and actual signal evidence. A single aggregate F1 score is not
 sufficient to understand whether the detector is usable.
 
-## 11. First implementation milestone
+## 11. Implementation status and first experiment milestone
 
-1. Pin and test `ruptures` in the project environment, then implement quality masks, development-
-   fitted physical evidence, hysteresis, and PELT refinement. It is not installed as of 2026-08-28.
-2. Reconstruct one development timeline each from MM-Fit and MoniPar.
-3. Build file-level loaders for C-MHAD and WEAR without reading their test labels during tuning.
-4. Freeze thresholds on development subjects.
+As of 2026-08-30, the native-time physical evidence, explicit quality masks, development-fitted
+robust scaling, hysteresis, bounded PELT refinement, operating-point calibration, serialization,
+and interval metrics are implemented under `applications/motion_monitoring/task0`. `ruptures`
+1.1.10 is tested and declared by the `task0` project extra. Dataset policies reject invalid
+stream/annotation/exhaustiveness combinations by default. PELT runs only in bounded neighborhoods
+around hysteresis boundaries, avoiding its long-timeline worst case. The remaining experiment
+milestone is:
+
+1. Fit scaling on the declared OpenPack/RecoFit development corpus and calibrate thresholds only on
+   an explicitly exhaustive development annotation level.
+2. Select and freeze PELT penalty and physical-time boundary parameters on development subjects.
+3. Evaluate held-out C-MHAD, WEAR, and OCA with their audited stream and annotation policies.
+4. Review full timelines and boundary panels, including WEAR's missing-channel stress recording and
+   OCA's hard clock-gap split.
 5. Report proposal curves and direct-downstream controls before adding a learned head or GGS arm.
 
 ## 12. Research basis

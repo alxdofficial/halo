@@ -84,8 +84,10 @@ class SensorStream:
             raise ValueError(f"unsupported canonical channels: {channels}")
         if self.gravity_state not in {"present", "removed", "unknown"}:
             raise ValueError(f"invalid gravity state: {self.gravity_state}")
-        if self.nominal_rate_hz is not None and self.nominal_rate_hz <= 0:
-            raise ValueError("nominal rate must be positive")
+        if self.nominal_rate_hz is not None and (
+            not np.isfinite(self.nominal_rate_hz) or self.nominal_rate_hz <= 0
+        ):
+            raise ValueError("nominal rate must be finite and positive")
 
         object.__setattr__(
             self, "timestamps_sec", timestamps.astype(np.float64, copy=False)

@@ -5,8 +5,10 @@
 
 **Current progress.** The application package, selected seven-source acquisition, immutable payload
 checksums, raw-timeline adapters, lossless map-style caches, source-role inventory, and corpus audit
-are implemented and verified. Stage 0 remains open for the shared `MotionSequence` schema, immutable
-task manifests, and checkpoint-provenance freeze. Stages 1-6 remain planned.
+are implemented and verified. The initial Task-0 statistical detector, calibration guardrails, and
+interval metrics are implemented; its full development calibration and held-out visual audit remain
+open. Stage 0 remains open for the shared `MotionSequence` schema, immutable task manifests, and
+checkpoint-provenance freeze. Stages 1 and 3-6 remain planned.
 
 ## Stage 0: protocol and data audit
 
@@ -42,15 +44,17 @@ time.
 The implementation contract for this stage is
 [`TASK0_EVENT_SEGMENTATION.md`](../tasks/TASK0_EVENT_SEGMENTATION.md).
 
-1. Implement the energy-only hysteresis floor.
-2. Implement the primary compact dynamic-acceleration/angular-speed evidence, hysteresis, and
+1. **Implemented:** energy-only hysteresis floor.
+2. **Implemented:** primary compact dynamic-acceleration/angular-speed evidence, hysteresis, and
    `ruptures` PELT refinement with all durations expressed in seconds.
-3. Fit feature scales, thresholds, PELT penalty, `min_size`, and `jump` on development subjects and
-   freeze them.
-4. Audit each evaluation source for exhaustive background annotation. Evaluate false proposals only
+3. **Mechanism implemented; experiment open:** fit feature scales and threshold grids on development
+   subjects, then freeze thresholds, PELT penalty, `min_size`, and `jump`.
+4. **Metric guard implemented; full audit open:** audit each evaluation source for exhaustive
+   background annotation. Evaluate false proposals only
    where valid; otherwise report annotated-event recall, boundary quality, and reviewed unmatched
    proposals.
-5. Evaluate over/under-segmentation and the Task-1/Task-3 delta from oracle intervals to Task-0
+5. **Interval metrics implemented; downstream control open:** evaluate over/under-segmentation and
+   the Task-1/Task-3 delta from oracle intervals to Task-0
    proposals.
 6. Benchmark an established temporal-localization implementation over raw or frozen
    representations only after the statistical floor is fixed.
