@@ -10,7 +10,7 @@
 2. A reference and evaluated occurrence must be independent executions. Adjacent windows from one
    bout do not become independent examples.
 3. Development data selects thresholds and hyperparameters; sealed test data only measures them.
-4. Test activities may be named for scoring but their names do not enter Tasks 0-3.
+4. Test activities may be named for scoring but their names do not enter Tasks 1-3.
 5. Synthetic insertion uses an independently recorded occurrence when possible. Copying the query
    excerpt, even after augmentation, is a smoke test only.
 6. Report same-session, cross-session, remounting, cross-device, and cross-subject conditions
@@ -42,41 +42,19 @@ Different upstream corpora are part of the released model. This comparison ident
 application component; it does not by itself attribute a gain to architecture. Report checkpoint,
 model size, accepted sensors, temporal granularity, latency, memory, and energy where measurable.
 
-## 3. Task 0: event proposal and segmentation
-
-Task 0 receives complete timelines with event boundaries hidden. It reports:
-
-- event average precision across temporal-IoU thresholds;
-- event recall at fixed false-proposal rates where background is exhaustively annotated;
-- false proposals per recording hour where background is exhaustively annotated;
-- start/end boundary error and boundary F1;
-- over-segmentation and under-segmentation rates;
-- stability under small duration and stride changes; and
-- computational cost per recording hour.
-
-Score near-still background, incidental movement, sensor artifacts, and coherent annotated events
-separately only where the source supports those distinctions. An unmatched proposal is not a false
-positive when the source labels only target actions and leaves other real movement unannotated.
-C-MHAD therefore supports annotated-target recall and boundary metrics, but not naive false
-proposals per hour. A VLM may generate training pseudo-labels, but sealed evaluation boundaries and
-labels require source-provided or human-verified ground truth. Also report Task-1 and Task-3 results
-with oracle intervals, Task-0 proposals, and direct-timeline controls so the downstream cost of
-proposal errors is visible.
-The complete contract is owned by
-[`TASK0_EVENT_SEGMENTATION.md`](../tasks/TASK0_EVENT_SEGMENTATION.md).
-
-## 4. Task 1: arbitrary task detection
+## 3. Task 1: arbitrary task detection
 
 Task 1 enrolls independent executions, searches later continuous recordings, and reports event
 average precision, false alarms per hour, boundary error, and count error. The complete cohort,
-episode, action-proposal, and metric protocol is owned by
+episode, complete-timeline decoding, and metric protocol is owned by
 [`TASK1_ARBITRARY_DETECTION.md`](../tasks/TASK1_ARBITRARY_DETECTION.md). Window accuracy is not a
 primary metric because background dominates continuous recordings.
 
-Report both Task-0-proposal search and direct full-timeline search so proposal misses are not
-misattributed to the Task-1 matcher.
+The primary result always searches the complete timeline. The optional physical motion-proposal
+baseline may additionally report runtime, event recall, and downstream accuracy to quantify whether
+screening is worthwhile.
 
-## 5. Task 2: activity difference quantification
+## 4. Task 2: activity difference quantification
 
 The complete cohort, baseline, alignment, metric, and visualization protocol is owned by
 [`TASK2_CHANGE_QUANTIFICATION.md`](../tasks/TASK2_CHANGE_QUANTIFICATION.md).
@@ -106,14 +84,15 @@ Evaluate three properties separately.
 
 Latent distance is never labeled "quality" solely because it separates activity classes.
 
-## 6. Task 3: recurrent motion discovery
+## 5. Task 3: recurrent motion discovery
 
 The complete motif-search, hidden-label scoring, and human-review protocol is owned by
 [`TASK3_RECURRENT_MOTION_DISCOVERY.md`](../tasks/TASK3_RECURRENT_MOTION_DISCOVERY.md).
 
 Training annotations define arbitrary same/different event identities. Evaluation identities are
 held out completely; their annotations are hidden from matching and clustering and used only for
-scoring. Report oracle source intervals and Task-0 proposals separately.
+scoring. Report oracle source-interval matching and complete-timeline multiscale discovery
+separately.
 
 ### Metrics
 
@@ -141,7 +120,7 @@ clips and timelines for the top motif clusters and marks each as meaningful, dup
 uncertain. Measure review time, inter-rater agreement, and the fraction of cumulative motion exposure
 covered by confirmed motifs.
 
-## 7. Existing data roles
+## 6. Existing data roles
 
 The verified, checkpoint-dependent inventory is owned by
 [`APPLICATION_DATASETS.md`](../data/APPLICATION_DATASETS.md). In particular, Upper Limb Use is
@@ -153,10 +132,10 @@ The core public evaluation matrix is intentionally small:
 
 | dataset | primary role | complementary role |
 |---|---|---|
-| **C-MHAD** | sealed Task-0 segmentation and Task-1 demonstrated-action detection | wrist-versus-waist condition |
-| **WEAR** | external continuous Task-0/Task-1 validation | Task-3 recurrence control |
+| **C-MHAD** | sealed Task-1 demonstrated-action detection | Task-3 event recurrence and wrist-versus-waist control |
+| **WEAR** | long continuous Task-1 false-alarm validation | coarse Task-3 activity-bout control |
 | **MoniPar** | longitudinal Task-2 change quantification | natural cross-week Task-1 condition |
-| **OCA** | occupational Task-3 recurrent-motion discovery | occupational Task-0/Task-1 transfer |
+| **OCA** | occupational Task-3 recurrent-motion discovery | occupational Task-1 transfer |
 
 This is one shared four-dataset study, not four unrelated benchmark collections. C-MHAD, WEAR, and
 OCA are not reportable until immutable subject/recording manifests are frozen. Their loaders and
@@ -172,7 +151,10 @@ deployment condition unmeasured. Such a collection would include
 independent remounting, several sessions, target-absent intervals, clinician- or ergonomist-approved
 references, controlled deviations, and video ground truth.
 
-## 8. Statistical and reporting rules
+The exact temporal annotation contract of every source is recorded in
+[`ANNOTATION_INVENTORY.md`](../data/ANNOTATION_INVENTORY.md).
+
+## 7. Statistical and reporting rules
 
 - The unit of uncertainty is the subject, not the window.
 - Report one primary table per dataset and task condition, with subject-level confidence intervals.

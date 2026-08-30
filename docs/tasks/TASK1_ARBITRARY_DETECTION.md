@@ -16,9 +16,8 @@ personal task. A deployment consists of:
 1. recording one or more reference executions;
 2. trimming and validating those references;
 3. monitoring a later continuous recording;
-4. proposing intervals that contain coherent motion;
-5. matching each proposal or timeline subsequence against the references; and
-6. returning event times, scores, and aligned reference evidence for review.
+4. matching the complete recording timeline against the references; and
+5. returning consolidated event times, scores, and aligned reference evidence for review.
 
 IMU data cannot establish intent. An automatically proposed interval is a motion event until a user
 or clinician confirms that it is the intended task.
@@ -126,7 +125,7 @@ reference and query embeddings
     -> pairwise cosine cost
     -> constrained subsequence dynamic time warping
     -> duration/warp penalty
-    -> event proposals
+    -> dense endpoint scores and aligned intervals
     -> temporal non-maximum suppression
     -> development-calibrated threshold
 ```
@@ -150,20 +149,19 @@ independent positive executions, target-absent queries, hard negatives, and a di
 soft-DTW or ranking objective. Fine-tuning creates a task-specific encoder checkpoint; the original
 frozen checkpoint remains shared by all application tasks.
 
-## 6. Action proposals and boundaries
+## 6. Detection boundaries and duplicate consolidation
 
-Task matching and action proposal are evaluated separately. The proposal ladder is:
+The initial deployment uses user-guided enrollment boundaries followed by automatic trimming. Query
+recordings are not pre-segmented. Every feasible DTW endpoint yields a candidate alignment whose
+traceback supplies a start, end, normalized score, and duration ratio. A threshold calibrated on
+target-absent development recordings rejects weak candidates. Temporal non-maximum suppression then
+consolidates overlapping alignments that describe one physical occurrence.
 
-1. user-supplied enrollment boundaries, followed by automatic trimming;
-2. motion energy with hysteresis;
-3. multivariate change-point refinement;
-4. recurrence or cross-reference consistency; and
-5. an optional temporal action-localization head trained with explicit background.
-
-The initial deployment uses user-guided enrollment and automatic trimming. Automatic monitoring can
-use a cheap proposal stage, but the full subsequence matcher must also be evaluated on an unfiltered
-timeline so proposal errors are visible. A proposed interval is rejected as an enrollment reference
-when repeated demonstrations do not contain a stable alignable pattern.
+The reusable implementation is
+`applications.motion_monitoring.task1.matcher.full_timeline_matches`. It consumes only reference and
+query embeddings plus physical-time patch intervals, so every encoder receives identical decoding.
+The optional motion-proposal baseline may be measured as a speed arm, but it is not part of the
+primary accuracy path.
 
 ## 7. Dataset roles
 
@@ -237,10 +235,10 @@ operating point. Also report event F1, onset/offset error, temporal IoU, count e
 false alarms, and recall versus query/reference duration ratio. Uncertainty is computed over subjects,
 not windows.
 
-Required controls are raw-signal DTW, engineered physical features with the same matcher, every
-frozen encoder with the same matcher, an oracle-boundary arm, and each automatic proposal method.
-Oracle boundaries isolate representation and matching quality; automatic boundaries measure the
-deployable system.
+Required controls are raw-signal DTW, engineered physical features with the same matcher, and every
+frozen encoder with the same complete-timeline matcher. Source event boundaries score localization;
+they are never supplied to the query matcher. The optional motion-proposal baseline is reported only
+as a runtime/accuracy tradeoff.
 
 ## 10. Required visualizations
 

@@ -1,7 +1,7 @@
 # Encoder hypotheses for personalized motion monitoring
 
 > **Design and evidence record, 2026-08-28.** This document asks whether HALO's encoder mechanisms
-> address the representation failures that matter for Tasks 0-3. It separates implemented behavior,
+> address the representation failures that matter for Tasks 1-3. It separates implemented behavior,
 > literature-based motivation, prior project evidence, and claims that still require an experiment.
 
 ## 1. Bottom line
@@ -67,33 +67,9 @@ channels, rotation augmentation, synthetic coverage, channel-independent process
 HALO's narrower hypothesis is that **explicit physical rate and observability information can retain
 honest differences without forcing every source into one apparently uniform input**.
 
-## 3. What the four tasks require
+## 3. What the three tasks require
 
-### 3.1 Task 0: event proposal and segmentation
-
-The representation must preserve motion onsets, offsets, short transitions, stillness, and local
-background. Fixed-window HAR does not directly optimize these quantities. Temporal Action
-Localization work on inertial data reports that whole-timeline localization can produce more
-coherent segments and better NULL handling than fixed-window classifiers
-([Bock et al., 2024](https://doi.org/10.1145/3699770)).
-
-Relevant HALO mechanisms:
-
-- physical-time patch positions and validity masks;
-- the continuous frontend's ordered sub-second responses; and
-- a local temporal embedding sequence rather than one pooled session vector.
-
-Weak or irrelevant mechanisms:
-
-- acquisition text cannot create a boundary absent from the signal;
-- the fixed filterbank may blur within-patch onset shape because it retains band power but not phase;
-  and
-- neither frontend replaces the Task-0 proposal/localization algorithm.
-
-Task 0 must first compare raw energy and change-point methods with latent change points. If the raw
-floor wins, an encoder is not needed for proposal generation.
-
-### 3.2 Task 1: arbitrary demonstrated movement detection
+### 3.1 Task 1: arbitrary demonstrated movement detection
 
 This is query-by-example sequence matching, not activity-label classification. The representation
 must keep the order of local motion while tolerating bounded speed variation and ordinary execution
@@ -115,7 +91,7 @@ Acquisition descriptions could reduce false matches across incompatible placemen
 they outperform both neutral text and structured non-language metadata on unseen sessions. They do
 not encode the demonstrated movement and should never be used as a semantic shortcut.
 
-### 3.3 Task 2: change quantification
+### 3.2 Task 2: change quantification
 
 This task creates the hardest invariance tradeoff. The representation should ignore acquisition
 nuisance while retaining changes in phase, duration, intensity, smoothness, range, and compensation.
@@ -144,7 +120,7 @@ Task 2 therefore keeps raw physical measurements beside latent distance. It must
 reliability, false change under remounting, and sensitivity to known execution changes. A latent
 metric that is discriminative but unreliable is not useful.
 
-### 3.4 Task 3: recurrent motion discovery
+### 3.3 Task 3: recurrent motion discovery
 
 The representation must preserve repeated subsequences, variable duration, and separation from
 incidental or outlier motion. Prior factory work finds that outlier segments can shift inferred
@@ -258,8 +234,8 @@ localization, matching, and change sensitivity.
 
 ## 6. Decisive experiment ladder
 
-Every encoder must feed the same Task-0 proposal, Task-1 matcher, Task-2 alignment/report, and Task-3
-motif evaluator. Thresholds and tiny metric heads are fit only on development data. Test subjects,
+Every encoder must feed the same Task-1 full-timeline matcher, Task-2 alignment/report, and Task-3
+dense motif evaluator. Thresholds and tiny metric heads are fit only on development data. Test subjects,
 sessions, and tasks remain sealed.
 
 ### 6.1 Floors and external encoders

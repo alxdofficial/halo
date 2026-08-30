@@ -1,12 +1,11 @@
-# Task 0: event proposal and segmentation
+# Optional motion-proposal baseline
 
-> **Design of record, 2026-08-30.** Task 0 is deliberately a small statistical front end built from
-> established components.
-> It proposes observable motion intervals for Tasks 1-3; it is not a new activity recognizer.
+> **Baseline record, 2026-08-30.** This is a small statistical accelerator built from established
+> components. It is not a numbered research task or a prerequisite for Tasks 1-3.
 
 ## 1. Question and scope
 
-Given a continuous IMU recording, where are the bounded intervals of coherent human motion?
+Given a continuous IMU recording, where are likely intervals of coherent physical motion?
 
 ```text
 continuous native-rate IMU
@@ -39,9 +38,9 @@ of segments and assumes approximately Gaussian, independent samples. Learned ine
 action localization has also improved coherent segmentation and NULL handling, but it requires
 supervised interval labels and adds another trained model.
 
-The primary Task-0 implementation is therefore physical motion evidence, hysteresis, and PELT.
+The implemented baseline is therefore physical motion evidence, hysteresis, and PELT.
 Energy-only hysteresis is the simple floor, GGS is an HAR-specific comparison, and released temporal
-localization is a supervised comparison rather than a prerequisite. Task 0 is not a claimed modeling
+localization is a supervised comparison rather than a prerequisite. This is not a claimed modeling
 contribution.
 
 ## 3. Output contract
@@ -123,14 +122,14 @@ weak-boundary intervals are retained as uncertain rather than silently discarded
 Merge intervals only when their gap is short and the evidence remains above the continuation floor.
 Keep nested or adjacent intervals when the data support two scales; Task 3 may need a repeated
 sub-action while Task 1 may need the complete exercise. Final non-overlap is a downstream decision,
-not an irreversible Task-0 assumption.
+not an irreversible downstream-task assumption.
 
 ## 5. Comparison arms
 
 | arm | input | fitted component | purpose |
 |---|---|---|---|
 | energy floor | raw physical summaries | development thresholds | simplest deployable baseline |
-| PELT + hysteresis | compact physical summaries | penalty and thresholds | primary Task-0 method |
+| PELT + hysteresis | compact physical summaries | penalty and thresholds | implemented optional method |
 | frozen-latent change points | HALO or released encoder timeline | penalty and thresholds | test whether the representation sharpens boundaries |
 | temporal localization | raw or frozen latent timeline | small released TAL head | learned upper comparison |
 | video-privileged localization | IMU at deployment, video during training/annotation | same small head | test privileged supervision |
@@ -169,7 +168,7 @@ physically motivated nuisance transformations are allowed:
 - a mild whole-session clock perturbation when the model consumes physical timestamps.
 
 Do not apply a transformation only to positive intervals, because that creates an insertion
-watermark. Do not use local time warping as a Task-0 nuisance: duration and temporal boundaries are
+watermark. Do not use local time warping as a proposal nuisance: duration and temporal boundaries are
 the quantities being detected.
 
 ## 8. Dataset roles and verified compatibility
@@ -179,7 +178,7 @@ the quantities being detected.
 | **OpenPack** | 53,760 fine-action rows in the inspected release, nested within operations and repeated box cycles, plus NULL and synchronized occupational sensors | largest occupational development source or official held-out-subject test | collapse five identity aliases, preserve measured 30.30-33.33 Hz timestamps, handle two clock gaps and one zero-duration action, and keep action/operation/box levels separate |
 | **Bodyweight Exercise Segmentation** | continuous workouts with exact set/rest intervals and 4,756 repetition-start points | controlled repetition-onset development after source repair | raw integer acceleration/gyroscope scale is unresolved; point starts do not supply complete repetition end boundaries |
 | **AIDLAB-HAR** | series intervals and repetition-marker fiducial windows for 13 exercises plus three background-like activities | small proposal and anchor control | marker windows are not full repetitions, `SUBxx` codes are not global participant IDs, and the chest stream is acceleration/orientation rather than standard six-axis watch input |
-| **C-MHAD** | 240 two-minute streams; synchronized 50 Hz six-axis IMU and 15 fps video; manually inspected intervals | primary sealed Task-0/1 evaluation | parse two metadata rows; convert m/s2 to g and degree/s to rad/s; align by timestamp and known missing initial Bluetooth samples rather than fabricating motion with zero padding |
+| **C-MHAD** | 240 two-minute streams; synchronized 50 Hz six-axis IMU and 15 fps video; manually inspected intervals | proposal-baseline and primary Task-1 evaluation | parse two metadata rows; convert m/s2 to g and degree/s to rad/s; align by timestamp and known missing initial Bluetooth samples rather than fabricating motion with zero padding |
 | **WEAR** | continuous 50 Hz four-watch acceleration, explicit `null`, THUMOS-style intervals, synchronized egocentric video | primary learned-development or sealed evaluation source | use one arm watch for the consumer-wearable result; acceleration is gravity-present in g; row order supplies time because the raw CSV has no timestamp column |
 | **OCA** | twelve continuous CSV sessions, four six-axis IMUs, and six actions plus NULL | occupational evaluation and Task-3 development | split timestamp gaps; preserve per-session native rates near 20 or 27 Hz; convert m/s2 to g and BNO055 degree/s to rad/s; report research upper-arm/chest placement |
 | **MM-Fit** | synchronized phones, watches, earbud, RGB-D, pose, workout sets and repetition information | development only for current expanded HALO checkpoint | reconstruct complete workouts from source files; converted set sessions are not continuous recordings |
@@ -214,7 +213,8 @@ positive. Use C-MHAD primarily for annotated-event recall and boundary quality. 
 proposals per hour only on datasets whose background annotation is verified as exhaustive. Frame
 accuracy is secondary because background prevalence can make it misleading.
 
-Task 1 must be evaluated both with Task-0 proposals and by direct full-timeline matching. Task 3 must
+Task 1 and Task 3 are evaluated directly on complete timelines. This baseline may additionally be
+measured as an acceleration arm, but its recall must not cap their primary results. Task 3 must
 include a direct timeline motif baseline. These controls expose proposal-stage false negatives.
 
 ## 10. Required visualizations

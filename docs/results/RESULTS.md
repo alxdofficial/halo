@@ -50,8 +50,8 @@ A result becomes current only when it has:
 - per-dataset results and failure cases; and
 - a generated artifact path linked from this document.
 
-Task 0 will report event AP, boundary quality, and segmentation errors, plus false proposals only
-where background annotation is exhaustive. Task 1 will report event AP, false alarms per hour,
-count error, and boundary error. Task 2 will report
+The optional motion-proposal baseline will report event recall, boundary quality, runtime, and false
+proposals only where background annotation is exhaustive. Task 1 will report event AP, false alarms
+per hour, count error, and boundary error. Task 2 will report
 reliability, known-difference sensitivity, and longitudinal association. Task 3 will report motif
 event recovery, fragmentation, false motifs, recurrence count error, and human review burden.

@@ -4,7 +4,7 @@ How raw datasets become the gridded corpus. Every stage is one module in `data/s
 `DATA_HETEROGENEITY.md` for the per-dataset rationale).
 
 > **Application requirement, 2026-08-28:** the six-second grids are an encoder-training and legacy
-> HAR representation. Tasks 0-3 operate on complete source-session timelines. Application loaders
+> HAR representation. Tasks 1-3 operate on complete source-session timelines. Application loaders
 > must reconstruct overlapping temporal embeddings from the converted sessions, preserve real gaps
 > and event boundaries, and never treat six-second blocks as independent source recordings.
 
@@ -59,7 +59,7 @@ python -m data.scripts.scan_duplicates                    # (6) REQUIRED — nat
 python -m data.scripts.scan_implausible --alignment non_harmonised   # needed by run_baselines
 python -m data.scripts.scan_duplicates  --alignment non_harmonised   # needed by run_baselines
 
-python -m data.scripts.labels.build_global_label_mapping  # legacy HAR vocabulary; not required by Tasks 0-3
+python -m data.scripts.labels.build_global_label_mapping  # legacy HAR vocabulary; not required by Tasks 1-3
 python -m data.scripts.curate.sensor_bias --build         # frozen per-sensor physics; Phase A fails closed without it
 ```
 

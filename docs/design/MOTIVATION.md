@@ -32,10 +32,8 @@ open-vocabulary classifier.
 > comparison, and discovery of personally or operationally meaningful movement using consumer
 > wearables and little or no task-specific training.
 
-The thesis is evaluated through four tasks:
+The thesis is evaluated through three tasks:
 
-0. **Event proposal and segmentation:** find intervals of coherent human motion in a continuous
-   recording and estimate their start and end boundaries without requiring an activity vocabulary.
 1. **Arbitrary task detection:** given one or a few reference recordings, find independent
    occurrences of that movement in later continuous data.
 2. **Activity difference quantification:** learn ordinary personal variation for one confirmed task,
@@ -44,11 +42,10 @@ The thesis is evaluated through four tasks:
 3. **Recurrent motion discovery:** find coherent motion motifs that recur frequently in unlabeled
    occupational recordings, then let a human identify which motifs correspond to meaningful work.
 
-The tasks form one workflow: segment candidate motion, discover or demonstrate a movement, monitor
-its future occurrences, and track whether its execution changes beyond its personal noise floor.
-They are evaluated as four small operations in one end-to-end monitoring system, not as four
-independent papers or four claims of new machine-learning algorithms. Task 0 supplies proposals;
-Tasks 1-3 supply the application behavior that makes those proposals useful.
+The tasks form one workflow: discover or demonstrate a movement, monitor its future occurrences, and
+track whether its execution changes beyond its personal noise floor. They are evaluated as three
+small operations in one end-to-end monitoring system. Task 1 and Task 3 process complete timelines
+and perform their own localization; Task 2 compares independently bounded executions.
 
 ## Why rehabilitation is the primary application
 
@@ -87,8 +84,7 @@ clinical improvement, exercise correctness, fatigue, or injury risk unless those
 validated against appropriate human or physical ground truth.
 
 The word **activity** is therefore reserved for a motion confirmed by a person or supplied as a
-reference. Task 0 returns **candidate motion events**, not intentional activities. Before human or
-external confirmation, Task 3 returns **motion motifs**, not activities.
+reference. Before human or external confirmation, Task 3 returns **motion motifs**, not activities.
 
 ## Role of HALO and external encoders
 
@@ -99,7 +95,7 @@ are acceptable under that question, but they prevent a claim that one architectu
 superior.
 
 The primary contribution is the complete application system: its problem formulation, interoperable
-representation interface, proposal/detection/comparison/discovery workflow, evaluation protocol,
+representation interface, detection/comparison/discovery workflow, evaluation protocol,
 and evidence on real rehabilitation and occupational recordings. HALO's physical-time frontend,
 temporal patch structure, and heterogeneous-sensor handling are secondary mechanism contributions
 only where controlled ablations support them. The paper remains useful if a released external

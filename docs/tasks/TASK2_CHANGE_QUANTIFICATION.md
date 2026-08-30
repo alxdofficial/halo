@@ -18,8 +18,8 @@ accepted baseline executions + later confirmed execution
     -> interpretable change report with uncertainty
 ```
 
-Task 2 assumes that Task 0, Task 1, or a human has already established the event boundaries and task
-identity. It does not solve activity detection again.
+Task 2 receives independently bounded executions from source annotations, user-guided recordings, or
+Task-1 detections. It does not require or evaluate a generic motion-proposal stage.
 
 The system reports **difference and persistent drift**. It may report improvement, deterioration,
 quality, fatigue, or clinical severity only when an external measure defines that direction. This

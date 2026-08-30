@@ -11,9 +11,10 @@ and how much cumulative exposure do they represent?
 
 ```text
 continuous recording
-    -> Task-0 event proposals
-    -> timestamped encoder sequences for each proposal
+    -> one timestamped base-patch encoding
+    -> pooled multiscale temporal candidates
     -> learned pairwise same-motion scores
+    -> temporal consolidation of overlapping candidates
     -> thresholded recurrence graph
     -> recurring motion clusters and bouts
     -> recurrence and exposure ranking
@@ -43,17 +44,22 @@ shared words as physical equivalence or treating different naming conventions as
 The deployment test holds out complete identities. Success therefore means that the learned matching
 rule transfers to motions whose training labels and semantic names were never seen.
 
-### 2.2 Event boundaries during training
+### 2.2 Dense multiscale candidates and boundary supervision
 
-When a training dataset supplies event boundaries, use them directly. Task-0 recall must not limit
-learning of the matching metric. Keep the source recording, subject, session, timestamps, and sensor
-configuration attached to every event.
+Encode each complete recording once at the encoder's declared base stride. Pool adjacent patch
+embeddings over a small fixed set of physical durations to produce a temporal pyramid. Each candidate
+stores its start, end, duration, scale, embedding, recording, subject, session, and sensor
+configuration.
 
-Task 0 remains necessary at deployment and for the end-to-end evaluation. Report two evaluation
-conditions:
+Source event intervals supervise candidates without being supplied at deployment:
 
-1. **oracle proposals:** source-provided event intervals isolate matching and clustering quality; and
-2. **Task-0 proposals:** predicted intervals measure the complete deployed pipeline.
+- candidates with sufficient overlap with the same event identity are positives;
+- candidates assigned to explicitly different events are negatives;
+- partial overlaps near boundaries are ignored until a boundary-tolerant target is defined; and
+- unlabeled intervals are negatives only when the annotation track is exhaustive.
+
+Source intervals additionally provide an oracle-event matching control, but the primary deployed
+condition searches the complete timeline. No generic motion-proposal recall can cap discovery.
 
 ### 2.3 Pair construction
 
@@ -100,12 +106,14 @@ practice.
 
 ## 3. Deployment grouping
 
-### 3.1 Candidate comparison
+### 3.1 Candidate comparison and temporal decoding
 
-Use pooled cosine similarity as a fast screen for long recordings, then apply the exact temporal
-matcher only to plausible pairs. Do not compare an event with temporally overlapping copies of
-itself. Keep a direct variable-length matrix-profile search over raw or frozen features as a control
-for Task-0 misses and as a non-learned literature baseline.
+Use pooled cosine similarity as a fast screen, then apply the exact temporal matcher only to plausible
+pairs. Do not compare a candidate with temporally overlapping copies of itself. Multiple scales and
+nearby starts will generate duplicate descriptions of one event; consolidate them with a declared
+temporal non-maximum suppression, Soft-NMS, or weighted interval-selection rule before counting
+occurrences. Keep direct variable-length matrix-profile search over raw or frozen features as a
+non-learned literature baseline.
 
 ### 3.2 Recurrence graph
 
@@ -121,7 +129,7 @@ labels.
 
 Three decisions remain separate:
 
-1. **identity:** the learned matcher decides which event proposals represent the same motion;
+1. **identity:** the learned matcher decides which temporal candidates represent the same motion;
 2. **recurrence acceptance:** a user-selected `min_occurrences` controls which clusters are shown;
 3. **bout grouping:** nearby occurrences from one cluster may be grouped using a maximum temporal gap
    or a requested number of repetitions per group.
@@ -225,12 +233,12 @@ and exposed only to score the frozen output.
 - adjusted Rand index as a secondary closed-annotation summary;
 - repeated-event coverage and occurrence-count error;
 - false motif clusters per recording hour;
-- boundary temporal IoU and start/end error for the Task-0 condition;
+- boundary temporal IoU and start/end error after dense temporal decoding;
 - stability under small threshold and proposal-boundary changes; and
 - runtime and peak memory per recording hour.
 
-Report oracle-proposal and Task-0-proposal results side by side. This attributes failures to event
-proposal or recurrence matching rather than conflating them.
+Report oracle-event matching and complete-timeline discovery side by side. This separates metric and
+clustering quality from dense candidate generation and temporal decoding.
 
 ### 6.3 Human review
 
@@ -263,13 +271,14 @@ precision among reviewed clusters, and cumulative exposure covered.
 
 1. Build a deterministic event manifest from one exact-boundary training source, retaining subject,
    session, identity, and configuration.
-2. Export frozen HALO and released-baseline `MotionSequence` events.
-3. Implement pooled-cosine and constrained-DTW floors.
-4. Train the balanced pairwise matcher and record positive/negative score telemetry.
-5. Calibrate the recurrence threshold on held-out subjects and identities.
-6. Implement mutual-neighbor components, unassigned events, bout grouping, and review filtering.
-7. Evaluate oracle proposals first, then repeat with Task-0 proposals.
-8. Run a cross-domain experiment from controlled exercise training to OCA or held-out OpenPack
+2. Export complete frozen HALO and released-baseline `MotionSequence` timelines.
+3. Build the shared base-stride temporal pyramid and interval-overlap targets.
+4. Implement pooled-cosine, constrained-DTW, and matrix-profile floors.
+5. Train the balanced pairwise matcher and record positive/negative score telemetry.
+6. Calibrate recurrence and temporal-consolidation thresholds on held-out subjects and identities.
+7. Implement mutual-neighbor components, unassigned candidates, grouping, and review filtering.
+8. Evaluate oracle source intervals and complete-timeline discovery separately.
+9. Run a cross-domain experiment from controlled exercise training to OCA or held-out OpenPack
    occupational actions.
 
 ## 9. Research basis

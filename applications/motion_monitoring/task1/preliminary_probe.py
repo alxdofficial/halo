@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from applications.motion_monitoring.task1.matcher import best_full_timeline_match
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DATA_ROOT = REPO_ROOT / "data" / "datasets"
@@ -287,79 +289,14 @@ def physical_patch_features(frame: pd.DataFrame, patch_seconds: float = 1.0):
 def subsequence_dtw(
     reference: np.ndarray, query: np.ndarray, warp_penalty: float = 0.05
 ):
-    """Open-begin/open-end cosine DTW with a bounded local warp slope.
-
-    Consecutive horizontal or vertical moves are prohibited. This keeps the
-    local duration ratio within roughly 0.5x--2x and prevents a long reference
-    from matching a single query patch through an arbitrarily degenerate path.
-    """
-    if reference.ndim != 2 or query.ndim != 2 or reference.shape[1] != query.shape[1]:
-        raise ValueError(
-            "reference and query must be [time, feature] with matching features"
-        )
-    cost = 1.0 - np.clip(reference @ query.T, -1.0, 1.0)
-    n_ref, n_query = cost.shape
-    if not n_ref or not n_query:
-        raise ValueError("reference and query must be non-empty")
-    # States are diagonal, vertical, and horizontal. A non-diagonal state may
-    # only follow a different state, which is the slope constraint.
-    accumulated = np.full((3, n_ref + 1, n_query + 1), np.inf, dtype=np.float64)
-    previous = np.full((3, n_ref + 1, n_query + 1), -1, dtype=np.int8)
-    accumulated[0, 0, :] = 0.0
-
-    for i in range(1, n_ref + 1):
-        for j in range(1, n_query + 1):
-            diagonal_choices = accumulated[:, i - 1, j - 1]
-            previous[0, i, j] = int(np.argmin(diagonal_choices))
-            accumulated[0, i, j] = cost[i - 1, j - 1] + float(
-                diagonal_choices[previous[0, i, j]]
-            )
-
-            vertical_choices = accumulated[[0, 2], i - 1, j]
-            vertical_choice = int(np.argmin(vertical_choices))
-            previous[1, i, j] = (0, 2)[vertical_choice]
-            accumulated[1, i, j] = (
-                cost[i - 1, j - 1]
-                + warp_penalty
-                + float(vertical_choices[vertical_choice])
-            )
-
-            horizontal_choices = accumulated[[0, 1], i, j - 1]
-            horizontal_choice = int(np.argmin(horizontal_choices))
-            previous[2, i, j] = (0, 1)[horizontal_choice]
-            accumulated[2, i, j] = (
-                cost[i - 1, j - 1]
-                + warp_penalty
-                + float(horizontal_choices[horizontal_choice])
-            )
-
-    final = accumulated[:, n_ref, 1:]
-    flat_index = int(np.argmin(final))
-    state, end_offset = np.unravel_index(flat_index, final.shape)
-    end = int(end_offset) + 1
-    raw_score = float(accumulated[state, n_ref, end])
-    if not np.isfinite(raw_score):
-        raise ValueError("no DTW path satisfies the 0.5x--2x local warp constraint")
-    i, j = n_ref, end
-    path_length = 0
-    while i > 0:
-        prior_state = int(previous[state, i, j])
-        path_length += 1
-        if state == 0:
-            i -= 1
-            j -= 1
-        elif state == 1:
-            i -= 1
-        else:
-            j -= 1
-        state = prior_state
-    start = j
+    """Compatibility wrapper around the promoted full-timeline matcher."""
+    match = best_full_timeline_match(reference, query, warp_penalty=warp_penalty)
     return {
-        "start_patch": start,
-        "end_patch": end,
-        "score": raw_score / max(path_length, 1),
-        "path_length": path_length,
-        "duration_ratio": (end - start) / n_ref,
+        "start_patch": match.start_patch,
+        "end_patch": match.end_patch,
+        "score": match.score,
+        "path_length": match.path_length,
+        "duration_ratio": match.duration_ratio,
     }
 
 

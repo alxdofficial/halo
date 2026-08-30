@@ -30,7 +30,7 @@ The new application comparison therefore includes:
 2. neutral descriptions with the same numeric metadata; and
 3. no text conditioning where checkpoint compatibility permits it.
 
-Language never names the target movement in Tasks 0-3. A proposal, recurrence, or difference score must come
+Language never names the target movement in Tasks 1-3. A detection, recurrence, or difference score must come
 from sensor evidence, not semantic proximity between activity names.
 
 ## Correctness contract

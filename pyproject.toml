@@ -29,6 +29,7 @@ exclude = ["applications.motion_monitoring.data.sources*"]
 [tool.setuptools.package-data]
 "applications.motion_monitoring.data" = [
     "SOURCE_INVENTORY.json",
+    "ANNOTATION_INVENTORY.json",
     "PAYLOAD_CHECKSUMS.json",
     "CORPUS_SUMMARY.json",
     "inspection/*.json",

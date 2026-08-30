@@ -1,7 +1,7 @@
-# Task 0 implementation
+# Optional motion-proposal baseline implementation
 
-This package implements the statistical event-proposal design in
-`docs/tasks/TASK0_EVENT_SEGMENTATION.md`. It operates on one explicitly selected native-time sensor
+This package implements the optional statistical event-proposal baseline in
+`docs/methods/MOTION_PROPOSAL_BASELINE.md`. It operates on one explicitly selected native-time sensor
 stream and produces class-agnostic motion intervals. It does not classify activities or infer
 intent.
 
@@ -83,6 +83,6 @@ Render a full raw/evidence/proposal/reference timeline before accepting an opera
 
 ## Stability gate
 
-Task 0 is not considered experimentally frozen until the complete OpenPack/RecoFit development
-calibration, held-out C-MHAD/WEAR/OCA evaluation, and proposal-timeline visual review are recorded.
-No Task-1 implementation should consume Task-0 proposals before that gate is complete.
+The baseline is not experimentally frozen until its OpenPack/RecoFit development calibration and
+proposal-timeline audit are recorded. Tasks 1 and 3 do not depend on it; use it only as a measured
+runtime arm after their complete-timeline results exist.

@@ -100,7 +100,8 @@ padding as measured stillness. The authors' loader and the official page differ 
 in the offset convention, equivalent to 40 ms at 50 Hz. Treat this as boundary uncertainty and
 report a +/-2-sample sensitivity check for any boundary-error result.
 
-**Role:** strongest sealed Task-0/Task-1 source after a complete manifest audit. Report wrist gestures
+**Role:** strongest sealed Task-1 source after a complete manifest audit and an exact-event Task-3
+control. Report wrist gestures
 and waist transitions separately.
 
 ### 5.2 WEAR
@@ -121,8 +122,7 @@ new test participants. In `sbj_10.csv`, all three left-arm axes are absent for 5
 primary right-arm stream is complete; any multi-sensor result must use a channel mask rather than
 zero filling or interpolation.
 
-**Role:** real continuous Task-0/Task-1 evaluation and Task-3 recurrence. If it trains a temporal
-localization head, it cannot also be that arm's sealed test.
+**Role:** real continuous Task-1 false-alarm evaluation and coarse Task-3 recurrence control.
 
 ### 5.3 OCA
 
@@ -138,7 +138,7 @@ paper identifies the IMU as a BNO055, and every released gyroscope value is exac
 by `* pi / 180`. Two sensors are on upper arms and two are on a vest/chest; some sessions use active
 arm support.
 
-**Role:** primary public occupational Task-3 benchmark and a secondary Task-0/Task-1 source. Report
+**Role:** primary public occupational Task-3 benchmark and a secondary Task-1 transfer source. Report
 arm-support conditions separately and do not present it as a consumer-watch deployment.
 
 ### 5.4 GAITEX
@@ -187,7 +187,7 @@ than one exact rate. Preserve timestamps, split or mask two 1.26/5.88-second gap
 and box annotation levels separately and report the active placement. The non-RGB release is CC
 BY-NC-SA 4.0; RGB has separate terms.
 
-**Role:** strongest verified occupational Task-0/Task-3 source. It may be a training source or an
+**Role:** strongest verified occupational Task-1/Task-3 source. It may be a training source or an
 official held-out-subject benchmark, but the same arm cannot call its test split an unseen dataset.
 
 ### 6.2 Bodyweight Exercise Segmentation
@@ -203,7 +203,7 @@ conversion is documented sufficiently for defensible HALO ingestion. Obtain the 
 configuration, source code, or author confirmation before conversion. One participant contributes
 five of the thirteen sessions, so subject-balanced splitting is mandatory.
 
-**Role:** excellent controlled repetition and Task-0 development source after units are resolved;
+**Role:** excellent controlled repetition-boundary source after units are resolved;
 secondary rather than sole publication evidence because it accompanies a 2026 master's thesis rather
 than a peer-reviewed dataset paper.
 
@@ -222,7 +222,7 @@ split must use the released mapping and must not equate code count with the pape
 count. Arrays are interpolated to approximately 100 Hz by the authors' preprocessing code, and
 repetition starts were marked using watch vibration. The released repetition slices run from one
 machine-paced vibration cue to the next; they are useful same-motion training excerpts, not observed
-natural repetition boundaries and not valid Task-0 boundary ground truth. The public release has no
+natural repetition boundaries and not valid natural boundary ground truth. The public release has no
 clear data licence. Obtain rights-holder confirmation before a publication result depends on it.
 
 **Role:** strongest verified subject-diverse controlled source for Task-1/Task-3 same-motion pair
@@ -273,17 +273,10 @@ release supplies complete start/end boundaries for every occurrence.
 
 ## 7. Task-specific choices
 
-### Task 0: event proposal and segmentation
-
-- Develop statistical floors on reconstructed MM-Fit/Opportunity timelines.
-- Use OpenPack action intervals as large occupational development data when it is not the sealed test.
-- Use AIDLAB-HAR for series boundaries and repetition anchors; it does not provide full repetition
-  intervals. Use Bodyweight for precise repetition boundaries only after its unit contract is fixed.
-- Use C-MHAD and WEAR as the strongest real continuous interval benchmarks.
-- Use OCA as occupational transfer with its clock gaps and rates handled explicitly.
-- Keep one source sealed for every learned localization arm.
-
-Owner: [`TASK0_EVENT_SEGMENTATION.md`](../tasks/TASK0_EVENT_SEGMENTATION.md).
+The exact distinction between action instances, bouts, sets, counts, and fiducials is owned by
+[`ANNOTATION_INVENTORY.md`](ANNOTATION_INVENTORY.md). The former generic event-proposal stage is only
+an optional runtime baseline documented in
+[`MOTION_PROPOSAL_BASELINE.md`](../methods/MOTION_PROPOSAL_BASELINE.md).
 
 ### Task 1: arbitrary task detection
 

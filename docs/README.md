@@ -7,18 +7,18 @@ representations.
 
 1. [**MOTIVATION.md**](design/MOTIVATION.md) - why the project moved from generic open-label HAR to
    applied movement measurement.
-2. [**RESEARCH_TASKS.md**](design/RESEARCH_TASKS.md) - the four agreed tasks and their boundaries.
-3. [**TASK0_EVENT_SEGMENTATION.md**](tasks/TASK0_EVENT_SEGMENTATION.md) - Task-0 motion proposal,
-   boundary, supervision, and evaluation design.
-4. [**TASK1_ARBITRARY_DETECTION.md**](tasks/TASK1_ARBITRARY_DETECTION.md) - Task-1 data construction,
+2. [**RESEARCH_TASKS.md**](design/RESEARCH_TASKS.md) - the three agreed tasks and their boundaries.
+3. [**TASK1_ARBITRARY_DETECTION.md**](tasks/TASK1_ARBITRARY_DETECTION.md) - Task-1 data construction,
    matching, training, and evaluation design.
-5. [**TASK2_CHANGE_QUANTIFICATION.md**](tasks/TASK2_CHANGE_QUANTIFICATION.md) - Task-2 personal
+4. [**TASK2_CHANGE_QUANTIFICATION.md**](tasks/TASK2_CHANGE_QUANTIFICATION.md) - Task-2 personal
    baselines, alignment, measurements, training data, and validation.
-6. [**TASK3_RECURRENT_MOTION_DISCOVERY.md**](tasks/TASK3_RECURRENT_MOTION_DISCOVERY.md) - Task-3 motif
+5. [**TASK3_RECURRENT_MOTION_DISCOVERY.md**](tasks/TASK3_RECURRENT_MOTION_DISCOVERY.md) - Task-3 motif
    search, clustering, occupational data, review, and evaluation.
+6. [**ANNOTATION_INVENTORY.md**](data/ANNOTATION_INVENTORY.md) - the exact temporal supervision,
+   background coverage, and current adapter form of every selected source.
 7. [**DESIGN_OF_RECORD.md**](design/DESIGN_OF_RECORD.md) - the shared representation and algorithms.
 8. [**ENCODER_HYPOTHESES.md**](design/ENCODER_HYPOTHESES.md) - which representation gaps matter for
-   Tasks 0-3, which HALO mechanisms may address them, and the required matched ablations.
+   Tasks 1-3, which HALO mechanisms may address them, and the required matched ablations.
 9. [**EVALUATION_PROTOCOL.md**](design/EVALUATION_PROTOCOL.md) - shared leakage, metrics, controls, and data
    roles.
 10. [**IMPLEMENTATION_PLAN.md**](design/IMPLEMENTATION_PLAN.md) - staged build order and exit criteria.

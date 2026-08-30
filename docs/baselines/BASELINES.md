@@ -61,7 +61,7 @@ Use two execution tiers:
 
 - **Rapid development:** HALO, raw/physical controls, HARNet, and UniMTS.
 - **Final frozen benchmark:** add NormWear, encode each recording once, and cache timestamped
-  embeddings for reuse by Tasks 0-3.
+  embeddings for reuse by Tasks 1-3.
 
 The primary study compares frozen representations. Do not fine-tune every foundation model merely
 to make the table larger. If a task-specific learned arm is justified, fit the same small head to

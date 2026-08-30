@@ -38,7 +38,7 @@
     "openpack": {
       "name": "OpenPack",
       "decision": "acquire",
-      "role": ["task0_development", "task1_training", "task3_training", "task3_within_source_evaluation"],
+      "role": ["task1_training", "task3_training", "task3_within_source_evaluation", "optional_motion_proposal_development"],
       "distinct_value": "Nested fine-action, operation, and box-cycle intervals in continuous occupational work.",
       "subjects": 16,
       "hours": 53.8,
@@ -73,7 +73,7 @@
     "aidlab_har": {
       "name": "AIDLAB-HAR",
       "decision": "acquire",
-      "role": ["task0_boundary_development", "task1_control", "task3_boundary_control"],
+      "role": ["task1_control", "task3_boundary_control", "optional_motion_proposal_development"],
       "distinct_value": "Small source with precise series boundaries and repetition-marker fiducials for checking event proposals.",
       "subjects": null,
       "source_subject_codes": 90,
@@ -91,7 +91,7 @@
     "c_mhad": {
       "name": "C-MHAD",
       "decision": "acquire_selective",
-      "role": ["task0_sealed_evaluation", "task1_sealed_evaluation"],
+      "role": ["task1_sealed_evaluation", "task3_exact_event_control", "optional_motion_proposal_evaluation"],
       "distinct_value": "Video-verified actions embedded in real continuous background with wrist and waist conditions.",
       "subjects": 12,
       "hours": 8.0,
@@ -109,7 +109,7 @@
     "wear": {
       "name": "WEAR",
       "decision": "acquire_selective",
-      "role": ["task0_external_evaluation", "task1_external_evaluation", "task3_continuous_control"],
+      "role": ["task1_external_evaluation", "task3_continuous_control", "optional_motion_proposal_evaluation"],
       "distinct_value": "Natural outdoor continuous activity and NULL from consumer-like limb watches; four original/repeat sessions have unresolved directional identity linkage.",
       "subjects": 22,
       "released_recordings": 24,
@@ -129,7 +129,7 @@
     "oca": {
       "name": "Overhead Car Assembly IMU Dataset",
       "decision": "acquire",
-      "role": ["task0_occupational_transfer", "task1_occupational_transfer", "task3_external_evaluation"],
+      "role": ["task1_occupational_transfer", "task3_external_evaluation", "optional_motion_proposal_evaluation"],
       "distinct_value": "Repeated industrial assembly phases, NULL, publisher partitions, and arm-support conditions; training and validation are not subject-disjoint.",
       "subjects": 5,
       "hours": 6.0,
@@ -155,7 +155,7 @@
     "recofit": {
       "name": "RecoFit",
       "decision": "acquire_selective",
-      "role": ["task0_development", "task1_training", "task3_weak_supervision"],
+      "role": ["task1_training", "task3_weak_supervision", "optional_motion_proposal_development"],
       "distinct_value": "More than 200 participants, full visits, natural non-exercise background, and set/count annotations add population and background diversity.",
       "repository_subjects": "over 200 across the two release files",
       "selected_file_subjects": 94,

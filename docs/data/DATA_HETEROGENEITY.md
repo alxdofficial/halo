@@ -3,7 +3,7 @@
 > **Application status, 2026-08-28:** the verified unit, placement, rate, gravity, and channel
 > decisions below remain authoritative. The old train/eval role column describes encoder and HAR
 > provenance, not the new application split. Use
-> [`APPLICATION_DATASETS.md`](APPLICATION_DATASETS.md) for Tasks 0-3.
+> [`APPLICATION_DATASETS.md`](APPLICATION_DATASETS.md) for Tasks 1-3.
 
 > This doc is the mechanics of how we normalize heterogeneity. It is not a contribution claim.
 > Application measurements must nevertheless test whether session, remounting, and device variation

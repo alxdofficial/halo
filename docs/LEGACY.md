@@ -14,7 +14,7 @@ git show 32267b6:docs/design/PHASE_B_TRAINING_INTENT.md
 
 Relevant old code includes `model/evidence/`, `training/evidence/`, generic HAR evaluation under
 `eval/`, and candidate-label sections of the tokenizer trainer. It is historical support code, not
-the design of record for the four-task movement-monitoring system.
+the design of record for the three-task movement-monitoring system.
 
 Switch to `archive/pre-application-main-20260830` when reproducing those experiments. Do not
 restore copies of the old documents to `main`; use Git history so there is one authoritative active
