@@ -1,0 +1,16 @@
+WEAR: An Outdoor Sports Dataset for Wearable and Egocentric Activity Recognition
+
+Publication: https://doi.org/10.1145/3699776
+Dataset page: https://ubi29.informatik.uni-siegen.de/usi/data_wear.html
+Preprint: https://arxiv.org/abs/2304.05088
+
+Verified for application planning on 2026-08-29. All 24 raw 50 Hz inertial CSV files and 29 interval
+JSON files were selectively downloaded; video was not downloaded. The release provides
+gravity-present acceleration in g from four limb watches, NULL/background rows, and THUMOS14-style
+interval annotations. The raw CSV has no timestamp column, so row order and the documented fixed
+rate define time. The 24 recording files represent 22 people after two documented repeat-session
+aliases are collapsed. `sbj_10.csv` lacks 51,392 rows on each left-arm axis; the right arm is
+complete, and any multi-placement adapter must retain an explicit missing-channel mask.
+The application adapter emits 24 sessions for 22 collapsed identities and the two arm streams only,
+with 719 activity and 741 explicit NULL intervals. The missing `sbj_10` left-arm region remains NaN
+with a false validity mask; it is never interpreted as stillness.

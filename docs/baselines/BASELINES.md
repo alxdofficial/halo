@@ -16,19 +16,57 @@ temporal output permits that use.
 A pretrained encoder is not useful merely because it beats another encoder. It must improve on these
 simple, interpretable application methods or provide materially better robustness or efficiency.
 
-## Released checkpoint roster
+## Primary released-checkpoint roster
 
-| encoder | released representation | application use |
-|---|---|---|
-| **HARNet / ssl-wearables** | accelerometer encoder pretrained on UK Biobank | frozen temporal/sliding-window representation |
-| **UniMTS** | released universal time-series checkpoint | frozen IMU representation through its official preprocessing |
-| **NormWear** | released channel-independent wearable checkpoint | frozen variable-channel representation |
-| **ImageBind** | released IMU tower | frozen IMU representation where temporal granularity is adequate |
-| **HALO** | project checkpoints | frozen physical-time patch representation and controlled ablations |
+The primary comparison deliberately uses three external encoders. This is the smallest set that
+covers the main representation families relevant to the application without repeating nearly the
+same scientific control.
+
+| encoder | publication | family represented | why it is retained | main limitation |
+|---|---|---|---|---|
+| **HARNet / ssl-wearables** | npj Digital Medicine, 2024 | large-scale convolutional self-supervision on real wrist accelerometry | strongest low-cost control for whether scale and a conventional temporal CNN are already sufficient | accelerometer only; fixed 5 s, 30 Hz contract |
+| **UniMTS** | NeurIPS, 2024 | synthetic motion, skeleton-graph encoding, rotation augmentation, and sensor-text alignment | recent control for explicit placement/orientation generalization and language-aligned motion representations | accelerometer only; body placement must map to its 22-joint skeleton |
+| **NormWear** | ACM TCH, 2025 | channel-independent time-frequency wearable foundation model | recent and most direct external comparison to HALO's frequency-domain and variable-channel design | approximately an order of magnitude slower than the other primary baselines |
+| **HALO** | project model | physical-time representation | fixed and continuous physical-time arms under matched within-HALO ablations | project model, not an external baseline |
+
+**ImageBind remains implemented but is not a primary baseline.** It is a useful optional appendix
+control for generic multimodal alignment, but its IMU tower was trained on head-mounted Ego4D IMU,
+requires a roughly 4.5 GB full-model checkpoint, and overlaps with the language-alignment question
+already covered more directly by UniMTS. It is therefore a poor trade for routine application runs.
 
 CrossHAR and LiMU-BERT remain excluded because the repository's usable backbones were pretrained by
 us rather than released by their authors. That would reintroduce choices about corpus, schedule,
 augmentation, and checkpoint selection.
+
+## Measured evaluation cost
+
+The following measurements come from the same existing adaptation manifest
+(`1bd89d35f5aed197fdce73db87c8442a949249337bbe703a870ae7c2253a5469`) on the project RTX 4090.
+They include the shared readout/evaluation work, so they are a matched operational screen rather
+than pure encoder microbenchmarks. The manifest and code path are identical across rows.
+
+| encoder | elapsed time | setup time | peak GPU memory | time relative to HARNet |
+|---|---:|---:|---:|---:|
+| **HARNet** | 31.45 s | 0.13 s | 0.26 GiB | 1.0x |
+| **UniMTS** | 50.23 s | 2.19 s | 4.98 GiB | 1.6x |
+| **ImageBind (optional)** | 47.78 s | 7.97 s | 5.10 GiB | 1.5x |
+| **NormWear** | 484.65 s | 2.34 s | 8.82 GiB | 15.4x |
+
+Artifacts:
+`eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_shared/*__adaptation_v1.json`.
+
+Use two execution tiers:
+
+- **Rapid development:** HALO, raw/physical controls, HARNet, and UniMTS.
+- **Final frozen benchmark:** add NormWear, encode each recording once, and cache timestamped
+  embeddings for reuse by Tasks 0-3.
+
+The primary study compares frozen representations. Do not fine-tune every foundation model merely
+to make the table larger. If a task-specific learned arm is justified, fit the same small head to
+each frozen representation. Any end-to-end encoder fine-tuning is a separate experiment with its
+own compute and training-data disclosure. For that optional arm, HARNet and the UniMTS sensor tower
+are the practical external candidates; keep NormWear frozen unless a result shows that its roughly
+136M-parameter backbone warrants the additional cost.
 
 ## What is shared
 
@@ -54,10 +92,14 @@ pooled versus temporal patch output.
 
 ## Primary sources
 
-- [HARNet / ssl-wearables](https://github.com/OxWearables/ssl-wearables)
-- [UniMTS](https://github.com/xiyuanzh/UniMTS)
-- [NormWear](https://github.com/Mobile-Sensing-and-UbiComp-Laboratory/NormWear)
-- [ImageBind](https://github.com/facebookresearch/ImageBind)
+- [HARNet paper](https://doi.org/10.1038/s41746-024-01062-3) and
+  [official repository](https://github.com/OxWearables/ssl-wearables)
+- [UniMTS paper](https://doi.org/10.48550/arxiv.2410.19818) and
+  [official repository](https://github.com/xiyuanzh/UniMTS)
+- [NormWear paper](https://doi.org/10.1145/3803808) and
+  [official repository](https://github.com/Mobile-Sensing-and-UbiComp-Laboratory/NormWear)
+- [ImageBind paper](https://doi.org/10.1109/CVPR52729.2023.01457) and
+  [official repository](https://github.com/facebookresearch/ImageBind) (optional appendix control)
 
 The detailed treatment contract is in
 [`BASELINE_FAIRNESS_POLICY.md`](BASELINE_FAIRNESS_POLICY.md).

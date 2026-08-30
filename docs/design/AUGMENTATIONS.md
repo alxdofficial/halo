@@ -1,7 +1,7 @@
 # Augmentation policy for movement monitoring
 
-> **Application policy, 2026-08-27.** The first Task-1, Task-2, and Task-3 experiments use clean
-> recorded signals. Augmentations are enabled one family at a time only for a later learned metric
+> **Application policy, 2026-08-29.** The first Task-0, Task-1, Task-2, and Task-3 experiments use clean
+> recorded signals. Augmentations are enabled one family at a time only for the learned metric
 > arm and never manufacture the only positive examples.
 
 ## Why the default is clean
@@ -19,7 +19,7 @@ The implementation in `data/scripts/augmentations.py` contains transformations f
 jitter/noise, amplitude scale, rate/time resampling, gravity removal, channel dropout, and text
 description perturbation. Their existence does not make them part of the application recipe.
 
-## Allowed use in optional metric learning
+## Allowed use in metric learning
 
 | transformation | initial role | constraint |
 |---|---|---|
@@ -29,7 +29,7 @@ description perturbation. Their existence does not make them part of the applica
 | channel dropout | missing-modality robustness | update signal, masks, and descriptions consistently; never write into padded channels |
 | gravity removal | declared configuration stress only | do not treat gravity-present and gravity-removed views as identical without telling the model |
 
-Text paraphrasing and arbitrary label aliases are not relevant to Tasks 1-3 because movement names do
+Text paraphrasing and arbitrary label aliases are not relevant to Tasks 0-3 because movement names do
 not enter the core matcher.
 
 ## Positive-pair rule

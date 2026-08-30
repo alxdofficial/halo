@@ -1,0 +1,17 @@
+C-MHAD: Continuous Multimodal Human Action Dataset of Simultaneous Video and Inertial Sensing
+
+Publication: https://doi.org/10.3390/s20102905
+Dataset page: https://personal.utdallas.edu/~kehtar/C-MHAD.html
+Open article: https://pmc.ncbi.nlm.nih.gov/articles/PMC7287800/
+
+Verified for application planning on 2026-08-29. All 240 inertial CSV files and 24 XLSX annotation
+workbooks were selectively downloaded from the public Box hierarchy; video was not downloaded. The
+files contain two metadata rows, millisecond timestamps, acceleration in m/s2, and gyroscope in
+degree/s. They cover 12 subjects, synchronized nominal-50 Hz wrist or waist six-axis inertial data,
+actions of interest among actions of non-interest, and visually inspected event boundaries. Numeric
+streams contain 5,948-6,101 rows over 118.87-121.97 seconds and measure 50.027 Hz, with no non-finite
+values, non-increasing timestamps, or invalid intervals. The source reports missing initial
+Bluetooth samples; preserve timestamps rather than forcing a row count or treating source-recommended
+zero padding as measured stillness. The application adapter follows the authors' signed frame-offset
+rule for video/IMU alignment, retains native timestamps, excludes annotations with no observed sensor
+overlap, and clips partially observed annotations while preserving their source bounds in metadata.

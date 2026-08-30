@@ -1,0 +1,12 @@
+{
+  "dataset": "AIDLAB-HAR",
+  "title": "Real-Time Sensor-Based Human Activity Recognition for eFitness and eHealth Platforms",
+  "authors": ["Lukasz Czekaj", "Mateusz Kowalewski", "Jakub Domaszewicz", "Robert Kitlowski", "Mariusz Szwoch", "Wlodzislaw Duch"],
+  "year": 2024,
+  "venue": "Sensors",
+  "volume": 24,
+  "issue": 12,
+  "article": 3891,
+  "doi": "10.3390/s24123891",
+  "url": "https://www.mdpi.com/1424-8220/24/12/3891"
+}

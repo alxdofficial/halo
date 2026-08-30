@@ -1,0 +1,14 @@
+{
+  "dataset": "OCA",
+  "dataset_title": "Overhead Car Assembly IMU Dataset",
+  "dataset_authors": ["Jan Kuschan", "Hristo Filaretov"],
+  "dataset_year": 2021,
+  "dataset_doi": "10.24406/fordatis/121",
+  "dataset_url": "https://fordatis.fraunhofer.de/handle/fordatis/195",
+  "paper_title": "Inertial Measurement Unit based Human Action Recognition Dataset for Cyclic Overhead Car Assembly and Disassembly",
+  "paper_authors": ["Jan Kuschan", "Hristo Filaretov", "Joerg Krueger"],
+  "paper_year": 2022,
+  "paper_venue": "IEEE 20th International Conference on Industrial Informatics",
+  "paper_doi": "10.1109/INDIN51773.2022.9976078",
+  "license": "CC BY-NC 4.0"
+}

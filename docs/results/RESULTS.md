@@ -1,10 +1,12 @@
 # Application results
 
-> **Status: protocol and implementation phase, 2026-08-27.** No result for the three application
+> **Status: protocol and implementation phase, 2026-08-30.** No result for the four application
 > tasks has been promoted yet.
 
 ## Active questions
 
+0. Can an IMU timeline be segmented into coherent motion events at a practically useful boundary
+   accuracy and false-proposal rate?
 1. Can a frozen IMU representation find an independently repeated demonstrated movement in a
    continuous recording at a practically low false-alarm rate?
 2. Can aligned latent and physical measurements distinguish real execution change from ordinary
@@ -45,6 +47,8 @@ A result becomes current only when it has:
 - per-dataset results and failure cases; and
 - a generated artifact path linked from this document.
 
-Task 1 will report event AP, false alarms per hour, count error, and boundary error. Task 2 will
-report reliability, known-difference sensitivity, and longitudinal association. Task 3 will report
-motif event recovery, fragmentation, false motifs, recurrence count error, and human review burden.
+Task 0 will report event AP, boundary quality, and segmentation errors, plus false proposals only
+where background annotation is exhaustive. Task 1 will report event AP, false alarms per hour,
+count error, and boundary error. Task 2 will report
+reliability, known-difference sensitivity, and longitudinal association. Task 3 will report motif
+event recovery, fragmentation, false motifs, recurrence count error, and human review burden.

@@ -1,0 +1,10 @@
+{
+  "dataset": "OpenPack",
+  "title": "OpenPack: A Large-Scale Dataset for Recognizing Packaging Works in IoT-Enabled Logistic Environments",
+  "authors": ["Naoya Yoshimura", "Jaime Morales", "Takuya Maekawa", "Takahiro Hara"],
+  "year": 2024,
+  "venue": "IEEE International Conference on Pervasive Computing and Communications (PerCom)",
+  "pages": "90-97",
+  "doi": "10.1109/PerCom59722.2024.10494448",
+  "url": "https://arxiv.org/abs/2212.11152"
+}

@@ -1,0 +1,10 @@
+{
+  "dataset": "RecoFit",
+  "title": "RecoFit: Using a Wearable Sensor to Find, Recognize, and Count Repetitive Exercises",
+  "authors": ["Dan Morris", "T. Scott Saponas", "Andrew Guillory", "Ilya Kelner"],
+  "year": 2014,
+  "venue": "Proceedings of the SIGCHI Conference on Human Factors in Computing Systems",
+  "pages": "3225-3234",
+  "doi": "10.1145/2556288.2557116",
+  "url": "https://www.microsoft.com/en-us/research/publication/recofit-using-wearable-sensor-find-recognize-count-repetitive-exercises/"
+}

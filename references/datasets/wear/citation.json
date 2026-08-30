@@ -1,0 +1,11 @@
+{
+  "dataset": "WEAR",
+  "title": "WEAR: An Outdoor Sports Dataset for Wearable and Egocentric Activity Recognition",
+  "authors": ["Marius Bock", "Hilde Kuehne", "Kristof Van Laerhoven", "Michael Moeller"],
+  "year": 2024,
+  "venue": "Proceedings of the ACM on Interactive, Mobile, Wearable and Ubiquitous Technologies",
+  "doi": "10.1145/3699776",
+  "paper_url": "https://doi.org/10.1145/3699776",
+  "dataset_url": "https://mariusbock.github.io/wear/",
+  "license": "CC BY-NC-SA 4.0"
+}

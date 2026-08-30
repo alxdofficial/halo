@@ -2,30 +2,40 @@
 
 HALO is a research system for **personalized movement monitoring from wearable IMU data**. It uses
 pretrained temporal representations from phones, smartwatches, and compatible consumer wearables to
-support three application tasks:
+support four application tasks:
 
+0. propose coherent motion events and estimate their start and end boundaries;
 1. detect an arbitrary demonstrated movement in later continuous recordings;
 2. quantify how two executions of the same movement differ; and
-3. discover frequently recurring motion motifs in unlabeled occupational recordings.
+3. cluster and discover frequently recurring motion motifs in unlabeled occupational recordings.
 
-The intended workflow is **demonstrate or discover, detect, compare, and track**. Rehabilitation is
+The intended workflow is **propose, demonstrate or discover, detect, compare, and track**. Rehabilitation is
 the primary application. Occupational monitoring is scoped to repetitive-motion exposure and drift;
 the system does not infer intent, fatigue, injury, or clinical improvement without external ground
 truth.
+
+The contribution is evaluated as one end-to-end application system. The four tasks are small linked
+operations, not separate papers, and Task 0 deliberately uses an established statistical proposal
+method rather than claiming a new segmentation model.
 
 Read the active design in this order:
 
 1. [`docs/design/MOTIVATION.md`](docs/design/MOTIVATION.md)
 2. [`docs/design/RESEARCH_TASKS.md`](docs/design/RESEARCH_TASKS.md)
-3. [`docs/design/DESIGN_OF_RECORD.md`](docs/design/DESIGN_OF_RECORD.md)
-4. [`docs/design/EVALUATION_PROTOCOL.md`](docs/design/EVALUATION_PROTOCOL.md)
-5. [`docs/design/IMPLEMENTATION_PLAN.md`](docs/design/IMPLEMENTATION_PLAN.md)
+3. [`docs/tasks/TASK0_EVENT_SEGMENTATION.md`](docs/tasks/TASK0_EVENT_SEGMENTATION.md)
+4. [`docs/tasks/TASK1_ARBITRARY_DETECTION.md`](docs/tasks/TASK1_ARBITRARY_DETECTION.md)
+5. [`docs/tasks/TASK2_CHANGE_QUANTIFICATION.md`](docs/tasks/TASK2_CHANGE_QUANTIFICATION.md)
+6. [`docs/tasks/TASK3_RECURRENT_MOTION_DISCOVERY.md`](docs/tasks/TASK3_RECURRENT_MOTION_DISCOVERY.md)
+7. [`docs/design/DESIGN_OF_RECORD.md`](docs/design/DESIGN_OF_RECORD.md)
+8. [`docs/design/ENCODER_HYPOTHESES.md`](docs/design/ENCODER_HYPOTHESES.md)
+9. [`docs/design/EVALUATION_PROTOCOL.md`](docs/design/EVALUATION_PROTOCOL.md)
+10. [`docs/design/IMPLEMENTATION_PLAN.md`](docs/design/IMPLEMENTATION_PLAN.md)
 
 ## Current status
 
 This branch, `application-motion-monitoring`, records the application pivot agreed on 2026-08-27.
 The encoder, data converters, released-checkpoint baseline adapters, and prior evaluation machinery
-already exist. The common `MotionSequence` export and the three application evaluators are planned
+already exist. The common `MotionSequence` export and the four application evaluators are planned
 but not yet implemented.
 
 The previous zero-shot, k-curve, and retrieve-mix-vote research remains recoverable from Git at the
@@ -38,8 +48,9 @@ branch point, commit `32267b6`. It is not the design of record on this branch.
   than treating six-second training grids as independent recordings.
 - **HALO encoder:** physical-time frontend plus temporal patch embeddings and explicit acquisition
   metadata.
-- **External representations:** author-released HARNet, UniMTS, NormWear, and ImageBind checkpoints,
-  used frozen through faithful adapters.
+- **External representations:** a minimal primary roster of author-released HARNet, UniMTS, and
+  NormWear checkpoints, used frozen through faithful adapters; ImageBind remains an optional generic
+  multimodal control.
 - **Initial downstream methods:** raw-signal DTW, physical-feature alignment, latent subsequence
   alignment, and matrix-profile-style motif discovery. Learned metric heads come later only if the
   frozen floors identify a representation limitation.

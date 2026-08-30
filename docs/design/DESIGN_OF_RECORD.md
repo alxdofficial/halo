@@ -1,6 +1,6 @@
-# Design of record: demonstrate, detect, compare, and discover
+# Design of record: propose, demonstrate, detect, compare, and discover
 
-> **Design of record, 2026-08-27.** This replaces the former Phase-A/Phase-B label-prediction
+> **Design of record, 2026-08-30.** This replaces the former Phase-A/Phase-B label-prediction
 > architecture on the `application-motion-monitoring` branch. The initial implementation is
 > representation-agnostic: HALO and released external encoders enter through the same interface.
 
@@ -13,7 +13,7 @@ timestamped movement representation. It does not require activity names for its 
 native-rate IMU + acquisition metadata
     -> faithful encoder adapter
     -> timestamped patch embeddings
-    -> task-specific matching, alignment, or motif discovery
+    -> event proposal followed by task-specific matching, alignment, or motif discovery
     -> inspectable events and measurements
 ```
 
@@ -36,36 +36,28 @@ Adapters may use a model's native temporal features. A model exposing only a poo
 applied with a common physical-time sliding window and stride. Duplicate windows never receive extra
 weight merely because one model emits a denser temporal grid.
 
-## 3. Task 1: reference-to-stream detection
+## 3. Task 0: event proposal and segmentation
 
-### 3.1 Reference construction
+Task 0 locates candidate intervals of coherent human motion and estimates their boundaries. The
+primary method uses compact physical signal evidence, hysteresis, and PELT; a learned temporal
+localization head over frozen encoder timelines is a supervised comparison. Synchronized video may
+provide privileged boundary supervision during development, but deployment remains IMU-only.
 
-Each reference execution remains an individual sequence. When several references are available,
-the system stores their distribution rather than averaging away timing and execution variation.
+Task 0 does not infer intent or assign activity labels. Its full contract is owned by
+[`TASK0_EVENT_SEGMENTATION.md`](../tasks/TASK0_EVENT_SEGMENTATION.md).
 
-### 3.2 Matching
+## 4. Task 1: reference-to-stream detection
 
-For reference patch `i` and candidate patch `j`, the initial latent cost is:
+Task 1 uses independent reference executions and constrained cosine-cost subsequence DTW over a
+continuous `MotionSequence`. The initial implementation is non-parametric; learned projections are
+later comparison arms rather than prerequisites. Its complete episode, matching, action-proposal,
+training, and evaluation contract is owned by
+[`TASK1_ARBITRARY_DETECTION.md`](../tasks/TASK1_ARBITRARY_DETECTION.md).
 
-```text
-cost[i,j] = 1 - cosine(reference_embedding[i], candidate_embedding[j])
-```
+Task-0 proposals provide an efficient candidate search, but direct matching against the full
+timeline remains a required control.
 
-Subsequence dynamic time warping or an equivalent monotonic alignment finds candidate intervals
-whose patch sequence matches the reference while permitting bounded speed variation. Duration and
-warping penalties prevent an arbitrarily stretched fragment from receiving a good score.
-
-The first design is non-parametric. A learned Siamese projection or match head is introduced only
-after frozen representations, raw DTW, and physical-feature controls are measured.
-
-### 3.3 Event formation
-
-Overlapping detections are merged with temporal non-maximum suppression. Thresholds are selected on
-development subjects using event precision-recall or a false-alarms-per-hour target, never on test
-recordings. Reference variability and optional target-absent calibration recordings provide
-per-deployment uncertainty.
-
-## 4. Task 2: aligned difference measurement
+## 5. Task 2: aligned difference measurement
 
 The reference and current execution are aligned once, then measured through separate views:
 
@@ -83,37 +75,45 @@ The system reports the aligned raw traces, physical summaries, latent deviation 
 and nearest historical examples. It does not map deviation to "better" or "worse" without an
 external direction label.
 
-## 5. Task 3: recurrent motion discovery
+The complete contract is owned by
+[`TASK2_CHANGE_QUANTIFICATION.md`](../tasks/TASK2_CHANGE_QUANTIFICATION.md).
 
-### 5.1 Candidate generation
+## 6. Task 3: recurrent motion discovery
 
-The continuous embedding timeline is searched over a bounded set of physical durations. Candidate
-subsequences overlap during search but final motif occurrences must be non-overlapping. Near-still
-and duplicate sensor intervals are screened using explicit signal-quality rules.
+### 6.1 Candidate generation
 
-### 5.2 Recurrence evidence
+Task-0 proposals are searched for recurring temporal structure. Final motif occurrences must be
+non-overlapping. A direct raw-timeline motif search remains a control so proposal-stage misses are
+measured.
 
-The initial implementation compares two established floors:
+### 6.2 Recurrence evidence
 
-- raw or engineered-feature matrix-profile/subsequence matching; and
-- the same motif search over frozen encoder embeddings.
+Training datasets provide bounded events and arbitrary action identities. A balanced pairwise loss
+teaches a small metric whether two independently recorded events have the same source identity.
+Names are not embedded, cross-dataset equivalence is not assumed, and complete identities are held
+out for evaluation.
 
-A recurrence graph connects candidate intervals whose aligned distance passes a development-set
-threshold. Clustering extracts groups of repeated motifs. The implementation must report cluster
-compactness, separation from local background, occurrence count, duration spread, and boundary
-stability rather than returning an unqualified cluster id.
+At deployment, a recurrence graph connects candidate intervals whose calibrated same-motion
+probability passes a development-set threshold. Clustering extracts groups of repeated motifs. Raw
+or engineered-feature matrix-profile search and frozen-embedding DTW remain non-learned controls.
+The implementation reports cluster compactness, nearest-negative separation, occurrence count,
+duration spread, and boundary stability rather than returning an unqualified cluster id.
 
-### 5.3 Human confirmation
+### 6.3 Human confirmation
 
 The interface ranks motif clusters by recurrence and cumulative exposure, shows representative
 executions and their timeline locations, and asks a clinician or ergonomist to confirm, reject, or
 name them. A confirmed motif becomes a Task-1 reference. Intent is never inferred from recurrence
 alone.
 
-## 6. Optional learning
+The complete contract is owned by
+[`TASK3_RECURRENT_MOTION_DISCOVERY.md`](../tasks/TASK3_RECURRENT_MOTION_DISCOVERY.md).
 
-The first milestone freezes every encoder. If the representation is the limiting factor, the next
-model is a small shared metric projection trained episodically:
+## 7. Learning boundary
+
+Task 3 includes a small pairwise metric because arbitrary event-equivalence supervision is the
+mechanism being tested. The first milestone still freezes every encoder. If representation quality
+is the measured limitation, the next arm fine-tunes the encoder through the same metric:
 
 - positives are independent executions of the same movement;
 - hard negatives are different movements from the same subject and configuration;
@@ -121,22 +121,24 @@ model is a small shared metric projection trained episodically:
 - augmentations model sensor nuisance but never manufacture the only positive evidence; and
 - test tasks, subjects, and sessions remain unseen.
 
-The head is trained for verification and reused by Tasks 1-3. Separate complex decoders are not
-introduced until a simpler shared metric fails for a measured reason.
+The metric may be reused by Tasks 1 and 2 where appropriate. Task 0 keeps its established proposal
+methods. Separate complex decoders are not introduced until the simple metric fails for a measured
+reason.
 
-## 7. Role of the current HALO encoder
+## 8. Role of the current HALO encoder
 
 HALO contributes physical-time features, temporal patch embeddings, explicit missing-information
 masks, and heterogeneous sensor metadata. These properties are hypotheses, not assumed advantages.
 They are tested against raw signal methods and frozen released encoders under the same downstream
-pipeline.
+pipeline. [`ENCODER_HYPOTHESES.md`](ENCODER_HYPOTHESES.md) owns the cross-task literature analysis,
+mechanism audit, prior evidence, and matched ablation gates for those hypotheses.
 
 The previous candidate-label interface, zero-shot classifier, memory-label voting, admissibility
 gate, and retrieve-mix-vote Phase B are not part of this design. Their code remains temporarily for
 reproducibility while application code is built; their documentation is removed from the active
 surface and remains recoverable from commit `32267b6`.
 
-## 8. Implementation principles
+## 9. Implementation principles
 
 - Use physical seconds, not sample counts, for every duration and stride.
 - Preserve source timestamps and hard recording/session boundaries.

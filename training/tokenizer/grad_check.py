@@ -84,7 +84,10 @@ def main() -> None:
         patch_durations = batch[f"patch_durations{suffix}"].to(device)
         tokens = model.encoder.tokenize(
             patches, rates, lengths,
+            channel_mask=channel_mask,
             source_rate_hz=batch[f"source_rates{suffix}"].to(device),
+            sensor_id=batch[f"sensor_id{suffix}"].to(device),
+            n_sensors=max(map(len, batch[f"sensor_texts{suffix}"])),
         )
         sensor_descriptors, sensor_text_ids = model.encoder.encode_sensor_descriptors_unique(
             batch[f"sensor_texts{suffix}"], device,
@@ -138,9 +141,15 @@ def main() -> None:
     loss.total.backward()
 
     encoder = model.encoder
-    folded, present = encoder.sensor_fold(
-        tokens, sensor_id, batch["channel_mask"].to(device), n_sensors=sensors,
-    )
+    if encoder.sensor_fold is None:
+        folded = tokens
+        present = encoder.filterbank.sensor_presence(
+            sensor_id, batch["channel_mask"].to(device), sensors,
+        )
+    else:
+        folded, present = encoder.sensor_fold(
+            tokens, sensor_id, batch["channel_mask"].to(device), n_sensors=sensors,
+        )
     descriptor_conditioned = encoder.descriptor_proj(folded, clean["descriptor"], present)
     magnitudes = {
         "channel_tokens": rms(tokens),
@@ -159,11 +168,12 @@ def main() -> None:
         "encoder": module_grad_norm(encoder),
         "jepa_predictor": module_grad_norm(model.jepa_predictor),
         "vicreg_projector": module_grad_norm(model.vicreg_projector),
-        "sensor_fold": module_grad_norm(encoder.sensor_fold),
         "descriptor_projection": module_grad_norm(encoder.descriptor_proj),
         "descriptor_head": module_grad_norm(encoder.descriptor_head),
         "transformer_layers": [module_grad_norm(layer) for layer in encoder.transformer.layers],
     }
+    if encoder.sensor_fold is not None:
+        gradients["sensor_fold"] = module_grad_norm(encoder.sensor_fold)
     dead = [name for name, parameter in model.named_parameters()
             if parameter.requires_grad and (parameter.grad is None or not bool(parameter.grad.any()))]
     checks = {

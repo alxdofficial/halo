@@ -1,0 +1,9 @@
+{
+  "dataset": "C-MHAD",
+  "title": "C-MHAD: Continuous Multimodal Human Action Dataset of Simultaneous Video and Inertial Sensing",
+  "authors": ["Haoran Wei", "Pranav Chopada", "Nasser Kehtarnavaz"],
+  "year": 2020,
+  "venue": "Sensors",
+  "doi": "10.3390/s20102905",
+  "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC7287800/"
+}

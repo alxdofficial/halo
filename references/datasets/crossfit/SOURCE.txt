@@ -1,0 +1,17 @@
+Recognition and Repetition Counting for Complex Physical Exercises with Deep Learning
+
+Publication DOI: https://doi.org/10.3390/s19030714
+Article: https://www.mdpi.com/1424-8220/19/3/714
+Dataset and code: https://drive.google.com/drive/folders/1s_-2MI0eoNBUo0P-zSNij16uhyUpK0QK
+
+Verified for application planning on 2026-08-29. The selected authored code and sensor release
+contains 446 non-NULL exercise arrays and 5,461 non-NULL repetition arrays at the authors'
+interpolated approximately 100 Hz rate. Arrays contain wrist and ankle acceleration in m/s2,
+gyroscope in rad/s, and orientation. Six repetition fragments last only 0.08-0.16 seconds and must
+be excluded or justified. The paper reports 54 participants, while the released map exposes 57
+codes, seven of which are NULL-only; freeze source-code splits rather than inferring identities.
+The public Drive release does not contain a clear machine-readable data licence. Confirm permitted
+research and publication use before the dataset contributes to a final paper result.
+The application adapter exposes all 5,923 authored parent/repetition arrays lazily in canonical
+units. Parent exercises and repetition excerpts duplicate signal by design and must be selected as
+alternative supervision views, not counted as independent observations in one training split.

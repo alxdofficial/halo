@@ -1,0 +1,16 @@
+RecoFit: Using a Wearable Sensor to Find, Recognize, and Count Repetitive Exercises
+
+Publication DOI: https://doi.org/10.1145/2556288.2557116
+Open publication copy: https://www.microsoft.com/en-us/research/wp-content/uploads/2016/12/p3225-morris.pdf
+Dataset repository: https://github.com/microsoft/Exercise-Recognition-from-Wearable-Sensors
+Format guide: https://github.com/microsoft/Exercise-Recognition-from-Wearable-Sensors/blob/main/readme.html
+
+The data repository uses the Community Data License Agreement - Permissive, Version 2.0. The selected
+multionly file contains full visits and can reconstruct the isolated-exercise data, so the duplicate
+singleonly file is not acquired. Verified on 2026-08-29: the selected 1.57 GB MATLAB file contains
+126 visits from 94 subject IDs and 79.42 hours of timestamped 50 Hz right-forearm acceleration in g
+and gyroscope in degree/s. It provides set intervals and counts, not individual repetition times;
+two visits are marked incomplete.
+The application adapter decodes one MATLAB subject cell at a time, emits all 126 visits without
+materializing the corpus, converts gyroscope values to rad/s, and preserves 4,814 set/background
+intervals plus repetition counts. It intentionally omits undocumented slave arrays.

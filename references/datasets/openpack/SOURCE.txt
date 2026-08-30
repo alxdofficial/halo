@@ -1,0 +1,17 @@
+OpenPack: A Large-Scale Dataset for Recognizing Packaging Works in IoT-Enabled Logistic Environments
+
+Publication DOI: https://doi.org/10.1109/PerCom59722.2024.10494448
+Open-access manuscript: https://arxiv.org/abs/2212.11152
+Dataset page: https://open-pack.github.io/
+Non-RGB release: https://zenodo.org/records/8145223
+Repository: https://github.com/open-pack/openpack-dataset
+
+The selected acquisition is the non-RGB release. The dataset is CC BY-NC-SA 4.0; the repository
+documents separate terms for the RGB release. Verified on 2026-08-29: all 21 subject-ID archives
+(5.20 GiB) are present, representing 16 distinct people after the five documented aliases are
+collapsed. The 416 ATR IMU files contain finite gravity-present acceleration in g and gyroscope in
+degree/s. Preserve measured 30.30-33.33 Hz timestamps, split or mask two gaps in
+`U0108.zip:atr/atr01/S0400.csv`, and exclude one zero-duration `Bend Flap` annotation in `U0208`.
+The application adapter selects the documented `atr01` right-wrist IMU, emits 105 usable
+quality-contiguous records, drops one isolated single sample, excludes annotations with no selected
+sensor overlap, and clips observable fragments while retaining their original bounds in metadata.

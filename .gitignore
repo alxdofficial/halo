@@ -42,6 +42,13 @@ data/datasets/*/labels.json
 data/datasets/*/events.json
 data/datasets/*/debug_*.png
 data/**/bundles/
+
+# Application-study datasets are deliberately isolated from the representation-training corpus.
+# Keep acquisition code and source contracts, but never version downloaded or derived payloads.
+applications/motion_monitoring/data/sources/*/downloads/
+applications/motion_monitoring/data/sources/*/raw/
+applications/motion_monitoring/data/sources/*/processed/
+applications/motion_monitoring/data/sources/*/manifests/
 training_output/
 test_output/
 eval/results/

@@ -96,7 +96,10 @@ def stage_activations(encoder, batch, device) -> dict[str, torch.Tensor]:
                 captured[name] = value.detach()
         return hook
 
-    handles.append(encoder.sensor_fold.register_forward_hook(grab("1_sensor_fold")))
+    if encoder.sensor_fold is not None:
+        handles.append(encoder.sensor_fold.register_forward_hook(grab("1_sensor_fold")))
+    else:
+        handles.append(encoder.filterbank.proj.register_forward_hook(grab("1_sensor_projection")))
     handles.append(encoder.descriptor_proj.register_forward_hook(grab("2_descriptor_proj")))
     for i, block in enumerate(encoder.transformer.attn):
         handles.append(block.register_forward_hook(grab(f"3_trunk_attn{i}")))

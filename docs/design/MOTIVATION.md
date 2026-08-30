@@ -1,6 +1,6 @@
 # Motivation: personalized movement monitoring
 
-> **Design of record, 2026-08-27.** This document replaces the prior zero-shot/open-label
+> **Design of record, 2026-08-30.** This document replaces the prior zero-shot/open-label
 > motivation on the `application-motion-monitoring` branch.
 
 ## The problem
@@ -32,17 +32,23 @@ open-vocabulary classifier.
 > comparison, and discovery of personally or operationally meaningful movement using consumer
 > wearables and little or no task-specific training.
 
-The thesis is evaluated through three tasks:
+The thesis is evaluated through four tasks:
 
-1. **Arbitrary activity detection:** given one or a few reference recordings, find independent
+0. **Event proposal and segmentation:** find intervals of coherent human motion in a continuous
+   recording and estimate their start and end boundaries without requiring an activity vocabulary.
+1. **Arbitrary task detection:** given one or a few reference recordings, find independent
    occurrences of that movement in later continuous data.
-2. **Activity difference quantification:** align two executions of the same task and quantify how
-   they differ in latent structure and interpretable physical measurements.
+2. **Activity difference quantification:** learn ordinary personal variation for one confirmed task,
+   then detect and explain persistent change across later executions using latent structure and
+   interpretable physical measurements.
 3. **Recurrent motion discovery:** find coherent motion motifs that recur frequently in unlabeled
    occupational recordings, then let a human identify which motifs correspond to meaningful work.
 
-The tasks form one workflow: discover or demonstrate a movement, monitor its future occurrences,
-and track how its execution changes.
+The tasks form one workflow: segment candidate motion, discover or demonstrate a movement, monitor
+its future occurrences, and track whether its execution changes beyond its personal noise floor.
+They are evaluated as four small operations in one end-to-end monitoring system, not as four
+independent papers or four claims of new machine-learning algorithms. Task 0 supplies proposals;
+Tasks 1-3 supply the application behavior that makes those proposals useful.
 
 ## Why rehabilitation is the primary application
 
@@ -81,7 +87,8 @@ clinical improvement, exercise correctness, fatigue, or injury risk unless those
 validated against appropriate human or physical ground truth.
 
 The word **activity** is therefore reserved for a motion confirmed by a person or supplied as a
-reference. Before confirmation, Task 3 returns **motion motifs**, not activities.
+reference. Task 0 returns **candidate motion events**, not intentional activities. Before human or
+external confirmation, Task 3 returns **motion motifs**, not activities.
 
 ## Role of HALO and external encoders
 
@@ -91,9 +98,13 @@ which available representation is useful for these tasks? Different upstream pre
 are acceptable under that question, but they prevent a claim that one architecture is intrinsically
 superior.
 
-HALO earns a model contribution only if controlled ablations show that its physical-time frontend,
-temporal patch structure, or heterogeneous-sensor handling improves these application outcomes.
-Otherwise the contribution is the task formulation, protocol, system, and applied evidence.
+The primary contribution is the complete application system: its problem formulation, interoperable
+representation interface, proposal/detection/comparison/discovery workflow, evaluation protocol,
+and evidence on real rehabilitation and occupational recordings. HALO's physical-time frontend,
+temporal patch structure, and heterogeneous-sensor handling are secondary mechanism contributions
+only where controlled ablations support them. The paper remains useful if a released external
+encoder is best for one operation; it must report that result rather than redefine the task around
+HALO.
 
 ## Non-goals
 

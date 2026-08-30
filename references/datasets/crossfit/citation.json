@@ -1,0 +1,12 @@
+{
+  "dataset": "CrossFit exercise repetitions",
+  "title": "Recognition and Repetition Counting for Complex Physical Exercises with Deep Learning",
+  "authors": ["Andrea Soro", "Gino Brunner", "Simon Tanner", "Roger Wattenhofer"],
+  "year": 2019,
+  "venue": "Sensors",
+  "volume": 19,
+  "issue": 3,
+  "article": 714,
+  "doi": "10.3390/s19030714",
+  "url": "https://www.mdpi.com/1424-8220/19/3/714"
+}

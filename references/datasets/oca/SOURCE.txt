@@ -1,0 +1,17 @@
+Overhead Car Assembly IMU Dataset (OCA)
+
+Dataset record: https://doi.org/10.24406/fordatis/121
+Publication: https://doi.org/10.1109/INDIN51773.2022.9976078
+
+Verified for application planning on 2026-08-29. The complete 33.22 MB ZIP was downloaded and all
+twelve CSV sessions were inspected. It contains timestamps in milliseconds, four accelerometers and
+gyroscopes, six action labels, NULL, and official subject-level train/validation/test splits. Sessions
+use native rates near either 20 Hz or 27 Hz; `P0-R0.csv` contains an 81-second timestamp gap. The
+accelerometer norm is consistent with m/s2. The publication identifies the IMU as a BNO055, and every
+released gyroscope value is exactly quantized at the device's 1/16 degree/s output scale. Convert
+acceleration by `/ 9.80665` and gyroscope by `* pi / 180`. Data have not been imported into the HALO
+representation-training corpus.
+The separate application adapter emits 13 quality-contiguous records from the twelve sessions,
+preserves all four placements and native rates, applies those unit conversions, and retains the
+official split metadata. The training split and validation split share some published participants;
+only the official test participants are subject-disjoint from both.
