@@ -4,6 +4,13 @@
 > motion" from datasets with bounded, labeled events. Deployment requires neither an enrolled
 > reference nor an activity vocabulary. Classical motif search remains a non-learned control.
 
+**Implementation status, 2026-08-30.** Complete-timeline collation, dense physical-time multiscale
+candidates, exact-event overlap targets, scope-local arbitrary identities, balanced pair sampling,
+same-motion metric learning, recurrence graph decoding, temporal consolidation, metrics, and
+encoder/head gradient telemetry are mechanically implemented. Short real-cache smokes pass.
+Operating-point calibration, immutable manifests, long training, and human-review artifacts remain
+outstanding.
+
 ## 1. Question and deployment contract
 
 Given a long unlabeled IMU recording, which temporally structured motions recur, where do they occur,

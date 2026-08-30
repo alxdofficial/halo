@@ -1,6 +1,6 @@
 # Movement-monitoring datasets
 
-This directory owns data used by the four application tasks. It is intentionally separate from
+This directory owns data used by the three application tasks. It is intentionally separate from
 `data/datasets`, which is the HALO representation-training corpus.
 
 - `SOURCE_INVENTORY.json` is the single acquisition and role contract.

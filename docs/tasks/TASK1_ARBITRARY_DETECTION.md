@@ -5,6 +5,12 @@
 > representation contracts, and reporting rules remain in the documents linked from
 > [`docs/README.md`](../README.md).
 
+**Implementation status, 2026-08-30.** Native-time cache episodes, independent reference/query
+construction, join guards, target-absent episodes, bounded open-begin/open-end soft-DTW, endpoint
+training, temporal suppression, and encoder/head gradient telemetry are mechanically implemented.
+Short real-cache smokes pass. Threshold calibration, immutable task manifests, long training, and
+sealed evaluation remain deliberately outstanding.
+
 ## 1. Question and deployment contract
 
 Given one or a few bounded recordings of a movement, determine whether independent executions occur

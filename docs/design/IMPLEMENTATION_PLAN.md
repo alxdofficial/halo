@@ -5,15 +5,29 @@
 
 **Current progress.** Seven application sources have immutable payload checksums, verified native-time
 adapters, and lossless map-style caches. The temporal annotation inventory measures their real event
-structure and records the source capabilities of reused datasets. Task 1 has a tested encoder-agnostic
-subsequence matcher with physical-time output and duplicate consolidation. The common
-`MotionSequence` export, immutable task manifests, and complete evaluations remain open.
+structure and records the source capabilities of reused datasets. The runtime `MotionSequence`
+contract now exports native-clock patch intervals, validity, normalized embeddings, physical
+summaries, and provenance through both HALO and a cheap physical-feature control. All three task
+pipelines have short real-cache optimizer smokes with finite head and encoder gradients. These are
+mechanical checks, not trained models or results. Serialized representation caches, immutable task
+manifests, calibrated operating points, long training, and complete evaluations remain open.
+
+Reproduce the cross-task mechanical check with:
+
+```bash
+/home/alex/code/HALO/legacy_code/.venv/bin/python \
+  -m applications.motion_monitoring.smoke --steps 3 --device cpu
+```
+
+The same command accepts `--encoder halo --checkpoint <phase-a.pt>` and optional
+`--train-encoder` for a one-step GPU gradient-path check. Do not treat its deliberately tiny,
+development-source metrics as application performance.
 
 ## Stage 0: protocol and annotation audit
 
 1. Maintain one authoritative temporal annotation inventory.
 2. Reconstruct XRF V2 and HARMES complete timelines without Phase-A excerpt assumptions.
-3. Define the serialized `MotionSequence` contract.
+3. **Runtime implemented:** define and validate `MotionSequence`; serialized cache format remains open.
 4. Freeze application train/development/test roles and upstream-checkpoint provenance.
 5. Freeze deterministic manifests containing subjects, recordings, references, target intervals,
    target-absent time, annotation scope, and split fingerprints.
@@ -36,9 +50,11 @@ contract, and every result regenerates from one manifest fingerprint.
 1. **Implemented:** open-begin/open-end cosine subsequence DTW with bounded local warp slope.
 2. **Implemented:** trace every feasible endpoint into a physical-time candidate interval.
 3. **Implemented:** score thresholding and temporal non-maximum suppression for multiple detections.
-4. Wire raw-signal, physical-feature, HALO, and released-encoder timelines into the same matcher.
+4. **Partially implemented:** physical-feature and HALO timelines use the same matcher; raw-signal
+   and released-encoder adapters remain open.
 5. Fit thresholds on target-present and target-absent development recordings.
-6. Build natural and synthetic training episodes without leaking joins or augmentation watermarks.
+6. **Implemented mechanically:** natural cache episodes plus deterministic independent-view,
+   retiming, distractor, target-absent, validity, and join-guard test episodes.
 7. Produce event timelines, alignment paths, false-alarm curves, count error, and boundary error.
 
 **Exit condition:** event AP and recall at a declared false-alarms-per-hour operating point are
@@ -46,11 +62,13 @@ available for every representation on natural continuous recordings.
 
 ## Stage 3: Task-2 measurement
 
-1. Reuse Task-1 alignment for phase-local latent deviation.
-2. Add duration, cadence, intensity, physical-frequency, smoothness, and stability measurements.
+1. **Implemented mechanically:** phase-normalized latent residual curves for bounded executions.
+2. **Partially implemented:** duration and IMU magnitude/dynamic/jerk summaries are exported;
+   cadence, frequency, smoothness, and stability reporting remain open.
 3. Estimate personal baseline variability, remounting noise, and minimum detectable change.
 4. Fit a robust longitudinal state over per-execution deviations.
-5. Validate known execution differences and held-out longitudinal association separately.
+5. **Mechanically implemented:** masked, unit-scaled known-change classification/regression and
+   accepted-variation controls; real longitudinal association remains open.
 6. Build phase and longitudinal plots with uncertainty and nearest historical examples.
 
 **Exit condition:** known changes are separated from ordinary measurement noise without using quality
@@ -58,15 +76,16 @@ or clinical language absent external validation.
 
 ## Stage 4: Task-3 dense recurrence discovery
 
-1. Encode each complete recording once at a fine physical-time stride.
-2. Pool adjacent embeddings over a small declared duration set to form a temporal pyramid.
-3. Assign candidate/event overlap targets from exact-boundary training sources; ignore ambiguous
+1. **Implemented mechanically:** encode complete recording crops at a fine physical-time stride.
+2. **Implemented:** pool adjacent embeddings over declared physical durations.
+3. **Implemented:** assign candidate/event overlap targets from exact-boundary training sources; ignore ambiguous
    partial overlaps and incompletely annotated negatives.
 4. Implement pooled cosine, constrained DTW, and variable-length matrix-profile controls.
-5. Train the balanced same-motion metric on arbitrary source identities.
-6. Consolidate overlapping multiscale candidates with a frozen temporal decoding rule.
+5. **Implemented mechanically:** train a balanced same-motion metric on scoped arbitrary identities.
+6. **Implemented:** consolidate overlapping multiscale candidates with temporal NMS.
 7. Calibrate recurrence thresholds on held-out subjects and identities.
-8. Build recurrence graphs, unassigned candidates, motif diagnostics, and human review output.
+8. **Partially implemented:** mutual-neighbor recurrence graphs, unassigned candidates, and motif
+   diagnostics exist; human-review artifacts remain open.
 9. Report oracle source-interval matching and complete-timeline discovery separately.
 
 **Exit condition:** repeated-event coverage, false motif rate, count error, fragmentation, boundary
