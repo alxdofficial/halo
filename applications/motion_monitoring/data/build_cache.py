@@ -15,6 +15,8 @@ from applications.motion_monitoring.data.adapters.registry import (
 from applications.motion_monitoring.data.cache import (
     CACHE_SCHEMA_VERSION,
     _storage_name,
+    cache_provenance,
+    verify_source_payload,
     write_recording,
 )
 
@@ -23,6 +25,7 @@ DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parent / "sources"
 
 
 def build_dataset_cache(dataset: str, *, force: bool = False) -> dict[str, object]:
+    verify_source_payload(dataset)
     output = DEFAULT_SOURCE_ROOT / dataset / "processed" / "canonical_v1"
     staging = output.with_name(f".{output.name}.building")
     if output.exists() and not force:
@@ -65,6 +68,7 @@ def build_dataset_cache(dataset: str, *, force: bool = False) -> dict[str, objec
                     "resampled": False,
                     "windowed": False,
                     "imputed": False,
+                    "provenance": cache_provenance(dataset),
                 },
                 indent=2,
                 sort_keys=True,

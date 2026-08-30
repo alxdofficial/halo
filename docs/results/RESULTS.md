@@ -20,7 +20,8 @@ after the common `MotionSequence` interface and application manifest are impleme
 
 ## Prior evidence and why it is not an application result
 
-The branch point contains the completed generic HAR comparison. Its main finding was that released
+The archived pre-application design contains the completed generic HAR comparison. Its main finding
+was that released
 foundation encoders and HALO remained far below useful supervised HAR accuracy in zero-shot settings,
 while simple nearest-neighbor enrollment often matched or beat the learned HALO readout. Those
 experiments established that temporal representations and retrieval are worth studying, but they did
@@ -31,6 +32,8 @@ The exact prior tables remain available with:
 ```bash
 git show 32267b6:docs/results/RESULTS.md
 ```
+
+The same commit is named by `archive/pre-application-main-20260830`.
 
 They must not be copied into an application table or described as evidence for the new tasks.
 

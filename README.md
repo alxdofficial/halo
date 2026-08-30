@@ -33,13 +33,13 @@ Read the active design in this order:
 
 ## Current status
 
-This branch, `application-motion-monitoring`, records the application pivot agreed on 2026-08-27.
-The encoder, data converters, released-checkpoint baseline adapters, and prior evaluation machinery
-already exist. The common `MotionSequence` export and the four application evaluators are planned
-but not yet implemented.
+The application pivot agreed on 2026-08-27 is now the design of record on `main`. The encoder, data
+converters, released-checkpoint baseline adapters, application source acquisition, and seven
+lossless raw-timeline adapters exist. The common `MotionSequence` export and the four application
+evaluators are planned but not yet implemented.
 
-The previous zero-shot, k-curve, and retrieve-mix-vote research remains recoverable from Git at the
-branch point, commit `32267b6`. It is not the design of record on this branch.
+The previous zero-shot, k-curve, and retrieve-mix-vote research remains recoverable from Git at
+commit `32267b6` and branch `archive/pre-application-main-20260830`. It is not the design of record.
 
 ## Technical foundation
 

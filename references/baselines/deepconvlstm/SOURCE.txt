@@ -1,0 +1,3 @@
+https://www.mdpi.com/1424-8220/16/1/115
+https://www.mdpi.com/1424-8220/16/1/115/pdf
+https://github.com/sussexwearlab/DeepConvLSTM

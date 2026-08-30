@@ -30,7 +30,7 @@ def test_wear_loads_real_arm_streams_at_release_rate_and_units() -> None:
     assert recording.dataset == "wear"
     assert recording.recording_id == "wear:sbj_0"
     assert recording.subject_id == recording.session_id == "sbj_0"
-    assert recording.split == "training"
+    assert recording.split is None
     assert recording.metadata["annotation_usage"] == "scoring_only"
     assert recording.metadata["excluded_source_placements"] == ("right_leg", "left_leg")
 
@@ -135,14 +135,37 @@ def test_wear_full_release_ids_masks_intervals_and_source_quirks() -> None:
     assert total_samples == 3_466_400
     assert total_activity_intervals == 719
     assert len(label_set) == 18
-    assert summaries["sbj_18"].subject_id == "sbj_0"
-    assert summaries["sbj_19"].subject_id == "sbj_14"
+    assert summaries["sbj_18"].subject_id == "sbj_18"
+    assert summaries["sbj_19"].subject_id == "sbj_19"
     assert summaries["sbj_18"].session_id == "sbj_18"
     assert summaries["sbj_19"].session_id == "sbj_19"
-    assert summaries["sbj_18"].metadata["identity_alias_applied"] is True
-    assert summaries["sbj_19"].metadata["identity_alias_applied"] is True
-    assert all(summaries[f"sbj_{index}"].split == "training" for index in range(18))
-    assert all(summaries[f"sbj_{index}"].split == "testing" for index in range(18, 24))
+    assert summaries["sbj_18"].metadata["identity_alias_applied"] is False
+    assert summaries["sbj_19"].metadata["identity_alias_applied"] is False
+    assert summaries["sbj_18"].metadata["identity_linkage_group"] == (
+        "wear_repeat_pair_unresolved"
+    )
+    assert summaries["sbj_19"].metadata["identity_linkage_group"] == (
+        "wear_repeat_pair_unresolved"
+    )
+    assert summaries["sbj_0"].metadata["identity_linkage_group"] == (
+        "wear_repeat_pair_unresolved"
+    )
+    assert summaries["sbj_14"].metadata["identity_linkage_group"] == (
+        "wear_repeat_pair_unresolved"
+    )
+    assert all(summaries[f"sbj_{index}"].split is None for index in range(24))
+    assert all(
+        summaries[f"sbj_{index}"].metadata["official_partition"] == "training"
+        for index in range(18)
+    )
+    assert all(
+        summaries[f"sbj_{index}"].metadata["official_partition"] == "testing"
+        for index in range(18, 24)
+    )
+    assert all(
+        recording.metadata["official_partition_subject_disjoint"] is False
+        for recording in summaries.values()
+    )
 
     left = summaries["sbj_10"].streams[1]
     assert int((~left.valid).all(axis=1).sum()) == 51_392

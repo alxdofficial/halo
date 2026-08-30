@@ -1,7 +1,6 @@
 # Research tasks
 
-> **Agreed scope, 2026-08-30.** These are the four active application tasks on the
-> `application-motion-monitoring` branch.
+> **Agreed scope, 2026-08-30.** These are the four active application tasks on `main`.
 
 The four tasks are components of one applied movement-monitoring system. Individually they are
 deliberately small. The research contribution is the complete path from continuous wearable data to

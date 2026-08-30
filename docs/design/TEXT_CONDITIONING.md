@@ -1,7 +1,7 @@
 # Acquisition-description conditioning
 
 This is an implementation reference for the optional text-conditioning path in the HALO encoder. It
-is not an application contribution on the `application-motion-monitoring` branch.
+is not an application contribution on `main`.
 
 ## Implemented factorization
 

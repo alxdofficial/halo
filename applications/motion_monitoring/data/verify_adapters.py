@@ -59,6 +59,8 @@ def _validate_recording(recording: RawRecording) -> dict[str, Any]:
         "events": len(recording.events),
         "duration_sec": observed_end - observed_start,
         "rates_hz": rates,
+        "invalid_values": invalid,
+        "value_count": values,
         "invalid_fraction": invalid / values if values else 0.0,
     }
 
@@ -87,8 +89,8 @@ def verify_dataset(dataset: str, *, limit: int) -> dict[str, Any]:
         "rate_hz_median": float(np.median(rates)),
         "rate_hz_max": max(rates),
         "invalid_fraction": (
-            sum(row["invalid_fraction"] * row["samples"] for row in rows)
-            / sum(row["samples"] for row in rows)
+            sum(row["invalid_values"] for row in rows)
+            / sum(row["value_count"] for row in rows)
         ),
     }
 

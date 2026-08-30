@@ -22,7 +22,7 @@ _DEFAULT_ROOT = Path(__file__).resolve().parents[1] / "sources" / "wear"
 _SOURCE_RATE_HZ = 50.0
 _CHANNELS = ("acc_x", "acc_y", "acc_z")
 _SESSION_RE = re.compile(r"sbj_(?P<index>\d+)")
-_SUBJECT_ALIASES = {18: 0, 19: 14}
+_AMBIGUOUS_REPEAT_GROUP = frozenset({0, 14, 18, 19})
 _ARM_COLUMNS = {
     "right_arm": ("right_arm_acc_x", "right_arm_acc_y", "right_arm_acc_z"),
     "left_arm": ("left_arm_acc_x", "left_arm_acc_y", "left_arm_acc_z"),
@@ -345,24 +345,36 @@ def iter_recordings(
         )
         reconciliation = _reconcile_row_labels(frame["label"].to_numpy(), events)
 
-        canonical_subject_index = _SUBJECT_ALIASES.get(source_index, source_index)
         official_partition = "training" if source_index < 18 else "testing"
+        ambiguous_repeat = source_index in _AMBIGUOUS_REPEAT_GROUP
         recording = RawRecording(
             dataset="wear",
             recording_id=f"wear:{session_id}",
-            subject_id=f"sbj_{canonical_subject_index}",
+            subject_id=session_id,
             session_id=session_id,
             streams=tuple(
                 _sensor_stream(frame, timestamps_sec, stream_id=stream_id)
                 for stream_id in ("right_arm", "left_arm")
             ),
             events=events,
-            split=official_partition,
+            split=None,
             metadata={
                 "source_file": path.name,
                 "source_subject_id": session_id,
-                "identity_alias_applied": canonical_subject_index != source_index,
+                "identity_alias_applied": False,
+                "possible_repeated_identity": ambiguous_repeat,
+                "identity_linkage_group": (
+                    "wear_repeat_pair_unresolved" if ambiguous_repeat else None
+                ),
+                "identity_linkage_caveat": (
+                    "sbj_18 and sbj_19 repeat sbj_0 and sbj_14, but the released "
+                    "documentation does not establish the directional pairing"
+                    if ambiguous_repeat
+                    else None
+                ),
                 "official_partition": official_partition,
+                "official_partition_subject_disjoint": False,
+                "application_role": "sealed_external_evaluation",
                 "annotation_usage": "scoring_only",
                 "annotation_sources": annotation_sources[session_id],
                 "annotation_fps": int(annotation_record.get("fps", 0)),

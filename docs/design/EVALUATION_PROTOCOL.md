@@ -145,8 +145,8 @@ covered by confirmed motifs.
 
 The verified, checkpoint-dependent inventory is owned by
 [`APPLICATION_DATASETS.md`](../data/APPLICATION_DATASETS.md). In particular, Upper Limb Use is
-currently blocked by short converted artifacts; C-MHAD, WEAR, and OCA have passed only the file-level
-checks recorded there and still need frozen manifests. Dataset readiness must be copied into each
+currently blocked by short converted artifacts; C-MHAD, WEAR, and OCA have verified raw-timeline
+adapters but still need frozen evaluation manifests. Dataset readiness must be copied into each
 result artifact so a later source or converter change cannot silently alter the cohort.
 
 The core public evaluation matrix is intentionally small:
@@ -159,13 +159,13 @@ The core public evaluation matrix is intentionally small:
 | **OCA** | occupational Task-3 recurrent-motion discovery | occupational Task-0/Task-1 transfer |
 
 This is one shared four-dataset study, not four unrelated benchmark collections. C-MHAD, WEAR, and
-OCA are not reportable until their pending loader/manifest checks in `APPLICATION_DATASETS.md` are
-closed. UniMTS/OCA is additionally unsupported until upper-arm placement is mapped explicitly to
-the released skeleton contract.
+OCA are not reportable until immutable subject/recording manifests are frozen. Their loaders and
+physical contracts are implemented and verified. UniMTS/OCA is additionally unsupported until
+upper-arm placement is mapped explicitly to the released skeleton contract.
 
-OpenPack is the priority Task-3 metric-training and held-out-identity source. It enters the final
-evaluation matrix only after import and provenance checks, and never serves as an unseen-dataset test
-for an arm that trained its matcher on OpenPack.
+OpenPack is the priority Task-3 metric-training and held-out-identity source. Its import and
+provenance checks are complete; it enters a result only after the exact identity manifest is frozen,
+and never serves as an unseen-dataset test for an arm that trained its matcher on OpenPack.
 
 A prospective consumer-watch collection is warranted only if the public datasets leave a material
 deployment condition unmeasured. Such a collection would include

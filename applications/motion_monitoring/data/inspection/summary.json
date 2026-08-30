@@ -175,8 +175,9 @@
         "P57",
         "P58"
       ],
-      "participant_identity_warning": "the released participant map has 57 codes, while the paper reports 54 participants; freeze source-code splits and do not infer demographics or distinct-person counts from code names alone",
-      "publication_participants": 54,
+      "participant_identity_warning": "the 50 non-NULL release codes match the paper's constrained-workout cohort; seven additional NULL-only codes are release identifiers and must not be inferred to be additional people",
+      "publication_participants_constrained_workout": 50,
+      "publication_participants_wider_study": 54,
       "released_participant_codes": 57,
       "repetition_arrays": 5461,
       "repetition_length_samples": {
@@ -185,7 +186,7 @@
         "min": 8.0
       },
       "short_repetition_arrays_under_0_2_seconds": 6,
-      "status": "pass_with_identity_count_and_short_fragment_caveats",
+      "status": "pass_with_short_fragment_and_release_code_caveats",
       "timing": "arrays are interpolated to 100 Hz by the released preprocessing code",
       "unique_exercise_shapes": 224,
       "unmapped_exercise_indices": []
@@ -760,6 +761,17 @@
       "visits": 126
     },
     "wear": {
+      "ambiguous_identity_linkage": {
+        "directional_mapping": "unverified",
+        "known_original_sessions": [
+          "sbj_0",
+          "sbj_14"
+        ],
+        "known_repeat_sessions": [
+          "sbj_18",
+          "sbj_19"
+        ]
+      },
       "duration_seconds": {
         "max": 4171.0,
         "median": 2786.25,
@@ -768,10 +780,6 @@
       "files": {
         "annotation_json": 29,
         "inertial_csv": 24
-      },
-      "identity_aliases": {
-        "sbj_18": "second_session_of_sbj_0",
-        "sbj_19": "second_session_of_sbj_14"
       },
       "interval_label_order": [
         "jogging",
@@ -845,7 +853,7 @@
         "median": 139312.5,
         "min": 95400.0
       },
-      "status": "pass_with_identity_alias_and_missing_channel_mask_required",
+      "status": "pass_with_unresolved_identity_linkage_and_missing_channel_mask_required",
       "subject_id_mismatches": 0,
       "timing": "fixed 50 Hz; derive time from row index because CSV has no timestamp"
     }

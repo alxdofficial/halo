@@ -27,9 +27,9 @@ than by whichever source gives the highest score, and each source is reported se
 | dataset | task coverage | reason for inclusion | current gate |
 |---|---|---|---|
 | **C-MHAD** | Tasks 0 and 1 | synchronized video, real continuous background, event intervals, and wrist/waist six-axis views | native-clock adapter verified; freeze the evaluation manifest before use |
-| **WEAR** | Tasks 0, 1, and 3 | independent outdoor cohort, natural continuous activity/NULL, arm-watch acceleration, and egocentric video | fixed-rate adapter verified; identity aliases and one missing left-arm stream are explicit |
+| **WEAR** | Tasks 0, 1, and 3 | independent outdoor cohort, natural continuous activity/NULL, arm-watch acceleration, and egocentric video | fixed-rate adapter verified; unresolved repeat-session linkage and one missing left-arm stream are explicit |
 | **MoniPar** | Tasks 1 and 2 | repeated real watch protocols across weeks with clinician-reviewed motor scores | ready; report clinical cohorts separately |
-| **OCA** | Tasks 0, 1, and 3 | repeated industrial assembly in long recordings with NULL and official subject splits | native-rate four-stream adapter and clock-gap split verified; per-baseline placement audit remains |
+| **OCA** | Tasks 0, 1, and 3 | repeated industrial assembly in long recordings with NULL and publisher partitions | native-rate four-stream adapter and clock-gap split verified; publisher train/validation are not subject-disjoint |
 
 The core matrix is sufficient for the main application paper because it covers continuous event
 localization, query-by-example detection, longitudinal change, and occupational recurrence while
@@ -55,14 +55,16 @@ Reporting contract:
 
 | dataset | measured local structure | primary use | readiness and limitation |
 |---|---|---|---|
-| **MoniPar** | 174 complete weekly protocols, 28 subjects, nine labels; session duration 405-445 s | cross-week Task 1 and longitudinal Task 2 | **Ready.** Released 50 Hz gravity-present watch acceleration; 21 PD and 7 controls. Supervised, remote, and control cohorts and severity imbalance must be reported separately. |
+| **MoniPar** | 174 complete weekly protocols, 28 subjects, nine labels; session duration 405-445 s | cross-week Task 1 and longitudinal Task 2 | **Signals ready.** Released 50 Hz gravity-present watch acceleration; 21 PD and 7 controls. Clinical-severity files still need a dedicated identity-aligned task adapter before association analysis. |
 | **SPAR** | 280 exercise bouts, 20 subjects, seven labels; median 42 s | Task-1 alignment and Task-2 within-bout repeatability | **Conditional.** Apple Watch acceleration and gyroscope are appropriate, but about 20 repetitions share one bout and are not independent sessions. |
 | **Upper Limb Use** | 1,042 converted sessions, 15 subjects, 15 ADLs | bilateral wrist Task-2 exploration | **Blocked.** 598 sessions contain under 50 rows and many contain only two samples. Reconstruct and validate the source timeline before use. |
 | **KneE-PAD** | 2,084 trials, 31 subjects, nine variant labels; median 3.79 s | known-difference Task 2 | **Conditional.** Correct and two incorrect variants are useful, but most trials are shorter than six seconds, placements are research-grade, and checkpoint exclusion must be confirmed. |
 
-MoniPar is the strongest existing longitudinal source. It supplies repeated real sessions and
-clinician-reviewed exercise severity, but it does not span severe Parkinson's disease and should not
-be presented as a complete clinical validation.
+MoniPar is the strongest existing longitudinal source. It supplies repeated real sessions, and the
+release separately includes clinician-reviewed exercise severity. The current signal converter does
+not expose those severity records; Task 2 must add and verify a subject/week alignment adapter before
+using them. The cohort does not span severe Parkinson's disease and is not complete clinical
+validation.
 
 ## 4. Development sources consumed by expanded HALO pretraining
 
@@ -94,7 +96,9 @@ last 118.87-121.97 seconds, and measure 50.027 Hz; no non-finite values, non-inc
 invalid annotation intervals were found. The source reports 30-40 missing initial IMU samples due to
 Bluetooth delay. Preserve each file's measured timestamps and
 align it to video/annotations; do not force a nominal row count or interpret source-recommended zero
-padding as measured stillness.
+padding as measured stillness. The authors' loader and the official page differ by two metadata rows
+in the offset convention, equivalent to 40 ms at 50 Hz. Treat this as boundary uncertainty and
+report a +/-2-sample sensitivity check for any boundary-error result.
 
 **Role:** strongest sealed Task-0/Task-1 source after a complete manifest audit. Report wrist gestures
 and waist transitions separately.
@@ -109,10 +113,13 @@ The inspected raw file is fixed-rate 50 Hz, gravity-present acceleration in g wi
 `null` label, and no timestamp column. Derive time from row order and the documented rate. Use one arm
 watch for the consumer-wearable primary result; leg watches may be secondary only.
 
-The 24 recording files represent 22 people: `sbj_18` is a second session of `sbj_0`, `sbj_19` is a
-second session of `sbj_14`, and `sbj_20` through `sbj_23` are four new test participants. In
-`sbj_10.csv`, all three left-arm axes are absent for 51,392 rows. The primary right-arm stream is
-complete; any multi-sensor result must use a channel mask rather than zero filling or interpolation.
+The 24 recording files represent 22 people. The paper establishes that `sbj_18` and `sbj_19` are
+second sessions of `sbj_0` and `sbj_14`, but the available documentation does not prove which repeat
+maps to which original. Keep all four in one leakage group for splitting, but do not create
+same-person pairs until the directional mapping is confirmed. `sbj_20` through `sbj_23` are four
+new test participants. In `sbj_10.csv`, all three left-arm axes are absent for 51,392 rows. The
+primary right-arm stream is complete; any multi-sensor result must use a channel mask rather than
+zero filling or interpolation.
 
 **Role:** real continuous Task-0/Task-1 evaluation and Task-3 recurrence. If it trains a temporal
 localization head, it cannot also be that arm's sealed test.
@@ -121,8 +128,8 @@ localization head, it cannot also be that arm's sealed test.
 
 **Status: complete release adapter implemented and verified.** The 33.22 MB official ZIP contains twelve
 continuous CSV sessions, four six-axis IMUs, millisecond timestamps, six work phases, NULL, metadata,
-and official subject-level train/validation/test splits. It covers roughly 282 assembly cycles from
-five participants.
+and official train/validation/test partitions. Training and validation share P1/P2; only the P3/P4
+test partition is subject-disjoint. It covers roughly 282 assembly cycles from five participants.
 
 The files use two native clock regimes near 20 Hz and 27 Hz. `P0-R0.csv` contains an 81-second
 timestamp gap and must be split. Median acceleration norm is about 9.8, consistent with m/s2. The
@@ -168,8 +175,10 @@ wrists and upper arms; the release also provides depth, LiDAR,
 IoT, operation, action, box-cycle, order, and NULL annotations. Sessions contain repeated packaging
 cycles and include procedural variation, irregular situations, and a rushed condition.
 
-The `box` identity links fine actions to one completed packaging cycle. OpenPack can therefore train
-event matching at the fine-action level and test hierarchical grouping into operations or cycles.
+The `box` identity links fine actions to one completed packaging cycle. The adapter's
+`packing_cycle` interval is derived as the minimum and maximum source operation boundaries for a box;
+it is not a source-provided event interval. OpenPack can therefore train event matching at the
+fine-action level and test hierarchical grouping into operations or cycles.
 The 21 released identifiers represent 16 people: five `U02xx` identifiers are later recordings of
 documented `U01xx` people. Collapse those aliases before any subject split. The 416 IMU files are
 finite with gravity-present acceleration near 1 g, but their timestamps measure 30.30-33.33 Hz rather
@@ -201,15 +210,20 @@ than a peer-reviewed dataset paper.
 ### 6.3 CrossFit exercise repetitions
 
 **Status: complete selected release acquired and verified.** The paper reports 54 participants, ten
-exercises, about 230 minutes, and 5,461 repetition starts. The inspected release contains 446 non-NULL
-exercise arrays and exactly 5,461 non-NULL repetition arrays. It also contains seven NULL bouts and
+exercises, about 230 minutes, and 5,461 repetition starts. Fifty participants completed the
+constrained workout represented by the released non-NULL arrays; the paper's 54-person count covers
+the wider study. The inspected release contains 446 non-NULL exercise arrays and exactly 5,461
+non-NULL repetition arrays. It also contains seven NULL bouts and
 nine pseudo-repetition arrays under `Null`; those are background, not repetitions. Six non-NULL
 fragments are only 0.08-0.16 seconds and must be excluded or separately justified. Accelerometer and
 gyroscope rows are finite; one recording has missing orientation rows, which does not affect HALO's
 IMU adapter. The release participant map exposes 57 codes, including seven NULL-only codes, so a
 split must use the released mapping and must not equate code count with the paper's distinct-person
 count. Arrays are interpolated to approximately 100 Hz by the authors' preprocessing code, and
-repetition starts were marked using watch vibration.
+repetition starts were marked using watch vibration. The released repetition slices run from one
+machine-paced vibration cue to the next; they are useful same-motion training excerpts, not observed
+natural repetition boundaries and not valid Task-0 boundary ground truth. The public release has no
+clear data licence. Obtain rights-holder confirmation before a publication result depends on it.
 
 **Role:** strongest verified subject-diverse controlled source for Task-1/Task-3 same-motion pair
 training and held-out-exercise evaluation. It is structured exercise data rather than natural
@@ -223,6 +237,9 @@ series intervals and 1,486 repetition-marker fiducial windows. Those marker wind
 repetition intervals. The 90 `SUBxx` values are source codes, not globally unique participant IDs,
 so this release cannot support a subject-disjoint claim without an external identity map. The public
 signals are 50 Hz chest acceleration in g and orientation quaternions; raw gyroscope is absent.
+The v3 archive is a corrected redistribution on Aidlab's production S3 endpoint, but the public page
+does not establish the provenance of the corrections or an explicit data licence. Confirm the
+rights holder and disclose who produced v3 before a publication result depends on it.
 
 **Role:** small control for series boundaries and repetition anchors, not a complete repetition-
 segmentation benchmark. Use through a declared acceleration-only adapter and do not report a

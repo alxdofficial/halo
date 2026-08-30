@@ -9,7 +9,9 @@ contains 446 non-NULL exercise arrays and 5,461 non-NULL repetition arrays at th
 interpolated approximately 100 Hz rate. Arrays contain wrist and ankle acceleration in m/s2,
 gyroscope in rad/s, and orientation. Six repetition fragments last only 0.08-0.16 seconds and must
 be excluded or justified. The paper reports 54 participants, while the released map exposes 57
-codes, seven of which are NULL-only; freeze source-code splits rather than inferring identities.
+codes, seven of which are NULL-only; 50 codes have constrained-workout data, reconciling the paper's
+wider study count. Freeze source-code splits rather than inferring identities. Repetition slices run
+from one machine-paced vibration cue to the next and are not observed natural repetition boundaries.
 The public Drive release does not contain a clear machine-readable data licence. Confirm permitted
 research and publication use before the dataset contributes to a final paper result.
 The application adapter exposes all 5,923 authored parent/repetition arrays lazily in canonical

@@ -3,6 +3,11 @@
 > **Plan of record, 2026-08-30.** This is intentionally staged. Each stage establishes a simple
 > floor before adding a learned component.
 
+**Current progress.** The application package, selected seven-source acquisition, immutable payload
+checksums, raw-timeline adapters, lossless map-style caches, source-role inventory, and corpus audit
+are implemented and verified. Stage 0 remains open for the shared `MotionSequence` schema, immutable
+task manifests, and checkpoint-provenance freeze. Stages 1-6 remain planned.
+
 ## Stage 0: protocol and data audit
 
 1. Create an `applications/motion_monitoring/` package separate from the old zero-shot and Phase-B
@@ -127,6 +132,7 @@ Collect a small prospective phone/watch study if public data cannot close the ev
 
 ## Repository cleanup rule
 
-The branch keeps only active application documentation and implementation references. The complete
+`main` keeps only active application documentation and implementation references. The complete
 zero-shot, k-curve, evidence-engine, and historical result record remains recoverable from the branch
-point at commit `32267b6`; it is not duplicated under an active-looking archive directory.
+`archive/pre-application-main-20260830` at commit `32267b6`; it is not duplicated under an
+active-looking archive directory.

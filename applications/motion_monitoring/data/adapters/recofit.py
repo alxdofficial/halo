@@ -128,11 +128,13 @@ def _event_metadata(row: np.ndarray) -> dict[str, Any]:
             int(raw_count) if raw_count is not None and raw_count >= 0 else None
         ),
         "source_repetition_count": int(raw_count) if raw_count is not None else None,
-        "source_aligned_start_sec": _finite_scalar(row[5]),
+        # The release README documents only columns 0--4. Preserve additional
+        # source fields without assigning unsupported semantics to them.
+        "undocumented_source_field_5": _finite_scalar(row[5]),
     }
     annotation = row[6]
     for field_name in getattr(annotation, "_fieldnames", ()):
-        metadata[f"source_{field_name}"] = _finite_scalar(
+        metadata[f"undocumented_source_annotation_{field_name}"] = _finite_scalar(
             getattr(annotation, field_name)
         )
     return metadata

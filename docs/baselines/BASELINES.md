@@ -52,8 +52,10 @@ than pure encoder microbenchmarks. The manifest and code path are identical acro
 | **ImageBind (optional)** | 47.78 s | 7.97 s | 5.10 GiB | 1.5x |
 | **NormWear** | 484.65 s | 2.34 s | 8.82 GiB | 15.4x |
 
-Artifacts:
-`eval/adaptation_results/e2e_set_scalar_1nn_35k_20260824_shared/*__adaptation_v1.json`.
+The compact measurements above were promoted in Git at commit `87d3c04`; the large per-model JSON
+outputs remain intentionally ignored. Treat this as an operational screening result, not a
+reproducibility-grade benchmark. New publication results must retain the compact manifest,
+checkpoint hashes, and per-model timing summary in a tracked result artifact.
 
 Use two execution tiers:
 

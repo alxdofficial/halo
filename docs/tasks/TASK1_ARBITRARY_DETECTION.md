@@ -1,7 +1,7 @@
 # Task 1: arbitrary task detection
 
 > **Design of record, 2026-08-29.** This document owns the Task-1 data construction, matching,
-> training, and evaluation protocol on the `application-motion-monitoring` branch. Shared motivation,
+> training and evaluation protocol on `main`. Shared motivation,
 > representation contracts, and reporting rules remain in the documents linked from
 > [`docs/README.md`](../README.md).
 
@@ -263,7 +263,7 @@ distractor.
 3. Run cosine subsequence DTW on natural MoniPar cross-week pairs and synthetic independent-trial
    episodes.
 4. Measure runtime, positive/hard-negative separation, target-absent scores, and boundary recovery.
-5. Acquire and verify the complete C-MHAD release before freezing its manifest as the primary test.
+5. Freeze the verified C-MHAD adapter output as the primary immutable test manifest.
 6. Only then export frozen HALO and baseline representations through the common adapter.
 
 Preliminary probes establish feasibility and defaults. They are not promoted application results.
@@ -281,7 +281,7 @@ not every converter retains a continuous timeline:
 | source | locally measured structure | Task-1 implication |
 |---|---|---|
 | HARMES | 7,018 event segments, 38.75 h | many repeatable actions; original inter-event timeline still needed |
-| XRF V2 | 5,435 physical events across 32,610 sensor views, 74.78 h | strong multi-device events; current sessions do not reconstruct scenes |
+| XRF V2 | 5,435 physical events across 32,610 sensor views; 12.46 physical h and 74.78 synchronized-view h | strong multi-device events; current sessions do not reconstruct scenes and synchronized views must not inflate duration |
 | Opportunity | 3,620 labeled blocks grouped into 24 recordings, 6.50 h | continuous recordings are reconstructable, but explicit NULL is absent from converted labels |
 | MM-Fit | 555 sets grouped into 21 workouts, 3.09 h | useful natural workout structure; sets are not individual repetition annotations |
 | Capture24 | 13,120 coarse segments, 2,560.38 h | abundant free-living background; current segments need source-day reconstruction |
@@ -296,28 +296,33 @@ session store as a complete monitoring recording. SP-SW-HAR is particularly unsu
 current application form because its converted sessions are one-second windows.
 
 For the numerical probe, one exercise block from a MoniPar week was used as the reference and the
-next available week from the same subject was searched. Across 350 deterministic cases spanning
-22-24 subjects per exercise:
+next available week from the same subject was searched. Across 350 deterministic cases, 14 subjects
+calibrated each threshold and a disjoint 14 subjects measured recall and specificity. DTW forbids
+consecutive non-diagonal moves, bounding local retiming to approximately 0.5x-2x. Negative crops are
+selected deterministically from all eligible target-absent regions rather than always taking the
+first region.
 
-| method | full-session center accuracy | mean temporal IoU | target score better than paired target-absent 120 s crop | recall at 95% negative specificity |
-|---|---:|---:|---:|---:|
-| physical features + subsequence DTW | 68.57% | 0.598 | 94.86% | 75.14% |
-| pooled physical features + cosine | 67.14% | 0.550 | 96.29% | 75.43% |
+| method | full-session center accuracy | mean temporal IoU | target better than paired target-absent crop | held-subject recall | held-subject specificity |
+|---|---:|---:|---:|---:|---:|
+| physical features + constrained subsequence DTW | 68.57% | 0.593 | 83.43% | 56.35% | 92.27% |
+| pooled physical features + cosine | 64.86% | 0.514 | 84.29% | 52.49% | 95.03% |
 
-The CPU probe processed 12.4 cases/s. The result supports three limited conclusions:
+The CPU probe processed 9.14 cases/s. The result supports three limited conclusions:
 
 1. fixed 120-second queries are computationally and statistically workable;
 2. simple features already separate many target-present and target-absent crops, so raw and physical
    controls will be meaningful rather than trivial; and
-3. temporal alignment modestly improves boundary overlap but does not yet improve calibrated
-   presence detection over pooling. Finger tapping and chair-rise intervals are the clearest hard
-   cases, so encoder comparisons and better boundary constraints remain necessary.
+3. temporal alignment modestly improves held-subject presence detection and boundary overlap, but
+   the false-alarm/recall operating point remains inadequate. Finger tapping and chair-rise
+   intervals are the clearest hard cases, so encoder comparisons remain necessary.
 
 All 240 selectively downloaded C-MHAD inertial streams and 24 annotation workbooks, all 24 WEAR
 inertial files and 29 annotation JSON files, and OCA's complete 33 MB release were inspected on
 2026-08-29. This establishes file-level compatibility, not a frozen test manifest. The tracked
-inspection records durations, interval validity, rates, identity aliases, missing channels, and OCA's
-clock gap. A separate immutable manifest must still be frozen before sealed evaluation.
+inspection records durations, interval validity, rates, identity linkage, missing channels, and OCA's
+clock gap. A separate immutable manifest must still be frozen before sealed evaluation. The probe's
+physical features deliberately omit jerk so unlike physical units are not mixed by one uncalibrated
+normalization.
 
 ## 13. Research basis
 

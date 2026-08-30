@@ -110,7 +110,12 @@ def test_recofit_adapter_loads_real_visits_in_canonical_units() -> None:
     )
     assert jumping_jacks.annotation_kind == "set"
     assert jumping_jacks.metadata["repetition_count"] == 20
-    assert jumping_jacks.metadata["source_startSequenceNumberMaster"] == 29792.0
+    assert (
+        jumping_jacks.metadata[
+            "undocumented_source_annotation_startSequenceNumberMaster"
+        ]
+        == 29792.0
+    )
 
     device_on_table = recordings[1].events[-1]
     assert device_on_table.label == "Device on Table"

@@ -208,13 +208,14 @@ def inspect_wear() -> dict[str, Any]:
                     start < 0 or end <= start or end > duration + 0.05
                 )
     return {
-        "status": "pass_with_identity_alias_and_missing_channel_mask_required",
+        "status": "pass_with_unresolved_identity_linkage_and_missing_channel_mask_required",
         "files": {"inertial_csv": len(paths), "annotation_json": len(annotation_paths)},
         "published_unique_participants": 22,
         "released_recording_files": len(paths),
-        "identity_aliases": {
-            "sbj_18": "second_session_of_sbj_0",
-            "sbj_19": "second_session_of_sbj_14",
+        "ambiguous_identity_linkage": {
+            "known_original_sessions": ["sbj_0", "sbj_14"],
+            "known_repeat_sessions": ["sbj_18", "sbj_19"],
+            "directional_mapping": "unverified",
         },
         "new_test_participants": ["sbj_20", "sbj_21", "sbj_22", "sbj_23"],
         "rows_per_recording": describe(rows),
@@ -449,8 +450,9 @@ def inspect_crossfit() -> dict[str, Any]:
             imu_nonfinite += int((~np.isfinite(array[imu_rows])).sum())
             orientation_nonfinite += int((~np.isfinite(array[orientation_rows])).sum())
     return {
-        "status": "pass_with_identity_count_and_short_fragment_caveats",
-        "publication_participants": 54,
+        "status": "pass_with_short_fragment_and_release_code_caveats",
+        "publication_participants_wider_study": 54,
+        "publication_participants_constrained_workout": 50,
         "released_participant_codes": len(participant_map),
         "participant_codes_with_non_null_exercise": len(
             participants_with_non_null_exercise
@@ -458,7 +460,7 @@ def inspect_crossfit() -> dict[str, Any]:
         "participant_codes_with_null_only": sorted(
             participants_with_null_only - participants_with_non_null_exercise
         ),
-        "participant_identity_warning": "the released participant map has 57 codes, while the paper reports 54 participants; freeze source-code splits and do not infer demographics or distinct-person counts from code names alone",
+        "participant_identity_warning": "the 50 non-NULL release codes match the paper's constrained-workout cohort; seven additional NULL-only codes are release identifiers and must not be inferred to be additional people",
         "exercise_arrays": len(exercise_paths),
         "non_null_exercise_arrays": sum(
             path.parent.name != "Null" for path in exercise_paths

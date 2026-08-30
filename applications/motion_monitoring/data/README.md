@@ -4,6 +4,8 @@ This directory owns data used by the four application tasks. It is intentionally
 `data/datasets`, which is the HALO representation-training corpus.
 
 - `SOURCE_INVENTORY.json` is the single acquisition and role contract.
+- `PAYLOAD_CHECKSUMS.json` freezes the accepted file set, byte sizes, and SHA-256 digests.
+- `CORPUS_SUMMARY.json` records measured effective hours, event counts, and known balance caveats.
 - `acquire.py` downloads only the source modalities listed in that contract.
 - `inspect_sources.py` validates downloaded files and writes `inspection/summary.json`.
 - `inspection/loader_profiles.json` records real cold/warm and multi-process measurements.
@@ -35,7 +37,9 @@ An evaluation source must not be used to fit the task head, thresholds, preproce
 stopping rule for the result that names it as held out. Within-source subject splits are separate
 development experiments and must not be described as unseen-dataset transfer.
 
-The empirical acquisition inspection is tracked in `inspection/summary.json`. All seven new sources
+Acquisition refuses any file not present in the tracked checksum contract. Changing a release is an
+explicit review operation, not an automatic consequence of an upstream listing changing. The
+empirical acquisition inspection is tracked in `inspection/summary.json`. All seven new sources
 also have lazy raw-timeline adapters. They preserve each source clock and sampling rate, express
 acceleration in g and gyroscope in rad/s, expose missing values through boolean masks, split hard
 clock gaps, and retain source annotation semantics in event metadata. They do not resample, window,
@@ -71,11 +75,13 @@ The generated `sources/<dataset>/processed/canonical_v1` directories are ignored
 native clocks, values, masks, stream metadata, and events in independently memory-mappable records;
 they do not resample, window, impute, or create task labels. `CachedRecordingDataset` is map-style,
 so a standard distributed or random sampler can assign disjoint indices to loader workers without
-re-reading a source archive or duplicating an epoch.
+re-reading a source archive or duplicating an epoch. Cache metadata binds the raw payload tree,
+adapter source, and shared data contract; stale caches fail at load time and must be rebuilt.
 
 ## External-source rule
 
 Every acquired source must have `references/datasets/<dataset>/SOURCE.txt` and `citation.json` with
-the publication, dataset page, release scope, licence status, and any interpretation caveats. Local
-paper PDFs may be retained for private review but are ignored by Git; the durable tracked record is
-the citation metadata and stable publication URL.
+the publication, dataset page, release scope, licence status, and any interpretation caveats. A
+readable local paper or official protocol page is required for integration review. These source
+documents may remain ignored for copyright reasons; the durable tracked locator is the citation
+metadata and stable URL.

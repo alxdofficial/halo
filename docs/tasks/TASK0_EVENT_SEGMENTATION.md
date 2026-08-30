@@ -1,6 +1,7 @@
 # Task 0: event proposal and segmentation
 
-> **Design of record, 2026-08-30.** Task 0 is deliberately a small, off-the-shelf front end.
+> **Design of record, 2026-08-30.** Task 0 is deliberately a small statistical front end built from
+> established components.
 > It proposes observable motion intervals for Tasks 1-3; it is not a new activity recognizer.
 
 ## 1. Question and scope
@@ -59,7 +60,7 @@ Every proposal contains:
 Overlapping proposals from synchronized sensor streams remain linked. They are not counted as
 independent events.
 
-## 4. Primary off-the-shelf pipeline
+## 4. Primary statistical pipeline
 
 ### 4.1 Signal-quality screen
 

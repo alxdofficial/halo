@@ -8,5 +8,7 @@
   "issue": 12,
   "article": 3891,
   "doi": "10.3390/s24123891",
-  "url": "https://www.mdpi.com/1424-8220/24/12/3891"
+  "url": "https://www.mdpi.com/1424-8220/24/12/3891",
+  "license": "Unresolved for the corrected v3 archive; rights-holder confirmation required before publication use.",
+  "notes": "The vendor production endpoint hosts v3, but the public dataset page does not establish who produced the corrections or grant explicit data terms."
 }

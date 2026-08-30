@@ -14,3 +14,7 @@ identities. Its repetition-marker intervals are fiducial windows, not full repet
 The application adapter exposes all 180 acceleration recordings, masks 4,512 invalid samples, keeps
 the 1,486 marker windows explicitly typed as fiducials, and uses recording-scoped identities because
 the release does not provide a defensible participant map.
+
+Publication blocker: the v3 archive is a corrected redistribution hosted on Aidlab's production S3
+endpoint, but the public page does not establish who produced the corrections or grant explicit
+archive terms. Confirm the rights holder and document provenance before publication use.

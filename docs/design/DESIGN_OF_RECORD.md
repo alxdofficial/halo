@@ -1,7 +1,7 @@
 # Design of record: propose, demonstrate, detect, compare, and discover
 
 > **Design of record, 2026-08-30.** This replaces the former Phase-A/Phase-B label-prediction
-> architecture on the `application-motion-monitoring` branch. The initial implementation is
+> architecture on `main`. The initial implementation is
 > representation-agnostic: HALO and released external encoders enter through the same interface.
 
 ## 1. System boundary

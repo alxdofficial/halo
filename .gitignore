@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .eggs/
+build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -86,6 +87,15 @@ training/evidence/outputs/telemetry/
 training/evidence/outputs/**/*.pt
 training/evidence/outputs/*/
 training/evidence/outputs/**/*.log
+training/evidence/outputs/*.json
+training/evidence/outputs/*.log
+
+# Historical per-run evaluation and locally trained baseline artifacts. Promoted summaries live in
+# docs/results; these raw outputs remain recoverable from the pre-application archive branch.
+eval/adaptation_results/
+eval/adaptation_tables/
+baselines/*/pretrain_run/
+baselines/*/*.meta.json
 
 # Debug plots regenerated on demand from the gridded corpus.
 data/scripts/debug/outputs/

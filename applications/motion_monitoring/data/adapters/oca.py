@@ -90,11 +90,14 @@ def _event_runs(
             raise ValueError(f"OCA contains unknown label id {label_id}")
 
         # Row labels describe sample support. Internal runs end at the first
-        # timestamp of the following run; the terminal run ends at the last
-        # source timestamp, avoiding an extrapolated annotation boundary.
-        end_sec = (
-            timestamps_sec[stop] if stop < len(labels) else timestamps_sec[stop - 1]
-        )
+        # timestamp of the following run. The terminal sample occupies one
+        # measured sample period rather than ending at its own timestamp.
+        if stop < len(labels):
+            end_sec = timestamps_sec[stop]
+        elif len(timestamps_sec) > 1:
+            end_sec = timestamps_sec[-1] + float(np.median(np.diff(timestamps_sec)))
+        else:
+            raise ValueError("OCA label runs require at least two timestamped rows")
         if end_sec <= timestamps_sec[start]:
             raise ValueError("OCA contains a zero-duration terminal label run")
         events.append(
@@ -228,13 +231,15 @@ def iter_recordings(
                         label_map,
                         source_row_offset=int(row_slice.start or 0),
                     ),
-                    split=split_by_file[filename],
+                    split=None,
                     metadata={
                         "source_file": filename,
                         "quality_part_index": part_index,
                         "quality_part_count": len(parts),
                         "source_timestamp_unit": "milliseconds",
                         "official_split": split_by_file[filename],
+                        "official_split_subject_disjoint": False,
+                        "application_role": "sealed_external_evaluation",
                         "arm_support": _ARM_SUPPORT[session_id],
                         "source_placements": {
                             f"imu{imu_id}": str(placement_map[imu_id])

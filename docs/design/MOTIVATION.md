@@ -1,7 +1,7 @@
 # Motivation: personalized movement monitoring
 
 > **Design of record, 2026-08-30.** This document replaces the prior zero-shot/open-label
-> motivation on the `application-motion-monitoring` branch.
+> motivation on `main`.
 
 ## The problem
 
@@ -115,5 +115,5 @@ HALO.
 - Estimating occupational injury risk from repetition count alone.
 - Calling augmented copies of one excerpt independent real-world repetitions.
 
-The previous zero-shot and enrollment work remains available in Git history at the branch point,
-commit `32267b6`, but it is not the design of record on this branch.
+The previous zero-shot and enrollment work remains available at commit `32267b6` and branch
+`archive/pre-application-main-20260830`, but it is not the design of record on `main`.

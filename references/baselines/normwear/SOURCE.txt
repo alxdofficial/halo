@@ -1,0 +1,3 @@
+https://arxiv.org/abs/2412.09758
+https://arxiv.org/pdf/2412.09758
+https://github.com/Mobile-Sensing-and-UbiComp-Laboratory/NormWear

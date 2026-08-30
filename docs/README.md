@@ -1,7 +1,7 @@
 # HALO documentation
 
-This branch contains one active research program: personalized movement monitoring from wearable
-IMU representations.
+`main` contains one active research program: personalized movement monitoring from wearable IMU
+representations.
 
 ## Reading order
 

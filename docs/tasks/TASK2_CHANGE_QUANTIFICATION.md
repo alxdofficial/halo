@@ -219,13 +219,14 @@ reported as multimodal.
 
 | source | evaluation question | current status |
 |---|---|---|
-| **MoniPar** | does a watch-based movement signature change across weeks and associate with neurologist-reviewed MDS-UPDRS exercise severity? | strongest local longitudinal source; 21 PD and 7 controls, 50 Hz gravity-present acceleration in the released files; report severity imbalance and supervised/remote cohorts separately |
+| **MoniPar** | does a watch-based movement signature change across weeks and associate with neurologist-reviewed MDS-UPDRS exercise severity? | strongest local longitudinal signal source; 21 PD and 7 controls. Severity MAT files exist separately but are not exposed by the current converter; implement and audit subject/week alignment before fitting this association. |
 | **KneE-PAD** | do measures distinguish correct from two real incorrect variants? | usable if checkpoint provenance confirms exclusion; most local trials are under six seconds and use research placements, so the adapter must support honest short sequences |
 | **SPAR** | are phase and physical measures stable across repeated shoulder motions? | usable for within-bout repeatability, not independent longitudinal generalization |
 | **Upper Limb Use** | do bilateral measures expose affected/unaffected differences in ADLs? | blocked pending converter/source-timeline repair: 598 of 1,042 local sessions contain under 50 samples and many contain only two samples |
 | **GAITEX** | can orientation/biomechanical reference data validate phase and known gait/exercise variants? | not a native HALO six-axis source: released IMU tables contain Xsens orientation quaternions rather than raw acceleration/gyroscope; use only through a separate orientation adapter or as an external oracle |
 
-MoniPar is suitable for real longitudinal association but not a balanced severity benchmark: the
+After its severity adapter is verified, MoniPar is suitable for real longitudinal association but
+not a balanced severity benchmark: the
 published cohort omits the most severe class and is concentrated in low severity. No inspected public
 source simultaneously provides consumer-watch six-axis IMU, independent remounting, several
 longitudinal sessions, deliberate execution errors, and sealed video/clinical ground truth. A small

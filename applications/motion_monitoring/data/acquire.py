@@ -12,12 +12,14 @@ import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
 
 HERE = Path(__file__).resolve().parent
 INVENTORY_PATH = HERE / "SOURCE_INVENTORY.json"
+CHECKSUMS_PATH = HERE / "PAYLOAD_CHECKSUMS.json"
 SOURCES_ROOT = HERE / "sources"
 BOX_SHARE = "4zwus5h4khsxpullnm45o59xlfpba6a0"
 CROSSFIT_FOLDER = (
@@ -55,6 +57,11 @@ def download(
     expected_digest: str | None = None,
     attempts: int = 3,
 ) -> dict[str, Any]:
+    if expected_digest is None:
+        raise ValueError(
+            "downloads require a frozen SHA-256 digest; update PAYLOAD_CHECKSUMS.json "
+            "explicitly when adopting a new source release"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists() and (
         expected_size is None or destination.stat().st_size == expected_size
@@ -105,6 +112,8 @@ def download(
 
 def download_many(jobs: Iterable[dict[str, Any]], workers: int) -> list[dict[str, Any]]:
     jobs = list(jobs)
+    if workers <= 0:
+        raise ValueError("workers must be positive")
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         pending = {
@@ -128,24 +137,80 @@ def download_many(jobs: Iterable[dict[str, Any]], workers: int) -> list[dict[str
 def write_manifest(dataset: str, results: list[dict[str, Any]]) -> None:
     path = SOURCES_ROOT / dataset / "manifests" / "download.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    normalized = []
+    for result in results:
+        row = dict(result)
+        row["path"] = str(
+            Path(row["path"]).resolve().relative_to(SOURCES_ROOT.resolve())
+        )
+        normalized.append(row)
     payload = {
         "dataset": dataset,
-        "files": sorted(results, key=lambda item: item["path"]),
-        "file_count": len(results),
-        "total_bytes": sum(item["bytes"] for item in results),
+        "checksum_contract": "PAYLOAD_CHECKSUMS.json",
+        "files": sorted(normalized, key=lambda item: item["path"]),
+        "file_count": len(normalized),
+        "total_bytes": sum(item["bytes"] for item in normalized),
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def acquire_http_archive(
-    dataset: str, url: str, filename: str, expected_size: int
-) -> None:
-    result = download(
-        url,
-        SOURCES_ROOT / dataset / "downloads" / filename,
-        expected_size=expected_size,
+@lru_cache(maxsize=1)
+def _frozen_checksum_payload() -> dict[str, Any]:
+    payload = json.loads(CHECKSUMS_PATH.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1:
+        raise ValueError(f"unsupported payload-checksum schema in {CHECKSUMS_PATH}")
+    return payload
+
+
+def _bind_frozen_checksums(
+    dataset: str, jobs: Iterable[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Bind a discovered release listing to the tracked immutable payload contract."""
+
+    jobs = [dict(job) for job in jobs]
+    try:
+        frozen_rows = _frozen_checksum_payload()["datasets"][dataset]["files"]
+    except KeyError as error:
+        raise KeyError(f"no frozen payload checksums for {dataset}") from error
+    frozen = {row["path"]: row for row in frozen_rows}
+    discovered: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        destination = Path(job["destination"]).resolve()
+        try:
+            relative = destination.relative_to(SOURCES_ROOT.resolve()).as_posix()
+        except ValueError as error:
+            raise ValueError(
+                f"download destination escapes source root: {destination}"
+            ) from error
+        if relative in discovered:
+            raise ValueError(f"duplicate download destination: {relative}")
+        discovered[relative] = job
+
+    missing = sorted(set(frozen) - set(discovered))
+    unexpected = sorted(set(discovered) - set(frozen))
+    if missing or unexpected:
+        raise RuntimeError(
+            f"{dataset} release listing differs from the frozen payload contract; "
+            f"missing={missing[:5]}, unexpected={unexpected[:5]}"
+        )
+    for relative, job in discovered.items():
+        row = frozen[relative]
+        job["expected_size"] = int(row["bytes"])
+        job["expected_digest"] = str(row["sha256"])
+    return jobs
+
+
+def acquire_http_archive(dataset: str, url: str, filename: str) -> None:
+    jobs = _bind_frozen_checksums(
+        dataset,
+        [
+            {
+                "url": url,
+                "destination": SOURCES_ROOT / dataset / "downloads" / filename,
+            }
+        ],
     )
-    write_manifest(dataset, [result])
+    write_manifest(dataset, download_many(jobs, workers=1))
 
 
 def acquire_aidlab_har() -> None:
@@ -154,7 +219,6 @@ def acquire_aidlab_har() -> None:
         "https://aidlab-production-datasets.s3.eu-central-1.amazonaws.com/"
         "AIDLAB-HAR-DATASET_v3.zip",
         "AIDLAB-HAR-DATASET_v3.zip",
-        3_292_987,
     )
 
 
@@ -163,7 +227,6 @@ def acquire_oca() -> None:
         "oca",
         "https://fordatis.fraunhofer.de/bitstream/fordatis/195/1/OCA.zip",
         "OCA.zip",
-        34_020_418,
     )
 
 
@@ -174,7 +237,6 @@ def acquire_recofit() -> None:
         "Exercise-Recognition-from-Wearable-Sensors/main/"
         "exercise_data.50.0000_multionly.mat",
         "exercise_data.50.0000_multionly.mat",
-        1_571_881_721,
     )
 
 
@@ -193,7 +255,10 @@ def acquire_openpack() -> None:
         )
     if len(jobs) != 21:
         raise RuntimeError(f"expected 21 OpenPack subject archives, found {len(jobs)}")
-    write_manifest("openpack", download_many(jobs, workers=4))
+    write_manifest(
+        "openpack",
+        download_many(_bind_frozen_checksums("openpack", jobs), workers=4),
+    )
 
 
 def _index_links(index_url: str, suffix: str) -> list[str]:
@@ -240,7 +305,9 @@ def acquire_wear() -> None:
         raise RuntimeError(
             "WEAR release no longer exposes the expected 24 inertial files"
         )
-    write_manifest("wear", download_many(jobs, workers=8))
+    write_manifest(
+        "wear", download_many(_bind_frozen_checksums("wear", jobs), workers=8)
+    )
 
 
 def _box_items(folder_id: int) -> list[dict[str, Any]]:
@@ -327,7 +394,9 @@ def acquire_c_mhad() -> None:
                         "expected_size": item["itemSize"],
                     }
                 )
-    write_manifest("c_mhad", download_many(jobs, workers=8))
+    write_manifest(
+        "c_mhad", download_many(_bind_frozen_checksums("c_mhad", jobs), workers=8)
+    )
 
 
 def _crossfit_listing() -> list[dict[str, str]]:
@@ -361,7 +430,9 @@ def acquire_crossfit() -> None:
                 "destination": SOURCES_ROOT / "crossfit" / "raw" / path,
             }
         )
-    write_manifest("crossfit", download_many(jobs, workers=12))
+    write_manifest(
+        "crossfit", download_many(_bind_frozen_checksums("crossfit", jobs), workers=12)
+    )
 
 
 ACQUIRERS = {

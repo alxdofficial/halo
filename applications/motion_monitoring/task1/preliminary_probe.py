@@ -12,6 +12,7 @@ Its output is diagnostic evidence, not a promoted application result.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -79,7 +80,8 @@ class DatasetInventory:
     physical_executions: int
     subjects: int
     labels: int
-    hours: float
+    stream_view_hours: float
+    unique_execution_hours: float
     median_session_seconds: float
     max_session_seconds: float
     multi_label_recordings: int
@@ -166,6 +168,7 @@ def inventory_dataset(dataset: str) -> DatasetInventory:
     subject_label_executions: dict[tuple[str, str], set[str]] = defaultdict(set)
     subject_label_recordings: dict[tuple[str, str], set[str]] = defaultdict(set)
     physical_executions: set[str] = set()
+    execution_durations: dict[str, float] = {}
 
     for path in paths:
         session = path.parent.name
@@ -183,6 +186,9 @@ def inventory_dataset(dataset: str) -> DatasetInventory:
         all_labels.update(labels)
         recording_labels[recording].update(labels)
         physical_executions.add(execution)
+        execution_durations[execution] = max(
+            duration, execution_durations.get(execution, 0.0)
+        )
         for label in labels:
             subject_label_executions[(subject, label)].add(execution)
             subject_label_recordings[(subject, label)].add(recording)
@@ -211,7 +217,10 @@ def inventory_dataset(dataset: str) -> DatasetInventory:
         physical_executions=len(physical_executions),
         subjects=len(subjects),
         labels=len(all_labels),
-        hours=float(finite_durations.sum() / 3600.0) if len(finite_durations) else 0.0,
+        stream_view_hours=(
+            float(finite_durations.sum() / 3600.0) if len(finite_durations) else 0.0
+        ),
+        unique_execution_hours=float(sum(execution_durations.values()) / 3600.0),
         median_session_seconds=(
             float(np.median(finite_durations)) if len(finite_durations) else 0.0
         ),
@@ -256,12 +265,11 @@ def physical_patch_features(frame: pd.DataFrame, patch_seconds: float = 1.0):
         if len(values) < max(3, int(0.7 * rate * patch_seconds)):
             continue
         magnitude = np.linalg.norm(values, axis=1)
-        jerk = np.diff(values, axis=0) * rate
         vector = np.concatenate(
             [
                 values.mean(axis=0),
                 values.std(axis=0),
-                [magnitude.mean(), magnitude.std(), np.sqrt(np.mean(jerk * jerk))],
+                [magnitude.mean(), magnitude.std()],
             ]
         )
         features.append(vector)
@@ -279,48 +287,79 @@ def physical_patch_features(frame: pd.DataFrame, patch_seconds: float = 1.0):
 def subsequence_dtw(
     reference: np.ndarray, query: np.ndarray, warp_penalty: float = 0.05
 ):
-    """Open-begin/open-end cosine DTW with a small non-diagonal step penalty."""
+    """Open-begin/open-end cosine DTW with a bounded local warp slope.
+
+    Consecutive horizontal or vertical moves are prohibited. This keeps the
+    local duration ratio within roughly 0.5x--2x and prevents a long reference
+    from matching a single query patch through an arbitrarily degenerate path.
+    """
     if reference.ndim != 2 or query.ndim != 2 or reference.shape[1] != query.shape[1]:
         raise ValueError(
             "reference and query must be [time, feature] with matching features"
         )
     cost = 1.0 - np.clip(reference @ query.T, -1.0, 1.0)
     n_ref, n_query = cost.shape
-    accumulated = np.full((n_ref + 1, n_query + 1), np.inf, dtype=np.float64)
-    previous = np.zeros((n_ref + 1, n_query + 1), dtype=np.int8)
-    accumulated[0, :] = 0.0
+    if not n_ref or not n_query:
+        raise ValueError("reference and query must be non-empty")
+    # States are diagonal, vertical, and horizontal. A non-diagonal state may
+    # only follow a different state, which is the slope constraint.
+    accumulated = np.full((3, n_ref + 1, n_query + 1), np.inf, dtype=np.float64)
+    previous = np.full((3, n_ref + 1, n_query + 1), -1, dtype=np.int8)
+    accumulated[0, 0, :] = 0.0
 
     for i in range(1, n_ref + 1):
         for j in range(1, n_query + 1):
-            choices = (
-                accumulated[i - 1, j - 1],
-                accumulated[i - 1, j] + warp_penalty,
-                accumulated[i, j - 1] + warp_penalty,
+            diagonal_choices = accumulated[:, i - 1, j - 1]
+            previous[0, i, j] = int(np.argmin(diagonal_choices))
+            accumulated[0, i, j] = cost[i - 1, j - 1] + float(
+                diagonal_choices[previous[0, i, j]]
             )
-            move = int(np.argmin(choices))
-            accumulated[i, j] = cost[i - 1, j - 1] + choices[move]
-            previous[i, j] = move
 
-    end = int(np.argmin(accumulated[n_ref, 1:])) + 1
-    raw_score = float(accumulated[n_ref, end])
+            vertical_choices = accumulated[[0, 2], i - 1, j]
+            vertical_choice = int(np.argmin(vertical_choices))
+            previous[1, i, j] = (0, 2)[vertical_choice]
+            accumulated[1, i, j] = (
+                cost[i - 1, j - 1]
+                + warp_penalty
+                + float(vertical_choices[vertical_choice])
+            )
+
+            horizontal_choices = accumulated[[0, 1], i, j - 1]
+            horizontal_choice = int(np.argmin(horizontal_choices))
+            previous[2, i, j] = (0, 1)[horizontal_choice]
+            accumulated[2, i, j] = (
+                cost[i - 1, j - 1]
+                + warp_penalty
+                + float(horizontal_choices[horizontal_choice])
+            )
+
+    final = accumulated[:, n_ref, 1:]
+    flat_index = int(np.argmin(final))
+    state, end_offset = np.unravel_index(flat_index, final.shape)
+    end = int(end_offset) + 1
+    raw_score = float(accumulated[state, n_ref, end])
+    if not np.isfinite(raw_score):
+        raise ValueError("no DTW path satisfies the 0.5x--2x local warp constraint")
     i, j = n_ref, end
     path_length = 0
     while i > 0:
-        move = int(previous[i, j])
+        prior_state = int(previous[state, i, j])
         path_length += 1
-        if move == 0:
+        if state == 0:
             i -= 1
             j -= 1
-        elif move == 1:
+        elif state == 1:
             i -= 1
         else:
             j -= 1
+        state = prior_state
     start = j
     return {
         "start_patch": start,
         "end_patch": end,
         "score": raw_score / max(path_length, 1),
         "path_length": path_length,
+        "duration_ratio": (end - start) / n_ref,
     }
 
 
@@ -373,17 +412,29 @@ def _positive_crop(length: int, targets: list[tuple[int, int]], crop_length: int
     return start, end, shifted
 
 
-def _negative_crop(length: int, targets: list[tuple[int, int]], crop_length: int):
+def _negative_crop(
+    length: int,
+    targets: list[tuple[int, int]],
+    crop_length: int,
+    *,
+    seed_material: str,
+):
     if length < crop_length:
         return None
+    eligible = []
     for start in range(0, length - crop_length + 1, 5):
         end = start + crop_length
         if all(
             end <= target_start or start >= target_end
             for target_start, target_end in targets
         ):
-            return start, end
-    return None
+            eligible.append((start, end))
+    if not eligible:
+        return None
+    seed = int.from_bytes(
+        hashlib.sha256(seed_material.encode("utf-8")).digest()[:8], "little"
+    )
+    return eligible[int(np.random.default_rng(seed).integers(len(eligible)))]
 
 
 def monipar_cross_week_probe(max_cases: int = 80) -> dict:
@@ -440,7 +491,12 @@ def monipar_cross_week_probe(max_cases: int = 80) -> dict:
         positive_start, positive_end, positive_targets = _positive_crop(
             len(query_features), target_runs, crop_length
         )
-        negative_bounds = _negative_crop(len(query_features), target_runs, crop_length)
+        negative_bounds = _negative_crop(
+            len(query_features),
+            target_runs,
+            crop_length,
+            seed_material=f"{reference_path}:{query_path}:{label}",
+        )
         positive_query = query_features[positive_start:positive_end]
         positive_dtw = subsequence_dtw(reference, positive_query)
         positive_pooled = pooled_cosine(reference, positive_query)
@@ -477,8 +533,17 @@ def monipar_cross_week_probe(max_cases: int = 80) -> dict:
     if not records:
         return {"cases": 0, "elapsed_seconds": elapsed, "records": []}
     paired = [row for row in records if row["negative_120s_dtw_score"] is not None]
-    dtw_negative = np.asarray([row["negative_120s_dtw_score"] for row in paired])
-    pooled_negative = np.asarray([row["negative_120s_pooled_score"] for row in paired])
+    subjects = sorted({row["subject"] for row in paired})
+    shuffled_subjects = np.random.default_rng(20260830).permutation(subjects)
+    split_index = max(1, len(shuffled_subjects) // 2)
+    calibration_subjects = set(shuffled_subjects[:split_index])
+    evaluation_subjects = set(shuffled_subjects[split_index:])
+    calibration = [row for row in paired if row["subject"] in calibration_subjects]
+    evaluation = [row for row in paired if row["subject"] in evaluation_subjects]
+    dtw_negative = np.asarray([row["negative_120s_dtw_score"] for row in calibration])
+    pooled_negative = np.asarray(
+        [row["negative_120s_pooled_score"] for row in calibration]
+    )
     dtw_threshold = (
         float(np.percentile(dtw_negative, 5)) if len(paired) else float("nan")
     )
@@ -499,6 +564,10 @@ def monipar_cross_week_probe(max_cases: int = 80) -> dict:
         ),
         "pooled_mean_iou": float(np.mean([row["pooled_iou"] for row in records])),
         "paired_120s_cases": len(paired),
+        "calibration_subjects": sorted(calibration_subjects),
+        "evaluation_subjects": sorted(evaluation_subjects),
+        "calibration_cases": len(calibration),
+        "evaluation_cases": len(evaluation),
         "dtw_pairwise_positive_better": (
             float(
                 np.mean(
@@ -511,13 +580,28 @@ def monipar_cross_week_probe(max_cases: int = 80) -> dict:
             if paired
             else float("nan")
         ),
-        "dtw_recall_at_95pct_negative_specificity": (
+        "dtw_eval_recall_at_calibrated_95pct_negative_specificity": (
             float(
                 np.mean(
-                    [row["positive_120s_dtw_score"] < dtw_threshold for row in paired]
+                    [
+                        row["positive_120s_dtw_score"] < dtw_threshold
+                        for row in evaluation
+                    ]
                 )
             )
-            if paired
+            if evaluation and calibration
+            else float("nan")
+        ),
+        "dtw_eval_negative_specificity": (
+            float(
+                np.mean(
+                    [
+                        row["negative_120s_dtw_score"] >= dtw_threshold
+                        for row in evaluation
+                    ]
+                )
+            )
+            if evaluation and calibration
             else float("nan")
         ),
         "pooled_pairwise_positive_better": (
@@ -533,16 +617,28 @@ def monipar_cross_week_probe(max_cases: int = 80) -> dict:
             if paired
             else float("nan")
         ),
-        "pooled_recall_at_95pct_negative_specificity": (
+        "pooled_eval_recall_at_calibrated_95pct_negative_specificity": (
             float(
                 np.mean(
                     [
                         row["positive_120s_pooled_score"] < pooled_threshold
-                        for row in paired
+                        for row in evaluation
                     ]
                 )
             )
-            if paired
+            if evaluation and calibration
+            else float("nan")
+        ),
+        "pooled_eval_negative_specificity": (
+            float(
+                np.mean(
+                    [
+                        row["negative_120s_pooled_score"] >= pooled_threshold
+                        for row in evaluation
+                    ]
+                )
+            )
+            if evaluation and calibration
             else float("nan")
         ),
         "records": records,

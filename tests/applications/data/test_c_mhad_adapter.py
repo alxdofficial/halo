@@ -28,10 +28,15 @@ pytestmark = pytest.mark.skipif(
 
 def _assert_recording(recording, expected_placement: str) -> None:
     assert recording.dataset == "c_mhad"
-    assert recording.split == "test"
+    assert recording.split is None
+    assert recording.metadata["application_role"] == "sealed_external_evaluation"
     assert recording.subject_id.startswith("subject_")
     assert recording.session_id in recording.recording_id
     assert recording.metadata["annotation_usage"] == "scoring_only"
+    assert recording.metadata["alignment_convention_uncertainty_samples"] == 2
+    assert recording.metadata["alignment_convention_uncertainty_sec"] == pytest.approx(
+        0.04
+    )
 
     assert len(recording.streams) == 1
     stream = recording.streams[0]

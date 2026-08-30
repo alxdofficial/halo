@@ -5,23 +5,33 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "halo"
 version = "0.1.0"
-description = "Language-aligned IMU foundation model for zero-shot phone/watch human activity recognition (v2 rebuild)"
+description = "Wearable-IMU representations for personalized movement monitoring"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "numpy",
     "pandas",
-    "scipy",
+    "scipy>=1.11,<1.17",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
 eda = ["matplotlib", "torch"]
+application = ["pyarrow"]
 # Full training/eval stack: encoder text prototypes (sentence-transformers) + probes (scikit-learn).
 model = ["torch", "torchaudio", "sentence-transformers", "scikit-learn"]
 
 [tool.setuptools.packages.find]
-include = ["data*", "model*", "training*"]
+include = ["applications*", "baselines*", "data*", "eval*", "model*", "training*"]
+exclude = ["applications.motion_monitoring.data.sources*"]
+
+[tool.setuptools.package-data]
+"applications.motion_monitoring.data" = [
+    "SOURCE_INVENTORY.json",
+    "PAYLOAD_CHECKSUMS.json",
+    "CORPUS_SUMMARY.json",
+    "inspection/*.json",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

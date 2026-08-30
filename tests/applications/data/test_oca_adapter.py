@@ -34,7 +34,7 @@ def test_oca_adapter_loads_real_native_rate_recordings() -> None:
     ]
     assert [recording.subject_id for recording in recordings] == ["P0", "P0", "P0"]
     assert all(recording.session_id.startswith("P0-R") for recording in recordings)
-    assert all(recording.split == "training" for recording in recordings)
+    assert all(recording.split is None for recording in recordings)
     assert all(len(recording.streams) == 4 for recording in recordings)
 
     before_gap, after_gap, rate_20hz = recordings
@@ -49,6 +49,7 @@ def test_oca_adapter_loads_real_native_rate_recordings() -> None:
     for recording in recordings:
         first_t = recording.streams[0].timestamps_sec[0]
         last_t = recording.streams[0].timestamps_sec[-1]
+        sample_period = np.median(np.diff(recording.streams[0].timestamps_sec))
         assert [stream.stream_id for stream in recording.streams] == [
             "imu0",
             "imu2",
@@ -82,9 +83,9 @@ def test_oca_adapter_loads_real_native_rate_recordings() -> None:
             assert np.max(np.abs(gyro_quantization - np.rint(gyro_quantization))) < 2e-3
 
         assert recording.events[0].start_sec == pytest.approx(first_t)
-        assert recording.events[-1].end_sec == pytest.approx(last_t)
+        assert recording.events[-1].end_sec == pytest.approx(last_t + sample_period)
         assert all(
-            first_t <= event.start_sec < event.end_sec <= last_t
+            first_t <= event.start_sec < event.end_sec <= last_t + sample_period
             for event in recording.events
         )
         assert all(
@@ -111,10 +112,15 @@ def test_oca_adapter_preserves_official_splits_and_source_metadata() -> None:
         recording_count += 1
 
     assert recording_count == 13  # Twelve sessions and one hard-gap split.
-    assert recordings_by_session["P1-R1"].split == "validation"
-    assert recordings_by_session["P2-R2"].split == "validation"
-    assert recordings_by_session["P3-R0"].split == "testing"
-    assert recordings_by_session["P4-R0"].split == "testing"
+    assert all(recording.split is None for recording in recordings_by_session.values())
+    assert recordings_by_session["P1-R1"].metadata["official_split"] == "validation"
+    assert recordings_by_session["P2-R2"].metadata["official_split"] == "validation"
+    assert recordings_by_session["P3-R0"].metadata["official_split"] == "testing"
+    assert recordings_by_session["P4-R0"].metadata["official_split"] == "testing"
+    assert all(
+        recording.metadata["official_split_subject_disjoint"] is False
+        for recording in recordings_by_session.values()
+    )
     assert recordings_by_session["P4-R0"].metadata["arm_support"] == "entire_session"
     assert recordings_by_session["P3-R0"].metadata["source_placements"] == {
         "imu0": "right upper arm",
