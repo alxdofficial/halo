@@ -68,6 +68,12 @@ Source event intervals supervise candidates without being supplied at deployment
 - partial overlaps near boundaries are ignored until a boundary-tolerant target is defined; and
 - unlabeled intervals are negatives only when the annotation track is exhaustive.
 
+Candidate durations are selected from development event-duration quantiles and then frozen. This is
+how the system addresses unknown event duration; it does not stretch source labels or assume one
+correct scale. Events shorter than the compared encoder's temporal support are reported in a
+separate resolution-limited stratum. Candidates overlapping conflicting source events remain
+unassigned.
+
 Source intervals additionally provide an oracle-event matching control, but the primary deployed
 condition searches the complete timeline. No generic motion-proposal recall can cap discovery.
 
@@ -101,6 +107,11 @@ The primary learned component is deliberately small:
 Use constrained soft-DTW when gradients through alignment are required. Report ordinary constrained
 DTW and pooled cosine matching as simpler controls. Fine-tune the encoder end to end only after the
 frozen-encoder comparison identifies a representation limitation.
+
+Train this small component separately for every frozen released encoder. HALO is additionally
+reported with a task-specific end-to-end arm. The current implementation provides projected
+pooled-candidate affinity; temporal DTW re-scoring remains a required control and must not be
+described as implemented training behavior until it is connected to the complete candidate path.
 
 The first loss is simply:
 

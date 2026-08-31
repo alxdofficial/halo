@@ -157,6 +157,10 @@ The comparison has three levels for HALO and each compatible released encoder:
 | frozen-calibrated | frozen | the same matcher plus a tiny fitted metric or score calibration | ease of adaptation |
 | end-to-end | trainable | the same interface with differentiable alignment/ranking | best task-specific system |
 
+The external-encoder comparison uses the first two rows: each released encoder is frozen, but its
+small projection/calibration module is trained. The end-to-end row is a HALO-specific task arm unless
+external fine-tuning is declared separately. Phase A/B checkpoint training is upstream of this table.
+
 The smallest learned extension is a shared linear projection or diagonal feature weighting before
 alignment. It is introduced only after the frozen-direct floor is measured. End-to-end training uses
 independent positive executions, target-absent queries, hard negatives, and a differentiable
@@ -176,6 +180,12 @@ The reusable implementation is
 query embeddings plus physical-time patch intervals, so every encoder receives identical decoding.
 The optional motion-proposal baseline may be measured as a speed arm, but it is not part of the
 primary accuracy path.
+
+Task manifests preserve true event duration. The primary temporal-sequence result requires at least
+two valid encoder positions in the reference. One-position events are a separately reported
+nearest-patch condition, not silently padded into motion sequences. Results are stratified by event
+duration and encoder temporal support. Conflicting source overlaps, including the two identified
+C-MHAD cases, are excluded until independently resolved.
 
 ## 7. Dataset roles
 

@@ -88,10 +88,20 @@ available from direct complete-timeline processing so proposal recall cannot cap
 
 ## 7. Learning boundary
 
-The first milestone freezes every encoder and compares representations under identical task
-algorithms. Small metric components are introduced only after the non-parametric floors expose a
-specific limitation. End-to-end fine-tuning keeps the same task definition, split, decoder, and
-evaluation.
+Phase A and Phase B are upstream HALO representation-training stages. They are not names for the
+three application tasks. The application comparison starts from released encoder checkpoints and
+uses a separate task-specific model for each task.
+
+Every external encoder remains frozen and receives the same small learned Task-1, Task-2, or Task-3
+module. HALO is reported both frozen under that matched protocol and as an additional end-to-end arm
+in which the task loss may update a task-specific copy of the HALO encoder. This does not require one
+HALO checkpoint to become simultaneously optimal for detection, change measurement, and recurrence
+discovery.
+
+Each task also retains a non-parametric floor. The floor establishes how much information is already
+available and whether the learned module adds value; it is not a claim that a classification-trained
+encoder is already an ideal application metric. End-to-end fine-tuning keeps the same task
+definition, split, decoder, and evaluation.
 
 - positives are independent executions of the same source movement;
 - hard negatives are explicitly different movements from the same source context where possible;

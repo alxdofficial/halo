@@ -55,6 +55,19 @@ Counts at nested annotation levels must not be added as though they were indepen
 example, one OpenPack time span can simultaneously belong to a fine action, an operation, and a box
 cycle.
 
+### Cohort boundary and resolution audit
+
+The 2026-08-31 audit loaded every `COHORT_V1` recording and checked every interval against its real
+sensor clocks. All events are finite and contained in at least one source stream. Three same-track
+overlaps require task-manifest policy rather than silent repair: two conflicting C-MHAD test events
+and one 35 ms OpenPack fine-action boundary overlap.
+
+Temporal resolution is a material eligibility condition. OpenPack contains 17,849 fine actions under
+one second, and OCA contains 1,429 sample-label runs under one second. A one-second representation
+cannot claim fine boundary localization on those intervals. Task manifests must report event-duration
+strata, mark intervals unsupported by an encoder's temporal receptive field, and provide a common
+resolution-supported comparison. Source intervals are never lengthened to make them eligible.
+
 ## Task-specific admission rules
 
 ### Task 1
@@ -64,6 +77,11 @@ timelines assembled from independent bounded executions and compatible real back
 evaluation requires a natural continuous timeline and real action-instance intervals. Set counts or
 fiducial markers are not sufficient event ground truth.
 
+Reference/query construction must retain the source interval exactly. The primary sequence-matching
+stratum requires at least two valid representation positions in the reference; single-position
+events are reported separately as a nearest-patch condition. Conflicting overlapping source events
+are excluded from primary event scoring unless an independent annotation audit resolves them.
+
 ### Task 2
 
 The critical evidence is not background annotation. It is repeated bounded executions plus an
@@ -71,11 +89,27 @@ external change variable, such as session time, an accepted/altered execution co
 clinical measurement. Long timelines are useful for end-to-end evaluation but are not a prerequisite
 for the aligned change measurement itself.
 
+The frozen seven-source cohort is sufficient for global metric development and a controlled
+synthetic benchmark, but not yet for a strong real longitudinal claim. The measured within-person,
+same-action recording support is concentrated in OpenPack: its training partition has 345 fine-action
+subject/action groups with at least three recordings. AIDLAB-HAR and CrossFit have one stored
+recording per subject/action; RecoFit has at most two sets per subject/action. MoniPar's repeated
+weekly protocols therefore remain the priority real repeated-session adapter.
+
+Synthetic Task-2 splits operate on disjoint bounded executions and must split subjects, source
+recordings, sessions, and actions before generating changes. They do not require a continuous source
+timeline. Synthetic evaluation establishes controlled sensitivity and nuisance rejection, but does
+not replace real known-variant or longitudinal validation.
+
 ### Task 3
 
 Training requires arbitrary event identities and exact intervals where available. Deployment uses a
 dense multiscale search over the full timeline; source intervals are hidden from discovery and used
 only for its loss or evaluation. Set/count datasets remain explicitly weak supervision.
+
+The multiscale duration set is selected from development event-duration distributions and frozen
+before test. Candidates intersecting conflicting source events or ambiguous partial overlaps receive
+no pair target. Oracle source-interval matching and complete-timeline discovery remain separate.
 
 ## Open adapter work
 

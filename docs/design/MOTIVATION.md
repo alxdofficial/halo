@@ -102,6 +102,12 @@ only where controlled ablations support them. The paper remains useful if a rele
 encoder is best for one operation; it must report that result rather than redefine the task around
 HALO.
 
+Task 2 is the longitudinal application and representation stress test, not a claim that robust
+covariance fitting or trend smoothing is a new algorithm. Its controlled synthetic arm measures
+whether an encoder retains known changes while rejecting nuisance. Its real repeated-session arm
+tests whether that behavior transfers to human variation. The three tasks together, rather than
+any one small downstream head, establish the end-to-end contribution.
+
 ## Non-goals
 
 - Winning a generic zero-shot HAR leaderboard.

@@ -32,6 +32,12 @@ All methods receive the same source recordings and event boundaries. Compare:
 - ImageBind only as an optional generic multimodal appendix control; and
 - the same small Task-3 pairwise metric trained separately for each frozen representation.
 
+The same rule applies to all three tasks: external encoder weights remain frozen, while the declared
+small task-specific module is fitted separately for each representation. HALO is reported once under
+that matched frozen protocol and once, where justified, with a task-specific end-to-end encoder copy.
+The frozen HALO row isolates representation quality; the end-to-end row measures the complete HALO
+application system.
+
 The primary external comparison contains only author-released pretrained checkpoints. Historical
 CrossHAR and LiMU-BERT backbones pretrained in this repository may appear only as supplementary
 diagnostics because their corpus, schedule, augmentation, and checkpoint choices are ours. Every

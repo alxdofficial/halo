@@ -17,6 +17,11 @@ from .metrics import (
     masked_regression_metrics,
 )
 from .model import ChangeHeadOutput, ChangeMetricHead, resample_to_phase
+from .personal import (
+    PersonalDeviation,
+    PersonalVariationModel,
+    fit_personal_variation,
+)
 from .training import StepTelemetry, initialize_change_threshold, train_step
 
 __all__ = [
@@ -29,6 +34,8 @@ __all__ = [
     "ExecutionPair",
     "ExecutionPairDataset",
     "PairBatch",
+    "PersonalDeviation",
+    "PersonalVariationModel",
     "RegressionMetrics",
     "StepTelemetry",
     "balanced_accuracy",
@@ -36,6 +43,7 @@ __all__ = [
     "change_quantification_loss",
     "collate_execution_pairs",
     "from_motion_sequence",
+    "fit_personal_variation",
     "initialize_change_threshold",
     "masked_regression_metrics",
     "resample_to_phase",

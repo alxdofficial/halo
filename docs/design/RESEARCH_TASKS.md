@@ -67,6 +67,17 @@ Task 2 does not require generic event proposals. Source intervals, user-guided r
 detections can supply executions. Its core evaluation uses source boundaries so change measurement is
 not confounded with localization error.
 
+Task 2 contains two distinct fits. A small global metric is learned from development subjects to
+retain known execution changes while reducing acquisition nuisance. Separately, accepted executions
+for one person, task, and compatible acquisition setup fit a regularized joint variation model. The
+personal fit learns which feature combinations normally move together; it is not equivalent to
+thresholding every feature independently and does not require a per-person neural optimizer.
+
+Disjoint bounded executions are sufficient: Task 2 does not require them to appear in one continuous
+recording. Controlled synthetic changes on held-out real executions provide an exact sensitivity
+benchmark, while real repeated-session or known-variant data remain necessary for an applied
+longitudinal claim.
+
 Without external ground truth, the output is **difference**, not correctness, fatigue, clinical
 improvement, or disease. Those interpretations require known execution variants, clinician labels, or
 validated measurements. The full contract is owned by
@@ -100,6 +111,11 @@ Temporal non-maximum suppression or weighted interval selection consolidates ove
 that describe one occurrence. This makes localization part of motif discovery rather than a separate
 front end. A reviewer confirms, rejects, or names the resulting motif. The full contract is owned by
 [`TASK3_RECURRENT_MOTION_DISCOVERY.md`](../tasks/TASK3_RECURRENT_MOTION_DISCOVERY.md).
+
+Each frozen encoder receives the same small Task-3 projection and affinity calibration. HALO also
+has a separately reported end-to-end task-specific arm. Multiscale candidates handle unknown event
+duration and boundaries; they are a downstream temporal search and do not re-encode the signal at
+every duration.
 
 ## Optional motion-proposal baseline
 

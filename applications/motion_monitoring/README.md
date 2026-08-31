@@ -12,6 +12,10 @@ contracts to code.
 - `training.py`: low-cost optimizer and gradient-health checks shared by development smokes.
 - `smoke.py`: one short real-cache training check spanning all three tasks.
 
+Phase A and Phase B train the upstream HALO representation. In the application study, released
+external encoders are frozen and receive a separately trained small module for each task. HALO is
+measured both frozen under that same protocol and with a task-specific end-to-end fine-tuning arm.
+
 ## Task packages
 
 - `task1/`: bounded-reference matching against a complete query timeline.

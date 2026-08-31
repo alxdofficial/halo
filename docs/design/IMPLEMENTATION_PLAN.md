@@ -74,7 +74,9 @@ available for every representation on natural continuous recordings.
 1. **Implemented mechanically:** phase-normalized latent residual curves for bounded executions.
 2. **Partially implemented:** duration and IMU magnitude/dynamic/jerk summaries are exported;
    cadence, frequency, smoothness, and stability reporting remain open.
-3. Estimate personal baseline variability, remounting noise, and minimum detectable change.
+3. **Personal joint-variation fit implemented:** estimate robust personal center, measurement-floor
+   scaling, and shrinkage-regularized covariance; remounting noise and minimum detectable change
+   calibration remain open.
 4. Fit a robust longitudinal state over per-execution deviations.
 5. **Mechanically implemented:** masked, unit-scaled known-change classification/regression and
    accepted-variation controls; real longitudinal association remains open.

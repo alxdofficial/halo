@@ -6,9 +6,10 @@
 
 **Implementation status, 2026-08-31.** The shared timestamped encoder export, bounded-execution
 pair contract, phase-normalized latent residual, accepted-variation and known-change objectives,
-masked unit-scaled target regression, and encoder/head gradient telemetry are mechanically
-implemented. Short real-cache smokes pass. Personal longitudinal state fitting, complete physical
-measurements, task manifests, long training, and external validation remain outstanding.
+masked unit-scaled target regression, encoder/head gradient telemetry, and robust personal joint
+variation fit are mechanically implemented. Short real-cache smokes pass. The longitudinal state
+smoother, complete physical measurements, task manifests, long training, and external validation
+remain outstanding.
 Execution pairs are constrained to one dataset-scoped subject identity, and bounded executions with
 internal missing-patch gaps are rejected rather than interpolated across.
 
@@ -46,6 +47,12 @@ accelerometer data to estimate velocity introduces drift. The initial implementa
 applies SPARC directly to angular velocity when gyroscope data are available, reports acceleration-
 based jerk as an explicitly different measurement, and does not infer joint angles or position from
 a single uncalibrated watch.
+
+Task 2 is not presented as a standalone novel covariance or trend algorithm. Its contribution is as
+the longitudinal measurement case study in the complete detect/compare/discover system and as a
+stress test of representation geometry: useful embeddings should suppress accepted personal and
+acquisition variation while retaining controlled or externally validated execution change. The
+statistical components remain deliberately established and auditable.
 
 ## 3. Input and output
 
@@ -128,17 +135,35 @@ Magnitude and physical-frequency summaries remain the placement-robust default.
 
 ### 4.5 Convert change into a personal deviation
 
-For each scalar or phase bin, estimate the accepted baseline median and median absolute deviation.
-The standardized deviation is:
+Form one fixed feature vector per aligned execution comparison. It contains phase-local latent
+residuals and separately measured physical changes. Fit the personal model separately for one
+person, task, and compatible acquisition setup.
+
+Estimate a robust center and per-feature scale from accepted executions. Then fit the covariance of
+the standardized residuals using oracle-approximating shrinkage toward an identity covariance. This
+captures ordinary correlated variation without estimating a singular high-dimensional covariance
+from a handful of examples. With fewer than three accepted executions, use the diagonal fallback and
+mark the result `reference_limited`.
+
+The scalar joint deviation is the dimension-normalized Mahalanobis distance. Per-feature residuals
+remain available for interpretation:
 
 ```text
-deviation = (current - baseline_median) / max(1.4826 * baseline_MAD, measurement_floor)
+standardized feature = (current - baseline_median)
+                       / max(1.4826 * baseline_MAD, measurement_floor)
+
+joint deviation = sqrt(standardized_features * precision * standardized_features
+                       / number_of_features)
 ```
 
 The measurement floor comes from test-retest and remounting data, not an arbitrary epsilon. Report
 the raw unit, percent change, and standardized change together. A change is marked as exceeding
 ordinary variation only when its confidence interval also exceeds the predeclared minimum detectable
 change.
+
+The implementation is `applications.motion_monitoring.task2.personal.fit_personal_variation`. This
+deployment adaptation uses accepted reference executions only; it is separate from global neural
+training.
 
 ### 4.6 Estimate persistent longitudinal change
 
@@ -156,11 +181,12 @@ Raw physical trends remain parallel outputs. The encoder is useful only if its l
 detects validated changes more reliably, earlier, or with fewer false alarms than those physical
 features alone.
 
-## 5. Optional lightweight learned arm
+## 5. Lightweight learned arm
 
-Learning is added only if fixed alignment cannot separate known changes from nuisance variation. The
+The application model includes a small global metric because an encoder trained for activity
+classification is not assumed to preserve the within-activity differences required here. The
 smallest head is a normalized diagonal weighting or linear projection applied to patch embeddings
-before the same DTW and reporting pipeline.
+before the same alignment and reporting pipeline. A fixed-metric arm remains mandatory as the floor.
 
 Train it with pairwise or ordinal constraints:
 
@@ -175,6 +201,11 @@ single opaque quality regressor is deferred until clinician labels support one.
 The learned target is nuisance-tolerant change, not disease identity. Stable accepted repetitions
 teach the model what should remain close; known execution variants or externally measured
 longitudinal changes teach which differences should remain observable.
+
+For every released baseline encoder, freeze the encoder and train the same head separately. Report
+HALO with the encoder frozen under that matched protocol, then report a distinct end-to-end HALO arm
+whose task loss updates a task-specific encoder copy. Do not compare a fitted HALO head against an
+unadapted baseline embedding.
 
 ## 6. Training-data construction
 
@@ -196,7 +227,9 @@ used to claim unseen-source generalization for that checkpoint.
 
 ### 6.2 Synthetic sensitivity tests
 
-Synthetic modifications test whether a metric responds in the intended direction:
+Task 2 does not need a continuous recording. Independent bounded executions with the same declared
+action are sufficient. Synthetic modifications can therefore provide both development training and
+a held-out controlled evaluation in which direction and severity are known exactly:
 
 - bounded whole-execution retiming;
 - phase-local amplitude scaling;
@@ -205,16 +238,34 @@ Synthetic modifications test whether a metric responds in the intended direction
 - session-wide orientation/remounting and measured noise as nuisances.
 
 Known-change and nuisance transformations must be labeled separately. A model should respond to the
-former and remain stable to the latter. Synthetic changes are not called clinical impairment and are
-not the primary test result.
+former and remain stable to the latter. Split base subjects, actions, sessions, and source recordings
+before generating transformations; otherwise transformed copies leak across train and evaluation.
+Evaluation seeds, severity ranges, and transformation compositions are frozen in a task manifest.
 
-### 6.3 No-label mode
+The controlled synthetic benchmark is a primary engineering test of sensitivity and invariance. It
+is not by itself evidence of clinical or longitudinal usefulness. At least one real repeated-session,
+known-variant, or externally measured evaluation remains required for that applied claim.
+
+### 6.3 Training mixture
+
+Construct balanced batches over source subjects and tasks rather than over the number of generated
+variants. Each batch contains:
+
+- untouched independent accepted-execution pairs;
+- known-change pairs with a declared direction and severity;
+- nuisance pairs such as remounting or measured device noise that should remain accepted; and
+- unlabeled real pairs used only for personal baseline fitting or unsupervised reporting.
+
+Do not apply a change only to one class in a way that leaves an augmentation watermark. Hold out
+complete base executions before generating either training or evaluation variants.
+
+### 6.4 No-label mode
 
 When no correct/incorrect labels exist, fit nothing beyond robust baseline statistics. The system can
 still quantify longitudinal change and estimate whether it exceeds test-retest variation. It cannot
 learn which direction is desirable.
 
-### 6.4 Video and privileged supervision
+### 6.5 Video and privileged supervision
 
 When synchronized video exists, use a dedicated temporal-localization or pose pipeline to propose
 event phase and visible kinematics. A VLM may provide coarse movement descriptions and flag examples
@@ -299,6 +350,8 @@ Avoid radar charts and a single unlabeled quality score. Both obscure units and 
 
 ## 11. Research basis
 
+- Chen et al., *Shrinkage Algorithms for MMSE Covariance Estimation*, IEEE Transactions on Signal
+  Processing 2010, [DOI 10.1109/TSP.2010.2053029](https://doi.org/10.1109/TSP.2010.2053029).
 - Komaris et al., *Unsupervised IMU-based evaluation of at-home exercise programmes*, BMC Sports
   Science, Medicine and Rehabilitation 2022,
   [DOI 10.1186/s13102-022-00417-1](https://doi.org/10.1186/s13102-022-00417-1).
