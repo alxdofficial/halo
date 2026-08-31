@@ -1,6 +1,6 @@
 # Evaluation protocol
 
-> **Protocol plan, 2026-08-30.** No application result is reportable until its artifact records the
+> **Protocol plan, 2026-08-31.** No application result is reportable until its artifact records the
 > dataset, subjects, sessions, references, query intervals, encoder checkpoint, adapter, thresholds,
 > and protocol fingerprint defined here.
 
@@ -125,7 +125,7 @@ covered by confirmed motifs.
 The verified, checkpoint-dependent inventory is owned by
 [`APPLICATION_DATASETS.md`](../data/APPLICATION_DATASETS.md). In particular, Upper Limb Use is
 currently blocked by short converted artifacts; C-MHAD, WEAR, and OCA have verified raw-timeline
-adapters but still need frozen evaluation manifests. Dataset readiness must be copied into each
+adapters and are frozen as test-only members of `COHORT_V1`. Dataset readiness must be copied into each
 result artifact so a later source or converter change cannot silently alter the cohort.
 
 The core public evaluation matrix is intentionally small:
@@ -138,8 +138,9 @@ The core public evaluation matrix is intentionally small:
 | **OCA** | occupational Task-3 recurrent-motion discovery | occupational Task-1 transfer |
 
 This is one shared four-dataset study, not four unrelated benchmark collections. C-MHAD, WEAR, and
-OCA are not reportable until immutable subject/recording manifests are frozen. Their loaders and
-physical contracts are implemented and verified. UniMTS/OCA is additionally unsupported until
+OCA remain non-reportable until task-specific episode manifests and operating points are frozen;
+their recording membership is fixed in `COHORT_V1`, and their loaders and physical contracts are
+implemented and verified. UniMTS/OCA is additionally unsupported until
 upper-arm placement is mapped explicitly to the released skeleton contract.
 
 OpenPack is the priority Task-3 metric-training and held-out-identity source. Its import and

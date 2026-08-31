@@ -1,12 +1,10 @@
 # Application results
 
-> **Status: protocol and implementation phase, 2026-08-30.** No result for the four application
-> tasks has been promoted yet.
+> **Status: protocol and implementation phase, 2026-08-31.** No result for the three application
+> tasks has been promoted yet. Task 0 is retained only as an optional classical proposal-speed arm.
 
 ## Active questions
 
-0. Can an IMU timeline be segmented into coherent motion events at a practically useful boundary
-   accuracy and false-proposal rate?
 1. Can a frozen IMU representation find an independently repeated demonstrated movement in a
    continuous recording at a practically low false-alarm rate?
 2. Can aligned latent and physical measurements distinguish real execution change from ordinary
@@ -16,7 +14,7 @@
 
 The metrics, controls, and dataset roles are fixed in
 [`../design/EVALUATION_PROTOCOL.md`](../design/EVALUATION_PROTOCOL.md). Results will be added only
-after the common `MotionSequence` interface and application manifest are implemented and audited.
+after task-specific episode manifests, operating points, and complete encoder controls are frozen.
 
 ## Prior evidence and why it is not an application result
 
@@ -50,7 +48,7 @@ A result becomes current only when it has:
 - per-dataset results and failure cases; and
 - a generated artifact path linked from this document.
 
-The optional motion-proposal baseline will report event recall, boundary quality, runtime, and false
+The optional Task-0 motion-proposal baseline will report event recall, boundary quality, runtime, and false
 proposals only where background annotation is exhaustive. Task 1 will report event AP, false alarms
 per hour, count error, and boundary error. Task 2 will report
 reliability, known-difference sensitivity, and longitudinal association. Task 3 will report motif

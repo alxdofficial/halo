@@ -9,10 +9,11 @@ structure and records the source capabilities of reused datasets. The runtime `M
 contract now exports native-clock patch intervals, validity, normalized embeddings, physical
 summaries, and provenance through both HALO and a cheap physical-feature control. All three task
 pipelines have short real-cache optimizer smokes with finite head and encoder gradients. These are
-mechanical checks, not trained models or results. Serialized representation caches, immutable task
-manifests, calibrated operating points, long training, and complete evaluations remain open.
-Subject/linkage-group split validation is implemented and rejects the released WEAR and OCA
-partitions that are not subject-disjoint; actual task manifests still need to be frozen.
+mechanical checks, not trained models or results. The seven-source `COHORT_V1` manifest and shared
+frozen-representation cache are implemented. The manifest contains 864 nonduplicated
+training/development recordings and 277 sealed-test recordings and rejects the released WEAR and OCA
+partitions as split authorities. HARMES/MoniPar application adapters, complete representation
+caches, calibrated operating points, long training, and complete evaluations remain open.
 
 Reproduce the cross-task mechanical check with:
 
@@ -29,10 +30,12 @@ development-source metrics as application performance.
 
 1. Maintain one authoritative temporal annotation inventory.
 2. Reconstruct XRF V2 and HARMES complete timelines without Phase-A excerpt assumptions.
-3. **Runtime implemented:** define and validate `MotionSequence`; serialized cache format remains open.
-4. Freeze application train/development/test roles and upstream-checkpoint provenance.
-5. Freeze deterministic manifests containing subjects, recordings, references, target intervals,
-   target-absent time, annotation scope, and split fingerprints.
+3. **Implemented:** define, validate, and serialize `MotionSequence` without losing physical time.
+4. **Implemented for seven canonical sources:** freeze application train/development/test roles and
+   upstream-cache provenance.
+5. **Recording cohort implemented; task episodes open:** freeze deterministic manifests containing
+   subjects, recordings, references, target intervals, target-absent time, annotation scope, and
+   split fingerprints.
 6. Select thresholds and checkpoints on development subjects before sealed evaluation.
 
 **Exit condition:** no reference/query leakage, every negative interval is supported by its annotation
@@ -40,12 +43,14 @@ contract, and every result regenerates from one manifest fingerprint.
 
 ## Stage 1: common representation export
 
-1. Export timestamped HALO patch embeddings without pooling away movement phase.
+1. **Implemented and smoke-tested:** export timestamped frozen HALO patch embeddings without pooling
+   away movement phase.
 2. Add faithful temporal adapters for the primary author-released encoders.
 3. Export raw IMU and parameter-free physical measurements beside every latent sequence.
 4. Measure temporal resolution, throughput, memory, and device coverage.
 
-**Exit condition:** every encoder produces the same `MotionSequence` schema in physical time.
+**Exit condition:** every selected encoder produces the same cached `MotionSequence` schema in
+physical time. HALO passes; released baseline cache adapters remain open.
 
 ## Stage 2: Task-1 full-timeline floors
 

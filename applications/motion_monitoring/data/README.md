@@ -7,6 +7,9 @@ This directory owns data used by the three application tasks. It is intentionall
 - `splits.py` defines the mandatory subject/linkage grouping validator for task manifests. A
   manifest is invalid if a canonical subject or conservative unresolved-identity group crosses
   train, development, and test assignments.
+- `../manifests/COHORT_V1.json` freezes exact recording membership for the seven canonical
+  application caches. Its protocol fingerprint is
+  `abee73424ac253bf61db8c25c23966ba0b01cb8ae843b117d2a8ff19d28ee244`.
 - `PAYLOAD_CHECKSUMS.json` freezes the accepted file set, byte sizes, and SHA-256 digests.
 - `CORPUS_SUMMARY.json` records measured effective hours, event counts, and known balance caveats.
 - `acquire.py` downloads only the source modalities listed in that contract.
@@ -80,6 +83,34 @@ they do not resample, window, impute, or create task labels. `CachedRecordingDat
 so a standard distributed or random sampler can assign disjoint indices to loader workers without
 re-reading a source archive or duplicating an epoch. Cache metadata binds the raw payload tree,
 adapter source, and shared data contract; stale caches fail at load time and must be rebuilt.
+
+Build or validate the cohort only after all canonical caches are current:
+
+```bash
+/home/alex/code/HALO/legacy_code/.venv/bin/python \
+  -m applications.motion_monitoring.data.build_manifest
+```
+
+The current manifest contains 864 nonduplicated training/development recordings and 277 sealed-test
+recordings. CrossFit repetition excerpts are excluded because they duplicate their parent exercise
+signal. Development groups are selected deterministically to cover source annotation cells while
+never moving a single-group label entirely out of training. HARMES and MoniPar remain outside
+`COHORT_V1` until application-native adapters are reviewed.
+
+Frozen encoder exports use the shared representation cache and retain patch timestamps, masks, and
+physical summaries:
+
+```bash
+/home/alex/code/HALO/legacy_code/.venv/bin/python \
+  -m applications.motion_monitoring.build_representations \
+  --manifest applications/motion_monitoring/manifests/COHORT_V1.json \
+  --checkpoint <frozen-checkpoint.pt> \
+  --output applications/motion_monitoring/artifacts/representations/<encoder>
+```
+
+The builder refuses trainable encoders and binds each cache to both the cohort fingerprint and the
+checkpoint digest. Application artifacts are local and ignored; the manifest and generation code
+are versioned.
 
 ## External-source rule
 

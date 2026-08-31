@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 
 from applications.motion_monitoring.data.contracts import RawRecording
 
@@ -30,13 +30,11 @@ def subject_leakage_group(recording: RawRecording) -> str:
 
 
 def validate_subject_disjoint_assignments(
-    recordings: Sequence[RawRecording],
+    recordings: Iterable[RawRecording],
     assignments: Mapping[RecordingKey, str],
 ) -> dict[str, tuple[RecordingKey, ...]]:
     """Reject missing assignments or any leakage group spanning multiple splits."""
 
-    if not recordings:
-        raise ValueError("subject-disjoint validation requires recordings")
     groups: dict[str, list[RecordingKey]] = defaultdict(list)
     splits_by_group: dict[str, set[str]] = defaultdict(set)
     seen: set[RecordingKey] = set()
@@ -54,6 +52,8 @@ def validate_subject_disjoint_assignments(
         groups[group].append(key)
         splits_by_group[group].add(split)
 
+    if not seen:
+        raise ValueError("subject-disjoint validation requires recordings")
     extra = set(assignments) - seen
     if extra:
         raise ValueError(f"manifest contains unknown recording assignments: {sorted(extra)!r}")

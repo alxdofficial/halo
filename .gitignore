@@ -50,6 +50,7 @@ applications/motion_monitoring/data/sources/*/downloads/
 applications/motion_monitoring/data/sources/*/raw/
 applications/motion_monitoring/data/sources/*/processed/
 applications/motion_monitoring/data/sources/*/manifests/
+applications/motion_monitoring/artifacts/
 training_output/
 test_output/
 eval/results/

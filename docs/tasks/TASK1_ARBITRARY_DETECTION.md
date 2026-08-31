@@ -8,8 +8,9 @@
 **Implementation status, 2026-08-31.** Native-time cache episodes, independent reference/query
 construction, join guards, target-absent episodes, bounded open-begin/open-end soft-DTW, endpoint
 training, temporal suppression, and encoder/head gradient telemetry are mechanically implemented.
-Short real-cache smokes pass. Threshold calibration, immutable task manifests, long training, and
-sealed evaluation remain deliberately outstanding.
+Short real-cache smokes pass. The recording cohort and frozen HALO representation-cache format are
+implemented; task-specific episode manifests, threshold calibration, long training, and sealed
+evaluation remain deliberately outstanding.
 
 Before constructing a training `DataLoader`, run `audit_cached_event_pairs` and persist both its
 eligible pair list and its rejected pair reasons in the task manifest. Events crossing invalid
@@ -278,6 +279,29 @@ distractor.
 6. Only then export frozen HALO and baseline representations through the common adapter.
 
 Preliminary probes establish feasibility and defaults. They are not promoted application results.
+
+### Frozen-representation pilot
+
+A bounded 20-record OpenPack pilot checks the complete frozen-cache and learned-projection path. It
+uses eight source actions, paired target-present/target-absent 60-second queries, training subjects
+disjoint from the one development subject, and a threshold selected only on training episodes. It is
+explicitly non-reportable: the cohort is too small, label selection is diagnostic, and it omits the
+released-encoder controls. The run confirmed finite nonzero gradients and also confirmed that ten
+projection steps did not improve development balanced accuracy over unmodified HALO+DTW. This is a
+reason to optimize and broaden the protocol before long training, not evidence against the method.
+
+Reproduce the diagnostic with:
+
+```bash
+/home/alex/code/HALO/legacy_code/.venv/bin/python \
+  -m applications.motion_monitoring.task1.pilot \
+  --manifest applications/motion_monitoring/manifests/COHORT_V1.json \
+  --representations applications/motion_monitoring/artifacts/representations/halo_pb04_openpack_pilot \
+  --steps 10 --device cuda
+```
+
+Episode construction records rejected labels and reasons. For example, an event shorter than one
+representation patch is excluded rather than assigned an invented patch target.
 
 ## 12. Preliminary feasibility probe
 
