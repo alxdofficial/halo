@@ -72,13 +72,6 @@ def _rough_intervals(
     if active_start is not None:
         intervals.append((active_start, len(scores) - 1))
 
-    intervals = [
-        (start, end)
-        for start, end in intervals
-        if _interval_times(sequence, start, end)[1]
-        - _interval_times(sequence, start, end)[0]
-        >= config.minimum_duration_seconds
-    ]
     if not intervals:
         return []
 
@@ -102,7 +95,13 @@ def _rough_intervals(
             merged[-1] = (previous_start, end)
         else:
             merged.append((start, end))
-    return merged
+    return [
+        (start, end)
+        for start, end in merged
+        if _interval_times(sequence, start, end)[1]
+        - _interval_times(sequence, start, end)[0]
+        >= config.minimum_duration_seconds
+    ]
 
 
 def _change_points(
@@ -181,8 +180,14 @@ def _change_points(
             endpoint = block_start + int(local_endpoint)
             if endpoint <= block_start or endpoint >= block_stop:
                 continue
-            before = standardized[max(block_start, endpoint - minimum_size) : endpoint]
-            after = standardized[endpoint : min(block_stop, endpoint + minimum_size)]
+            before = standardized[
+                max(block_start, endpoint - minimum_size) : endpoint,
+                available_columns,
+            ]
+            after = standardized[
+                endpoint : min(block_stop, endpoint + minimum_size),
+                available_columns,
+            ]
             magnitude = float(np.linalg.norm(after.mean(axis=0) - before.mean(axis=0)))
             if magnitude < config.minimum_change_magnitude:
                 continue

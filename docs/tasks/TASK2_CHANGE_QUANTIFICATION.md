@@ -4,11 +4,13 @@
 > first version learns ordinary personal variation, then tracks persistent deviation through
 > alignment and measurement; it is not a clinical diagnosis model.
 
-**Implementation status, 2026-08-30.** The shared timestamped encoder export, bounded-execution
+**Implementation status, 2026-08-31.** The shared timestamped encoder export, bounded-execution
 pair contract, phase-normalized latent residual, accepted-variation and known-change objectives,
 masked unit-scaled target regression, and encoder/head gradient telemetry are mechanically
 implemented. Short real-cache smokes pass. Personal longitudinal state fitting, complete physical
 measurements, task manifests, long training, and external validation remain outstanding.
+Execution pairs are constrained to one dataset-scoped subject identity, and bounded executions with
+internal missing-patch gaps are rejected rather than interpolated across.
 
 ## 1. Question and deployment contract
 

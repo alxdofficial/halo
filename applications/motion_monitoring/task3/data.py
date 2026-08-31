@@ -70,11 +70,23 @@ def event_batch_from_recordings(
 
     selected: list[list[tuple[float, float, str]]] = []
     scope_keys: list[tuple[str, str]] = []
-    for recording, sequence in zip(recordings, sequences, strict=True):
+    for row_index, (recording, sequence) in enumerate(
+        zip(recordings, sequences, strict=True)
+    ):
         if sequence.recording_id != recording.recording_id:
             raise ValueError("recording and MotionSequence provenance do not align")
         timeline_start = float(sequence.intervals_sec[0, 0])
         timeline_end = float(sequence.intervals_sec[-1, 1])
+        clipped_events = [
+            event
+            for event in recording.events
+            if event.annotation_kind == annotation_kind
+            and bool(event.metadata.get("clipped_by_recording_crop", False))
+        ]
+        if clipped_events and exhaustive_rows[row_index]:
+            raise ValueError(
+                "exhaustive Task-3 supervision cannot use events clipped by a timeline crop"
+            )
         rows = [
             (
                 max(timeline_start, event.start_sec),
@@ -84,6 +96,7 @@ def event_batch_from_recordings(
             for event in recording.events
             if event.annotation_kind == annotation_kind
             and event.label not in background_labels
+            and not bool(event.metadata.get("clipped_by_recording_crop", False))
             and min(timeline_end, event.end_sec)
             > max(timeline_start, event.start_sec)
         ]

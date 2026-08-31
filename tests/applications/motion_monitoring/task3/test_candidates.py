@@ -141,3 +141,38 @@ def test_multiscale_pooling_preserves_large_absolute_clock_precision():
         candidates.end_sec[candidates.candidate_mask]
         > candidates.start_sec[candidates.candidate_mask]
     )
+
+
+def test_candidate_pooling_is_invariant_to_batch_padding():
+    torch.manual_seed(4)
+    short_embeddings = torch.randn(1, 6, 4)
+    short_intervals = _intervals(1, 6).double()
+    short_mask = torch.ones(1, 6, dtype=torch.bool)
+    alone = pool_multiscale_candidates(
+        short_embeddings,
+        short_intervals,
+        short_mask,
+        durations_sec=(2.0, 3.0),
+    )
+
+    batched_embeddings = torch.zeros(2, 40, 4)
+    batched_intervals = torch.zeros(2, 40, 2, dtype=torch.float64)
+    batched_mask = torch.zeros(2, 40, dtype=torch.bool)
+    batched_embeddings[0, :6] = short_embeddings[0]
+    batched_intervals[0, :6] = short_intervals[0]
+    batched_mask[0, :6] = True
+    batched_embeddings[1] = torch.randn(40, 4)
+    batched_intervals[1] = _intervals(1, 40)[0].double()
+    batched_mask[1] = True
+    padded = pool_multiscale_candidates(
+        batched_embeddings,
+        batched_intervals,
+        batched_mask,
+        durations_sec=(2.0, 3.0),
+    )
+
+    count = alone.valid_count
+    assert padded.candidate_mask[0].sum().item() == count
+    assert torch.equal(padded.start_sec[0, :count], alone.start_sec[0, :count])
+    assert torch.equal(padded.end_sec[0, :count], alone.end_sec[0, :count])
+    assert torch.allclose(padded.embeddings[0, :count], alone.embeddings[0, :count])

@@ -1,6 +1,6 @@
 # Application implementation plan
 
-> **Plan of record, 2026-08-30.** Each stage establishes a simple complete-timeline floor before a
+> **Plan of record, 2026-08-31.** Each stage establishes a simple complete-timeline floor before a
 > learned component is added.
 
 **Current progress.** Seven application sources have immutable payload checksums, verified native-time
@@ -11,6 +11,8 @@ summaries, and provenance through both HALO and a cheap physical-feature control
 pipelines have short real-cache optimizer smokes with finite head and encoder gradients. These are
 mechanical checks, not trained models or results. Serialized representation caches, immutable task
 manifests, calibrated operating points, long training, and complete evaluations remain open.
+Subject/linkage-group split validation is implemented and rejects the released WEAR and OCA
+partitions that are not subject-disjoint; actual task manifests still need to be frozen.
 
 Reproduce the cross-task mechanical check with:
 
@@ -54,7 +56,9 @@ contract, and every result regenerates from one manifest fingerprint.
    and released-encoder adapters remain open.
 5. Fit thresholds on target-present and target-absent development recordings.
 6. **Implemented mechanically:** natural cache episodes plus deterministic independent-view,
-   retiming, distractor, target-absent, validity, and join-guard test episodes.
+   retiming, distractor, target-absent, validity, and join-guard test episodes. Pair preflight records
+   data-quality exclusions before loading, and guards break alignment paths rather than only masking
+   endpoint losses.
 7. Produce event timelines, alignment paths, false-alarm curves, count error, and boundary error.
 
 **Exit condition:** event AP and recall at a declared false-alarms-per-hour operating point are
@@ -77,7 +81,8 @@ or clinical language absent external validation.
 ## Stage 4: Task-3 dense recurrence discovery
 
 1. **Implemented mechanically:** encode complete recording crops at a fine physical-time stride.
-2. **Implemented:** pool adjacent embeddings over declared physical durations.
+2. **Implemented:** pool adjacent embeddings over declared physical durations, with candidate output
+   invariant to heterogeneous batch padding.
 3. **Implemented:** assign candidate/event overlap targets from exact-boundary training sources; ignore ambiguous
    partial overlaps and incompletely annotated negatives.
 4. Implement pooled cosine, constrained DTW, and variable-length matrix-profile controls.

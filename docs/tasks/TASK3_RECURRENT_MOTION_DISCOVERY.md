@@ -4,12 +4,15 @@
 > motion" from datasets with bounded, labeled events. Deployment requires neither an enrolled
 > reference nor an activity vocabulary. Classical motif search remains a non-learned control.
 
-**Implementation status, 2026-08-30.** Complete-timeline collation, dense physical-time multiscale
+**Implementation status, 2026-08-31.** Complete-timeline collation, dense physical-time multiscale
 candidates, exact-event overlap targets, scope-local arbitrary identities, balanced pair sampling,
 same-motion metric learning, recurrence graph decoding, temporal consolidation, metrics, and
 encoder/head gradient telemetry are mechanically implemented. Short real-cache smokes pass.
 Operating-point calibration, immutable manifests, long training, and human-review artifacts remain
 outstanding.
+Candidate construction is tested to be invariant to heterogeneous batch padding. Events clipped at
+a crop boundary cannot be presented as exact supervision: non-exhaustive crops ignore them, while
+exhaustive supervision fails closed.
 
 ## 1. Question and deployment contract
 

@@ -7,7 +7,7 @@ from applications.motion_monitoring.task0.calibration import (
     CalibrationCase,
     calibrate_thresholds,
 )
-from applications.motion_monitoring.task0.contracts import ProposalConfig
+from applications.motion_monitoring.task0.contracts import ProposalConfig, RefinementConfig
 from tests.applications.motion_monitoring.test_task0_detector import (
     _detector,
     _sequence,
@@ -62,3 +62,26 @@ def test_background_only_recording_contributes_false_proposals() -> None:
         iou_threshold=0.5,
     )
     assert selected.start_threshold == 4.0
+
+
+def test_calibration_uses_the_deployment_refinement_configuration(monkeypatch) -> None:
+    observed = []
+
+    def detect(detector, evidence):
+        del evidence
+        observed.append(detector.refinement_config.enabled)
+        return ()
+
+    monkeypatch.setattr(
+        "applications.motion_monitoring.task0.calibration.Task0Detector.detect_evidence",
+        detect,
+    )
+    calibrate_thresholds(
+        [CalibrationCase(_sequence(), (EventInterval(0.7, 1.6, "movement"),))],
+        _detector().scaler,
+        ProposalConfig(),
+        start_thresholds=(3.0,),
+        continue_thresholds=(1.0,),
+        refinement_config=RefinementConfig(enabled=True),
+    )
+    assert observed == [True]

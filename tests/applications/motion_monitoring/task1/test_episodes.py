@@ -15,6 +15,7 @@ from applications.motion_monitoring.task1.episodes import (
     CachedEventPairDataset,
     DetectionEpisode,
     EmbeddingSequence,
+    audit_cached_event_pairs,
     collate_detection_episodes,
     episode_from_recordings,
 )
@@ -153,6 +154,41 @@ def test_cached_event_pair_dataset_loads_real_cache_contract(tmp_path):
     assert episode.metadata["dataset"] == "test_source"
 
 
+def test_cached_pair_audit_filters_invalid_events_before_training(tmp_path):
+    reference = _recording("reference", EventInterval(1.0, 5.0, "pour"))
+    query = _recording("query", EventInterval(4.0, 7.0, "pour"))
+    write_recording(reference, tmp_path / "reference")
+    write_recording(query, tmp_path / "query")
+    (tmp_path / "cache.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "dataset": "test_source", "recording_count": 2}
+        )
+    )
+    (tmp_path / "manifest.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"dataset": "test_source", "directory": "reference"}),
+                json.dumps({"dataset": "test_source", "directory": "query"}),
+            ]
+        )
+        + "\n"
+    )
+    pairs = (
+        CachedEventPair(0, 1, "pour", 0, "wrist_acc", "wrist_acc"),
+    )
+
+    def provider(recording, stream_id):
+        del stream_id
+        return _sequence(invalid=(2,)) if recording.recording_id == "reference" else _sequence()
+
+    audit = audit_cached_event_pairs(
+        tmp_path, pairs, provider, validate_provenance=False
+    )
+    assert not audit.eligible_pairs
+    assert len(audit.rejected_pairs) == 1
+    assert "invalid embedding gap" in audit.rejected_pairs[0].reason
+
+
 def test_reference_cannot_bridge_an_invalid_embedding_gap():
     reference = _recording("reference", EventInterval(1.0, 5.0, "pour"))
     query = _recording("query", EventInterval(4.0, 7.0, "pour"))
@@ -198,6 +234,27 @@ def test_synchronized_views_and_targets_crossing_guards_are_rejected():
             label="pour",
             reference_event_index=0,
             guard_intervals_sec=((5.0, 6.0),),
+        )
+
+
+def test_cropped_views_of_one_source_recording_are_not_independent():
+    event = EventInterval(1.0, 4.0, "pour")
+    reference = _recording("reference-crop", event)
+    query = _recording("query-crop", EventInterval(2.0, 4.0, "pour"))
+    reference = RawRecording(
+        **{**reference.__dict__, "metadata": {"source_recording_id": "root"}}
+    )
+    query = RawRecording(
+        **{**query.__dict__, "metadata": {"source_recording_id": "root"}}
+    )
+    with pytest.raises(ValueError, match="independent recordings"):
+        episode_from_recordings(
+            reference,
+            query,
+            _sequence(),
+            _sequence(),
+            label="pour",
+            reference_event_index=0,
         )
 
 

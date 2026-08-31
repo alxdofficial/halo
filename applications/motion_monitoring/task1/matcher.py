@@ -129,16 +129,11 @@ def _trace_endpoint(
 
 
 def _normalized_endpoint_costs(
-    accumulated: np.ndarray, path_lengths: np.ndarray, *, n_ref: int
+    accumulated: np.ndarray, *, n_ref: int
 ) -> np.ndarray:
-    costs = accumulated[:, n_ref, 1:]
-    lengths = path_lengths[:, n_ref, 1:]
-    return np.divide(
-        costs,
-        lengths,
-        out=np.full_like(costs, np.inf),
-        where=lengths > 0,
-    )
+    """Use the same reference-length scale as the differentiable training path."""
+
+    return accumulated[:, n_ref, 1:] / n_ref
 
 
 def _interval_iou(left: TemporalMatch, right: TemporalMatch) -> float:
@@ -179,9 +174,7 @@ def full_timeline_matches(
     accumulated, previous, path_lengths = _dtw_tables(
         reference, query, warp_penalty=warp_penalty
     )
-    endpoint_costs = _normalized_endpoint_costs(
-        accumulated, path_lengths, n_ref=len(reference)
-    )
+    endpoint_costs = _normalized_endpoint_costs(accumulated, n_ref=len(reference))
     endpoint_states = np.argmin(endpoint_costs, axis=0)
     endpoint_scores = endpoint_costs[
         endpoint_states, np.arange(endpoint_costs.shape[1])
@@ -234,9 +227,7 @@ def best_full_timeline_match(
     accumulated, previous, path_lengths = _dtw_tables(
         reference, query, warp_penalty=warp_penalty
     )
-    endpoint_costs = _normalized_endpoint_costs(
-        accumulated, path_lengths, n_ref=len(reference)
-    )
+    endpoint_costs = _normalized_endpoint_costs(accumulated, n_ref=len(reference))
     flat_index = int(np.argmin(endpoint_costs))
     state, end_offset = np.unravel_index(flat_index, endpoint_costs.shape)
     end_patch = int(end_offset) + 1

@@ -169,13 +169,26 @@ def crop_recording(
             event_start = max(start_sec, event.start_sec)
             event_end = min(end_sec, event.end_sec)
             if event_end > event_start:
+                clipped = event_start > event.start_sec or event_end < event.end_sec
                 events.append(
                     EventInterval(
                         start_sec=event_start,
                         end_sec=event_end,
                         label=event.label,
                         annotation_kind=event.annotation_kind,
-                        metadata=event.metadata,
+                        metadata={
+                            **event.metadata,
+                            "source_event_start_sec": event.metadata.get(
+                                "source_event_start_sec", event.start_sec
+                            ),
+                            "source_event_end_sec": event.metadata.get(
+                                "source_event_end_sec", event.end_sec
+                            ),
+                            "clipped_by_recording_crop": bool(
+                                event.metadata.get("clipped_by_recording_crop", False)
+                                or clipped
+                            ),
+                        },
                     )
                 )
     return RawRecording(
@@ -186,7 +199,12 @@ def crop_recording(
         streams=tuple(streams),
         events=tuple(events),
         split=recording.split,
-        metadata={**recording.metadata, "source_recording_id": recording.recording_id},
+        metadata={
+            **recording.metadata,
+            "source_recording_id": recording.metadata.get(
+                "source_recording_id", recording.recording_id
+            ),
+        },
     )
 
 

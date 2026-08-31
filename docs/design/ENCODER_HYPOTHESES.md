@@ -6,7 +6,7 @@
 
 ## 1. Bottom line
 
-There is no single encoder deficit shared by all four application tasks. Most published wearable HAR
+There is no single encoder deficit shared by all three application tasks. Most published wearable HAR
 encoders are optimized and evaluated for classifying fixed windows. Our tasks instead require:
 
 - accurate event boundaries in a continuous timeline;

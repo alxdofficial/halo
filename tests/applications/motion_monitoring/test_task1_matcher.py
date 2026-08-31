@@ -59,7 +59,8 @@ def test_best_match_uses_open_query_boundaries_and_bounded_warp():
 
     assert (match.start_patch, match.end_patch) == (1, 5)
     assert match.duration_ratio == pytest.approx(4 / 3)
-    assert match.score < 0.02
+    assert match.path_length == 4
+    assert match.score == pytest.approx(0.05 / len(reference))
 
 
 def test_matcher_rejects_malformed_physical_intervals():

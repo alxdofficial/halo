@@ -48,6 +48,23 @@ def test_alignment_masks_impossible_endpoints_padding_and_internal_gaps():
     assert torch.isfinite(output.endpoint_logits).all()
 
 
+def test_loss_guards_break_alignment_paths_instead_of_only_masking_endpoints():
+    reference = _sequence(torch.eye(4))
+    query = _sequence(torch.randn(6, 4))
+    episode = DetectionEpisode(
+        reference,
+        query,
+        torch.empty(0, 2),
+        loss_valid=torch.tensor([True, True, False, True, True, True]),
+    )
+
+    output = DifferentiableSubsequenceMatcher(4)(
+        collate_detection_episodes([episode])
+    )
+
+    assert output.endpoint_valid[0].tolist() == [False, True, False, False, True, True]
+
+
 def test_all_trainable_matcher_parameters_receive_finite_nonzero_gradients():
     dataset = SyntheticDetectionDataset(
         8, feature_dim=8, query_patches=24, reference_patches=4, seed=3
@@ -102,3 +119,20 @@ def test_projected_embeddings_remain_compatible_with_deployment_matcher():
     matches = model.detect(reference, query, intervals, score_threshold=0.01)
 
     assert [(match.start_patch, match.end_patch) for match in matches] == [(4, 7)]
+
+
+def test_deployment_matcher_cannot_cross_invalid_query_gaps():
+    reference = torch.eye(3)
+    query = reference.clone()
+    intervals = np.column_stack([np.arange(3), np.arange(1, 4)])
+    model = DifferentiableSubsequenceMatcher(3)
+
+    matches = model.detect(
+        reference,
+        query,
+        intervals,
+        score_threshold=0.1,
+        query_valid=np.asarray([True, False, True]),
+    )
+
+    assert matches == []

@@ -5,11 +5,18 @@
 > representation contracts, and reporting rules remain in the documents linked from
 > [`docs/README.md`](../README.md).
 
-**Implementation status, 2026-08-30.** Native-time cache episodes, independent reference/query
+**Implementation status, 2026-08-31.** Native-time cache episodes, independent reference/query
 construction, join guards, target-absent episodes, bounded open-begin/open-end soft-DTW, endpoint
 training, temporal suppression, and encoder/head gradient telemetry are mechanically implemented.
 Short real-cache smokes pass. Threshold calibration, immutable task manifests, long training, and
 sealed evaluation remain deliberately outstanding.
+
+Before constructing a training `DataLoader`, run `audit_cached_event_pairs` and persist both its
+eligible pair list and its rejected pair reasons in the task manifest. Events crossing invalid
+patches are excluded rather than clipped, preserving the source boundary as ground truth.
+Deployment hard-DTW uses the same reference-length cost normalization as differentiable training and
+requires an explicitly development-calibrated score threshold; no learned-logit threshold is
+silently converted between the soft and hard decoders.
 
 ## 1. Question and deployment contract
 

@@ -67,11 +67,16 @@ def _fit(args: argparse.Namespace) -> None:
         nonlocal sequence_count
         for dataset in args.datasets:
             for recording in _recordings(dataset, args.limit_per_dataset):
-                identities.append(f"{recording.dataset}:{recording.recording_id}")
                 requested = set(args.stream_id or ())
-                for stream in recording.streams:
-                    if requested and stream.stream_id not in requested:
-                        continue
+                selected_streams = [
+                    stream
+                    for stream in recording.streams
+                    if not requested or stream.stream_id in requested
+                ]
+                if not selected_streams:
+                    continue
+                identities.append(f"{recording.dataset}:{recording.recording_id}")
+                for stream in selected_streams:
                     sequence_count += 1
                     yield extract_physical_evidence(recording, stream, evidence_config)
 
@@ -211,6 +216,7 @@ def _calibrate(args: argparse.Namespace) -> None:
         start_thresholds=args.start_thresholds,
         continue_thresholds=args.continue_thresholds,
         iou_threshold=args.iou_threshold,
+        refinement_config=detector.refinement_config,
     )
     detector.proposal_config = selected
     detector.fit_provenance["threshold_calibration"] = {
@@ -224,6 +230,7 @@ def _calibrate(args: argparse.Namespace) -> None:
         ).hexdigest(),
         "parent_detector_sha256": parent_detector_sha256,
         "iou_threshold": args.iou_threshold,
+        "refinement_config": asdict(detector.refinement_config),
         "exploratory_policy_override": args.allow_exploratory_policy,
         "selected": asdict(selected),
         "grid": [asdict(row) for row in rows],

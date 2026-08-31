@@ -72,6 +72,9 @@ def _candidate_spans(
     valid_indices = valid.nonzero(as_tuple=False).flatten().tolist()
     if not valid_indices:
         return starts, ends, scales
+    # Padded interval rows contain zero-valued tails. ``searchsorted`` requires a
+    # sorted input, so never expose it to storage beyond the last real patch.
+    valid_stop = valid_indices[-1] + 1
 
     for scale_index, duration in enumerate(durations_sec):
         last_start = -float("inf")
@@ -83,13 +86,13 @@ def _candidate_spans(
             ):
                 continue
             target_end = start_time + duration
-            later_ends = intervals[start:, 1]
+            later_ends = intervals[start:valid_stop, 1]
             end_offset = int(
                 torch.searchsorted(later_ends.contiguous(), target_end).item()
             )
             end = start + end_offset + 1
             if (
-                end > len(valid)
+                end > valid_stop
                 or float(intervals[end - 1, 1].item()) + 1e-9 < target_end
             ):
                 continue

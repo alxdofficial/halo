@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from applications.motion_monitoring.data.contracts import (
@@ -101,3 +102,24 @@ def test_task3_event_ids_are_scope_local_and_background_is_not_an_identity() -> 
     assert events.scope_id[:, :2].tolist() == [[0, 0], [1, 1]]
     assert len(set(events.instance_id[events.event_mask].tolist())) == 4
     assert events.exhaustive.tolist() == [True, False]
+
+
+def test_exhaustive_task3_supervision_rejects_crop_clipped_events() -> None:
+    recording = _recording("dataset_a", "first")
+    clipped = EventInterval(
+        recording.events[0].start_sec,
+        recording.events[0].end_sec,
+        "reach",
+        "action",
+        {"clipped_by_recording_crop": True},
+    )
+    recording = RawRecording(
+        **{**recording.__dict__, "events": (clipped,)}
+    )
+    with pytest.raises(ValueError, match="events clipped by a timeline crop"):
+        event_batch_from_recordings(
+            (recording,),
+            (_sequence(recording, length=4),),
+            annotation_kind="action",
+            exhaustive=True,
+        )

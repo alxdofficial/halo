@@ -4,6 +4,9 @@ This directory owns data used by the three application tasks. It is intentionall
 `data/datasets`, which is the HALO representation-training corpus.
 
 - `SOURCE_INVENTORY.json` is the single acquisition and role contract.
+- `splits.py` defines the mandatory subject/linkage grouping validator for task manifests. A
+  manifest is invalid if a canonical subject or conservative unresolved-identity group crosses
+  train, development, and test assignments.
 - `PAYLOAD_CHECKSUMS.json` freezes the accepted file set, byte sizes, and SHA-256 digests.
 - `CORPUS_SUMMARY.json` records measured effective hours, event counts, and known balance caveats.
 - `acquire.py` downloads only the source modalities listed in that contract.

@@ -133,14 +133,6 @@ class DifferentiableSubsequenceMatcher(nn.Module):
     def project(self, embeddings: torch.Tensor) -> torch.Tensor:
         return F.normalize(self.projection(embeddings), dim=-1, eps=1e-8)
 
-    def hard_score_threshold(self, logit_threshold: float = 0.0) -> float:
-        """Map a calibrated logit cutoff onto the hard-DTW score convention."""
-
-        threshold = (
-            self.score_bias.detach().cpu() - logit_threshold
-        ) * self.score_temperature
-        return float(threshold)
-
     @torch.no_grad()
     def detect(
         self,
@@ -148,31 +140,79 @@ class DifferentiableSubsequenceMatcher(nn.Module):
         query: np.ndarray | torch.Tensor,
         query_intervals_sec: np.ndarray,
         *,
-        score_threshold: float | None = None,
+        score_threshold: float,
+        query_valid: np.ndarray | torch.Tensor | None = None,
         nms_iou: float = 0.3,
         max_detections: int | None = None,
     ) -> list[TemporalMatch]:
-        """Project embeddings, then use the unchanged hard-DTW deployment decoder."""
+        """Project embeddings and match each quality-contiguous query run."""
 
         device = self.projection.weight.device
         dtype = self.projection.weight.dtype
         reference_tensor = torch.as_tensor(reference, dtype=dtype, device=device)
         query_tensor = torch.as_tensor(query, dtype=dtype, device=device)
+        if (
+            reference_tensor.ndim != 2
+            or query_tensor.ndim != 2
+            or reference_tensor.shape[1] != query_tensor.shape[1]
+        ):
+            raise ValueError(
+                "reference and query must be [time, feature] with matching features"
+            )
         projected_reference = self.project(reference_tensor).cpu().numpy()
         projected_query = self.project(query_tensor).cpu().numpy()
-        return full_timeline_matches(
-            projected_reference,
-            projected_query,
-            query_intervals_sec,
-            warp_penalty=self.warp_penalty,
-            score_threshold=(
-                self.hard_score_threshold()
-                if score_threshold is None
-                else score_threshold
-            ),
-            nms_iou=nms_iou,
-            max_detections=max_detections,
+        intervals = np.asarray(query_intervals_sec, dtype=np.float64)
+        if intervals.shape != (len(projected_query), 2):
+            raise ValueError("query_intervals_sec must have shape [query_time, 2]")
+        if not np.isfinite(intervals).all() or np.any(
+            intervals[:, 1] <= intervals[:, 0]
+        ):
+            raise ValueError("query intervals must be finite with positive duration")
+        if np.any(np.diff(intervals, axis=0) < 0):
+            raise ValueError("query intervals must be ordered in physical time")
+        if np.any(np.linalg.norm(projected_reference, axis=1) <= 1e-12):
+            raise ValueError("projected reference patches must remain non-zero")
+        valid = (
+            np.ones(len(projected_query), dtype=np.bool_)
+            if query_valid is None
+            else np.asarray(torch.as_tensor(query_valid).detach().cpu(), dtype=np.bool_)
         )
+        if valid.shape != (len(projected_query),):
+            raise ValueError("query_valid must have shape [query_time]")
+        if np.any(np.linalg.norm(projected_query[valid], axis=1) <= 1e-12):
+            raise ValueError("valid projected query patches must remain non-zero")
+        padded = np.pad(valid.astype(np.int8), (1, 1))
+        changes = np.diff(padded)
+        starts = np.flatnonzero(changes == 1)
+        ends = np.flatnonzero(changes == -1)
+        matches: list[TemporalMatch] = []
+        for start, end in zip(starts, ends, strict=True):
+            if end - start < (len(projected_reference) + 1) // 2:
+                continue
+            for match in full_timeline_matches(
+                projected_reference,
+                projected_query[start:end],
+                intervals[start:end],
+                warp_penalty=self.warp_penalty,
+                score_threshold=score_threshold,
+                nms_iou=nms_iou,
+            ):
+                matches.append(
+                    TemporalMatch(
+                        start_patch=match.start_patch + int(start),
+                        end_patch=match.end_patch + int(start),
+                        start_sec=match.start_sec,
+                        end_sec=match.end_sec,
+                        score=match.score,
+                        path_length=match.path_length,
+                        duration_ratio=match.duration_ratio,
+                    )
+                )
+        if max_detections is not None:
+            if max_detections <= 0:
+                raise ValueError("max_detections must be positive when provided")
+            matches = sorted(matches, key=lambda item: item.score)[:max_detections]
+        return sorted(matches, key=lambda item: item.start_sec)
 
     def forward(self, batch: DetectionBatch) -> AlignmentOutput:
         reference = self.project(batch.reference)
@@ -193,7 +233,10 @@ class DifferentiableSubsequenceMatcher(nn.Module):
             chunks: list[torch.Tensor] = []
             valid_chunks: list[torch.Tensor] = []
             cursor = 0
-            for start, end in _valid_runs(batch.query_valid[batch_index]):
+            alignment_valid = (
+                batch.query_valid[batch_index] & batch.loss_valid[batch_index]
+            )
+            for start, end in _valid_runs(alignment_valid):
                 if start > cursor:
                     chunks.append(query.new_full((start - cursor,), -1e4))
                     valid_chunks.append(

@@ -78,6 +78,12 @@ def test_pair_requires_independent_within_subject_same_task_executions() -> None
         pair(execution("r", subject="s1"), execution("c", subject="s2"))
     with pytest.raises(ValueError, match="independent"):
         pair(execution("same"), execution("same"))
+    comparison = execution("c")
+    comparison = BoundedExecution(
+        **{**comparison.__dict__, "dataset": "different-source"}
+    )
+    with pytest.raises(ValueError, match="identity namespace"):
+        pair(execution("r"), comparison)
 
 
 def test_unlabeled_pair_has_no_classification_target_but_can_carry_measurements() -> (
@@ -113,3 +119,14 @@ def test_collate_preserves_large_absolute_clock_precision() -> None:
         batch.reference_intervals_sec[0, :, 1]
         > batch.reference_intervals_sec[0, :, 0]
     )
+
+
+def test_bounded_execution_rejects_internal_missing_patch_gap() -> None:
+    base = execution("gapped", length=4)
+    with pytest.raises(ValueError, match="internal invalid patch gap"):
+        BoundedExecution(
+            **{
+                **base.__dict__,
+                "patch_mask": torch.tensor([True, False, True, True]),
+            }
+        )

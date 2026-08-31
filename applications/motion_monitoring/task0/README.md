@@ -35,7 +35,9 @@ Fit robust feature scaling on declared training/development sources:
 ```
 
 Select a threshold operating point only on a source whose relevant background is exhaustively
-annotated. Annotation level and sensor stream are always explicit:
+annotated. Calibration uses the same PELT boundary-refinement configuration stored in the detector,
+so threshold selection and deployment share one boundary regime. Annotation level and sensor stream
+are always explicit:
 
 ```bash
 /home/alex/code/HALO/legacy_code/.venv/bin/python \
@@ -46,6 +48,11 @@ annotated. Annotation level and sensor stream are always explicit:
   --annotation-kind set \
   --confirm-exhaustive-background
 ```
+
+RecoFit's audited calibration target treats source intervals outside annotated exercise sets as
+background. It therefore calibrates exercise-like coherent-motion proposals, not every possible
+deliberate movement during a gym visit. Reports using this calibration must retain that narrower
+definition.
 
 Write proposals or evaluate one declared annotation level:
 

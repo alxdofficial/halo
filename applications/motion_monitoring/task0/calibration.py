@@ -41,8 +41,9 @@ def calibrate_thresholds(
     start_thresholds: Sequence[float],
     continue_thresholds: Sequence[float],
     iou_threshold: float = 0.5,
+    refinement_config: RefinementConfig | None = None,
 ) -> tuple[ProposalConfig, tuple[CalibrationRow, ...]]:
-    """Choose an event-F1 operating point from exhaustively annotated development data."""
+    """Choose an event-F1 operating point under the deployed boundary regime."""
 
     if not cases:
         raise ValueError("threshold calibration requires at least one development case")
@@ -70,7 +71,7 @@ def calibrate_thresholds(
         detector = Task0Detector(
             scaler,
             proposal_config=config,
-            refinement_config=RefinementConfig(enabled=False),
+            refinement_config=refinement_config or RefinementConfig(enabled=False),
         )
         matched = 0
         proposal_count = 0

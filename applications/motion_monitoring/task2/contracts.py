@@ -61,6 +61,11 @@ class BoundedExecution:
             raise ValueError("patch mask must be boolean [patch]")
         if not bool(mask.any()):
             raise ValueError("an execution must contain at least one valid patch")
+        valid_indices = torch.nonzero(mask, as_tuple=False).flatten()
+        if len(valid_indices) > 1 and bool(
+            (valid_indices[1:] != valid_indices[:-1] + 1).any()
+        ):
+            raise ValueError("a bounded execution cannot cross an internal invalid patch gap")
         if not torch.isfinite(embeddings[mask]).all():
             raise ValueError("valid embeddings must be finite")
         valid_intervals = intervals[mask]
@@ -125,6 +130,8 @@ class ExecutionPair:
             raise ValueError(f"invalid pair kind: {self.pair_kind}")
         if self.reference.task_id != self.comparison.task_id:
             raise ValueError("paired executions must represent the same declared task")
+        if self.reference.dataset != self.comparison.dataset:
+            raise ValueError("paired executions must come from the same identity namespace")
         if self.reference.subject_id != self.comparison.subject_id:
             raise ValueError("training pairs must be within subject")
         if self.reference.execution_id == self.comparison.execution_id:

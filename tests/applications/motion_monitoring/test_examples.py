@@ -38,6 +38,8 @@ def test_crop_keeps_source_clock_and_clips_events() -> None:
     cropped = crop_recording(_example().recording, 103.0, 105.0)
     assert cropped.streams[0].timestamps_sec[[0, -1]].tolist() == pytest.approx([103.0, 104.9])
     assert [(event.start_sec, event.end_sec) for event in cropped.events] == [(104.0, 105.0)]
+    assert cropped.events[0].metadata["clipped_by_recording_crop"]
+    assert cropped.events[0].metadata["source_event_end_sec"] == 106.0
 
 
 def test_event_and_query_crops_have_distinct_contracts() -> None:
@@ -48,3 +50,11 @@ def test_event_and_query_crops_have_distinct_contracts() -> None:
     assert event.streams[0].timestamps_sec[-1] == pytest.approx(105.9)
     assert query.streams[0].timestamps_sec[0] == pytest.approx(102.0)
     assert query.streams[0].timestamps_sec[-1] == pytest.approx(107.9)
+    assert event.metadata["source_recording_id"] == "recording"
+    assert query.metadata["source_recording_id"] == "recording"
+
+
+def test_nested_crops_preserve_the_root_recording_identity() -> None:
+    first = crop_recording(_example().recording, 101.0, 109.0, recording_suffix="first")
+    second = crop_recording(first, 102.0, 108.0, recording_suffix="second")
+    assert second.metadata["source_recording_id"] == "recording"

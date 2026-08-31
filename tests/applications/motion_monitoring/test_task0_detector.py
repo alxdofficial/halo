@@ -94,6 +94,30 @@ def test_low_evidence_gap_is_not_merged_despite_window_overlap() -> None:
     assert proposals[0].end_sec <= proposals[1].start_sec
 
 
+def test_short_fragments_are_merged_before_minimum_duration_filtering() -> None:
+    sequence = _sequence()
+    features = np.zeros_like(sequence.features)
+    features[2, 0] = 4.0
+    features[3, 0] = 0.8
+    features[4, 0] = 4.0
+    detector = Task0Detector(
+        _detector().scaler,
+        proposal_config=ProposalConfig(
+            start_threshold=3.0,
+            continue_threshold=1.0,
+            minimum_duration_seconds=0.25,
+            merge_gap_seconds=0.25,
+            merge_floor=0.75,
+        ),
+        refinement_config=RefinementConfig(enabled=False),
+    )
+
+    proposals = detector.detect_evidence(replace(sequence, features=features))
+
+    assert len(proposals) == 1
+    assert proposals[0].end_sec - proposals[0].start_sec >= 0.25
+
+
 def test_multi_stream_recording_requires_explicit_selection() -> None:
     from tests.applications.motion_monitoring.test_task0_evidence import _recording
 

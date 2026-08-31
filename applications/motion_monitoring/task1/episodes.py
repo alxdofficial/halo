@@ -299,12 +299,22 @@ def episode_from_recordings(
         raise ValueError("episode label must be non-empty")
     if reference_event_index < 0:
         raise IndexError("reference_event_index must be non-negative")
+    reference_source_id = str(
+        reference_recording.metadata.get(
+            "source_recording_id", reference_recording.recording_id
+        )
+    )
+    query_source_id = str(
+        query_recording.metadata.get("source_recording_id", query_recording.recording_id)
+    )
     if (
         reference_recording.dataset == query_recording.dataset
-        and reference_recording.recording_id == query_recording.recording_id
+        and reference_source_id == query_source_id
         and not allow_same_recording
     ):
-        raise ValueError("reference and query must be independent recordings")
+        raise ValueError(
+            "reference and query must be independent recordings from different sources"
+        )
     try:
         reference_event = reference_recording.events[reference_event_index]
     except IndexError as error:
@@ -313,6 +323,8 @@ def episode_from_recordings(
         raise ValueError(
             "the selected reference event does not match the requested label"
         )
+    if bool(reference_event.metadata.get("clipped_by_recording_crop", False)):
+        raise ValueError("the reference event is incomplete at a recording crop boundary")
     for query_event in query_recording.events:
         same_synchronized_event = (
             reference_recording.dataset == query_recording.dataset
@@ -336,6 +348,7 @@ def episode_from_recordings(
         (event.start_sec, event.end_sec)
         for event in query_recording.events
         if event.label == label
+        and not bool(event.metadata.get("clipped_by_recording_crop", False))
     ]
     query_start = float(query_sequence.intervals_sec[0, 0])
     query_end = float(query_sequence.intervals_sec[-1, 1])
@@ -368,6 +381,8 @@ def episode_from_recordings(
             "label": label,
             "reference_recording_id": reference_recording.recording_id,
             "query_recording_id": query_recording.recording_id,
+            "reference_source_recording_id": reference_source_id,
+            "query_source_recording_id": query_source_id,
             "reference_subject_id": reference_recording.subject_id,
             "query_subject_id": query_recording.subject_id,
         },
@@ -391,6 +406,62 @@ class CachedEventPair:
             raise ValueError("reference event index must be non-negative")
         if not self.label or not self.reference_stream_id or not self.query_stream_id:
             raise ValueError("label and stream identities must be non-empty")
+
+
+@dataclass(frozen=True)
+class RejectedCachedEventPair:
+    pair_index: int
+    pair: CachedEventPair
+    reason: str
+
+
+@dataclass(frozen=True)
+class CachedPairAudit:
+    eligible_pairs: tuple[CachedEventPair, ...]
+    rejected_pairs: tuple[RejectedCachedEventPair, ...]
+
+
+def audit_cached_event_pairs(
+    cache_root: Path,
+    pairs: Sequence[CachedEventPair],
+    sequence_provider: Callable[[RawRecording, str], EmbeddingSequence],
+    *,
+    mmap: bool = True,
+    validate_provenance: bool = True,
+) -> CachedPairAudit:
+    """Preflight a pair manifest and retain auditable data-quality rejections.
+
+    Encoder/provider failures remain hard errors. Only an episode that violates the
+    explicit independence, event-boundary, validity, or guard contracts is rejected.
+    """
+
+    cache = CachedRecordingDataset(
+        cache_root, mmap=mmap, validate_provenance=validate_provenance
+    )
+    eligible: list[CachedEventPair] = []
+    rejected: list[RejectedCachedEventPair] = []
+    for pair_index, pair in enumerate(pairs):
+        reference_recording = cache[pair.reference_index]
+        query_recording = cache[pair.query_index]
+        reference_sequence = sequence_provider(
+            reference_recording, pair.reference_stream_id
+        )
+        query_sequence = sequence_provider(query_recording, pair.query_stream_id)
+        try:
+            episode_from_recordings(
+                reference_recording,
+                query_recording,
+                reference_sequence,
+                query_sequence,
+                label=pair.label,
+                reference_event_index=pair.reference_event_index,
+                guard_intervals_sec=pair.guard_intervals_sec,
+            )
+        except ValueError as error:
+            rejected.append(RejectedCachedEventPair(pair_index, pair, str(error)))
+        else:
+            eligible.append(pair)
+    return CachedPairAudit(tuple(eligible), tuple(rejected))
 
 
 class CachedEventPairDataset(Dataset[DetectionEpisode]):
