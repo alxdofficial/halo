@@ -4,16 +4,26 @@
 > learned component is added.
 
 **Current progress.** Seven application sources have immutable payload checksums, verified native-time
-adapters, and lossless map-style caches. The temporal annotation inventory measures their real event
-structure and records the source capabilities of reused datasets. The runtime `MotionSequence`
-contract now exports native-clock patch intervals, validity, normalized embeddings, physical
-summaries, and provenance through both HALO and a cheap physical-feature control. All three task
-pipelines have short real-cache optimizer smokes with finite head and encoder gradients. These are
-mechanical checks, not trained models or results. The seven-source `COHORT_V1` manifest and shared
-frozen-representation cache are implemented. The manifest contains 864 nonduplicated
-training/development recordings and 277 sealed-test recordings and rejects the released WEAR and OCA
-partitions as split authorities. HARMES/MoniPar application adapters, complete representation
-caches, calibrated operating points, long training, and complete evaluations remain open.
+adapters, and lossless map-style caches. Two Task-2 longitudinal state sources are additionally exposed
+through stream-only adapters: MoniPar reuses its existing canonical sessions, ALAMEDA reads selected
+campaigns from its 4.8 GB archive, and COPS reads nested hourly files without expanding roughly
+297 GiB of CSV. The runtime `MotionSequence` contract exports native-clock intervals, validity,
+normalized embeddings, physical summaries, and provenance. Author-released HARNet, UniMTS, and
+NormWear checkpoints now produce that same contract; optional ImageBind is also wired. All four
+encoders pass one-step, real-data Task-1/2/3 head and gradient smokes, and all four encode real samples
+from each Task-2 source. These are mechanical checks, not trained models or results. The seven-source
+`COHORT_V1` manifest contains 864 nonduplicated training/development recordings and 277 sealed-test
+recordings. Complete representation caches, task-specific fit manifests, calibrated operating
+points, long training, and complete evaluations remain open.
+
+The paired frozen-representation utility gate is now the required next experiment. Its direct arms
+are constrained cosine DTW for Task 1, phase-aligned cosine with personal robust statistics for Task
+2, and raw candidate cosine affinity for Task 3. Its learned arms use the existing task-specific
+heads on exactly the same tensors. A three-encoder GPU smoke on 2026-08-31 verified both paths and
+finite head gradients. It is not a quality result: it uses one OpenPack diagnostic fixture per task,
+five fitting steps, and a synthetic known change for Task 2. The full gate still requires immutable
+task manifests and subject-disjoint development evaluation as specified in
+[`EVALUATION_PROTOCOL.md`](EVALUATION_PROTOCOL.md).
 
 Reproduce the cross-task mechanical check with:
 
@@ -25,6 +35,15 @@ Reproduce the cross-task mechanical check with:
 The same command accepts `--encoder halo --checkpoint <phase-a.pt>` and optional
 `--train-encoder` for a one-step GPU gradient-path check. Do not treat its deliberately tiny,
 development-source metrics as application performance.
+
+Reproduce the paired released-encoder utility smoke with:
+
+```bash
+/home/alex/code/HALO/legacy_code/.venv/bin/python \
+  -m applications.motion_monitoring.baseline_smoke \
+  --baselines harnet unimts normwear --tasks task1 task2 task3 \
+  --steps 5 --device cuda --output /tmp/frozen_utility_gate.json
+```
 
 ## Stage 0: protocol and annotation audit
 
@@ -45,20 +64,22 @@ contract, and every result regenerates from one manifest fingerprint.
 
 1. **Implemented and smoke-tested:** export timestamped frozen HALO patch embeddings without pooling
    away movement phase.
-2. Add faithful temporal adapters for the primary author-released encoders.
+2. **Implemented and smoke-tested:** faithful temporal adapters for the primary author-released
+   HARNet, UniMTS, and NormWear encoders, plus optional ImageBind.
 3. Export raw IMU and parameter-free physical measurements beside every latent sequence.
 4. Measure temporal resolution, throughput, memory, and device coverage.
 
 **Exit condition:** every selected encoder produces the same cached `MotionSequence` schema in
-physical time. HALO passes; released baseline cache adapters remain open.
+physical time. HALO and the released baseline adapters pass short real-source probes; full cohort
+caches and throughput records remain open.
 
 ## Stage 2: Task-1 full-timeline floors
 
 1. **Implemented:** open-begin/open-end cosine subsequence DTW with bounded local warp slope.
 2. **Implemented:** trace every feasible endpoint into a physical-time candidate interval.
 3. **Implemented:** score thresholding and temporal non-maximum suppression for multiple detections.
-4. **Partially implemented:** physical-feature and HALO timelines use the same matcher; raw-signal
-   and released-encoder adapters remain open.
+4. **Partially implemented:** physical-feature, HALO, and released-encoder timelines use the same
+   matcher; the raw-signal DTW control and complete official evaluation runner remain open.
 5. Fit thresholds on target-present and target-absent development recordings.
 6. **Implemented mechanically:** natural cache episodes plus deterministic independent-view,
    retiming, distractor, target-absent, validity, and join-guard test episodes. Pair preflight records

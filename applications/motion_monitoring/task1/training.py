@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 import torch
@@ -99,17 +100,24 @@ def event_detection_metrics(
     *,
     query_duration_sec: float,
     iou_threshold: float = 0.5,
+    score_threshold: float = float("inf"),
 ) -> dict[str, float]:
-    """Score localized deployment matches against source-provided event intervals."""
+    """Score ranked localized matches and one calibrated operating point."""
 
     targets = torch.as_tensor(targets_sec, dtype=torch.float64)
     if targets.ndim != 2 or targets.shape[1] != 2:
         raise ValueError("targets_sec must have shape [events, 2]")
     if query_duration_sec <= 0 or not 0 < iou_threshold <= 1:
         raise ValueError("query duration and IoU threshold must be positive")
+    if not math.isfinite(score_threshold) and score_threshold != float("inf"):
+        raise ValueError("score threshold must be finite or positive infinity")
+    ranked_matches = sorted(matches, key=lambda item: item.score)
+    operating_matches = [
+        match for match in ranked_matches if match.score <= score_threshold
+    ]
     unmatched = set(range(len(targets)))
     paired: list[tuple[TemporalMatch, int]] = []
-    for match in sorted(matches, key=lambda item: item.score):
+    for match in operating_matches:
         best_target = None
         best_iou = 0.0
         for target_index in unmatched:
@@ -128,11 +136,37 @@ def event_detection_metrics(
             unmatched.remove(best_target)
 
     true_positive = len(paired)
-    false_positive = len(matches) - true_positive
+    false_positive = len(operating_matches) - true_positive
     false_negative = len(targets) - true_positive
     precision = true_positive / max(true_positive + false_positive, 1)
     recall = true_positive / max(true_positive + false_negative, 1)
     f1 = 2 * precision * recall / max(precision + recall, 1e-12)
+    # Recompute AP from the ranked list. Callers must pass the unthresholded,
+    # post-NMS candidate list; operating-point metrics may then use a subset.
+    unmatched_for_ap = set(range(len(targets)))
+    hit_count = 0
+    precision_at_hits = []
+    for rank, match in enumerate(ranked_matches, 1):
+        best_target = None
+        best_iou = 0.0
+        for target_index in unmatched_for_ap:
+            target_start, target_end = targets[target_index].tolist()
+            intersection = max(
+                0.0,
+                min(match.end_sec, target_end) - max(match.start_sec, target_start),
+            )
+            union = max(match.end_sec, target_end) - min(match.start_sec, target_start)
+            iou = intersection / union if union > 0 else 0.0
+            if iou > best_iou:
+                best_iou = iou
+                best_target = target_index
+        if best_target is not None and best_iou >= iou_threshold:
+            unmatched_for_ap.remove(best_target)
+            hit_count += 1
+            precision_at_hits.append(hit_count / rank)
+    event_average_precision = (
+        sum(precision_at_hits) / len(targets) if len(targets) else 0.0
+    )
     onset_errors = [
         abs(match.start_sec - float(targets[index, 0])) for match, index in paired
     ]
@@ -142,9 +176,21 @@ def event_detection_metrics(
     return {
         "event_precision": precision,
         "event_recall": recall,
+        "event_recall_at_operating_point": recall,
         "event_f1": f1,
+        "event_average_precision": event_average_precision,
+        "matched_event_count": float(true_positive),
+        "true_positive_count": float(true_positive),
+        "false_positive_count": float(false_positive),
+        "false_negative_count": float(false_negative),
+        "query_hours": query_duration_sec / 3600.0,
+        "onset_absolute_error_sum_sec": float(sum(onset_errors)),
+        "offset_absolute_error_sum_sec": float(sum(offset_errors)),
         "false_alarms_per_hour": false_positive / (query_duration_sec / 3600.0),
-        "count_error": float(abs(len(matches) - len(targets))),
+        "count_error": float(abs(len(operating_matches) - len(targets))),
+        "mean_absolute_count_error": float(
+            abs(len(operating_matches) - len(targets))
+        ),
         "mean_onset_error_sec": (
             sum(onset_errors) / len(onset_errors) if onset_errors else 0.0
         ),

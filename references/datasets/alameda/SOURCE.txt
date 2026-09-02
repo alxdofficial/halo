@@ -1,0 +1,8 @@
+Dataset: https://zenodo.org/records/15769959
+Dataset API: https://zenodo.org/api/records/15769959
+Protocol paper: https://doi.org/10.3390/healthcare11192656
+Project: https://alamedaproject.eu/
+
+Retrieved 2026-08-31. The dataset is CC BY 4.0 and contains one 4,786,073,026-byte ZIP archive.
+The local download matched MD5 8ce9f5286575898a8efae684932888e1. File-level caveats and the
+current application gate are recorded in docs/tasks/TASK2_CHANGE_QUANTIFICATION.md.

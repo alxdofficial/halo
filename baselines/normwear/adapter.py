@@ -97,11 +97,28 @@ def _signal_encode_np(model, x_np, query, device):
     uses its ``device`` arg to move the spectrogram + backbone onto the GPU. We pass numpy
     x + device=cuda and replicate the exact query-broadcast + aggregator call.
     """
-    sensor_out = model.sensor_model.get_embedding(x_np, sampling_rate=TARGET_HZ, device=device)  # (bn,nvar,P,768)
-    q = query.expand(sensor_out.shape[0], query.shape[1]) if query.shape[0] == 1 else query
-    bn, nvar, P, E = sensor_out.shape
-    q = q.unsqueeze(1).expand(bn, nvar * P, q.shape[1])
-    return model.aggregator(sensor_out, q, device=device, rel_only=model.rel_only, use_query=model.use_query)  # (bn,2048)
+    precision = os.environ.get("NORMWEAR_PRECISION", "fp16").lower()
+    if precision not in {"fp16", "fp32"}:
+        raise ValueError("NORMWEAR_PRECISION must be fp16 or fp32")
+    use_amp = torch.device(device).type == "cuda" and precision == "fp16"
+    with torch.autocast(
+        device_type=torch.device(device).type,
+        dtype=torch.float16,
+        enabled=use_amp,
+    ):
+        sensor_out = model.sensor_model.get_embedding(
+            x_np, sampling_rate=TARGET_HZ, device=device
+        )  # (bn,nvar,P,768)
+        q = query.expand(sensor_out.shape[0], query.shape[1]) if query.shape[0] == 1 else query
+        bn, nvar, P, E = sensor_out.shape
+        q = q.unsqueeze(1).expand(bn, nvar * P, q.shape[1])
+        return model.aggregator(
+            sensor_out,
+            q,
+            device=device,
+            rel_only=model.rel_only,
+            use_query=model.use_query,
+        )  # (bn,2048)
 
 
 @torch.no_grad()
@@ -163,6 +180,7 @@ class NormWearAdapter(BaselineAdapter):
             "input_samples": WINDOW_65,
             "real_channels_only": True,
             "native_metric": "manhattan_l1",
+            "inference_precision": os.environ.get("NORMWEAR_PRECISION", "fp16").lower(),
         }
 
     def setup(self, device):

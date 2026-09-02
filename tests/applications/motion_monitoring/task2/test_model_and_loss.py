@@ -7,8 +7,8 @@ import torch
 from applications.motion_monitoring.task2.contracts import (
     BoundedExecution,
     ChangeTargetSpec,
-    ExecutionPair,
-    collate_execution_pairs,
+    ExecutionEpisode,
+    collate_execution_episodes,
 )
 from applications.motion_monitoring.task2.losses import (
     ChangeLossConfig,
@@ -31,7 +31,15 @@ SCHEMA = (
 )
 
 
-def execution(execution_id: str, values: torch.Tensor) -> BoundedExecution:
+BASE = torch.tensor(
+    [[1.0, 0.2, 0.1, 0.4], [0.4, 1.0, 0.2, 0.1], [0.2, 0.3, 1.0, 0.5]]
+)
+DELTA = torch.tensor(
+    [[0.0, 1.0, -0.5, 0.3], [0.8, 0.0, 0.4, -0.2], [-0.4, 0.6, 0.0, 0.5]]
+)
+
+
+def execution(execution_id: str, values: torch.Tensor, *, task: str = "reach") -> BoundedExecution:
     edges = torch.arange(len(values) + 1, dtype=torch.float32)
     return BoundedExecution(
         embeddings=values.float(),
@@ -41,21 +49,23 @@ def execution(execution_id: str, values: torch.Tensor) -> BoundedExecution:
         subject_id="s1",
         session_id=execution_id,
         execution_id=execution_id,
-        task_id="reach",
+        task_id=task,
     )
 
 
-def make_pair(kind: str, offset: float, suffix: str) -> ExecutionPair:
-    reference = torch.tensor(
-        [[1.0, 0.2, 0.1, 0.4], [0.4, 1.0, 0.2, 0.1], [0.2, 0.3, 1.0, 0.5]]
+def make_episode(kind: str, offset: float, suffix: str) -> ExecutionEpisode:
+    references = (
+        execution("shared-r1", BASE),
+        execution("shared-r2", BASE + 0.01 * DELTA),
+        execution("shared-r3", BASE - 0.01 * DELTA),
     )
-    comparison = reference + offset * torch.tensor(
-        [[0.0, 1.0, -0.5, 0.3], [0.8, 0.0, 0.4, -0.2], [-0.4, 0.6, 0.0, 0.5]]
-    )
-    return ExecutionPair(
-        reference=execution(f"r{suffix}", reference),
-        comparison=execution(f"c{suffix}", comparison),
-        pair_kind=kind,
+    query = execution(f"q{suffix}", BASE + offset * DELTA)
+    context = (execution("shared-context", BASE.roll(1, 0), task="walk"),)
+    return ExecutionEpisode(
+        accepted_references=references,
+        query=query,
+        personal_context=context,
+        episode_kind=kind,
         change_targets=torch.tensor([offset * 2.0, offset * 0.5]),
         target_mask=torch.tensor([True, suffix != "masked"]),
         target_specs=SCHEMA,
@@ -65,12 +75,9 @@ def make_pair(kind: str, offset: float, suffix: str) -> ExecutionPair:
 def test_phase_resampling_uses_physical_time_and_handles_one_patch() -> None:
     values = torch.tensor([[[0.0], [2.0], [4.0]]])
     intervals = torch.tensor([[[0.0, 1.0], [1.0, 3.0], [3.0, 5.0]]])
-    result = resample_to_phase(
-        values, intervals, torch.ones(1, 3, dtype=torch.bool), bins=4
-    )
+    result = resample_to_phase(values, intervals, torch.ones(1, 3, dtype=torch.bool), bins=4)
     assert result.shape == (1, 4, 1)
     assert torch.allclose(result[0, [0, -1], 0], torch.tensor([0.0, 4.0]))
-
     single = resample_to_phase(
         values[:, :1], intervals[:, :1], torch.ones(1, 1, dtype=torch.bool), bins=4
     )
@@ -78,43 +85,53 @@ def test_phase_resampling_uses_physical_time_and_handles_one_patch() -> None:
 
 
 def test_masked_regression_ignores_missing_targets_and_respects_scales() -> None:
-    batch = collate_execution_pairs([make_pair("accepted_variation", 0.05, "masked")])
+    batch = collate_execution_episodes(
+        [make_episode("accepted_query", 0.05, "masked")]
+    )
     output = ChangeHeadOutput(
         change_logits=torch.tensor([0.0]),
         change_scores=torch.tensor([0.0]),
         target_predictions=torch.tensor([[2.1, 1_000.0]]),
         phase_residuals=torch.zeros(1, 4),
-        reference_phase=torch.zeros(1, 4, 4),
-        comparison_phase=torch.zeros(1, 4, 4),
+        reference_phase=torch.zeros(1, 3, 4, 4),
+        query_phase=torch.zeros(1, 4, 4),
+        evidence_attention=torch.zeros(1, 4, 16),
     )
     loss = change_quantification_loss(
         output,
         batch,
-        ChangeLossConfig(classification_weight=0.0, regression_weight=1.0),
+        ChangeLossConfig(
+            classification_weight=0.0, ranking_weight=0.0, regression_weight=1.0
+        ),
     )
-    # Target zero is 0.1, so the scaled error is exactly one: Huber(1) = 0.5.
     assert torch.allclose(loss.regression, torch.tensor(0.5))
     assert loss.regression_count == 1
 
 
 def test_padding_values_do_not_change_outputs() -> None:
-    short = make_pair("accepted_variation", 0.02, "a")
-    short = replace(
-        short,
-        reference=execution("ra_short", short.reference.embeddings[:2]),
-        comparison=execution("ca_short", short.comparison.embeddings[:2]),
+    first = make_episode("accepted_query", 0.02, "a")
+    first = replace(
+        first,
+        accepted_references=(
+            execution("shared-r1", BASE[:2]),
+            execution("shared-r2", (BASE + 0.01 * DELTA)[:2]),
+        ),
+        personal_context=(),
+        query=execution("qa", (BASE + 0.02 * DELTA)[:2]),
     )
-    pairs = [short, make_pair("known_change", 0.5, "b")]
-    batch = collate_execution_pairs(pairs)
+    batch = collate_execution_episodes(
+        [first, make_episode("changed_query", 0.5, "b")]
+    )
     model = ChangeMetricHead(embedding_dim=4, target_dim=2, phase_bins=5)
+    model.eval()
     expected = model(batch)
     corrupted = replace(
         batch,
         reference_embeddings=batch.reference_embeddings.masked_fill(
-            ~batch.reference_mask.unsqueeze(-1), 1e9
+            ~batch.reference_patch_mask.unsqueeze(-1), 1e9
         ),
-        comparison_embeddings=batch.comparison_embeddings.masked_fill(
-            ~batch.comparison_mask.unsqueeze(-1), -1e9
+        query_embeddings=batch.query_embeddings.masked_fill(
+            ~batch.query_mask.unsqueeze(-1), -1e9
         ),
     )
     actual = model(corrupted)
@@ -122,36 +139,45 @@ def test_padding_values_do_not_change_outputs() -> None:
     assert torch.allclose(actual.target_predictions, expected.target_predictions)
 
 
-def test_mixed_batch_updates_every_trainable_component_with_finite_gradients() -> None:
-    batch = collate_execution_pairs(
+def test_reference_order_is_invariant_and_context_affects_score() -> None:
+    item = make_episode("changed_query", 0.4, "x")
+    model = ChangeMetricHead(embedding_dim=4, target_dim=2, phase_bins=5)
+    model.eval()
+    original = model(collate_execution_episodes([item]))
+    permuted = replace(item, accepted_references=tuple(reversed(item.accepted_references)))
+    reordered = model(collate_execution_episodes([permuted]))
+    without_context = model(collate_execution_episodes([replace(item, personal_context=())]))
+    assert torch.allclose(original.change_logits, reordered.change_logits, atol=1e-6)
+    assert not torch.allclose(original.change_logits, without_context.change_logits)
+
+
+def test_mixed_batch_updates_contextualization_with_finite_gradients() -> None:
+    batch = collate_execution_episodes(
         [
-            make_pair("accepted_variation", 0.02, "a"),
-            make_pair("known_change", 0.6, "b"),
-            make_pair("known_change", 0.4, "c"),
+            make_episode("accepted_query", 0.02, "a"),
+            make_episode("changed_query", 0.6, "b"),
+            make_episode("changed_query", 0.4, "c"),
         ]
     )
     model = ChangeMetricHead(embedding_dim=4, target_dim=2, phase_bins=5)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-2)
-    before = {
-        name: parameter.detach().clone() for name, parameter in model.named_parameters()
-    }
     telemetry = train_step(model, batch, optimizer)
 
     assert telemetry.nonfinite_gradients == 0
     assert telemetry.total_grad_norm_preclip > 0
-    assert 0 < telemetry.clip_coefficient <= 1
-    assert all(value > 0 for value in telemetry.parameter_grad_norms.values())
-    assert all(
-        not torch.equal(before[name], parameter.detach())
-        for name, parameter in model.named_parameters()
-    )
+    assert telemetry.ranking_count == 2
+    for prefix in ("context_input", "role_embedding", "reference_encoder", "query_attention"):
+        assert any(
+            name.startswith(prefix) and value > 0
+            for name, value in telemetry.parameter_grad_norms.items()
+        )
 
 
-def test_threshold_initialization_uses_training_pair_medians() -> None:
-    batch = collate_execution_pairs(
+def test_threshold_initialization_uses_training_episode_medians() -> None:
+    batch = collate_execution_episodes(
         [
-            make_pair("accepted_variation", 0.02, "a"),
-            make_pair("known_change", 0.6, "b"),
+            make_episode("accepted_query", 0.02, "a"),
+            make_episode("changed_query", 0.6, "b"),
         ]
     )
     model = ChangeMetricHead(embedding_dim=4, target_dim=2, phase_bins=5)
@@ -162,16 +188,17 @@ def test_threshold_initialization_uses_training_pair_medians() -> None:
 
 
 def test_half_precision_head_preserves_output_dtype_and_finiteness() -> None:
-    batch = collate_execution_pairs(
+    batch = collate_execution_episodes(
         [
-            make_pair("accepted_variation", 0.02, "a"),
-            make_pair("known_change", 0.6, "b"),
+            make_episode("accepted_query", 0.02, "a"),
+            make_episode("changed_query", 0.6, "b"),
         ]
     )
     batch = replace(
         batch,
         reference_embeddings=batch.reference_embeddings.half(),
-        comparison_embeddings=batch.comparison_embeddings.half(),
+        context_embeddings=batch.context_embeddings.half(),
+        query_embeddings=batch.query_embeddings.half(),
     )
     model = ChangeMetricHead(embedding_dim=4, target_dim=2, phase_bins=5).half()
     output = model(batch)

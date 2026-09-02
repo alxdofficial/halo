@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
@@ -46,6 +46,11 @@ class CohortManifest:
     cache_fingerprints: Mapping[str, str]
     entries: tuple[CohortEntry, ...]
     fingerprint: str
+    # Declared per-dataset role. Empty for the original two-role cohorts (a
+    # training dataset is split train/development, an evaluation dataset is all
+    # test). ``split_evaluation`` is the only role allowed to hold both
+    # development and test recordings, and only across disjoint leakage groups.
+    roles: Mapping[str, str] = field(default_factory=dict)
 
     def entries_for(
         self, *, dataset: str | None = None, split: SplitName | None = None
@@ -138,12 +143,25 @@ def build_cohort_manifest(
     caches: Mapping[str, CachedRecordingDataset],
     *,
     name: str,
-    training_datasets: Sequence[str],
-    evaluation_datasets: Sequence[str],
+    training_datasets: Sequence[str] = (),
+    evaluation_datasets: Sequence[str] = (),
     seed: int = 20260831,
     development_fraction: float = 0.2,
+    train_only_datasets: Sequence[str] = (),
+    development_only_datasets: Sequence[str] = (),
+    split_evaluation_datasets: Sequence[str] = (),
+    evaluation_development_fraction: float | None = None,
 ) -> CohortManifest:
-    """Create one deterministic train/development/test recording manifest."""
+    """Create one deterministic train/development/test recording manifest.
+
+    Roles: ``training`` datasets are split train/development by leakage group;
+    ``evaluation`` datasets are entirely test; ``train_only`` datasets are
+    entirely train (for example a synthetic corpus that must never tune a
+    threshold); ``development_only`` datasets are entirely development;
+    ``split_evaluation`` datasets are partitioned development/test by leakage
+    group using ``evaluation_development_fraction`` so a natural source can
+    calibrate on a few subjects and test on the rest without any subject overlap.
+    """
 
     if not name.strip():
         raise ValueError("manifest name must be non-empty")
@@ -151,18 +169,39 @@ def build_cohort_manifest(
         raise ValueError("development_fraction must be in (0, 1)")
     training = tuple(training_datasets)
     evaluation = tuple(evaluation_datasets)
-    if not training or not evaluation:
-        raise ValueError("training and evaluation dataset lists must be non-empty")
-    if len(set(training)) != len(training) or len(set(evaluation)) != len(evaluation):
-        raise ValueError("dataset roles must not contain duplicates")
-    overlap = set(training) & set(evaluation)
-    if overlap:
-        raise ValueError(f"datasets cannot have both development and test roles: {overlap}")
-    expected = set(training) | set(evaluation)
+    train_only = tuple(train_only_datasets)
+    development_only = tuple(development_only_datasets)
+    split_evaluation = tuple(split_evaluation_datasets)
+    roles: dict[str, str] = {}
+    for role, names in (
+        ("training", training),
+        ("evaluation", evaluation),
+        ("train_only", train_only),
+        ("development_only", development_only),
+        ("split_evaluation", split_evaluation),
+    ):
+        if len(set(names)) != len(names):
+            raise ValueError("dataset roles must not contain duplicates")
+        for dataset in names:
+            if dataset in roles:
+                raise ValueError(f"dataset {dataset!r} declared with two roles")
+            roles[dataset] = role
+    fitting = set(training) | set(train_only) | set(development_only) | set(split_evaluation)
+    testing = set(evaluation) | set(split_evaluation)
+    if not fitting or not testing:
+        raise ValueError("cohort needs at least one fitting and one test dataset")
+    if split_evaluation and evaluation_development_fraction is None:
+        raise ValueError("split_evaluation datasets need evaluation_development_fraction")
+    if evaluation_development_fraction is not None and not 0 < evaluation_development_fraction < 1:
+        raise ValueError("evaluation_development_fraction must be in (0, 1)")
+    expected = set(roles)
     if set(caches) != expected:
         raise ValueError(
             f"cache datasets must exactly match declared roles: expected {sorted(expected)}"
         )
+    # The original two-role cohorts carry no role table so their fingerprints
+    # are unchanged; extended cohorts persist the table inside the fingerprint.
+    extended = bool(train_only or development_only or split_evaluation)
 
     entries: list[CohortEntry] = []
     fingerprints: dict[str, str] = {}
@@ -180,25 +219,35 @@ def build_cohort_manifest(
         groups = sorted(group_cells)
         if not groups:
             raise ValueError(f"dataset {dataset!r} has no eligible recordings")
-        development = (
-            _development_groups(
+        role = roles[dataset]
+        if role == "training":
+            development = _development_groups(
+                groups, group_cells, dataset=dataset, seed=seed, fraction=development_fraction
+            )
+        elif role == "split_evaluation":
+            development = _development_groups(
                 groups,
                 group_cells,
                 dataset=dataset,
                 seed=seed,
-                fraction=development_fraction,
+                fraction=float(evaluation_development_fraction),
             )
-            if dataset in training
-            else set()
-        )
+        else:
+            development = set()
         assignments: dict[RecordingKey, str] = {}
         for cache_index, recording in enumerate(cache):
             if not _eligible_recording(recording):
                 continue
             group = subject_leakage_group(recording)
             split: SplitName
-            if dataset in evaluation:
+            if role == "evaluation":
                 split = "test"
+            elif role == "split_evaluation":
+                split = "development" if group in development else "test"
+            elif role == "development_only":
+                split = "development"
+            elif role == "train_only":
+                split = "train"
             else:
                 split = "development" if group in development else "train"
             assignments[recording_key(recording)] = split
@@ -235,6 +284,8 @@ def build_cohort_manifest(
         "cache_fingerprints": dict(sorted(fingerprints.items())),
         "entries": [asdict(entry) for entry in entries],
     }
+    if extended:
+        unsigned["roles"] = dict(sorted(roles.items()))
     fingerprint = sha256(_canonical_json(unsigned)).hexdigest()
     return CohortManifest(
         schema_version=MANIFEST_SCHEMA_VERSION,
@@ -244,11 +295,14 @@ def build_cohort_manifest(
         cache_fingerprints=dict(sorted(fingerprints.items())),
         entries=tuple(entries),
         fingerprint=fingerprint,
+        roles=dict(sorted(roles.items())) if extended else {},
     )
 
 
 def write_cohort_manifest(manifest: CohortManifest, path: Path) -> None:
     payload = asdict(manifest)
+    if not payload.get("roles"):
+        payload.pop("roles", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -300,6 +354,9 @@ def _validate_manifest_structure(manifest: CohortManifest) -> None:
         raise ValueError(f"cohort leakage groups cross splits: {leaking}")
     for dataset, splits in dataset_splits.items():
         if "test" in splits and len(splits) > 1:
+            role = manifest.roles.get(dataset)
+            if role == "split_evaluation" and splits == {"development", "test"}:
+                continue
             raise ValueError(f"dataset {dataset!r} mixes test with fitting splits")
 
 

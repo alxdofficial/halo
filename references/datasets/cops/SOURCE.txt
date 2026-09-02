@@ -1,0 +1,11 @@
+Publication: https://doi.org/10.1038/s41597-026-06999-6
+Dataset: https://doi.org/10.17605/OSF.IO/5XVWN
+OSF API: https://api.osf.io/v2/nodes/5xvwn/files/
+
+Retrieved 2026-08-31. All 66 participant archives were downloaded from the public OSF node and
+retained as compressed ZIP files. Their combined payload is 47,868,203,591 bytes; every file matches
+the byte size reported by OSF and passes `unzip -tqq`. Read the nested hourly archives directly rather
+than expanding the projected roughly 297 GiB CSV corpus.
+
+The OSF node is public but its API license field is null. Confirm data reuse terms before a published
+analysis.

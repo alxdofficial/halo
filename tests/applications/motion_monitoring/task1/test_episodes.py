@@ -33,14 +33,14 @@ def _sequence(length=8, feature_dim=3, *, invalid=()):
     return EmbeddingSequence(embeddings + 1, intervals, valid)
 
 
-def _recording(recording_id, event):
+def _recording(recording_id, event, *, placement="wrist"):
     timestamps = np.arange(8, dtype=np.float64) + 0.5
     values = np.column_stack([timestamps, timestamps + 1, timestamps + 2]).astype(
         np.float32
     )
     stream = SensorStream(
         stream_id="wrist_acc",
-        placement="wrist",
+        placement=placement,
         device="watch",
         timestamps_sec=timestamps,
         values=values,
@@ -152,6 +152,63 @@ def test_cached_event_pair_dataset_loads_real_cache_contract(tmp_path):
     episode = dataset[0]
     assert episode.targets_sec.tolist() == [[4.0, 7.0]]
     assert episode.metadata["dataset"] == "test_source"
+
+
+def test_cached_pair_rejects_cross_placement_shortcut(tmp_path):
+    reference = _recording("reference", EventInterval(1.0, 4.0, "pour"))
+    query = _recording(
+        "query", EventInterval(4.0, 7.0, "pour"), placement="ankle"
+    )
+    write_recording(reference, tmp_path / "reference")
+    write_recording(query, tmp_path / "query")
+    (tmp_path / "cache.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "dataset": "test_source", "recording_count": 2}
+        )
+    )
+    (tmp_path / "manifest.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"dataset": "test_source", "directory": "reference"}),
+                json.dumps({"dataset": "test_source", "directory": "query"}),
+            ]
+        )
+        + "\n"
+    )
+
+    dataset = CachedEventPairDataset(
+        tmp_path,
+        [CachedEventPair(0, 1, "pour", 0, "wrist_acc", "wrist_acc")],
+        lambda recording, stream_id: _sequence(),
+        validate_provenance=False,
+    )
+    with pytest.raises(ValueError, match="incompatible acquisition configurations"):
+        dataset[0]
+
+
+def test_episode_rejects_one_sided_sensor_metadata():
+    reference = _recording("reference", EventInterval(1.0, 4.0, "pour"))
+    query = _recording("query", EventInterval(4.0, 7.0, "pour"))
+    configured = EmbeddingSequence(
+        **{
+            **_sequence().__dict__,
+            "metadata": {
+                "device": "smartwatch",
+                "placement": "wrist",
+                "channels": ("acc_x", "acc_y", "acc_z"),
+                "gravity_state": "present",
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="both declare sensor configurations"):
+        episode_from_recordings(
+            reference,
+            query,
+            configured,
+            _sequence(),
+            label="pour",
+            reference_event_index=0,
+        )
 
 
 def test_cached_pair_audit_filters_invalid_events_before_training(tmp_path):

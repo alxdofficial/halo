@@ -147,6 +147,35 @@ def test_representation_cache_rejects_trainable_encoder_and_existing_output(tmp_
         )
 
 
+def test_representation_cache_resumes_valid_staging_sequences(tmp_path):
+    caches, manifest = _cohort(tmp_path)
+    encoder = PhysicalProjectionEncoder(embedding_dim=8).requires_grad_(False)
+    partial = tmp_path / "partial"
+    output = tmp_path / "resumed"
+    build_representation_cache(
+        partial,
+        manifest,
+        caches,
+        encoder,
+        encoder_provenance={"kind": "test"},
+        limit=1,
+    )
+    partial.rename(output.with_name(f".{output.name}.staging"))
+
+    build_representation_cache(
+        output,
+        manifest,
+        caches,
+        encoder,
+        encoder_provenance={"kind": "test"},
+        resume=True,
+    )
+
+    cached = CachedMotionSequenceDataset(output)
+    assert len(cached) == 3
+    assert cached.get("train_source", "train_source-1", "wrist").embeddings.shape[1] == 8
+
+
 class _DetachedButTrainable(nn.Module):
     def __init__(self):
         super().__init__()
@@ -163,3 +192,84 @@ def test_write_policy_is_based_on_encoder_state_not_incidental_no_grad(tmp_path)
             _DetachedButTrainable(),
             encoder_provenance={"kind": "test"},
         )
+
+
+def _second_cohort(tmp_path, caches):
+    """A different cohort sharing ``test_source`` with the first one."""
+
+    extra = _cache(
+        tmp_path, "synthetic_source", (_recording("synthetic_source", "bg:1", 1),)
+    )
+    new_caches = {"test_source": caches["test_source"], "synthetic_source": extra}
+    manifest = build_cohort_manifest(
+        new_caches,
+        name="second",
+        train_only_datasets=("synthetic_source",),
+        evaluation_datasets=("test_source",),
+    )
+    return new_caches, manifest
+
+
+def test_cache_accepts_other_cohort_on_matching_raw_fingerprints_and_unions(tmp_path):
+    from applications.motion_monitoring.representation_cache import (
+        MotionSequenceUnion,
+        open_representations,
+    )
+
+    caches, first = _cohort(tmp_path)
+    encoder = PhysicalProjectionEncoder(embedding_dim=8).requires_grad_(False)
+    natural = tmp_path / "natural"
+    build_representation_cache(
+        natural, first, caches, encoder, encoder_provenance={"kind": "test", "weights": "w"}
+    )
+    new_caches, second = _second_cohort(tmp_path, caches)
+    assert second.fingerprint != first.fingerprint
+
+    # Same raw canonical cache for test_source -> exposed; train_source hidden.
+    bound = CachedMotionSequenceDataset(
+        natural,
+        manifest_fingerprint=second.fingerprint,
+        cache_fingerprints=second.cache_fingerprints,
+    )
+    assert bound.datasets == ("test_source",)
+    with pytest.raises(KeyError):
+        bound.get("train_source", "train_source-1", "wrist")
+
+    synthetic = tmp_path / "synthetic"
+    build_representation_cache(
+        synthetic, second, new_caches, encoder,
+        encoder_provenance={"kind": "test", "weights": "w"},
+        datasets={"synthetic_source"},
+    )
+    union = open_representations([natural, synthetic], cohort=second)
+    assert isinstance(union, MotionSequenceUnion)
+    assert union.datasets == ("synthetic_source", "test_source")
+    assert union.get("synthetic_source", "synthetic_source-1", "wrist").embeddings.shape[1] == 8
+    assert union.get("test_source", "test_source-1", "wrist").embeddings.shape[1] == 8
+    assert json.loads(json.dumps(union.metadata))["datasets"] == ["synthetic_source", "test_source"]
+
+    # A cache serving no dataset of the cohort is refused outright.
+    lonely = _cache(tmp_path, "lonely", (_recording("lonely", "x", 1),))
+    lonely_test = _cache(tmp_path, "lonely_test", (_recording("lonely_test", "y", 1),))
+    lonely_cohort = build_cohort_manifest(
+        {"lonely": lonely, "lonely_test": lonely_test},
+        name="lonely",
+        train_only_datasets=("lonely",),
+        evaluation_datasets=("lonely_test",),
+    )
+    with pytest.raises(ValueError, match="shares no canonical cache"):
+        open_representations([natural], cohort=lonely_cohort)
+
+    # Two caches serving the same dataset cannot be unioned.
+    with pytest.raises(ValueError, match="more than one representation cache"):
+        open_representations([natural, natural], cohort=second)
+
+    # Different encoders cannot be unioned either.
+    other = tmp_path / "other_encoder"
+    build_representation_cache(
+        other, second, new_caches, encoder,
+        encoder_provenance={"kind": "test", "weights": "different"},
+        datasets={"synthetic_source"},
+    )
+    with pytest.raises(ValueError, match="different encoders"):
+        open_representations([natural, other], cohort=second)

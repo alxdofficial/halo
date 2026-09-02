@@ -3,11 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+from dataclasses import replace
 
 from applications.motion_monitoring.data.contracts import RawRecording, SensorStream
 from applications.motion_monitoring.sequence import (
     MotionSequence,
     PhysicalProjectionEncoder,
+    localization_intervals,
     measured_rate_hz,
     stream_to_patch_batch,
 )
@@ -104,3 +106,18 @@ def test_physical_projection_exports_normalized_sequence_and_gradients() -> None
     loss.backward()
     assert encoder.projection[1].weight.grad is not None
     assert torch.isfinite(encoder.projection[1].weight.grad).all()
+
+
+def test_localization_cells_do_not_inherit_a_wide_receptive_field() -> None:
+    sequence = PhysicalProjectionEncoder(embedding_dim=12).encode_recording(_recording())
+    wide_support = torch.tensor(
+        [[0.0, 5.0], [1.0, 6.0], [2.0, 7.0]], dtype=torch.float64
+    )
+    sequence = replace(sequence, intervals_sec=wide_support)
+
+    cells = localization_intervals(sequence)
+
+    torch.testing.assert_close(
+        cells,
+        torch.tensor([[0.0, 3.0], [3.0, 4.0], [4.0, 7.0]], dtype=torch.float64),
+    )

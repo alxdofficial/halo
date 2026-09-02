@@ -20,9 +20,28 @@ class AdapterSpec:
     name: str
     module: str
     default_role: str
+    cache_policy: str = "materialize"
+    # Canonical caches this adapter synthesizes from (``derived`` policy only).
+    # A derived dataset has no frozen source payload; its provenance is the
+    # provenance of the caches it was generated from plus the generator code.
+    derived_from: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.cache_policy not in {"materialize", "stream", "derived"}:
+            raise ValueError(f"unsupported cache policy: {self.cache_policy}")
+        if (self.cache_policy == "derived") != bool(self.derived_from):
+            raise ValueError(
+                f"{self.name}: derived_from must be set exactly for the derived policy"
+            )
 
 
 ADAPTERS: dict[str, AdapterSpec] = {
+    "alameda": AdapterSpec(
+        "alameda",
+        "applications.motion_monitoring.data.adapters.alameda",
+        "task2_evaluation",
+        "stream",
+    ),
     "aidlab_har": AdapterSpec(
         "aidlab_har",
         "applications.motion_monitoring.data.adapters.aidlab_har",
@@ -37,6 +56,18 @@ ADAPTERS: dict[str, AdapterSpec] = {
         "crossfit",
         "applications.motion_monitoring.data.adapters.crossfit",
         "training_development",
+    ),
+    "cops": AdapterSpec(
+        "cops",
+        "applications.motion_monitoring.data.adapters.cops",
+        "task2_evaluation",
+        "stream",
+    ),
+    "monipar": AdapterSpec(
+        "monipar",
+        "applications.motion_monitoring.data.adapters.monipar",
+        "task1_evaluation",
+        "stream",
     ),
     "oca": AdapterSpec(
         "oca",
@@ -58,11 +89,31 @@ ADAPTERS: dict[str, AdapterSpec] = {
         "applications.motion_monitoring.data.adapters.wear",
         "evaluation",
     ),
+    # Task-1 synthetic wrist-IMU training corpus: CrossFit single-repetition
+    # clips inserted into RecoFit backgrounds (TASK1_REFERENCE_RESOLUTION_SPEC
+    # section C). Training only; never a development or test source.
+    "synth_wrist_v1": AdapterSpec(
+        "synth_wrist_v1",
+        "applications.motion_monitoring.data.adapters.synth_wrist_v1",
+        "task1_training",
+        "derived",
+        derived_from=("crossfit", "recofit"),
+    ),
 }
 
 
 def adapter_names() -> tuple[str, ...]:
     return tuple(ADAPTERS)
+
+
+def materializable_adapter_names() -> tuple[str, ...]:
+    """Adapters whose source payloads should be copied into canonical caches."""
+
+    return tuple(
+        name
+        for name, spec in ADAPTERS.items()
+        if spec.cache_policy in {"materialize", "derived"}
+    )
 
 
 def iter_recordings(

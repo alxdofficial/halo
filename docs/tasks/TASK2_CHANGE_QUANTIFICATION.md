@@ -5,13 +5,14 @@
 > alignment and measurement; it is not a clinical diagnosis model.
 
 **Implementation status, 2026-08-31.** The shared timestamped encoder export, bounded-execution
-pair contract, phase-normalized latent residual, accepted-variation and known-change objectives,
-masked unit-scaled target regression, encoder/head gradient telemetry, and robust personal joint
-variation fit are mechanically implemented. Short real-cache smokes pass. The longitudinal state
-smoother, complete physical measurements, task manifests, long training, and external validation
-remain outstanding.
-Execution pairs are constrained to one dataset-scoped subject identity, and bounded executions with
-internal missing-patch gaps are rejected rather than interpolated across.
+episode contract, set-conditioned metric head, phase-normalized latent residual, accepted-query and
+changed-query objectives, within-reference-set ranking, masked unit-scaled target regression,
+encoder/head gradient telemetry, and robust personal joint-variation fit are mechanically
+implemented. Short synthetic and real-cache smokes pass. The longitudinal state smoother, complete
+physical measurements, reportable task manifests, long training, and external validation remain
+outstanding. Episodes are constrained to one dataset-scoped subject identity and compatible sensor
+configuration. Bounded executions with internal missing-patch gaps are rejected rather than
+interpolated across.
 
 ## 1. Question and deployment contract
 
@@ -185,12 +186,20 @@ features alone.
 
 The application model includes a small global metric because an encoder trained for activity
 classification is not assumed to preserve the within-activity differences required here. The
-smallest head is a normalized diagonal weighting or linear projection applied to patch embeddings
-before the same alignment and reporting pipeline. A fixed-metric arm remains mandatory as the floor.
+encoder embeds every recording independently and in parallel. Immediately before scoring, a small
+role-aware head contextualizes the accepted reference executions, then lets the query attend to that
+reference set and optional same-person, same-configuration recordings of other tasks. The reference
+baseline never attends to the query, so an unusual query cannot redefine normality for itself.
 
-Train it with pairwise or ordinal constraints:
+The head retains the transparent cosine distance to the mean accepted phase trajectory and learns a
+bounded correction from the contextualized evidence. Reference, query, and personal-context tokens
+have distinct role embeddings. No subject identifier is supplied to the network. A fixed cosine
+metric and the robust personal statistical model remain mandatory floors.
 
-- independent accepted repetitions should be closer than known incorrect or perturbed executions;
+Train it with episodic classification and ordinal constraints:
+
+- a held-out accepted query should score below a known changed query under the exact same reference
+  set;
 - same-person, cross-session accepted repetitions are preferred positives;
 - ordinary remounting and measured device noise are nuisance controls; and
 - activity families, subjects, and datasets used for evaluation remain held out.
@@ -209,10 +218,13 @@ unadapted baseline embedding.
 
 ## 6. Training-data construction
 
-### 6.1 Real development pairs
+### 6.1 Real development episodes
 
-Construct tuples containing a baseline set, an independent accepted execution, and, where available,
-a known variant. Split by subject and source session before drawing tuples.
+Construct episodes containing three to eight accepted reference executions, one independent query,
+and optional same-person recordings of other tasks as personal context. Split by subject and source
+session before drawing episodes. The query and every transformed descendant of it must be absent from
+its reference set. The reference-set size varies during development so deployment is not tied to one
+enrollment count.
 
 Useful local development sources are:
 
@@ -249,12 +261,14 @@ known-variant, or externally measured evaluation remains required for that appli
 ### 6.3 Training mixture
 
 Construct balanced batches over source subjects and tasks rather than over the number of generated
-variants. Each batch contains:
+variants. Whenever possible, an accepted and changed query share the exact same accepted reference
+set so the ranking loss asks a well-defined personal question. Each batch contains:
 
-- untouched independent accepted-execution pairs;
-- known-change pairs with a declared direction and severity;
-- nuisance pairs such as remounting or measured device noise that should remain accepted; and
-- unlabeled real pairs used only for personal baseline fitting or unsupervised reporting.
+- untouched independent accepted-query episodes;
+- changed-query episodes with a declared direction and severity;
+- nuisance queries such as remounting or measured device noise that remain accepted;
+- optional same-person, same-configuration recordings of other tasks as role-marked context; and
+- unlabeled real episodes used only for personal baseline fitting or unsupervised reporting.
 
 Do not apply a change only to one class in a way that leaves an augmentation watermark. Hold out
 complete base executions before generating either training or evaluation variants.
@@ -278,18 +292,38 @@ reported as multimodal.
 
 | source | evaluation question | current status |
 |---|---|---|
-| **MoniPar** | does a watch-based movement signature change across weeks and associate with neurologist-reviewed MDS-UPDRS exercise severity? | strongest local longitudinal signal source; 21 PD and 7 controls. Severity MAT files exist separately but are not exposed by the current converter; implement and audit subject/week alignment before fitting this association. |
+| **PHYTMO** | can the method distinguish source-declared correct from deliberately incorrect rehabilitation exercise execution? | primary controlled Task-2 development source: 30 subjects, two correct and two incorrect series per task, four 100 Hz IMUs, and motion-capture reference. |
+| **ALAMEDA PD** | do wrist-motion summaries and latent state change across repeated free-living campaigns, and do those changes agree with repeated clinical measures? | accessible but conditional. The 4.8 GB ZIP passed its published MD5 and its Parquet data are finite 100 Hz acceleration in g with real timestamps. However, the archive has 13 sensor subject codes and only 22 campaigns, one complete campaign is byte-identical under participants 14 and 16, two participant-16 campaigns have unknown placement, two early campaigns fail device calibration, and several campaigns have no nearby clinical visit. All 32 daily files from the four selected same-placement campaigns have a documented visit within 14 days; their actual file dates, rather than campaign-folder names, are used for this join. It has no bounded repeated-task labels, so use it only as an exploratory free-living trend source unless the authors clarify the release. |
+| **COPS** | can a personal state model distinguish persistent hourly tremor or kinesia changes from ordinary within-day movement variability? | useful secondary source: 66 participants, bilateral 100 Hz wrist acceleration, hourly symptom diaries, and 393.8 usable participant-days. All 66 compressed participant archives are locally retained, match the OSF byte inventory, and pass ZIP integrity checks. The verified participant sample has monotonic 100 Hz timestamps, finite acceleration in g, and the documented diary schema. It measures week-scale state fluctuation, not long-term disease progression. Stream the nested hourly files rather than expanding roughly 297 GiB of CSV. The OSF node is public but declares no data license, so clarify reuse terms before publication. |
+| **REHAB-120** | can standardized stroke movements expose real recovery over a two-week intervention? | blocked despite strong clinical design. The release has 120 baseline and 109 discharge assessments but does not expose a defensible subject linkage between them; exercise files contain derived angles/flex signals rather than HALO-compatible IMU channels, and one released NPY is corrupt. Of 5,994 assessment sensor-1 arrays, 2,454 have all-zero acceleration and 262 reach about +/-16, while the paper declares m/s2 from a +/-2 g accelerometer. Seek identity, unit, and sentinel/saturation clarification before use. |
 | **KneE-PAD** | do measures distinguish correct from two real incorrect variants? | usable if checkpoint provenance confirms exclusion; most local trials are under six seconds and use research placements, so the adapter must support honest short sequences |
 | **SPAR** | are phase and physical measures stable across repeated shoulder motions? | usable for within-bout repeatability, not independent longitudinal generalization |
 | **Upper Limb Use** | do bilateral measures expose affected/unaffected differences in ADLs? | blocked pending converter/source-timeline repair: 598 of 1,042 local sessions contain under 50 samples and many contain only two samples |
 | **GAITEX** | can orientation/biomechanical reference data validate phase and known gait/exercise variants? | not a native HALO six-axis source: released IMU tables contain Xsens orientation quaternions rather than raw acceleration/gyroscope; use only through a separate orientation adapter or as an external oracle |
 
-After its severity adapter is verified, MoniPar is suitable for real longitudinal association but
-not a balanced severity benchmark: the
-published cohort omits the most severe class and is concentrated in low severity. No inspected public
+MoniPar is deliberately excluded from Task 2 because its sample labels are contiguous protocol states,
+not independently bounded repetitions. It remains a valid natural cross-week source for Task 1. No inspected public
 source simultaneously provides consumer-watch six-axis IMU, independent remounting, several
 longitudinal sessions, deliberate execution errors, and sealed video/clinical ground truth. A small
 prospective collection remains necessary for a strong applied claim.
+
+Cross-subject ordering is never a substitute for longitudinal time. Other subjects may be used to
+learn a population severity direction or initialize a nuisance model, but all primary trend and
+change-point claims must be evaluated on repeated measurements from the same person, task,
+device family, placement, channel set, and gravity convention.
+
+### 7.1 Implemented data and encoder checks
+
+The application adapters now expose selected ALAMEDA daily free-living campaigns and bilateral COPS
+hourly recordings. ALAMEDA and COPS deliberately expose no
+action events: their clinical or diary linkage is state supervision, not execution-boundary truth.
+Both are read in place rather than expanded into a second cache.
+
+The author-released HARNet, UniMTS, and NormWear encoders, plus optional ImageBind, pass finite
+representation probes on these real streams. The same encoders also pass one-step Task-2 head fits
+with nonzero finite head gradients. These checks prove mechanical compatibility only. They do not
+close the remaining scientific gate: controlled PHYTMO/KneE-PAD and longitudinal ALAMEDA/COPS
+development/test episode manifests must be frozen before a reportable fit.
 
 ## 8. Evaluation metrics
 
@@ -306,7 +340,9 @@ Report within-session, cross-session, and remounting conditions separately.
 
 ### 8.2 Sensitivity to known differences
 
-- AUROC and subject-level effect size for accepted versus known variants;
+- sensitivity to known variants, specificity on accepted executions, balanced accuracy, accepted-
+  execution false-alarm rate, and subject-level effect size at a development-fixed threshold;
+- AUROC as a secondary threshold-free ranking diagnostic;
 - Spearman association for ordinal clinician scores;
 - mixed-effects estimates for repeated longitudinal scores;
 - phase-local AUPRC or temporal IoU when changed phases are annotated; and
@@ -371,3 +407,15 @@ Avoid radar charts and a single unlabeled quality score. Both obscure units and 
 - Dal Farra et al., *Test-Retest Reliability and Minimal Detectable Changes for Wearable
   Sensor-Derived Gait Stability, Symmetry, and Smoothness*, Sensors 2025,
   [DOI 10.3390/s25061764](https://doi.org/10.3390/s25061764).
+- Papagiannakis et al., *The ALAMEDA Data Collection Protocol*, Healthcare 2023,
+  [DOI 10.3390/healthcare11192656](https://doi.org/10.3390/healthcare11192656); public data record
+  [DOI 10.5281/zenodo.15769959](https://doi.org/10.5281/zenodo.15769959).
+- Nesser et al., *Continuous observation of Parkinsonian symptoms using symptom diaries and
+  wearable accelerometry*, Scientific Data 2026,
+  [DOI 10.1038/s41597-026-06999-6](https://doi.org/10.1038/s41597-026-06999-6).
+- Czech et al., *Improved measurement of disease progression in people living with early
+  Parkinson's disease using digital health technologies*, Communications Medicine 2024,
+  [DOI 10.1038/s43856-024-00481-3](https://doi.org/10.1038/s43856-024-00481-3).
+- Lv et al., *A wearable sensor-based kinematic dataset collected under standardized rehabilitation
+  tasks from 120 post-stroke patients*, Scientific Data 2026,
+  [DOI 10.1038/s41597-026-07802-2](https://doi.org/10.1038/s41597-026-07802-2).

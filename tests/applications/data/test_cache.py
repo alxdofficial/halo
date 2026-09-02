@@ -11,6 +11,7 @@ from applications.motion_monitoring.data.cache import (
     verify_source_payload,
     write_recording,
 )
+from applications.motion_monitoring.data.build_cache import build_dataset_cache
 from applications.motion_monitoring.data.contracts import (
     EventInterval,
     RawRecording,
@@ -88,3 +89,8 @@ def test_cache_rejects_stale_provenance(tmp_path: Path) -> None:
 def test_source_payload_verifier_rejects_missing_dataset() -> None:
     with pytest.raises(KeyError, match="no frozen source payload"):
         verify_source_payload("fixture")
+
+
+def test_cache_builder_rejects_stream_only_adapter() -> None:
+    with pytest.raises(ValueError, match="stream-only"):
+        build_dataset_cache("cops")

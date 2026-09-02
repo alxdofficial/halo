@@ -63,10 +63,18 @@ def _start_crop_or_wrap(x: torch.Tensor, length: int) -> torch.Tensor:
 
 def _stream_joint(stream_key: str) -> int:
     """Map a ``dataset/stream`` key to the placement joint used by the UniMTS adapter."""
-    from baselines.unimts.adapter import DEFAULT_JOINT, JOINT_BY_DS, _PLACEMENT_KEYWORDS
+    from baselines.unimts.adapter import (
+        DEFAULT_JOINT,
+        JOINT_BY_DS,
+        _PLACEMENT_KEYWORDS,
+        _SIDE_PLACEMENT_JOINTS,
+    )
 
     dataset, _, stream = str(stream_key).partition("/")
     name = f"{dataset}/{stream}".lower()
+    for keyword, joint in _SIDE_PLACEMENT_JOINTS:
+        if keyword in name:
+            return int(joint)
     for keyword, joint in _PLACEMENT_KEYWORDS:
         if keyword in name:
             return int(joint)

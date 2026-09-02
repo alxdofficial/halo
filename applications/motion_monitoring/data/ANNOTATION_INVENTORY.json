@@ -182,11 +182,11 @@
       "current_data_form": "continuous weekly protocol timeline",
       "exact_instance_intervals": false,
       "instance_granularity": [
-        "exercise_block"
+        "protocol_state_run"
       ],
       "known_execution_change": true,
-      "recommended_use": "Task 2 longitudinal association after severity alignment audit",
-      "repeated_instances_in_timeline": true,
+      "recommended_use": "Task 2 longitudinal association after severity alignment and active-state aggregation audits",
+      "repeated_instances_in_timeline": false,
       "study_role": "sealed_task2_evaluation",
       "video_reference": "neurologist-reviewed clinical protocol; severity adapter remains open"
     },
@@ -418,7 +418,6 @@
     "xrf_v2"
   ],
   "primary_task2_change_sources": [
-    "monipar",
     "phytmo",
     "kneepad"
   ],

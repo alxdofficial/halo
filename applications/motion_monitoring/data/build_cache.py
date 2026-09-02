@@ -9,8 +9,9 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from applications.motion_monitoring.data.adapters.registry import (
-    adapter_names,
+    ADAPTERS,
     iter_recordings,
+    materializable_adapter_names,
 )
 from applications.motion_monitoring.data.cache import (
     CACHE_SCHEMA_VERSION,
@@ -25,6 +26,15 @@ DEFAULT_SOURCE_ROOT = Path(__file__).resolve().parent / "sources"
 
 
 def build_dataset_cache(dataset: str, *, force: bool = False) -> dict[str, object]:
+    try:
+        spec = ADAPTERS[dataset]
+    except KeyError as error:
+        raise KeyError(f"unknown application dataset {dataset!r}") from error
+    if spec.cache_policy not in {"materialize", "derived"}:
+        raise ValueError(
+            f"{dataset}: adapter is stream-only; building a canonical cache would "
+            "duplicate or expand a large existing payload"
+        )
     verify_source_payload(dataset)
     output = DEFAULT_SOURCE_ROOT / dataset / "processed" / "canonical_v1"
     staging = output.with_name(f".{output.name}.building")
@@ -64,7 +74,11 @@ def build_dataset_cache(dataset: str, *, force: bool = False) -> dict[str, objec
                     "schema_version": CACHE_SCHEMA_VERSION,
                     "dataset": dataset,
                     "recording_count": len(rows),
-                    "source": "lossless raw-adapter output",
+                    "source": (
+                        "deterministic synthesis from canonical caches"
+                        if spec.cache_policy == "derived"
+                        else "lossless raw-adapter output"
+                    ),
                     "resampled": False,
                     "windowed": False,
                     "imputed": False,
@@ -87,7 +101,7 @@ def build_dataset_cache(dataset: str, *, force: bool = False) -> dict[str, objec
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("datasets", nargs="+", choices=adapter_names())
+    parser.add_argument("datasets", nargs="+", choices=materializable_adapter_names())
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()

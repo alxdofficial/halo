@@ -40,7 +40,23 @@ def _embedding_slice(
         sequence.embeddings[start:stop],
         sequence.intervals_sec[start:stop],
         sequence.valid[start:stop],
+        metadata=_sequence_metadata(sequence),
     )
+
+
+def _sequence_metadata(sequence: MotionSequence) -> dict[str, object]:
+    return {
+        "dataset": sequence.dataset,
+        "recording_id": sequence.recording_id,
+        "subject_id": sequence.subject_id,
+        "session_id": sequence.session_id,
+        "stream_id": sequence.stream_id,
+        "placement": sequence.placement,
+        "device": sequence.device,
+        "channels": sequence.channels,
+        "gravity_state": sequence.gravity_state,
+        "sampling_rate_hz": sequence.sampling_rate_hz,
+    }
 
 
 def _crop_bounds(recording, event, duration_sec: float) -> tuple[float, float]:
@@ -166,6 +182,7 @@ def _episodes_for_split(
                         reference_sequence.embeddings,
                         reference_sequence.intervals_sec,
                         reference_sequence.valid,
+                        metadata=_sequence_metadata(reference_sequence),
                     ),
                     _embedding_slice(query_sequence, start, stop),
                     label=label,

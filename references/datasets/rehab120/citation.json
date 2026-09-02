@@ -1,0 +1,21 @@
+{
+  "title": "A wearable sensor-based kinematic dataset collected under standardized rehabilitation tasks from 120 post-stroke patients",
+  "authors": [
+    "Ming Lv",
+    "Yun Gao",
+    "Gang Cheng",
+    "Lanxiang Wang",
+    "Mingyu Cai",
+    "Weinan Zhou",
+    "Liquan Guo",
+    "Kunlun He"
+  ],
+  "year": 2026,
+  "venue": "Scientific Data",
+  "doi": "10.1038/s41597-026-07802-2",
+  "dataset_doi": "10.57760/sciencedb.37018",
+  "dataset_url": "https://www.scidb.cn/en/detail?dataSetId=0d134d6d647045979890711980fac55f",
+  "code_url": "https://github.com/zzzzz-123/REHAB",
+  "license": "CC BY 4.0",
+  "notes": "Downloaded release inspected on 2026-08-31. Longitudinal identity linkage is not exposed, one training NPY is corrupt, 2,454/5,994 assessment IMU arrays contain all-zero acceleration, and the released acceleration scale (gravity near 1 with values reaching +/-16) conflicts with the paper's m/s2 and +/-2 g declarations. Do not use without author clarification."
+}

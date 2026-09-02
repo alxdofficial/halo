@@ -1,0 +1,18 @@
+{
+  "title": "Continuous observation of Parkinsonian symptoms using symptom diaries & wearable accelerometry",
+  "authors": [
+    "T. P. R. Nesser",
+    "C. van der Linden",
+    "C. Schedlich-Teufer",
+    "G. Brandt",
+    "M. T. Barbe",
+    "T. A. Dembek"
+  ],
+  "year": 2026,
+  "venue": "Scientific Data",
+  "doi": "10.1038/s41597-026-06999-6",
+  "dataset_doi": "10.17605/OSF.IO/5XVWN",
+  "dataset_url": "https://osf.io/5xvwn/",
+  "license": "Not specified on the public OSF node",
+  "notes": "All 66 participant archives were downloaded on 2026-08-31 and retained compressed (47,868,203,591 payload bytes). Every archive matches its OSF byte size and passes ZIP integrity checks. Public download access is confirmed, but reuse terms should be clarified before publication because the OSF license field is null."
+}

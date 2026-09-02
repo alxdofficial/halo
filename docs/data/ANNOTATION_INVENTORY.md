@@ -31,7 +31,7 @@ Regenerate measured application-cache counts with:
 | **RecoFit** | continuous exercise visits with set intervals and counts | no | yes | background, set matching, and count supervision |
 | **AIDLAB-HAR** | series intervals and short repetition-marker windows | no | yes, within short recordings | boundary and temporal-anchor control |
 | **MM-Fit** | Phase-A set excerpts; full workouts recoverable | no, sets plus counts | yes in source | weak supervision and video/pose development |
-| **MoniPar** | continuous weekly exercise protocol | exercise blocks only | yes | Task-2 longitudinal association after severity audit |
+| **MoniPar** | continuous weekly exercise protocol | exercise blocks only | yes | Task-1 cross-week query-by-example only; excluded from Task 2 |
 | **PHYTMO** | bounded correct/incorrect therapy series | series only | no | Task-2 known-change development |
 | **KneE-PAD** | short correct and incorrect exercise trials | trial extent only | no | Task-2 known-variant evaluation candidate |
 | **SPAR** | shoulder-exercise bouts containing repetitions | bout only | no | Task-2 repeatability, not localization |

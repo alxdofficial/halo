@@ -8,6 +8,12 @@ from applications.motion_monitoring.task1 import (
     SyntheticDetectionDataset,
     collate_detection_episodes,
 )
+from applications.motion_monitoring.task1.matcher import (
+    _decode_ranked_endpoints,
+    _decode_ranked_endpoints_python,
+    _dtw_tables,
+    _dtw_tables_python,
+)
 
 
 def _sequence(values, valid=None):
@@ -136,3 +142,51 @@ def test_deployment_matcher_cannot_cross_invalid_query_gaps():
     )
 
     assert matches == []
+
+
+def test_compiled_dtw_tables_exactly_match_reference_implementation():
+    rng = np.random.default_rng(20260831)
+    reference = rng.normal(size=(7, 11))
+    query = rng.normal(size=(19, 11))
+    reference /= np.linalg.norm(reference, axis=1, keepdims=True)
+    query /= np.linalg.norm(query, axis=1, keepdims=True)
+
+    expected = _dtw_tables_python(reference, query, warp_penalty=0.05)
+    observed = _dtw_tables(reference, query, warp_penalty=0.05)
+
+    for expected_table, observed_table in zip(expected, observed, strict=True):
+        np.testing.assert_array_equal(observed_table, expected_table)
+
+
+def test_compiled_endpoint_decoding_exactly_matches_reference_implementation():
+    rng = np.random.default_rng(19)
+    reference = rng.normal(size=(7, 11))
+    query = rng.normal(size=(31, 11))
+    reference /= np.linalg.norm(reference, axis=1, keepdims=True)
+    query /= np.linalg.norm(query, axis=1, keepdims=True)
+    accumulated, previous, path_lengths = _dtw_tables_python(
+        reference, query, warp_penalty=0.05
+    )
+    endpoint_costs = accumulated[:, len(reference), 1:] / len(reference)
+    endpoint_states = np.argmin(endpoint_costs, axis=0)
+    endpoint_scores = endpoint_costs[
+        endpoint_states, np.arange(endpoint_costs.shape[1])
+    ]
+    ranked = np.argsort(endpoint_scores, kind="stable")
+    intervals = np.column_stack([np.arange(len(query)), np.arange(1, len(query) + 1)])
+    arguments = (
+        ranked,
+        endpoint_states,
+        endpoint_scores,
+        previous,
+        path_lengths,
+        intervals,
+        len(reference),
+        0.3,
+        None,
+    )
+
+    expected = _decode_ranked_endpoints_python(*arguments)
+    observed = _decode_ranked_endpoints(*arguments)
+
+    assert observed == expected

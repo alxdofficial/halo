@@ -116,12 +116,24 @@ def read_motion_sequence(directory: Path, *, mmap: bool = True) -> MotionSequenc
 
 
 class CachedMotionSequenceDataset(Sequence[MotionSequence]):
+    """One representation cache, bound to the data it was encoded from.
+
+    A cache is accepted for a cohort when either the cohort fingerprint matches
+    (same cohort file) or, given the cohort's per-dataset canonical-cache
+    fingerprints, every exposed dataset was encoded from the identical canonical
+    cache. The second path lets a cache built under one cohort serve a task
+    cohort with different split roles: a frozen encoder's output depends on the
+    raw recordings and the encoder, never on which split a recording sits in.
+    Datasets whose fingerprints disagree are hidden rather than served.
+    """
+
     def __init__(
         self,
         root: Path,
         *,
         mmap: bool = True,
         manifest_fingerprint: str | None = None,
+        cache_fingerprints: Mapping[str, str] | None = None,
     ) -> None:
         self.root = Path(root)
         metadata_path = self.root / "cache.json"
@@ -130,11 +142,25 @@ class CachedMotionSequenceDataset(Sequence[MotionSequence]):
         self.metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         if self.metadata.get("schema_version") != REPRESENTATION_SCHEMA_VERSION:
             raise ValueError(f"unsupported representation cache schema in {metadata_path}")
-        if (
+        exposed: set[str] | None = None
+        cohort_match = (
             manifest_fingerprint is not None
-            and self.metadata.get("cohort_fingerprint") != manifest_fingerprint
-        ):
-            raise ValueError("representation cache belongs to a different cohort manifest")
+            and self.metadata.get("cohort_fingerprint") == manifest_fingerprint
+        )
+        if manifest_fingerprint is not None and not cohort_match:
+            stored = self.metadata.get("cache_fingerprints")
+            if cache_fingerprints is None or not isinstance(stored, Mapping):
+                raise ValueError("representation cache belongs to a different cohort manifest")
+            exposed = {
+                dataset
+                for dataset, fingerprint in stored.items()
+                if cache_fingerprints.get(dataset) == fingerprint
+            }
+            if not exposed:
+                raise ValueError(
+                    "representation cache shares no canonical cache with the cohort"
+                )
+        self.exposed_datasets = exposed
         rows_path = self.root / "manifest.jsonl"
         self.rows = tuple(
             json.loads(line)
@@ -149,8 +175,16 @@ class CachedMotionSequenceDataset(Sequence[MotionSequence]):
         ]
         if len(keys) != len(set(keys)):
             raise ValueError("representation cache contains duplicate sequence identities")
-        self.index_by_key = {key: index for index, key in enumerate(keys)}
+        self.index_by_key = {
+            key: index
+            for index, key in enumerate(keys)
+            if exposed is None or key[0] in exposed
+        }
         self.mmap = mmap
+
+    @property
+    def datasets(self) -> tuple[str, ...]:
+        return tuple(sorted({key[0] for key in self.index_by_key}))
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -174,6 +208,72 @@ class CachedMotionSequenceDataset(Sequence[MotionSequence]):
                 f"representation not found: {(dataset, recording_id, stream_id)!r}"
             ) from error
         return self[index]
+
+
+class MotionSequenceUnion:
+    """Read-through union of representation caches with disjoint dataset sets.
+
+    Lets a natural-data cache and a synthetic-corpus cache (encoded separately,
+    possibly under different cohorts) serve one task manifest.
+    """
+
+    def __init__(self, members: Sequence[CachedMotionSequenceDataset]) -> None:
+        if not members:
+            raise ValueError("representation union needs at least one cache")
+        self.members = tuple(members)
+        self.member_by_dataset: dict[str, CachedMotionSequenceDataset] = {}
+        for member in self.members:
+            for dataset in member.datasets:
+                if dataset in self.member_by_dataset:
+                    raise ValueError(
+                        f"dataset {dataset!r} is served by more than one representation cache"
+                    )
+                self.member_by_dataset[dataset] = member
+        strides = {float(member.metadata.get("stride_seconds", 1.0)) for member in self.members}
+        if len(strides) != 1:
+            raise ValueError(f"representation caches disagree on stride: {sorted(strides)}")
+        encoders = {
+            json.dumps(member.metadata.get("encoder_provenance"), sort_keys=True)
+            for member in self.members
+        }
+        if len(encoders) != 1:
+            raise ValueError("representation caches were produced by different encoders")
+        self.metadata = dict(self.members[0].metadata)
+        self.metadata["datasets"] = sorted(self.member_by_dataset)
+        self.metadata["member_roots"] = [str(member.root) for member in self.members]
+
+    @property
+    def datasets(self) -> tuple[str, ...]:
+        return tuple(sorted(self.member_by_dataset))
+
+    def get(self, dataset: str, recording_id: str, stream_id: str) -> MotionSequence:
+        try:
+            member = self.member_by_dataset[dataset]
+        except KeyError as error:
+            raise KeyError(f"no representation cache serves dataset {dataset!r}") from error
+        return member.get(dataset, recording_id, stream_id)
+
+
+def open_representations(
+    roots: Sequence[Path],
+    *,
+    cohort: CohortManifest,
+    mmap: bool = True,
+) -> CachedMotionSequenceDataset | MotionSequenceUnion:
+    """Open one or more caches validated against ``cohort`` (see the class docs)."""
+
+    members = [
+        CachedMotionSequenceDataset(
+            root,
+            mmap=mmap,
+            manifest_fingerprint=cohort.fingerprint,
+            cache_fingerprints=cohort.cache_fingerprints,
+        )
+        for root in roots
+    ]
+    if len(members) == 1:
+        return members[0]
+    return MotionSequenceUnion(members)
 
 
 def _selected_entries(
@@ -208,14 +308,15 @@ def build_representation_cache(
     encoder_provenance: Mapping[str, Any],
     datasets: set[str] | None = None,
     splits: set[str] | None = None,
-    patch_seconds: float = 1.0,
+    patch_seconds: float | None = None,
     stride_seconds: float = 1.0,
     limit: int | None = None,
     force: bool = False,
+    resume: bool = False,
 ) -> None:
     """Encode a manifest subset atomically with a frozen encoder."""
 
-    if patch_seconds <= 0 or stride_seconds <= 0:
+    if (patch_seconds is not None and patch_seconds <= 0) or stride_seconds <= 0:
         raise ValueError("patch and stride durations must be positive")
     if isinstance(encoder, nn.Module) and any(
         parameter.requires_grad for parameter in encoder.parameters()
@@ -233,9 +334,9 @@ def build_representation_cache(
         if not force:
             raise FileExistsError(f"representation cache already exists: {output}")
         shutil.rmtree(output)
-    if staging.exists():
+    if staging.exists() and not resume:
         shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    staging.mkdir(parents=True, exist_ok=resume)
     rows: list[dict[str, Any]] = []
     try:
         for entry in entries:
@@ -243,14 +344,42 @@ def build_representation_cache(
             if recording.recording_id != entry.recording_id:
                 raise ValueError("cohort entry no longer matches canonical cache")
             for stream_id in entry.stream_ids:
-                sequence = encoder.encode_recording(
-                    recording,
-                    stream_id=stream_id,
-                    patch_seconds=patch_seconds,
-                    stride_seconds=stride_seconds,
-                )
                 directory = _storage_name(entry.dataset, entry.recording_id, stream_id)
-                write_motion_sequence(sequence, staging / directory)
+                destination = staging / directory
+                if resume and destination.exists():
+                    try:
+                        cached = read_motion_sequence(destination, mmap=False)
+                        identity = (
+                            cached.dataset,
+                            cached.recording_id,
+                            cached.stream_id,
+                        )
+                        expected = (entry.dataset, entry.recording_id, stream_id)
+                        if identity != expected:
+                            raise ValueError(
+                                f"resumed sequence identity {identity!r} != {expected!r}"
+                            )
+                    except Exception:
+                        shutil.rmtree(destination, ignore_errors=True)
+                    else:
+                        rows.append(
+                            {
+                                "dataset": entry.dataset,
+                                "recording_id": entry.recording_id,
+                                "stream_id": stream_id,
+                                "split": entry.split,
+                                "directory": directory,
+                            }
+                        )
+                        continue
+                encode_kwargs = {
+                    "stream_id": stream_id,
+                    "stride_seconds": stride_seconds,
+                }
+                if patch_seconds is not None:
+                    encode_kwargs["patch_seconds"] = patch_seconds
+                sequence = encoder.encode_recording(recording, **encode_kwargs)
+                write_motion_sequence(sequence, destination)
                 rows.append(
                     {
                         "dataset": entry.dataset,
@@ -268,8 +397,16 @@ def build_representation_cache(
             "schema_version": REPRESENTATION_SCHEMA_VERSION,
             "cohort_name": manifest.name,
             "cohort_fingerprint": manifest.fingerprint,
+            "cache_fingerprints": {
+                dataset: manifest.cache_fingerprints[dataset]
+                for dataset in sorted({entry.dataset for entry in entries})
+            },
             "encoder_provenance": _jsonable(encoder_provenance),
-            "patch_seconds": patch_seconds,
+            "patch_seconds": (
+                patch_seconds
+                if patch_seconds is not None
+                else float(getattr(encoder, "window_seconds", 1.0))
+            ),
             "stride_seconds": stride_seconds,
             "datasets": sorted({entry.dataset for entry in entries}),
             "splits": sorted({entry.split for entry in entries}),
@@ -282,5 +419,27 @@ def build_representation_cache(
         )
         staging.rename(output)
     except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
+        if not resume:
+            shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def backfill_cache_fingerprints(root: Path, cohort: CohortManifest) -> dict[str, str]:
+    """Record per-dataset canonical-cache fingerprints on a cache built before
+    they were persisted. Only the cohort the cache was built from can vouch for
+    them, so the cohort fingerprint must match exactly."""
+
+    root = Path(root)
+    metadata_path = root / "cache.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("cohort_fingerprint") != cohort.fingerprint:
+        raise ValueError(f"{root}: cache was not built from cohort {cohort.name!r}")
+    fingerprints = {
+        dataset: cohort.cache_fingerprints[dataset] for dataset in metadata["datasets"]
+    }
+    if metadata.get("cache_fingerprints") != fingerprints:
+        metadata["cache_fingerprints"] = fingerprints
+        metadata_path.write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    return fingerprints

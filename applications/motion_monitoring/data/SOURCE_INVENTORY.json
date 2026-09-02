@@ -194,7 +194,7 @@
     }
   },
   "reuse_existing_without_copy": {
-    "monipar": "Primary Task-2 longitudinal source and Task-1 cross-week evaluation.",
+    "monipar": "Task-1 cross-week evaluation only; excluded from Task 2 because source states are not independent executions.",
     "mmfit": "Reconstruct full workouts for development; set intervals and counts are weaker than exact repetition boundaries.",
     "harmes": "Fifth training/development source; reconstruct event gaps for wrist-ADL development.",
     "opportunity": "Reconstruct full runs and fine gesture annotations for development only.",

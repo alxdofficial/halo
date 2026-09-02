@@ -24,7 +24,9 @@ def binary_auroc(scores: Tensor, targets: Tensor, mask: Tensor | None = None) ->
         return float("nan")
     order = torch.argsort(scores, stable=True)
     sorted_scores = scores[order]
-    ranks = torch.arange(1, len(scores) + 1, dtype=torch.float64)
+    ranks = torch.arange(
+        1, len(scores) + 1, dtype=torch.float64, device=scores.device
+    )
     start = 0
     while start < len(scores):
         end = start + 1
@@ -40,13 +42,15 @@ def binary_auroc(scores: Tensor, targets: Tensor, mask: Tensor | None = None) ->
     )
 
 
-def balanced_accuracy(
+def binary_operating_metrics(
     logits: Tensor,
     targets: Tensor,
     mask: Tensor | None = None,
     *,
     threshold: float = 0.0,
-) -> float:
+) -> dict[str, float]:
+    """Return decisions at a threshold fixed on development subjects."""
+
     logits = torch.as_tensor(logits).flatten()
     targets = torch.as_tensor(targets).bool().flatten()
     valid = (
@@ -59,10 +63,47 @@ def balanced_accuracy(
     positive = truth
     negative = ~truth
     if not bool(positive.any()) or not bool(negative.any()):
-        return float("nan")
+        return {
+            name: float("nan")
+            for name in (
+                "sensitivity",
+                "specificity",
+                "balanced_accuracy",
+                "precision",
+                "f1",
+                "false_positive_rate",
+                "accepted_false_alarm_rate",
+            )
+        }
     sensitivity = (predictions[positive] == truth[positive]).float().mean()
     specificity = (predictions[negative] == truth[negative]).float().mean()
-    return float((sensitivity + specificity) / 2)
+    true_positive = (predictions & truth).sum().float()
+    predicted_positive = predictions.sum().float()
+    precision = true_positive / predicted_positive.clamp_min(1.0)
+    f1 = 2 * precision * sensitivity / (precision + sensitivity).clamp_min(1e-12)
+    return {
+        "sensitivity": float(sensitivity),
+        "specificity": float(specificity),
+        "balanced_accuracy": float((sensitivity + specificity) / 2),
+        "precision": float(precision),
+        "f1": float(f1),
+        "false_positive_rate": float(1.0 - specificity),
+        "accepted_false_alarm_rate": float(1.0 - specificity),
+    }
+
+
+def balanced_accuracy(
+    logits: Tensor,
+    targets: Tensor,
+    mask: Tensor | None = None,
+    *,
+    threshold: float = 0.0,
+) -> float:
+    """Compatibility wrapper for the complete operating-point metrics."""
+
+    return binary_operating_metrics(
+        logits, targets, mask, threshold=threshold
+    )["balanced_accuracy"]
 
 
 @dataclass(frozen=True)

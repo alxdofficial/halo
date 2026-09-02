@@ -34,11 +34,16 @@ from applications.motion_monitoring.task1 import (
     from_motion_sequence as task1_sequence,
     train_step as task1_train_step,
 )
+from applications.motion_monitoring.task1.matcher import best_full_timeline_match
+from applications.motion_monitoring.task1.training import event_detection_metrics
 from applications.motion_monitoring.task2 import (
     BoundedExecution,
     ChangeMetricHead,
-    ExecutionPair,
-    collate_execution_pairs,
+    ExecutionEpisode,
+    binary_auroc,
+    binary_operating_metrics,
+    collate_execution_episodes,
+    direct_change_scores,
     from_motion_sequence as task2_execution,
     initialize_change_threshold,
     train_step as task2_train_step,
@@ -48,9 +53,11 @@ from applications.motion_monitoring.task3 import (
     RecurrentMotionMetric,
     assign_event_targets,
     collate_motion_sequences,
+    direct_cosine_affinity,
     event_batch_from_recordings,
     initialize_affinity_threshold,
     pool_multiscale_candidates,
+    scoped_pair_indices,
 )
 from applications.motion_monitoring.task3.training import train_step as task3_train_step
 
@@ -73,6 +80,24 @@ def _encoder_grad_norm(encoder: torch.nn.Module) -> tuple[float, float]:
     return float(norm), float(finite)
 
 
+def _midpoint_operating_metrics(
+    positive_scores: torch.Tensor, negative_scores: torch.Tensor
+) -> tuple[float, dict[str, float]]:
+    """Calibrate a diagnostic threshold halfway between class medians."""
+
+    threshold = float(
+        0.5 * (positive_scores.detach().median() + negative_scores.detach().median())
+    )
+    scores = torch.cat((positive_scores, negative_scores))
+    targets = torch.cat(
+        (
+            torch.ones_like(positive_scores, dtype=torch.bool),
+            torch.zeros_like(negative_scores, dtype=torch.bool),
+        )
+    )
+    return threshold, binary_operating_metrics(scores, targets, threshold=threshold)
+
+
 def _different_recording_pair(dataset: str, annotation_kind: str):
     return find_event_pair(
         open_cache(dataset),
@@ -82,15 +107,37 @@ def _different_recording_pair(dataset: str, annotation_kind: str):
     )
 
 
-def _same_subject_pair(dataset: str, annotation_kind: str):
-    first_by_key = {}
-    for example in iter_events(open_cache(dataset), annotation_kind=annotation_kind):
-        key = (example.recording.subject_id, example.event.label)
-        prior = first_by_key.get(key)
-        if prior is not None and prior.execution_id != example.execution_id:
-            return prior, example
-        first_by_key[key] = example
-    raise LookupError(f"{dataset} has no within-subject repeated {annotation_kind}")
+def _independent_examples(
+    dataset: str,
+    annotation_kind: str,
+    *,
+    label: str,
+    count: int,
+    same_subject: bool = False,
+):
+    """Select deterministic same-label examples from distinct recordings."""
+
+    selected = []
+    recording_ids: set[str] = set()
+    subject_id: str | None = None
+    for example in iter_events(
+        open_cache(dataset),
+        annotation_kind=annotation_kind,
+        include_labels={label},
+    ):
+        recording_id = example.recording.recording_id
+        if recording_id in recording_ids:
+            continue
+        if same_subject and subject_id is not None and example.recording.subject_id != subject_id:
+            continue
+        selected.append(example)
+        recording_ids.add(recording_id)
+        subject_id = subject_id or example.recording.subject_id
+        if len(selected) == count:
+            return tuple(selected)
+    raise LookupError(
+        f"{dataset} has fewer than {count} independent {annotation_kind} examples for {label!r}"
+    )
 
 
 def _build_encoder(args: argparse.Namespace) -> MotionEncoder:
@@ -111,9 +158,11 @@ def _task1_smoke(
     steps: int,
     train_encoder: bool,
 ) -> dict[str, object]:
-    reference_example, query_example = _different_recording_pair("openpack", "fine_action")
+    reference_example, query_example = _independent_examples(
+        "openpack", "operation", label="Assemble Box", count=2, same_subject=True
+    )
     reference_recording = crop_event(reference_example)
-    query_recording = crop_query_around_event(query_example, duration_sec=30.0)
+    query_recording = crop_query_around_event(query_example, duration_sec=60.0)
 
     def build_batch():
         reference_sequence = encoder.encode_recording(reference_recording)
@@ -137,6 +186,19 @@ def _task1_smoke(
         )
 
     first_batch = build_batch()
+    reference = first_batch.reference[0, first_batch.reference_valid[0]].detach().cpu().numpy()
+    query = first_batch.query[0, first_batch.query_valid[0]].detach().cpu().numpy()
+    intervals = first_batch.query_intervals_sec[
+        0, first_batch.query_valid[0]
+    ].detach().cpu().numpy()
+    direct_match = best_full_timeline_match(reference, query, intervals)
+    direct_metrics = event_detection_metrics(
+        [direct_match],
+        first_batch.targets_sec[0, first_batch.target_valid[0]].detach().cpu(),
+        query_duration_sec=float(intervals[-1, 1] - intervals[0, 0]),
+        score_threshold=float("inf"),
+    )
+    frozen_batch = None if train_encoder else first_batch
     model = DifferentiableSubsequenceMatcher(first_batch.reference.shape[-1]).to(
         first_batch.reference.device
     )
@@ -146,7 +208,7 @@ def _task1_smoke(
     optimizer = torch.optim.AdamW(parameters, lr=2e-3)
     rows = []
     for _ in range(steps):
-        result = task1_train_step(model, build_batch(), optimizer)
+        result = task1_train_step(model, frozen_batch or build_batch(), optimizer)
         encoder_norm, encoder_finite = _encoder_grad_norm(encoder)
         rows.append(
             {
@@ -156,6 +218,20 @@ def _task1_smoke(
                 "encoder_gradient_finite": encoder_finite,
             }
         )
+    learned_matches = model.detect(
+        first_batch.reference[0, first_batch.reference_valid[0]],
+        first_batch.query[0],
+        first_batch.query_intervals_sec[0].detach().cpu().numpy(),
+        score_threshold=float("inf"),
+        query_valid=first_batch.query_valid[0] & first_batch.loss_valid[0],
+        max_detections=1,
+    )
+    learned_event_metrics = event_detection_metrics(
+        learned_matches,
+        first_batch.targets_sec[0, first_batch.target_valid[0]].detach().cpu(),
+        query_duration_sec=float(intervals[-1, 1] - intervals[0, 0]),
+        score_threshold=float("inf"),
+    )
     return {
         "dataset": "openpack",
         "label": reference_example.event.label,
@@ -163,6 +239,17 @@ def _task1_smoke(
         "query_patches": int(first_batch.query_valid.sum()),
         "reference_patches": int(first_batch.reference_valid.sum()),
         "target_count": int(first_batch.target_valid.sum()),
+        "frozen_direct": {
+            "method": "constrained_subsequence_dtw_best_match",
+            "match_score": direct_match.score,
+            **direct_metrics,
+        },
+        "frozen_learned": {
+            "method": "projected_soft_dtw_endpoint_head",
+            "hard_dtw_event_readout": learned_event_metrics,
+            "first": rows[0],
+            "last": rows[-1],
+        },
         "first": rows[0],
         "last": rows[-1],
     }
@@ -174,25 +261,41 @@ def _task2_smoke(
     steps: int,
     train_encoder: bool,
 ) -> dict[str, object]:
-    first, second = _same_subject_pair("crossfit", "repetition")
-    reference_recording = crop_event(first)
-    comparison_recording = crop_event(second)
+    # A mechanical smoke needs a real encoder input but does not define a Task-2
+    # cohort.  Use independently recorded same-label OpenPack actions here;
+    # controlled PHYTMO/KneE-PAD manifests own reportable known-change fitting.
+    examples = _independent_examples(
+        "openpack", "operation", label="Assemble Box", count=4, same_subject=True
+    )
+    reference_examples = examples[:3]
+    comparison_example = examples[3]
+    reference_recordings = tuple(crop_event(item) for item in reference_examples)
+    comparison_recording = crop_event(comparison_example)
 
     def build_batch():
-        reference_sequence = encoder.encode_recording(reference_recording)
+        reference_sequences = tuple(
+            encoder.encode_recording(recording) for recording in reference_recordings
+        )
         comparison_sequence = encoder.encode_recording(comparison_recording)
-        reference = task2_execution(
-            reference_sequence, execution_id=first.execution_id, task_id=first.event.label
+        references = tuple(
+            task2_execution(
+                sequence,
+                execution_id=example.execution_id,
+                task_id=example.event.label,
+            )
+            for sequence, example in zip(
+                reference_sequences, reference_examples, strict=True
+            )
         )
         comparison = task2_execution(
             comparison_sequence,
-            execution_id=second.execution_id,
-            task_id=first.event.label,
+            execution_id=comparison_example.execution_id,
+            task_id=comparison_example.event.label,
         )
-        accepted = ExecutionPair(
-            reference=reference,
-            comparison=comparison,
-            pair_kind="accepted_variation",
+        accepted = ExecutionEpisode(
+            accepted_references=references,
+            query=comparison,
+            episode_kind="accepted_query",
             change_targets=torch.zeros(len(SYNTHETIC_TARGETS)),
             target_mask=torch.ones(len(SYNTHETIC_TARGETS), dtype=torch.bool),
             target_specs=SYNTHETIC_TARGETS,
@@ -215,20 +318,32 @@ def _task2_smoke(
             session_id=comparison.session_id,
             execution_id=f"{comparison.execution_id}/synthetic-change",
             task_id=comparison.task_id,
+            sensor_config=comparison.sensor_config,
         )
-        known_change = ExecutionPair(
-            reference=reference,
-            comparison=changed,
-            pair_kind="known_change",
+        changed_episode = ExecutionEpisode(
+            accepted_references=references,
+            query=changed,
+            episode_kind="changed_query",
             change_targets=torch.tensor([0.2, -0.2, 0.2, 0.1]),
             target_mask=torch.ones(len(SYNTHETIC_TARGETS), dtype=torch.bool),
             target_specs=SYNTHETIC_TARGETS,
         )
-        return collate_execution_pairs([accepted, known_change]).to(
+        return collate_execution_episodes([accepted, changed_episode]).to(
             next(encoder.parameters()).device
         )
 
     first_batch = build_batch()
+    direct = direct_change_scores(first_batch)
+    direct_auroc = binary_auroc(
+        direct.personal_change_scores,
+        first_batch.classification_targets,
+        first_batch.classification_mask,
+    )
+    direct_threshold, direct_operating = _midpoint_operating_metrics(
+        direct.personal_change_scores[first_batch.classification_targets.bool()],
+        direct.personal_change_scores[~first_batch.classification_targets.bool()],
+    )
+    frozen_batch = None if train_encoder else first_batch
     model = ChangeMetricHead(
         embedding_dim=first_batch.reference_embeddings.shape[-1],
         target_dim=len(SYNTHETIC_TARGETS),
@@ -241,7 +356,7 @@ def _task2_smoke(
     optimizer = torch.optim.AdamW(parameters, lr=2e-3)
     rows = []
     for _ in range(steps):
-        result = task2_train_step(model, build_batch(), optimizer)
+        result = task2_train_step(model, frozen_batch or build_batch(), optimizer)
         encoder_norm, encoder_finite = _encoder_grad_norm(encoder)
         rows.append(
             {
@@ -250,10 +365,43 @@ def _task2_smoke(
                 "encoder_gradient_finite": encoder_finite,
             }
         )
+    model.eval()
+    with torch.no_grad():
+        learned_output = model(first_batch)
+        learned_auroc = binary_auroc(
+            learned_output.change_scores,
+            first_batch.classification_targets,
+            first_batch.classification_mask,
+        )
+        learned_operating = binary_operating_metrics(
+            learned_output.change_logits,
+            first_batch.classification_targets,
+            first_batch.classification_mask,
+            threshold=0.0,
+        )
     return {
-        "dataset": "crossfit",
-        "task": first.event.label,
+        "dataset": "openpack",
+        "task": comparison_example.event.label,
         "steps": steps,
+        "frozen_direct": {
+            "method": "phase_cosine_personal_robust_statistics",
+            "auroc": direct_auroc,
+            "diagnostic_threshold": direct_threshold,
+            **direct_operating,
+            "accepted_score": float(direct.personal_change_scores[0]),
+            "changed_score": float(direct.personal_change_scores[1]),
+            "reference_limited_fraction": float(direct.reference_limited.float().mean()),
+        },
+        "frozen_learned": {
+            "method": "set_conditioned_change_head",
+            "auroc": learned_auroc,
+            "diagnostic_threshold": 0.0,
+            **learned_operating,
+            "accepted_score": float(learned_output.change_scores[0]),
+            "changed_score": float(learned_output.change_scores[1]),
+            "first": rows[0],
+            "last": rows[-1],
+        },
         "first": rows[0],
         "last": rows[-1],
     }
@@ -294,6 +442,8 @@ def _task3_smoke(
         return candidates, targets, int(events.event_mask.sum())
 
     initial_candidates, initial_targets, event_count = build_candidates()
+    direct = direct_cosine_affinity(initial_candidates, initial_targets)
+    frozen_candidates = None if train_encoder else (initial_candidates, initial_targets)
     model = RecurrentMotionMetric(
         initial_candidates.embeddings.shape[-1],
         projection_dim=min(32, initial_candidates.embeddings.shape[-1]),
@@ -305,7 +455,10 @@ def _task3_smoke(
     optimizer = torch.optim.AdamW(parameters, lr=2e-3)
     rows = []
     for _ in range(steps):
-        candidates, targets, _ = build_candidates()
+        if frozen_candidates is None:
+            candidates, targets, _ = build_candidates()
+        else:
+            candidates, targets = frozen_candidates
         result = task3_train_step(model, optimizer, candidates, targets)
         encoder_norm, encoder_finite = _encoder_grad_norm(encoder)
         rows.append(
@@ -316,12 +469,56 @@ def _task3_smoke(
                 "encoder_gradient_finite": encoder_finite,
             }
         )
+    positive_pairs, negative_pairs = scoped_pair_indices(
+        initial_candidates, initial_targets
+    )
+    flat_candidates = initial_candidates.embeddings.reshape(
+        -1, initial_candidates.embeddings.shape[-1]
+    )
+    with torch.no_grad():
+        learned_positive = model.pair_logits(
+            flat_candidates[positive_pairs[:, 0]],
+            flat_candidates[positive_pairs[:, 1]],
+        )
+        learned_negative = model.pair_logits(
+            flat_candidates[negative_pairs[:, 0]],
+            flat_candidates[negative_pairs[:, 1]],
+        )
+    direct_threshold, direct_operating = _midpoint_operating_metrics(
+        direct.positive_scores, direct.negative_scores
+    )
+    learned_operating = binary_operating_metrics(
+        torch.cat((learned_positive, learned_negative)),
+        torch.cat(
+            (
+                torch.ones_like(learned_positive, dtype=torch.bool),
+                torch.zeros_like(learned_negative, dtype=torch.bool),
+            )
+        ),
+        threshold=0.0,
+    )
     return {
         "dataset": "openpack",
         "annotation_kind": "fine_action",
         "steps": steps,
         "event_count": event_count,
         "candidate_count": initial_candidates.valid_count,
+        "frozen_direct": {
+            "method": "raw_cosine_candidate_affinity",
+            "pair_auroc": direct.auroc,
+            "pair_auprc": direct.auprc,
+            "diagnostic_threshold": direct_threshold,
+            **direct_operating,
+            "positive_score": float(direct.positive_scores.mean()),
+            "negative_score": float(direct.negative_scores.mean()),
+        },
+        "frozen_learned": {
+            "method": "projected_cosine_affinity_head",
+            "diagnostic_threshold": 0.0,
+            **learned_operating,
+            "first": rows[0],
+            "last": rows[-1],
+        },
         "first": rows[0],
         "last": rows[-1],
     }

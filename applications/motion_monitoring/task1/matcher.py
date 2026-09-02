@@ -6,6 +6,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+try:
+    from numba import njit
+except ImportError:  # pragma: no cover - exercised by minimal installations
+    njit = None
+
 
 @dataclass(frozen=True)
 class TemporalMatch:
@@ -57,7 +62,7 @@ def _validate_inputs(
     return reference / reference_norm, query / query_norm, intervals
 
 
-def _dtw_tables(
+def _dtw_tables_python(
     reference: np.ndarray,
     query: np.ndarray,
     *,
@@ -107,6 +112,76 @@ def _dtw_tables(
     return accumulated, previous, path_lengths
 
 
+if njit is not None:
+
+    @njit(cache=True)
+    def _dtw_tables_compiled(reference, query, warp_penalty):
+        """Compiled equivalent of ``_dtw_tables_python`` for full evaluations."""
+
+        cost = 1.0 - np.clip(reference @ query.T, -1.0, 1.0)
+        n_ref, n_query = cost.shape
+        accumulated = np.full((3, n_ref + 1, n_query + 1), np.inf, dtype=np.float64)
+        previous = np.full((3, n_ref + 1, n_query + 1), -1, dtype=np.int8)
+        path_lengths = np.full((3, n_ref + 1, n_query + 1), -1, dtype=np.int32)
+        accumulated[0, 0, :] = 0.0
+        path_lengths[0, 0, :] = 0
+
+        for i in range(1, n_ref + 1):
+            for j in range(1, n_query + 1):
+                diagonal_state = 0
+                diagonal_value = accumulated[0, i - 1, j - 1]
+                for state in range(1, 3):
+                    value = accumulated[state, i - 1, j - 1]
+                    if value < diagonal_value:
+                        diagonal_state = state
+                        diagonal_value = value
+                previous[0, i, j] = diagonal_state
+                accumulated[0, i, j] = cost[i - 1, j - 1] + diagonal_value
+                path_lengths[0, i, j] = (
+                    path_lengths[diagonal_state, i - 1, j - 1] + 1
+                )
+
+                vertical_state = 0
+                vertical_value = accumulated[0, i - 1, j]
+                if accumulated[2, i - 1, j] < vertical_value:
+                    vertical_state = 2
+                    vertical_value = accumulated[2, i - 1, j]
+                previous[1, i, j] = vertical_state
+                accumulated[1, i, j] = (
+                    cost[i - 1, j - 1] + warp_penalty + vertical_value
+                )
+                path_lengths[1, i, j] = (
+                    path_lengths[vertical_state, i - 1, j] + 1
+                )
+
+                horizontal_state = 0
+                horizontal_value = accumulated[0, i, j - 1]
+                if accumulated[1, i, j - 1] < horizontal_value:
+                    horizontal_state = 1
+                    horizontal_value = accumulated[1, i, j - 1]
+                previous[2, i, j] = horizontal_state
+                accumulated[2, i, j] = (
+                    cost[i - 1, j - 1] + warp_penalty + horizontal_value
+                )
+                path_lengths[2, i, j] = (
+                    path_lengths[horizontal_state, i, j - 1] + 1
+                )
+        return accumulated, previous, path_lengths
+
+
+def _dtw_tables(
+    reference: np.ndarray,
+    query: np.ndarray,
+    *,
+    warp_penalty: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if warp_penalty < 0:
+        raise ValueError("warp penalty must be non-negative")
+    if njit is None:
+        return _dtw_tables_python(reference, query, warp_penalty=warp_penalty)
+    return _dtw_tables_compiled(reference, query, warp_penalty)
+
+
 def _trace_endpoint(
     previous: np.ndarray, *, n_ref: int, end_patch: int, state: int
 ) -> int | None:
@@ -142,6 +217,159 @@ def _interval_iou(left: TemporalMatch, right: TemporalMatch) -> float:
     )
     union = max(left.end_sec, right.end_sec) - min(left.start_sec, right.start_sec)
     return intersection / union if union > 0 else 0.0
+
+
+def _decode_ranked_endpoints_python(
+    ranked_endpoints,
+    endpoint_states,
+    endpoint_scores,
+    previous,
+    path_lengths,
+    intervals,
+    n_ref,
+    nms_iou,
+    max_detections,
+):
+    selected = []
+    for end_offset in ranked_endpoints:
+        end_patch = int(end_offset) + 1
+        state = int(endpoint_states[end_offset])
+        start_patch = _trace_endpoint(
+            previous, n_ref=n_ref, end_patch=end_patch, state=state
+        )
+        if start_patch is None:
+            continue
+        candidate = TemporalMatch(
+            start_patch=start_patch,
+            end_patch=end_patch,
+            start_sec=float(intervals[start_patch, 0]),
+            end_sec=float(intervals[end_patch - 1, 1]),
+            score=float(endpoint_scores[end_offset]),
+            path_length=int(path_lengths[state, n_ref, end_patch]),
+            duration_ratio=(end_patch - start_patch) / n_ref,
+        )
+        if any(_interval_iou(candidate, kept) > nms_iou for kept in selected):
+            continue
+        selected.append(candidate)
+        if max_detections is not None and len(selected) >= max_detections:
+            break
+    return selected
+
+
+if njit is not None:
+
+    @njit(cache=True)
+    def _decode_ranked_endpoints_compiled(
+        ranked_endpoints,
+        endpoint_states,
+        endpoint_scores,
+        previous,
+        path_lengths,
+        intervals,
+        n_ref,
+        nms_iou,
+        max_detections,
+    ):
+        capacity = len(ranked_endpoints)
+        starts = np.empty(capacity, dtype=np.int64)
+        ends = np.empty(capacity, dtype=np.int64)
+        scores = np.empty(capacity, dtype=np.float64)
+        lengths = np.empty(capacity, dtype=np.int64)
+        count = 0
+        for end_offset in ranked_endpoints:
+            end_patch = int(end_offset) + 1
+            state = int(endpoint_states[end_offset])
+            i = n_ref
+            j = end_patch
+            valid_path = True
+            while i > 0:
+                prior_state = int(previous[state, i, j])
+                if prior_state < 0:
+                    valid_path = False
+                    break
+                if state == 0:
+                    i -= 1
+                    j -= 1
+                elif state == 1:
+                    i -= 1
+                else:
+                    j -= 1
+                state = prior_state
+            if not valid_path or j < 0 or end_patch <= j:
+                continue
+
+            start_sec = intervals[j, 0]
+            end_sec = intervals[end_patch - 1, 1]
+            overlaps = False
+            for selected_index in range(count):
+                kept_start = intervals[starts[selected_index], 0]
+                kept_end = intervals[ends[selected_index] - 1, 1]
+                intersection = max(0.0, min(end_sec, kept_end) - max(start_sec, kept_start))
+                union = max(end_sec, kept_end) - min(start_sec, kept_start)
+                iou = intersection / union if union > 0 else 0.0
+                if iou > nms_iou:
+                    overlaps = True
+                    break
+            if overlaps:
+                continue
+            starts[count] = j
+            ends[count] = end_patch
+            scores[count] = endpoint_scores[end_offset]
+            lengths[count] = path_lengths[int(endpoint_states[end_offset]), n_ref, end_patch]
+            count += 1
+            if max_detections > 0 and count >= max_detections:
+                break
+        return starts[:count], ends[:count], scores[:count], lengths[:count]
+
+
+def _decode_ranked_endpoints(
+    ranked_endpoints,
+    endpoint_states,
+    endpoint_scores,
+    previous,
+    path_lengths,
+    intervals,
+    n_ref,
+    nms_iou,
+    max_detections,
+):
+    if njit is None:
+        return _decode_ranked_endpoints_python(
+            ranked_endpoints,
+            endpoint_states,
+            endpoint_scores,
+            previous,
+            path_lengths,
+            intervals,
+            n_ref,
+            nms_iou,
+            max_detections,
+        )
+    starts, ends, scores, lengths = _decode_ranked_endpoints_compiled(
+        ranked_endpoints,
+        endpoint_states,
+        endpoint_scores,
+        previous,
+        path_lengths,
+        intervals,
+        n_ref,
+        nms_iou,
+        -1 if max_detections is None else max_detections,
+    )
+    return [
+        TemporalMatch(
+            start_patch=int(start),
+            end_patch=int(end),
+            start_sec=float(intervals[start, 0]),
+            end_sec=float(intervals[end - 1, 1]),
+            score=float(score),
+            path_length=int(length),
+            duration_ratio=(int(end) - int(start)) / n_ref,
+        )
+        for start, end, score, length in zip(
+            starts, ends, scores, lengths, strict=True
+        )
+    ]
 
 
 def full_timeline_matches(
@@ -182,29 +410,17 @@ def full_timeline_matches(
     eligible = np.flatnonzero(endpoint_scores <= score_threshold)
     ranked_endpoints = eligible[np.argsort(endpoint_scores[eligible], kind="stable")]
 
-    selected: list[TemporalMatch] = []
-    for end_offset in ranked_endpoints:
-        end_patch = int(end_offset) + 1
-        state = int(endpoint_states[end_offset])
-        start_patch = _trace_endpoint(
-            previous, n_ref=len(reference), end_patch=end_patch, state=state
-        )
-        if start_patch is None:
-            continue
-        candidate = TemporalMatch(
-            start_patch=start_patch,
-            end_patch=end_patch,
-            start_sec=float(intervals[start_patch, 0]),
-            end_sec=float(intervals[end_patch - 1, 1]),
-            score=float(endpoint_scores[end_offset]),
-            path_length=int(path_lengths[state, len(reference), end_patch]),
-            duration_ratio=(end_patch - start_patch) / len(reference),
-        )
-        if any(_interval_iou(candidate, kept) > nms_iou for kept in selected):
-            continue
-        selected.append(candidate)
-        if max_detections is not None and len(selected) >= max_detections:
-            break
+    selected = _decode_ranked_endpoints(
+        ranked_endpoints,
+        endpoint_states,
+        endpoint_scores,
+        previous,
+        path_lengths,
+        intervals,
+        len(reference),
+        nms_iou,
+        max_detections,
+    )
     return sorted(selected, key=lambda item: item.start_sec)
 
 

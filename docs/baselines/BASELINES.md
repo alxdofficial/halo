@@ -63,6 +63,14 @@ Use two execution tiers:
 - **Final frozen benchmark:** add NormWear, encode each recording once, and cache timestamped
   embeddings for reuse by Tasks 1-3.
 
+The shared application adapter is implemented in
+`applications/motion_monitoring/baseline_encoder.py`. It slides each released model at a one-second
+stride while preserving its native receptive field: HARNet 5 s, UniMTS 10 s, and NormWear 6 s.
+The application task heads receive only timestamped unit-normalized representations; native HAR
+classifiers and label text do not enter Tasks 1-3. Real-data smokes cover all three task heads and
+MoniPar, ALAMEDA, and bilateral COPS streams. This establishes input compatibility only, not model
+quality.
+
 The primary study compares frozen representations. Do not fine-tune every foundation model merely
 to make the table larger. If a task-specific learned arm is justified, fit the same small head to
 each frozen representation. Any end-to-end encoder fine-tuning is a separate experiment with its

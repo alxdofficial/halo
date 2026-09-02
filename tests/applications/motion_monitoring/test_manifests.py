@@ -134,3 +134,84 @@ def test_manifest_round_trip_and_cache_drift_detection(tmp_path):
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="fingerprint mismatch"):
         read_cohort_manifest(path)
+
+
+def test_extended_roles_split_only_where_declared_and_round_trip(tmp_path):
+    synthetic = _cache(
+        tmp_path,
+        "synthetic_source",
+        (_recording("synthetic_source", "bg:1", 1), _recording("synthetic_source", "bg:2", 2)),
+    )
+    dev_only = _cache(tmp_path, "dev_source", (_recording("dev_source", "d1", 1),))
+    split_eval = _cache(
+        tmp_path,
+        "split_source",
+        tuple(_recording("split_source", f"p{index}", index) for index in range(1, 9)),
+    )
+    test = _cache(tmp_path, "test_source", (_recording("test_source", "e1", 1),))
+    caches = {
+        "synthetic_source": synthetic,
+        "dev_source": dev_only,
+        "split_source": split_eval,
+        "test_source": test,
+    }
+    manifest = build_cohort_manifest(
+        caches,
+        name="roles",
+        train_only_datasets=("synthetic_source",),
+        development_only_datasets=("dev_source",),
+        split_evaluation_datasets=("split_source",),
+        evaluation_datasets=("test_source",),
+        evaluation_development_fraction=0.25,
+    )
+    splits = {
+        dataset: {entry.split for entry in manifest.entries_for(dataset=dataset)}
+        for dataset in caches
+    }
+    assert splits["synthetic_source"] == {"train"}
+    assert splits["dev_source"] == {"development"}
+    assert splits["test_source"] == {"test"}
+    assert splits["split_source"] == {"development", "test"}
+    split_dev = [
+        entry.leakage_group
+        for entry in manifest.entries_for(dataset="split_source")
+        if entry.split == "development"
+    ]
+    assert len(set(split_dev)) == 2
+    assert manifest.roles == {
+        "dev_source": "development_only",
+        "split_source": "split_evaluation",
+        "synthetic_source": "train_only",
+        "test_source": "evaluation",
+    }
+
+    path = tmp_path / "roles.json"
+    write_cohort_manifest(manifest, path)
+    loaded = read_cohort_manifest(path)
+    assert loaded == manifest
+    validate_manifest_caches(loaded, caches)
+
+    # Roles are fingerprinted: a role edit is a different cohort.
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["roles"]["dev_source"] = "train_only"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        read_cohort_manifest(path)
+
+    # Every declared dataset must have a loaded cache and vice versa.
+    with pytest.raises(ValueError):
+        build_cohort_manifest(
+            caches, name="bad", train_only_datasets=("synthetic_source",)
+        )
+
+    # Two-role cohorts keep their original (unextended) fingerprint payload.
+    legacy = build_cohort_manifest(
+        {"synthetic_source": synthetic, "test_source": test},
+        name="legacy",
+        training_datasets=("synthetic_source",),
+        evaluation_datasets=("test_source",),
+    )
+    assert legacy.roles == {}
+    assert "roles" not in json.loads(
+        json.dumps(legacy, default=lambda value: getattr(value, "__dict__", str(value)))
+    ) or legacy.roles == {}

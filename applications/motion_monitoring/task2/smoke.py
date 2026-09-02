@@ -13,9 +13,9 @@ from torch.utils.data import DataLoader
 from .contracts import (
     BoundedExecution,
     ChangeTargetSpec,
-    ExecutionPair,
-    ExecutionPairDataset,
-    collate_execution_pairs,
+    ExecutionEpisode,
+    ExecutionEpisodeDataset,
+    collate_execution_episodes,
 )
 from .losses import ChangeLossConfig, change_quantification_loss
 from .metrics import balanced_accuracy, binary_auroc, masked_regression_metrics
@@ -60,6 +60,7 @@ def _execution(
     subject: int,
     execution: str,
     duration: float,
+    task: str = "repeated_reach",
 ) -> BoundedExecution:
     count = len(values)
     edges = torch.linspace(0.0, duration, count + 1)
@@ -72,36 +73,55 @@ def _execution(
         subject_id=f"subject_{subject}",
         session_id=f"session_{execution}",
         execution_id=f"subject_{subject}_{execution}",
-        task_id="repeated_reach",
+        task_id=task,
     )
 
 
-def make_synthetic_pairs(
+def make_synthetic_episodes(
     *,
     subjects: int = 16,
     embedding_dim: int = 12,
     seed: int = 7,
-) -> list[ExecutionPair]:
-    """Create independent repetitions with nuisance-only and known-change pairs."""
+) -> list[ExecutionEpisode]:
+    """Create personal reference sets with accepted and known-change queries."""
 
     if subjects < 2 or embedding_dim < 4:
         raise ValueError(
             "synthetic smoke requires at least two subjects and four features"
         )
     generator = torch.Generator().manual_seed(seed)
-    pairs: list[ExecutionPair] = []
+    episodes: list[ExecutionEpisode] = []
     for subject in range(subjects):
         length = 10 + subject % 5
         subject_offset = 0.05 * torch.randn(embedding_dim, generator=generator)
-        reference_values = _trajectory(length, embedding_dim) + subject_offset
-        reference_values += 0.015 * torch.randn(
-            reference_values.shape, generator=generator
-        )
-        reference = _execution(
-            reference_values,
-            subject=subject,
-            execution="reference",
-            duration=4.0 + 0.1 * (subject % 3),
+        references = []
+        for reference_index in range(3):
+            reference_values = _trajectory(
+                length + reference_index % 2,
+                embedding_dim,
+                0.002 * reference_index,
+            ) + subject_offset
+            reference_values += 0.015 * torch.randn(
+                reference_values.shape, generator=generator
+            )
+            references.append(
+                _execution(
+                    reference_values,
+                    subject=subject,
+                    execution=f"reference_{reference_index}",
+                    duration=4.0 + 0.05 * reference_index + 0.1 * (subject % 3),
+                )
+            )
+        references = tuple(references)
+        context_values = _trajectory(length, embedding_dim, 0.2) + subject_offset
+        context = (
+            _execution(
+                context_values,
+                subject=subject,
+                execution="context_other_task",
+                duration=3.7,
+                task="other_task",
+            ),
         )
 
         accepted_values = _trajectory(length + (subject % 2), embedding_dim, 0.005)
@@ -115,14 +135,15 @@ def make_synthetic_pairs(
             execution="accepted",
             duration=4.05 + 0.1 * (subject % 3),
         )
-        pairs.append(
-            ExecutionPair(
-                reference=reference,
-                comparison=accepted,
-                pair_kind="accepted_variation",
+        episodes.append(
+            ExecutionEpisode(
+                accepted_references=references,
+                query=accepted,
+                episode_kind="accepted_query",
                 change_targets=torch.tensor([0.01, 0.01, -0.01, 0.0]),
                 target_mask=torch.ones(4, dtype=torch.bool),
                 target_specs=SYNTHETIC_TARGETS,
+                personal_context=context,
             )
         )
 
@@ -138,24 +159,25 @@ def make_synthetic_pairs(
             execution="changed",
             duration=5.0 + 0.1 * (subject % 3),
         )
-        pairs.append(
-            ExecutionPair(
-                reference=reference,
-                comparison=changed,
-                pair_kind="known_change",
+        episodes.append(
+            ExecutionEpisode(
+                accepted_references=references,
+                query=changed,
+                episode_kind="changed_query",
                 change_targets=torch.tensor([0.22, -0.28, 0.24, 0.18]),
                 target_mask=torch.tensor([True, True, subject % 4 != 0, True]),
                 target_specs=SYNTHETIC_TARGETS,
+                personal_context=context,
             )
         )
-    return pairs
+    return episodes
 
 
 @torch.no_grad()
 def _evaluate(
-    model: ChangeMetricHead, pairs: Sequence[ExecutionPair]
+    model: ChangeMetricHead, episodes: Sequence[ExecutionEpisode]
 ) -> dict[str, object]:
-    batch = collate_execution_pairs(pairs)
+    batch = collate_execution_episodes(episodes)
     model.eval()
     output = model(batch)
     loss = change_quantification_loss(output, batch)
@@ -192,18 +214,18 @@ def run_synthetic_smoke(
     if steps <= 0 or batch_size <= 1:
         raise ValueError("steps must be positive and batch size must exceed one")
     torch.manual_seed(seed)
-    pairs = make_synthetic_pairs(embedding_dim=embedding_dim, seed=seed)
-    train_pairs = [
-        pair for pair in pairs if int(pair.reference.subject_id.split("_")[-1]) < 12
+    episodes = make_synthetic_episodes(embedding_dim=embedding_dim, seed=seed)
+    train_episodes = [
+        item for item in episodes if int(item.query.subject_id.split("_")[-1]) < 12
     ]
-    validation_pairs = [
-        pair for pair in pairs if int(pair.reference.subject_id.split("_")[-1]) >= 12
+    validation_episodes = [
+        item for item in episodes if int(item.query.subject_id.split("_")[-1]) >= 12
     ]
     loader = DataLoader(
-        ExecutionPairDataset(train_pairs),
+        ExecutionEpisodeDataset(train_episodes),
         batch_size=batch_size,
         shuffle=True,
-        collate_fn=collate_execution_pairs,
+        collate_fn=collate_execution_episodes,
         generator=torch.Generator().manual_seed(seed),
     )
     model = ChangeMetricHead(
@@ -211,8 +233,10 @@ def run_synthetic_smoke(
         target_dim=len(SYNTHETIC_TARGETS),
         phase_bins=8,
     ).to(device)
-    initialize_change_threshold(model, collate_execution_pairs(train_pairs).to(device))
-    initial_loss = float(_evaluate(model.cpu(), train_pairs)["loss"])
+    initialize_change_threshold(
+        model, collate_execution_episodes(train_episodes).to(device)
+    )
+    initial_loss = float(_evaluate(model.cpu(), train_episodes)["loss"])
     model.to(device)
     initial_parameters = {
         name: value.detach().clone() for name, value in model.named_parameters()
@@ -236,8 +260,8 @@ def run_synthetic_smoke(
                 grad_clip=5.0,
             )
         )
-    evaluation = _evaluate(model.cpu(), validation_pairs)
-    final_loss = float(_evaluate(model, train_pairs)["loss"])
+    evaluation = _evaluate(model.cpu(), validation_episodes)
+    final_loss = float(_evaluate(model, train_episodes)["loss"])
     active_gradients = [
         value
         for step_telemetry in telemetry

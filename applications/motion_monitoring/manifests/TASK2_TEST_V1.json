@@ -1,0 +1,27 @@
+{
+  "cohort_fingerprint": "abee73424ac253bf61db8c25c23966ba0b01cb8ae843b117d2a8ff19d28ee244",
+  "exclusions": [
+    {
+      "dataset": "alameda",
+      "reason": "free-living days have clinical linkage but no bounded task executions"
+    },
+    {
+      "dataset": "cops",
+      "reason": "hourly symptom states have no bounded task executions"
+    },
+    {
+      "dataset": "cohort_v1_test",
+      "reason": "C-MHAD, WEAR, and OCA do not label accepted versus changed executions"
+    }
+  ],
+  "fingerprint": "4c72ac9dc0ab25bceee8efd45b05559b5d1ae995d263a7a3e073fd58833e59e9",
+  "name": "task2_test_v1_blocked",
+  "protocol": {
+    "required_unit": "same-person, same-task bounded executions with accepted/change truth",
+    "status": "blocked"
+  },
+  "schema_version": 2,
+  "seed": 20260831,
+  "task": "task2",
+  "units": []
+}

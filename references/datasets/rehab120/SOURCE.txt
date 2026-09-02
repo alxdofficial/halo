@@ -1,0 +1,5 @@
+Publication: https://doi.org/10.1038/s41597-026-07802-2
+Dataset: https://doi.org/10.57760/sciencedb.37018
+Code: https://github.com/zzzzz-123/REHAB
+
+Retrieved 2026-08-31. The ScienceDB V1 ZIP is 515,125,864 bytes compressed and declares CC BY 4.0.

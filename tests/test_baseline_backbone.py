@@ -182,7 +182,10 @@ def test_gravity_removed_acceleration_is_explicitly_incompatible(harnet):
 
 
 def test_unimts_placement_mapping_uses_the_stream_key():
-    assert _stream_joint("xrf_v2/left_wrist") == 21
+    assert _stream_joint("xrf_v2/left_wrist") == 17
+    assert _stream_joint("c_mhad/right_wrist") == 21
+    assert _stream_joint("oca/imu0_right upper arm") == 19
+    assert _stream_joint("oca/imu2_left upper arm") == 15
     assert _stream_joint("xrf_v2/right_pocket") == 5
     assert _stream_joint("nfi_fared/lower_back") == 9
     assert _stream_joint("unknown/device") == 0

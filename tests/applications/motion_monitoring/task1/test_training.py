@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import torch
 
 from applications.motion_monitoring.task1 import (
@@ -10,6 +11,7 @@ from applications.motion_monitoring.task1 import (
     train_step,
 )
 from applications.motion_monitoring.task1.matcher import TemporalMatch
+from applications.motion_monitoring.task1.train_full import _event_prefix
 
 
 def test_synthetic_episodes_are_deterministic_and_include_absent_examples():
@@ -66,6 +68,10 @@ def test_event_metrics_score_boundaries_and_target_absent_false_alarms():
         [match], torch.tensor([[2.0, 5.0]]), query_duration_sec=120.0
     )
     assert metrics["event_f1"] == 1.0
+    assert metrics["matched_event_count"] == 1.0
+    assert metrics["event_average_precision"] == 1.0
+    assert metrics["event_recall_at_operating_point"] == 1.0
+    assert metrics["mean_absolute_count_error"] == 0.0
     assert metrics["mean_onset_error_sec"] == 0.0
     assert metrics["false_alarms_per_hour"] == 0.0
 
@@ -73,4 +79,39 @@ def test_event_metrics_score_boundaries_and_target_absent_false_alarms():
         [match], torch.empty(0, 2), query_duration_sec=120.0
     )
     assert absent["event_f1"] == 0.0
+    assert absent["event_average_precision"] == 0.0
     assert absent["false_alarms_per_hour"] == 30.0
+
+
+def test_calibration_prefix_matches_event_metric_at_every_threshold():
+    matches = [
+        TemporalMatch(0, 2, 0.0, 2.0, 0.1, 2, 1.0),
+        TemporalMatch(1, 3, 1.0, 3.0, 0.2, 2, 1.0),
+        TemporalMatch(5, 7, 5.0, 7.0, 0.3, 2, 1.0),
+        TemporalMatch(8, 10, 8.0, 10.0, 0.4, 2, 1.0),
+    ]
+    targets = torch.tensor([[0.0, 2.0], [5.0, 7.0]])
+    scores, cumulative, target_count = _event_prefix(
+        matches, targets, iou_threshold=0.5
+    )
+
+    for threshold in (np.nextafter(0.1, -np.inf), 0.1, 0.2, 0.3, 0.4):
+        detection_count = int(np.searchsorted(scores, threshold, side="right"))
+        true_positive = int(cumulative[detection_count - 1]) if detection_count else 0
+        fast = (
+            true_positive,
+            detection_count - true_positive,
+            target_count - true_positive,
+        )
+        exact = event_detection_metrics(
+            matches,
+            targets,
+            query_duration_sec=10.0,
+            iou_threshold=0.5,
+            score_threshold=threshold,
+        )
+        assert fast == (
+            int(exact["true_positive_count"]),
+            int(exact["false_positive_count"]),
+            int(exact["false_negative_count"]),
+        )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
@@ -102,6 +104,21 @@ def test_task3_event_ids_are_scope_local_and_background_is_not_an_identity() -> 
     assert events.scope_id[:, :2].tolist() == [[0, 0], [1, 1]]
     assert len(set(events.instance_id[events.event_mask].tolist())) == 4
     assert events.exhaustive.tolist() == [True, False]
+
+
+def test_task3_scopes_do_not_merge_cross_placement_events() -> None:
+    recording = _recording("dataset_a", "first")
+    wrist = _sequence(recording, length=4)
+    ankle = replace(wrist, stream_id="ankle", placement="ankle")
+    events = event_batch_from_recordings(
+        (recording, recording),
+        (wrist, ankle),
+        annotation_kind="action",
+        background_labels=frozenset({"idle"}),
+    )
+
+    assert events.scope_id[0, 0] != events.scope_id[1, 0]
+    assert events.instance_id[0, :2].tolist() == events.instance_id[1, :2].tolist()
 
 
 def test_exhaustive_task3_supervision_rejects_crop_clipped_events() -> None:

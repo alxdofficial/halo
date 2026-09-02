@@ -49,6 +49,23 @@ def cache_provenance(dataset: str) -> dict[str, Any]:
         raise KeyError(
             f"no registered adapter for cache dataset {dataset!r}"
         ) from error
+    module_path = Path(import_module(spec.module).__file__).resolve()
+    contracts_path = Path(__file__).with_name("contracts.py")
+    if spec.cache_policy == "derived":
+        # A synthesized dataset is exactly reproducible from its generator code
+        # and the canonical caches it reads, so those replace the payload tree.
+        return {
+            "schema_version": CACHE_PROVENANCE_VERSION,
+            "source_caches": {
+                name: validate_cache_metadata(
+                    _DATA_ROOT / "sources" / name / "processed" / "canonical_v1"
+                )["provenance"]
+                for name in spec.derived_from
+            },
+            "adapter_module": spec.module,
+            "adapter_sha256": _sha256_file(module_path),
+            "contracts_sha256": _sha256_file(contracts_path),
+        }
     checksums = json.loads(_PAYLOAD_CHECKSUMS_PATH.read_text(encoding="utf-8"))
     try:
         payload = checksums["datasets"][dataset]
@@ -56,8 +73,6 @@ def cache_provenance(dataset: str) -> dict[str, Any]:
         raise KeyError(
             f"no frozen source payload for cache dataset {dataset!r}"
         ) from error
-    module_path = Path(import_module(spec.module).__file__).resolve()
-    contracts_path = Path(__file__).with_name("contracts.py")
     return {
         "schema_version": CACHE_PROVENANCE_VERSION,
         "payload_tree_sha256": payload["tree_sha256"],
@@ -70,6 +85,14 @@ def cache_provenance(dataset: str) -> dict[str, Any]:
 def verify_source_payload(dataset: str) -> None:
     """Verify every source file before assigning frozen provenance to a cache."""
 
+    from applications.motion_monitoring.data.adapters.registry import ADAPTERS
+
+    spec = ADAPTERS.get(dataset)
+    if spec is not None and spec.cache_policy == "derived":
+        # Derived datasets read canonical caches; ``cache_provenance`` already
+        # rejects a stale or missing source cache.
+        cache_provenance(dataset)
+        return
     checksums = json.loads(_PAYLOAD_CHECKSUMS_PATH.read_text(encoding="utf-8"))
     try:
         rows = checksums["datasets"][dataset]["files"]

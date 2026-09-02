@@ -48,10 +48,53 @@ Different upstream corpora are part of the released model. This comparison ident
 application component; it does not by itself attribute a gain to architecture. Report checkpoint,
 model size, accepted sensors, temporal granularity, latency, memory, and energy where measurable.
 
+### 2.1 Frozen-representation utility gate
+
+Before any end-to-end application training, run one paired experiment for every primary encoder.
+The experiment asks two separate questions:
+
+1. how much task-relevant information is already exposed by the frozen representation; and
+2. how much a small, identically specified task head can recover without changing the encoder.
+
+Both arms must consume the same immutable episode manifest, encoder cache, train/development/test
+split, masks, candidates, and task metric. Only the mechanism after the frozen representation may
+change. Thresholds, measurement floors, covariance regularization, early stopping, and all learned
+parameters are selected using training and development subjects only. The test split is evaluated
+once after the operating point is frozen.
+
+| task | frozen non-learned arm | frozen learned arm |
+|---|---|---|
+| Task 1 | normalized cosine cost with constrained subsequence DTW and development-calibrated event threshold | the same alignment geometry after the shared small projection and score calibration |
+| Task 2 | cosine phase residuals summarized by the robust personal center, MAD scale, and shrinkage covariance | the shared set-conditioned metric head, trained against accepted and known-change executions |
+| Task 3 | cosine or matrix-profile recurrence on the same multiscale candidates, followed by the same temporal consolidation | the shared projected affinity and calibration head, trained from same/different event identities |
+
+The non-learned arm is not allowed to fit a neural projection. Fitting a scalar decision threshold on
+development data is permitted because each deployed method needs an operating point. Task 2 may fit
+personal robust statistics from that person's accepted enrollment executions; this is deployment
+adaptation, not global task-head training. The learned arm receives exactly the same enrollment
+evidence.
+
+Persist one result row per `(task, dataset, encoder, arm, split, protocol_fingerprint)`. In addition
+to task quality, record trainable parameter count, fitting time, inference time per recording hour,
+peak memory, and the number of independent subjects, recordings, references, queries, and events.
+Aggregate tables may show paired learned-minus-direct deltas, but must retain per-dataset results and
+subject-level confidence intervals.
+
+This gate determines the next experiment:
+
+- if the direct arm is strong and the learned arm improves it on development and held-out subjects,
+  proceed to the matched frozen comparison and then the HALO end-to-end arm;
+- if the direct arm is strong but the learned arm degrades it, debug or simplify the task head before
+  any encoder fine-tuning;
+- if both arms are weak, treat the representation or task formulation as the limiting factor rather
+  than spending a full run on the head; and
+- never promote a learned arm solely because it improves training loss.
+
 ## 3. Task 1: arbitrary task detection
 
 Task 1 enrolls independent executions, searches later continuous recordings, and reports event
-average precision, false alarms per hour, boundary error, and count error. The complete cohort,
+precision, recall, F1, false alarms per hour, boundary error, and count error at a development-fixed
+operating point. Event average precision remains a secondary threshold-free diagnostic. The complete cohort,
 episode, complete-timeline decoding, and metric protocol is owned by
 [`TASK1_ARBITRARY_DETECTION.md`](../tasks/TASK1_ARBITRARY_DETECTION.md). Window accuracy is not a
 primary metric because background dominates continuous recordings.
@@ -76,7 +119,9 @@ Evaluate three properties separately.
 
 ### Known execution differences
 
-- AUROC and effect size for correct versus independently recorded incorrect variants;
+- sensitivity to known changes, specificity on accepted executions, balanced accuracy, and effect
+  size at a development-fixed threshold;
+- the accepted-execution false-alarm rate, reported directly rather than inferred from specificity;
 - ordinal association with clinician severity or quality scores;
 - sensitivity to controlled changes in speed, range, and amplitude; and
 - phase localization agreement when a deviation interval is annotated.
@@ -102,15 +147,18 @@ separately.
 
 ### Metrics
 
-- event-level precision and recall for repeated ground-truth actions;
-- same-motion pair AUROC and AUPRC before clustering;
+- event-level precision, recall, and F1 for repeated ground-truth actions;
 - occurrence-count error;
 - motif coverage: fraction of genuinely repeated events assigned to a coherent cluster;
-- cluster purity and fragmentation, reported together rather than purity alone;
+- cluster purity and mean fragments per true motif, reported together rather than purity alone;
 - false motif rate on target-absent or low-structure intervals;
 - boundary error and stability under small duration/stride changes;
 - recurrence ranking quality for the top motifs shown to a reviewer; and
 - computational cost per hour of recording.
+
+Pair AUROC and AUPRC remain secondary diagnostics for the affinity model. They do not replace the
+complete discovery metrics because a useful system must localize, consolidate, and cluster actual
+occurrences at a declared operating point.
 
 Report unseen-subject/known-identity, unseen-subject/held-out-identity, and unseen-dataset conditions
 separately. Cross-dataset pairs are not assigned negative targets merely because annotation
@@ -140,14 +188,12 @@ The core public evaluation matrix is intentionally small:
 |---|---|---|
 | **C-MHAD** | sealed Task-1 demonstrated-action detection | Task-3 event recurrence and wrist-versus-waist control |
 | **WEAR** | long continuous Task-1 false-alarm validation | coarse Task-3 activity-bout control |
-| **MoniPar** | longitudinal Task-2 change quantification | natural cross-week Task-1 condition |
 | **OCA** | occupational Task-3 recurrent-motion discovery | occupational Task-1 transfer |
 
-This is one shared four-dataset study, not four unrelated benchmark collections. C-MHAD, WEAR, and
-OCA remain non-reportable until task-specific episode manifests and operating points are frozen;
-their recording membership is fixed in `COHORT_V1`, and their loaders and physical contracts are
-implemented and verified. UniMTS/OCA is additionally unsupported until
-upper-arm placement is mapped explicitly to the released skeleton contract.
+This is one shared three-dataset test study, not three unrelated benchmark collections. Their
+recording membership is fixed in `COHORT_V1`; signed train, development, and test task manifests
+freeze the exact evaluation units. MoniPar is excluded because its available conversion does not
+provide sufficiently reliable event boundaries for these tasks.
 
 OpenPack is the priority Task-3 metric-training and held-out-identity source. Its import and
 provenance checks are complete; it enters a result only after the exact identity manifest is frozen,
@@ -175,3 +221,9 @@ The exact temporal annotation contract of every source is recorded in
 - Publish target prevalence and recording hours so false-alarm rates are interpretable.
 - Store generated tables and figures under a versioned application result directory and summarize
   only the promoted protocol in `docs/results/RESULTS.md`.
+
+One operating threshold is selected per encoder/readout on the four development sources and then
+held fixed for C-MHAD, WEAR, and OCA. Selecting a threshold from each test dataset is prohibited.
+Complete evaluation means every unit in the signed manifest, not a bounded smoke fixture. Task 3
+uses exact blockwise top-k cosine search to retain complete long recordings without allocating a
+dense candidate-by-candidate matrix.

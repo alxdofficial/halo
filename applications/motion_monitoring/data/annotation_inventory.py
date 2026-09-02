@@ -134,12 +134,15 @@ SOURCE_CONTRACTS: dict[str, dict[str, Any]] = {
         "current_data_form": "continuous weekly protocol timeline",
         "continuous_timeline": True,
         "exact_instance_intervals": False,
-        "instance_granularity": ["exercise_block"],
-        "repeated_instances_in_timeline": True,
+        "instance_granularity": ["protocol_state_run"],
+        "repeated_instances_in_timeline": False,
         "background_contract": "protocol transitions, not free-living exhaustive background",
         "known_execution_change": True,
         "video_reference": "neurologist-reviewed clinical protocol; severity adapter remains open",
-        "recommended_use": "Task 2 longitudinal association after severity alignment audit",
+        "recommended_use": (
+            "Task 2 longitudinal association after severity alignment and active-state "
+            "aggregation audits"
+        ),
     },
     "phytmo": {
         "study_role": "task2_development",
@@ -285,7 +288,7 @@ def build_inventory() -> dict[str, Any]:
         },
         "primary_natural_event_sources": ["c_mhad", "openpack", "oca", "xrf_v2"],
         "primary_isolated_instance_source": ["crossfit"],
-        "primary_task2_change_sources": ["monipar", "phytmo", "kneepad"],
+        "primary_task2_change_sources": ["phytmo", "kneepad"],
         "datasets": datasets,
     }
 

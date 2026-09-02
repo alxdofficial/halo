@@ -217,6 +217,9 @@ def clustering_metrics(
         if pair_precision + pair_recall
         else 0.0
     )
+    fragments = []
+    for identity in torch.unique(target):
+        fragments.append(float(torch.unique(predicted[target == identity]).numel()))
     return {
         "cluster/bcubed_precision": bc_precision,
         "cluster/bcubed_recall": bc_recall,
@@ -224,6 +227,7 @@ def clustering_metrics(
         "cluster/pair_precision": pair_precision,
         "cluster/pair_recall": pair_recall,
         "cluster/pair_f1": pair_f1,
+        "cluster/mean_fragments_per_true_motif": sum(fragments) / len(fragments),
     }
 
 

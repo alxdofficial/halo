@@ -8,6 +8,8 @@
 **Implementation status, 2026-08-31.** Native-time cache episodes, independent reference/query
 construction, join guards, target-absent episodes, bounded open-begin/open-end soft-DTW, endpoint
 training, temporal suppression, and encoder/head gradient telemetry are mechanically implemented.
+Cached pair preflight now rejects changes in device family, placement, canonical channel set, or
+gravity convention.
 Short real-cache smokes pass. The recording cohort and frozen HALO representation-cache format are
 implemented; task-specific episode manifests, threshold calibration, long training, and sealed
 evaluation remain deliberately outstanding.
@@ -102,6 +104,12 @@ A query should come from one physical recording whenever possible. If several re
 joined, all parts must have compatible modality, placement, channel semantics, gravity state, and
 sampling clock. Artificial joins receive a guard interval that cannot be a target or contribute to
 the loss. A discontinuity must never become a shortcut for detecting an insertion.
+
+Compatibility is evaluated before encoding. HALO receives one truthful acquisition description for
+the whole stream; it must never receive a description switch at an insertion boundary or background
+metadata that falsely describes an incompatible inserted signal. Released encoders do not consume
+the text, but they are subject to the same pairing rule because a configuration discontinuity is
+still a signal-level shortcut.
 
 ### 3.3 Distractors
 
@@ -254,10 +262,11 @@ test, not the primary detection benchmark.
 
 ## 9. Metrics and required controls
 
-Primary metrics are event average precision and recall at a predeclared false-alarms-per-hour
-operating point. Also report event F1, onset/offset error, temporal IoU, count error, target-absent
-false alarms, and recall versus query/reference duration ratio. Uncertainty is computed over subjects,
-not windows.
+Primary metrics are event precision, recall, and F1 at a threshold fixed on development subjects,
+together with false alarms per recording hour. Also report onset/offset error in seconds, temporal
+IoU, count error, target-absent false alarms, and recall versus query/reference duration ratio. Event
+average precision remains a secondary threshold-free diagnostic. Uncertainty is computed over
+subjects, not windows.
 
 Required controls are raw-signal DTW, engineered physical features with the same matcher, and every
 frozen encoder with the same complete-timeline matcher. Source event boundaries score localization;

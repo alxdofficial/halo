@@ -17,7 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 eda = ["matplotlib", "torch"]
-application = ["pyarrow"]
+application = ["pyarrow", "numba>=0.62,<0.63"]
 task0 = ["pyarrow", "ruptures>=1.1.10,<2", "matplotlib>=3.8,<4"]
 # Full training/eval stack: encoder text prototypes (sentence-transformers) + probes (scikit-learn).
 model = ["torch", "torchaudio", "sentence-transformers", "scikit-learn"]

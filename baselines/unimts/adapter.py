@@ -59,8 +59,18 @@ GRAVITY_INCOMPATIBLE = frozenset({"kuhar"})
 #   0 = pelvis/root, 5 = R-hip (pocket/thigh), 9 = spine1 (waist/lower-back/chest), 21 = R-wrist.
 # Matched on the stream id first (placement-derived), then a per-dataset fallback, then pelvis.
 DEFAULT_JOINT = 0
+_SIDE_PLACEMENT_JOINTS = [
+    ("left wrist", 17), ("left_wrist", 17),
+    ("right wrist", 21), ("right_wrist", 21),
+    ("left forearm", 16), ("left_forearm", 16),
+    ("right forearm", 20), ("right_forearm", 20),
+    ("left upper arm", 15), ("left_upper_arm", 15),
+    ("right upper arm", 19), ("right_upper_arm", 19),
+    ("left chest", 14), ("left_chest", 14),
+    ("right chest", 18), ("right_chest", 18),
+]
 _PLACEMENT_KEYWORDS = [
-    ("wrist", 21), ("forearm", 21),
+    ("wrist", 21), ("forearm", 20), ("upper arm", 19), ("upper_arm", 19),
     ("pocket", 5), ("thigh", 5), ("hip", 5),
     ("waist", 9), ("lower_back", 9), ("lowerback", 9), ("lumbar", 9),
     ("belt", 9), ("chest", 9), ("back", 9),
@@ -78,6 +88,9 @@ JOINT_BY_DS = {
 
 def _joint_for(stream) -> int:
     name = f"{stream.dataset}/{stream.stream}".lower()
+    for keyword, joint in _SIDE_PLACEMENT_JOINTS:
+        if keyword in name:
+            return joint
     for kw, j in _PLACEMENT_KEYWORDS:
         if kw in name:
             return j
@@ -97,7 +110,10 @@ def _accel_indices(channels):
 def _resample_to_20hz(acc: np.ndarray, rate_hz: float) -> np.ndarray:
     """(N,T,3) at rate_hz -> 20 Hz with polyphase anti-alias filtering."""
     _, length, _ = acc.shape
-    expected = int(round(length * TARGET_HZ / float(rate_hz)))
+    # A source-valid short tail may contain fewer than half a target-rate sample.
+    # Preserve one measured sample for the declared wrap-padding path instead of
+    # producing an empty temporal axis that NumPy cannot pad.
+    expected = max(1, int(round(length * TARGET_HZ / float(rate_hz))))
     if expected == length and float(rate_hz) == TARGET_HZ:
         return acc
     ratio = Fraction(TARGET_HZ / float(rate_hz)).limit_denominator(1000)

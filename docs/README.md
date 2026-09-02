@@ -24,8 +24,10 @@ representations.
 10. [**IMPLEMENTATION_PLAN.md**](design/IMPLEMENTATION_PLAN.md) - staged build order and exit criteria.
 11. [**APPLICATION_DATASETS.md**](data/APPLICATION_DATASETS.md) - which local datasets can answer each
    task and which are contaminated by existing pretraining.
-12. [**BASELINES.md**](baselines/BASELINES.md) - released representations and raw/physical controls.
-13. [**RESULTS.md**](results/RESULTS.md) - promoted application results only; currently a pre-result
+12. [**STORAGE_INVENTORY.md**](data/STORAGE_INVENTORY.md) - dataset footprint, retention policy, and
+   verified reclaim candidates.
+13. [**BASELINES.md**](baselines/BASELINES.md) - released representations and raw/physical controls.
+14. [**RESULTS.md**](results/RESULTS.md) - promoted application results only; currently a pre-result
    protocol record.
 
 ## Implementation references

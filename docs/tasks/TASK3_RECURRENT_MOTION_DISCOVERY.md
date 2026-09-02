@@ -43,13 +43,17 @@ Training annotations define only whether two bounded events are instances of the
 Their text is not embedded and the numeric identity has no meaning. Initially scope an identity as:
 
 ```text
-(dataset, annotation track, action identity)
+(dataset, annotation track, compatible sensor configuration, action identity)
 ```
 
 Two events with the same identity form a positive pair. Two explicitly different identities within
 the same annotation system form a negative pair. Events from different datasets are not assumed to
 be equal or different unless their annotation equivalence has been verified. This avoids treating
-shared words as physical equivalence or treating different naming conventions as negatives.
+shared words as physical equivalence or treating different naming conventions as negatives. A
+compatible configuration has the same device family, placement, channel set, and gravity convention.
+Device model and native rate may vary as declared nuisance factors within that family; a phone and a
+watch are never interchangeable. Synchronized sensor views of one physical execution share one
+instance identifier and therefore cannot masquerade as independent positive executions.
 
 The deployment test holds out complete identities. Success therefore means that the learned matching
 rule transfers to motions whose training labels and semantic names were never seen.
@@ -246,14 +250,15 @@ and exposed only to score the frozen output.
 
 ### 6.2 Pair and clustering metrics
 
-- same-motion pair AUROC and AUPRC;
-- positive/negative score separation and equal-error rate;
+- occurrence precision, recall, and F1 after complete-timeline decoding;
+- false motif occurrences per recording hour and occurrence-count error;
 - B-cubed precision, recall, and F1;
 - pairwise cluster precision and recall;
-- cluster purity and fragmentation reported together;
+- cluster purity and mean fragments per true motif reported together;
+- same-motion pair AUROC, AUPRC, score separation, and equal-error rate as secondary affinity
+  diagnostics;
 - adjusted Rand index as a secondary closed-annotation summary;
-- repeated-event coverage and occurrence-count error;
-- false motif clusters per recording hour;
+- repeated-event coverage;
 - boundary temporal IoU and start/end error after dense temporal decoding;
 - stability under small threshold and proposal-boundary changes; and
 - runtime and peak memory per recording hour.

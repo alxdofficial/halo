@@ -1,0 +1,17 @@
+{
+  "title": "ALAMEDA Parkinson's Disease Accelerometer Dataset",
+  "authors": [
+    "Nikolaos Papagiannakis",
+    "Leonidas Stefanis",
+    "Konstantina-Maria Giannakopoulou",
+    "Panagiotis Tsakanikas",
+    "Christoniki Maga-Nteve"
+  ],
+  "year": 2025,
+  "publisher": "Zenodo",
+  "doi": "10.5281/zenodo.15769959",
+  "dataset_url": "https://zenodo.org/records/15769959",
+  "publication_doi": "10.3390/healthcare11192656",
+  "license": "CC BY 4.0",
+  "notes": "The local paper is the collection protocol. The official ZIP passed its published MD5 but contains 13 sensor subject codes/22 campaigns rather than four campaigns for 11 contributors, one complete campaign duplicated across two identities, two unknown-placement campaigns, and incomplete sensor-to-clinical visit coverage. Use only after an explicit exclusion manifest or author clarification."
+}

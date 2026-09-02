@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+import random
 from typing import Any
 
 import numpy as np
@@ -13,8 +14,17 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
 
 from applications.motion_monitoring.data.cache import CachedRecordingDataset
-from applications.motion_monitoring.data.contracts import EventInterval, RawRecording
-from applications.motion_monitoring.sequence import MotionSequence
+from applications.motion_monitoring.data.compatibility import (
+    SensorCompatibilityKey,
+    require_compatible_streams,
+    sensor_compatibility_key,
+)
+from applications.motion_monitoring.data.contracts import (
+    EventInterval,
+    RawRecording,
+    SensorStream,
+)
+from applications.motion_monitoring.sequence import MotionSequence, localization_intervals
 
 
 @dataclass(frozen=True)
@@ -67,7 +77,7 @@ def from_motion_sequence(sequence: MotionSequence) -> EmbeddingSequence:
 
     return EmbeddingSequence(
         embeddings=sequence.embeddings,
-        intervals_sec=sequence.intervals_sec,
+        intervals_sec=localization_intervals(sequence),
         valid=sequence.valid,
         metadata={
             "dataset": sequence.dataset,
@@ -76,8 +86,25 @@ def from_motion_sequence(sequence: MotionSequence) -> EmbeddingSequence:
             "session_id": sequence.session_id,
             "stream_id": sequence.stream_id,
             "placement": sequence.placement,
+            "device": sequence.device,
+            "channels": sequence.channels,
             "gravity_state": sequence.gravity_state,
+            "sampling_rate_hz": sequence.sampling_rate_hz,
         },
+    )
+
+
+def _sequence_compatibility_key(
+    sequence: EmbeddingSequence,
+) -> SensorCompatibilityKey | None:
+    required = {"device", "placement", "channels", "gravity_state"}
+    if not required.issubset(sequence.metadata):
+        return None
+    return sensor_compatibility_key(
+        device=str(sequence.metadata["device"]),
+        placement=str(sequence.metadata["placement"]),
+        channels=tuple(sequence.metadata["channels"]),
+        gravity_state=str(sequence.metadata["gravity_state"]),
     )
 
 
@@ -263,22 +290,139 @@ def _patches_in_interval(
     )
 
 
-def _trim_reference(
-    sequence: EmbeddingSequence, event: EventInterval
+MINIMUM_REFERENCE_POSITIONS = 2
+
+
+def crop_sequence(
+    sequence: EmbeddingSequence, start_sec: float, end_sec: float
 ) -> EmbeddingSequence:
+    """Select the positions whose centers fall inside [start_sec, end_sec)."""
+
+    if not np.isfinite((start_sec, end_sec)).all() or end_sec <= start_sec:
+        raise ValueError("crop bounds must be finite with positive duration")
+    centers = sequence.intervals_sec.mean(dim=1)
     selected = torch.nonzero(
-        _patches_in_interval(sequence, event), as_tuple=False
+        (centers >= start_sec) & (centers < end_sec), as_tuple=False
     ).flatten()
     if not len(selected):
-        raise ValueError("the reference event contains no valid embedding patches")
+        raise ValueError("crop contains no representation positions")
+    left, right = int(selected[0]), int(selected[-1]) + 1
+    return EmbeddingSequence(
+        sequence.embeddings[left:right],
+        sequence.intervals_sec[left:right],
+        sequence.valid[left:right],
+        metadata=sequence.metadata,
+    )
+
+
+def _snap_reference_selection(
+    sequence: EmbeddingSequence,
+    start_sec: float,
+    end_sec: float,
+    *,
+    minimum_positions: int = MINIMUM_REFERENCE_POSITIONS,
+    context_bound_sec: float | None = None,
+    rng: "random.Random | None" = None,
+) -> tuple[int, int, dict[str, object]]:
+    """Snap an enrolled interval to the localization grid with a position floor.
+
+    Nearest snapping: a cell belongs to the reference when its center lies inside
+    the enrolled interval (with midpoint cells this is the majority-overlap rule).
+    If that yields nothing, the closest overlapping valid cell seeds the
+    selection. Selections below ``minimum_positions`` are extended with real
+    surrounding context inside the same contiguous valid run, choosing the side
+    at random when ``rng`` is provided and deterministically (smaller added
+    context first) otherwise. See TASK1_REFERENCE_RESOLUTION_SPEC.md.
+    """
+
+    if not np.isfinite((start_sec, end_sec)).all() or end_sec <= start_sec:
+        raise ValueError("reference interval must be finite with positive duration")
+    if minimum_positions < 1:
+        raise ValueError("minimum_positions must be at least one")
+    intervals = sequence.intervals_sec
+    centers = intervals.mean(dim=1)
+    widths = (intervals[:, 1] - intervals[:, 0]).abs()
+    step = float(widths.median())
+    if context_bound_sec is None:
+        context_bound_sec = max(0.5, 1.5 * step)
+
+    valid = sequence.valid
+    inside = valid & (centers >= start_sec) & (centers < end_sec)
+    selected = torch.nonzero(inside, as_tuple=False).flatten()
+    seeded_by_overlap = False
+    if not len(selected):
+        overlap = (
+            torch.minimum(intervals[:, 1], torch.as_tensor(end_sec, dtype=intervals.dtype))
+            - torch.maximum(intervals[:, 0], torch.as_tensor(start_sec, dtype=intervals.dtype))
+        ).clamp_min(0.0)
+        candidates = torch.nonzero(valid & (overlap > 0), as_tuple=False).flatten()
+        if not len(candidates):
+            raise ValueError("the reference event contains no valid embedding patches")
+        midpoint = 0.5 * (start_sec + end_sec)
+        seed = candidates[torch.argmin((centers[candidates] - midpoint).abs())]
+        selected = seed.reshape(1)
+        seeded_by_overlap = True
     if len(selected) > 1 and torch.any(selected[1:] != selected[:-1] + 1):
         raise ValueError("the reference event crosses an invalid embedding gap")
-    start, end = int(selected[0]), int(selected[-1]) + 1
-    return EmbeddingSequence(
-        sequence.embeddings[start:end],
-        sequence.intervals_sec[start:end],
-        sequence.valid[start:end],
-        metadata=sequence.metadata,
+
+    left, right = int(selected[0]), int(selected[-1]) + 1
+    added_context_sec = 0.0
+    while right - left < minimum_positions:
+        options: list[tuple[float, str]] = []
+        if left > 0 and bool(valid[left - 1]) and int(selected[0]) - (left - 1) <= 1:
+            extra = max(0.0, float(start_sec - intervals[left - 1, 0]))
+            if added_context_sec + extra <= context_bound_sec + 1e-9:
+                options.append((extra, "left"))
+        if right < len(valid) and bool(valid[right]):
+            extra = max(0.0, float(intervals[right, 1] - end_sec))
+            if added_context_sec + extra <= context_bound_sec + 1e-9:
+                options.append((extra, "right"))
+        if not options:
+            raise ValueError(
+                "the reference event cannot reach the minimum position floor "
+                "within its contiguous valid run and context bound"
+            )
+        if rng is not None and len(options) > 1:
+            extra, side = options[rng.randrange(len(options))]
+        else:
+            extra, side = min(options)
+        if side == "left":
+            left -= 1
+        else:
+            right += 1
+        added_context_sec += extra
+    provenance = {
+        "reference_positions": right - left,
+        "reference_added_context_sec": round(added_context_sec, 6),
+        "reference_seeded_by_overlap": seeded_by_overlap,
+        "reference_grid_step_sec": round(step, 6),
+    }
+    return left, right, provenance
+
+
+def _trim_reference(
+    sequence: EmbeddingSequence,
+    event: EventInterval,
+    *,
+    interval_sec: tuple[float, float] | None = None,
+    rng: "random.Random | None" = None,
+) -> tuple[EmbeddingSequence, dict[str, object]]:
+    start_sec, end_sec = (
+        (float(event.start_sec), float(event.end_sec))
+        if interval_sec is None
+        else (float(interval_sec[0]), float(interval_sec[1]))
+    )
+    left, right, provenance = _snap_reference_selection(
+        sequence, start_sec, end_sec, rng=rng
+    )
+    return (
+        EmbeddingSequence(
+            sequence.embeddings[left:right],
+            sequence.intervals_sec[left:right],
+            sequence.valid[left:right],
+            metadata=sequence.metadata,
+        ),
+        provenance,
     )
 
 
@@ -290,15 +434,40 @@ def episode_from_recordings(
     *,
     label: str,
     reference_event_index: int,
+    target_intervals_sec: Sequence[tuple[float, float]] | None = None,
+    reference_interval_sec: tuple[float, float] | None = None,
+    reference_rng: random.Random | None = None,
     guard_intervals_sec: Sequence[tuple[float, float]] = (),
     allow_same_recording: bool = False,
 ) -> DetectionEpisode:
-    """Build an episode from source events and externally computed embeddings."""
+    """Build an episode from source events and externally computed embeddings.
+
+    ``reference_interval_sec`` overrides the source event's extent with a derived
+    single-execution enrollment interval (see TASK1_REFERENCE_RESOLUTION_SPEC.md
+    section A); it must lie inside the source event. ``reference_rng`` randomizes
+    the grid-snap context side during training; leave it ``None`` for the
+    deterministic development/test draw.
+    """
 
     if not label:
         raise ValueError("episode label must be non-empty")
     if reference_event_index < 0:
         raise IndexError("reference_event_index must be non-negative")
+    reference_config = _sequence_compatibility_key(reference_sequence)
+    query_config = _sequence_compatibility_key(query_sequence)
+    if (reference_config is None) != (query_config is None):
+        raise ValueError(
+            "reference and query must either both declare sensor configurations or both omit them"
+        )
+    if (
+        reference_config is not None
+        and query_config is not None
+        and reference_config != query_config
+    ):
+        raise ValueError(
+            "reference and query use incompatible sensor configurations: "
+            f"{reference_config} != {query_config}"
+        )
     reference_source_id = str(
         reference_recording.metadata.get(
             "source_recording_id", reference_recording.recording_id
@@ -325,6 +494,15 @@ def episode_from_recordings(
         )
     if bool(reference_event.metadata.get("clipped_by_recording_crop", False)):
         raise ValueError("the reference event is incomplete at a recording crop boundary")
+    if reference_interval_sec is not None:
+        interval_start, interval_end = map(float, reference_interval_sec)
+        if not np.isfinite((interval_start, interval_end)).all() or interval_end <= interval_start:
+            raise ValueError("reference_interval_sec must be finite with positive duration")
+        if (
+            interval_start < float(reference_event.start_sec) - 1e-6
+            or interval_end > float(reference_event.end_sec) + 1e-6
+        ):
+            raise ValueError("reference_interval_sec must lie inside the source event")
     for query_event in query_recording.events:
         same_synchronized_event = (
             reference_recording.dataset == query_recording.dataset
@@ -344,12 +522,18 @@ def episode_from_recordings(
             raise ValueError(
                 "synchronized views of one execution cannot form reference/query evidence"
             )
-    targets = [
-        (event.start_sec, event.end_sec)
-        for event in query_recording.events
-        if event.label == label
-        and not bool(event.metadata.get("clipped_by_recording_crop", False))
-    ]
+    targets = (
+        [tuple(map(float, interval)) for interval in target_intervals_sec]
+        if target_intervals_sec is not None
+        else [
+            (event.start_sec, event.end_sec)
+            for event in query_recording.events
+            if event.label == label
+            and not bool(event.metadata.get("clipped_by_recording_crop", False))
+        ]
+    )
+    if any(not np.isfinite(interval).all() or interval[1] <= interval[0] for interval in targets):
+        raise ValueError("target intervals must be finite with positive duration")
     query_start = float(query_sequence.intervals_sec[0, 0])
     query_end = float(query_sequence.intervals_sec[-1, 1])
     targets = [
@@ -367,8 +551,14 @@ def episode_from_recordings(
             query_sequence.intervals_sec[:, 1] > start
         )
         loss_valid &= ~overlaps
+    reference, reference_provenance = _trim_reference(
+        reference_sequence,
+        reference_event,
+        interval_sec=reference_interval_sec,
+        rng=reference_rng,
+    )
     return DetectionEpisode(
-        reference=_trim_reference(reference_sequence, reference_event),
+        reference=reference,
         query=query_sequence,
         targets_sec=torch.tensor(
             targets,
@@ -385,6 +575,7 @@ def episode_from_recordings(
             "query_source_recording_id": query_source_id,
             "reference_subject_id": reference_recording.subject_id,
             "query_subject_id": query_recording.subject_id,
+            **reference_provenance,
         },
     )
 
@@ -421,6 +612,15 @@ class CachedPairAudit:
     rejected_pairs: tuple[RejectedCachedEventPair, ...]
 
 
+def _selected_stream(recording: RawRecording, stream_id: str) -> SensorStream:
+    matches = [stream for stream in recording.streams if stream.stream_id == stream_id]
+    if len(matches) != 1:
+        raise ValueError(
+            f"recording {recording.recording_id!r} has no unique stream {stream_id!r}"
+        )
+    return matches[0]
+
+
 def audit_cached_event_pairs(
     cache_root: Path,
     pairs: Sequence[CachedEventPair],
@@ -448,6 +648,10 @@ def audit_cached_event_pairs(
         )
         query_sequence = sequence_provider(query_recording, pair.query_stream_id)
         try:
+            require_compatible_streams(
+                _selected_stream(reference_recording, pair.reference_stream_id),
+                _selected_stream(query_recording, pair.query_stream_id),
+            )
             episode_from_recordings(
                 reference_recording,
                 query_recording,
@@ -489,6 +693,10 @@ class CachedEventPairDataset(Dataset[DetectionEpisode]):
         pair = self.pairs[index]
         reference_recording = self.cache[pair.reference_index]
         query_recording = self.cache[pair.query_index]
+        require_compatible_streams(
+            _selected_stream(reference_recording, pair.reference_stream_id),
+            _selected_stream(query_recording, pair.query_stream_id),
+        )
         return episode_from_recordings(
             reference_recording,
             query_recording,

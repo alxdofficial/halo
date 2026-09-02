@@ -154,6 +154,32 @@ class MotionEncoder(Protocol):
     ) -> MotionSequence: ...
 
 
+def localization_intervals(sequence: MotionSequence) -> torch.Tensor:
+    """Partition a timeline around token centers, independent of receptive width.
+
+    ``MotionSequence.intervals_sec`` records the signal support consumed by an
+    encoder token. A 10-second baseline receptive field must not force every
+    localized event to be at least 10 seconds long. This function converts token
+    centers to non-overlapping midpoint cells while retaining the source edges.
+    """
+
+    support = sequence.intervals_sec
+    if len(support) == 1:
+        return support.clone()
+    centers = support.mean(dim=1)
+    if torch.any(centers[1:] <= centers[:-1]):
+        raise ValueError("token centers must be strictly increasing")
+    boundaries = torch.empty(
+        len(centers) + 1, dtype=support.dtype, device=support.device
+    )
+    boundaries[0] = support[0, 0]
+    boundaries[-1] = support[-1, 1]
+    boundaries[1:-1] = 0.5 * (centers[:-1] + centers[1:])
+    if torch.any(boundaries[1:] <= boundaries[:-1]):
+        raise ValueError("token localization cells must have positive duration")
+    return torch.stack((boundaries[:-1], boundaries[1:]), dim=-1)
+
+
 def measured_rate_hz(stream: SensorStream) -> float:
     """Robust rate estimate used for storage sizing, never to rewrite source time."""
 
