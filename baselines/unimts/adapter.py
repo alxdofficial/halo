@@ -56,10 +56,19 @@ GRAVITY_INCOMPATIBLE = frozenset({"kuhar"})
 
 # Placement -> SMPL joint index. A single IMU stream is placed at one joint; others zero-filled.
 # Joint semantics (from the graph child->parent tree + UniMTS data.py assignments):
-#   0 = pelvis/root, 5 = R-hip (pocket/thigh), 9 = spine1 (waist/lower-back/chest), 21 = R-wrist.
+#   0 = pelvis/root; left leg = 1 hip, 2 knee, 3 ankle, 4 foot;
+#   right leg = 5 hip, 6 knee, 7 ankle, 8 foot; 9 = spine1; 17/21 = L/R wrist.
 # Matched on the stream id first (placement-derived), then a per-dataset fallback, then pelvis.
 DEFAULT_JOINT = 0
 _SIDE_PLACEMENT_JOINTS = [
+    ("left rectus femoris", 1), ("left_rectus_femoris", 1),
+    ("left hamstrings", 1), ("left_hamstrings", 1),
+    ("right rectus femoris", 5), ("right_rectus_femoris", 5),
+    ("right hamstrings", 5), ("right_hamstrings", 5),
+    ("left tibialis anterior", 2), ("left_tibialis_anterior", 2),
+    ("left gastrocnemius", 2), ("left_gastrocnemius", 2),
+    ("right tibialis anterior", 6), ("right_tibialis_anterior", 6),
+    ("right gastrocnemius", 6), ("right_gastrocnemius", 6),
     ("left wrist", 17), ("left_wrist", 17),
     ("right wrist", 21), ("right_wrist", 21),
     ("left forearm", 16), ("left_forearm", 16),
@@ -143,6 +152,14 @@ class UniMTSAdapter(CosineAdapter):
             "input_samples": PAD_LEN,
             "input_channels": ["acc_x", "acc_y", "acc_z"],
             "label_text_ensemble": self.TEXT_ENSEMBLE,
+        }
+
+    def feature_config(self, state):
+        return {
+            "input_rate_hz": TARGET_HZ,
+            "input_samples": PAD_LEN,
+            "input_channels": ["acc_x", "acc_y", "acc_z"],
+            "feature_layer": "acc_st_gcn",
         }
 
     def setup(self, device):

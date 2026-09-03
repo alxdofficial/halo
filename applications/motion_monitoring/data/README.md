@@ -7,9 +7,9 @@ This directory owns data used by the three application tasks. It is intentionall
 - `splits.py` defines the mandatory subject/linkage grouping validator for task manifests. A
   manifest is invalid if a canonical subject or conservative unresolved-identity group crosses
   train, development, and test assignments.
-- `../manifests/COHORT_V1.json` freezes exact recording membership for the seven canonical
-  application caches. Its protocol fingerprint is
-  `abee73424ac253bf61db8c25c23966ba0b01cb8ae843b117d2a8ff19d28ee244`.
+- `../manifests/COHORT_V1.json`, `COHORT_TASK1_V2.json`, and `COHORT_TASK2_V1.json` freeze
+  task-specific recording membership. Their embedded fingerprints, rather than copied values in
+  prose, are authoritative.
 - `PAYLOAD_CHECKSUMS.json` freezes the accepted file set, byte sizes, and SHA-256 digests.
 - `CORPUS_SUMMARY.json` records measured effective hours, event counts, and known balance caveats.
 - `acquire.py` downloads only the source modalities listed in that contract.
@@ -28,17 +28,16 @@ normally at most 5 GiB compressed per source, and a CPU-only conversion expected
 archives supply the only large occupational source with nested action, operation, and box-cycle
 annotations.
 
-## Minimum viable study
+## Active study
 
-The frozen target is five training/development sources and four evaluation sources:
+| task | fitting sources | evaluation sources |
+|---|---|---|
+| Task 1 V2 | `synth_wrist_v1` derived from independent CrossFit wrist executions | C-MHAD, OpenPack |
+| Task 2 V1 | HARMES, CrossFit, `task2_modified_v1` | MoniPar, KneE-PAD |
+| Task 3 V1 | OpenPack, CrossFit, AIDLAB-HAR, RecoFit | C-MHAD, WEAR, OCA |
 
-| use | sources |
-|---|---|
-| training/development | OpenPack, CrossFit, AIDLAB-HAR, RecoFit, and existing HARMES |
-| evaluation | C-MHAD, WEAR, OCA, and existing MoniPar |
-
-Only seven sources are new. HARMES and MoniPar remain in `data/datasets` and are read in place.
-The verified selective acquisitions total 6,310 files and 8,676,140,820 bytes (8.080 GiB).
+Each task has its own cohort and leakage contract. A dataset may therefore have different roles in
+different tasks, but one result must obey one signed task manifest.
 An evaluation source must not be used to fit the task head, thresholds, preprocessing choices, or
 stopping rule for the result that names it as held out. Within-source subject splits are separate
 development experiments and must not be described as unseen-dataset transfer.
@@ -74,7 +73,8 @@ the same source sequence. For repeated training passes, build the lossless map-s
 ```bash
 /home/alex/code/HALO/legacy_code/.venv/bin/python \
   -m applications.motion_monitoring.data.build_cache \
-  openpack crossfit aidlab_har recofit c_mhad wear oca --workers 4
+  openpack crossfit aidlab_har recofit c_mhad wear oca \
+  harmes monipar kneepad synth_wrist_v1 task2_modified_v1 --workers 4
 ```
 
 The generated `sources/<dataset>/processed/canonical_v1` directories are ignored by Git. They retain
@@ -91,11 +91,9 @@ Build or validate the cohort only after all canonical caches are current:
   -m applications.motion_monitoring.data.build_manifest
 ```
 
-The current manifest contains 864 nonduplicated training/development recordings and 277 sealed-test
-recordings. CrossFit repetition excerpts are excluded because they duplicate their parent exercise
-signal. Development groups are selected deterministically to cover source annotation cells while
-never moving a single-group label entirely out of training. HARMES and MoniPar remain outside
-`COHORT_V1` until application-native adapters are reviewed.
+`COHORT_V1` remains the Task 3 cohort. Task 1 and Task 2 are rebuilt with their dedicated manifest
+builders because their units and duplicate-view rules differ. CrossFit repetition excerpts are
+excluded from Task 3 but retained for Task 2, where the repetition itself is the unit.
 
 Frozen encoder exports use the shared representation cache and retain patch timestamps, masks, and
 physical summaries:

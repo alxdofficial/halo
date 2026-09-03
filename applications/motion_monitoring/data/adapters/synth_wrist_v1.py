@@ -1,16 +1,18 @@
 """Synthetic wrist-IMU training corpus for Task 1 (spec section C).
 
-Every recording is a 60-120 s slice of a real RecoFit right-forearm session
-into which single-repetition CrossFit wrist clips are spliced. The inserted
-extents are the only ``inserted_execution`` events, so target labels are
-execution-level by construction; the background's own RecoFit annotations are
-kept as ``background_activity`` events for provenance and never become targets.
+Every query recording is a 20-120 s slice of a real CrossFit wrist-background
+recording into which single-repetition CrossFit wrist clips are spliced. Clean,
+unmodified donor repetitions are also exposed as enrollment-only records in the
+same derived cache. This keeps device family, placement, channels and gravity
+convention identical on both sides of every episode.
 
 Design constraints (all measurable downstream):
 
 * raw-level synthesis in canonical units (g, rad/s) at the background's native
-  50 Hz, so every encoder sees the same waveform once;
-* the donor is time-warped, amplitude-scaled on its dynamic part, resampled,
+  100 Hz, so every encoder sees the same waveform once;
+* the donor is time-warped, log-uniformly amplitude-scaled on its dynamic part
+  so its intensity spans the declared deployment envelope rather than only the
+  gym-repetition band it was recorded in, resampled,
   rotated so its mean gravity direction matches the background's local gravity,
   then crossfaded in over 0.2-0.4 s at each seam;
 * insertions never overlap each other, a RecoFit exercise set, or a source-junk
@@ -44,23 +46,34 @@ DATASET = "synth_wrist_v1"
 _DATA_ROOT = Path(__file__).resolve().parents[1]
 
 SYNTHESIS_CONFIG: dict[str, Any] = {
-    "version": 1,
+    "version": 3,
     "seed": 20260902,
     "donor_dataset": "crossfit",
-    "background_dataset": "recofit",
-    "target_hours": 40.0,
-    "background_seconds": [60.0, 120.0],
+    "background_dataset": "crossfit",
+    "target_hours": 8.0,
+    "background_seconds": [20.0, 120.0],
     "donor_excluded_labels": ["Null"],
     "donor_duration_bounds_sec": [1.0, 8.0],
     # Number of inserted executions of the recording's primary exercise.
-    "primary_insert_counts": [0, 1, 2, 3, 4],
-    "primary_insert_weights": [0.20, 0.25, 0.25, 0.15, 0.15],
+    "primary_insert_counts": [1, 2, 3, 4],
+    "primary_insert_weights": [0.30, 0.30, 0.20, 0.20],
     # Number of inserted executions of other exercises (same procedure).
-    "distractor_insert_counts": [0, 1, 2],
-    "distractor_insert_weights": [0.40, 0.35, 0.25],
+    "distractor_insert_counts": [1, 2],
+    "distractor_insert_weights": [0.60, 0.40],
     "same_subject_primary_fraction": 0.2,
-    "time_warp_bounds": [0.85, 1.15],
-    "amplitude_bounds": [0.8, 1.2],
+    # Speed and intensity are the two axes on which a gym repetition differs
+    # from the movements this system is deployed to find. The declared envelope
+    # is "wrist movements from fine hand gestures to full-effort exercise", so
+    # the donor's dynamic component is scaled LOG-uniformly over a range whose
+    # lower end reaches gesture intensity; a linear +/-20 % band left the
+    # training targets roughly five times more energetic than any realistic
+    # fine-motion target, and made "loud region" a usable shortcut for "target".
+    # Duration is widened for the same reason: CrossFit repetitions occupy a
+    # narrow 3-4 s band while real bounded executions run from under a second to
+    # several seconds.
+    "time_warp_bounds": [0.6, 1.6],
+    "amplitude_bounds": [0.2, 1.25],
+    "amplitude_log_uniform": True,
     "noise_sd_acc_g": 0.01,
     "noise_sd_gyro_rad_s": 0.02,
     "crossfade_bounds_sec": [0.2, 0.4],
@@ -69,8 +82,9 @@ SYNTHESIS_CONFIG: dict[str, Any] = {
     "candidate_grid_sec": 0.25,
     "low_motion_quantile": 0.5,
     "whole_query_rotation_max_deg": 15.0,
-    "background_junk_kinds": ["source_junk"],
-    "background_set_kind": "set",
+    "background_junk_kinds": [],
+    "background_required_kind": "background",
+    "background_required_label": "Null",
 }
 
 
@@ -158,11 +172,22 @@ def load_background_index(
     cache: CachedRecordingDataset, config: dict[str, Any] = SYNTHESIS_CONFIG
 ) -> tuple[BackgroundSession, ...]:
     junk_kinds = set(config["background_junk_kinds"])
-    set_kind = config["background_set_kind"]
     minimum = float(config["background_seconds"][0]) + 2 * float(config["edge_margin_sec"])
     sessions: list[BackgroundSession] = []
     for cache_index, recording in enumerate(cache):
         if len(recording.streams) != 1:
+            continue
+        # CrossFit publishes both a parent recording and a duplicate repetition
+        # record for each Null trace. Retain only the source parent.
+        if recording.metadata.get("duplicates_parent_exercise_signal"):
+            continue
+        required_kind = config.get("background_required_kind")
+        required_label = config.get("background_required_label")
+        if not any(
+            (required_kind is None or event.annotation_kind == required_kind)
+            and (required_label is None or event.label == required_label)
+            for event in recording.events
+        ):
             continue
         stream = recording.streams[0]
         timestamps = np.asarray(stream.timestamps_sec, dtype=np.float64)
@@ -180,7 +205,7 @@ def load_background_index(
                 set_intervals=tuple(
                     (float(event.start_sec), float(event.end_sec), event.label)
                     for event in recording.events
-                    if event.annotation_kind == set_kind
+                    if event.annotation_kind == "set"
                 ),
                 junk_intervals=tuple(
                     (float(event.start_sec), float(event.end_sec))
@@ -335,7 +360,8 @@ def synthesize_recording(
     signal = np.asarray(session.values[left:right], dtype=np.float64).copy()
     length_sec = float(timestamps[-1]) + 1.0 / rate
 
-    # Background annotations clipped to the window (provenance; never targets).
+    # Source annotations are provenance only. CrossFit Null backgrounds do not
+    # block insertion locations because the whole trace is intentionally idle.
     background_events: list[EventInterval] = []
     blocked: list[tuple[float, float]] = []
     for set_start, set_end, set_label in session.set_intervals:
@@ -403,7 +429,11 @@ def synthesize_recording(
     occupied: list[tuple[float, float]] = []
     for role, clip in plan:
         warp = float(rng.uniform(warp_low, warp_high))
-        amplitude = float(rng.uniform(amp_low, amp_high))
+        amplitude = (
+            float(np.exp(rng.uniform(np.log(amp_low), np.log(amp_high))))
+            if config.get("amplitude_log_uniform", False)
+            else float(rng.uniform(amp_low, amp_high))
+        )
         fade = float(rng.uniform(fade_low, fade_high))
         donor = _resample(clip.values, clip.rate_hz, rate, warp)
         duration = len(donor) / rate
@@ -480,6 +510,14 @@ def synthesize_recording(
             )
         )
 
+    requested_primary = sum(role == "primary" for role, _ in plan)
+    requested_distractor = sum(role == "distractor" for role, _ in plan)
+    actual_primary = sum(e.metadata["role"] == "primary" for e in inserted_events)
+    actual_distractor = sum(e.metadata["role"] == "distractor" for e in inserted_events)
+    if actual_primary != requested_primary or actual_distractor != requested_distractor:
+        # Never let insertion failure recreate the target-presence shortcut.
+        return None
+
     # Whole-recording rotation so background and inserts share a sensor frame.
     axis = rng.normal(size=3)
     angle = float(np.radians(rng.uniform(0.0, config["whole_query_rotation_max_deg"])))
@@ -489,7 +527,7 @@ def synthesize_recording(
     stream = SensorStream(
         stream_id="wrist_imu",
         placement=session.stream.placement,
-        device="synthetic wrist IMU (RecoFit background, CrossFit donors)",
+        device=session.stream.device,
         timestamps_sec=timestamps,
         values=signal.astype(np.float32),
         channels=session.stream.channels,
@@ -505,6 +543,8 @@ def synthesize_recording(
             "whole_query_rotation_deg": float(np.degrees(angle)),
             "acceleration_unit": "g",
             "gyroscope_unit": "rad/s",
+            "source_device": session.stream.device,
+            "source_placement": session.stream.placement,
         },
     )
     recording_id = f"{DATASET}:{index:05d}"
@@ -530,6 +570,57 @@ def synthesize_recording(
     )
 
 
+def donor_recording(index: int, clip: DonorClip) -> RawRecording:
+    """Expose one clean source repetition for enrollment, never as a query."""
+
+    timestamps = np.arange(len(clip.values), dtype=np.float64) / clip.rate_hz
+    duration = len(clip.values) / clip.rate_hz
+    recording_id = f"{DATASET}:donor:{index:05d}"
+    stream = SensorStream(
+        stream_id="wrist_imu",
+        placement="wrist",
+        device="off-the-shelf smartwatch",
+        timestamps_sec=timestamps,
+        values=np.asarray(clip.values, dtype=np.float32),
+        channels=("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"),
+        valid=np.ones(np.asarray(clip.values).shape, dtype=bool),
+        gravity_state="present",
+        nominal_rate_hz=clip.rate_hz,
+        metadata={
+            "synthetic": False,
+            "source_dataset": SYNTHESIS_CONFIG["donor_dataset"],
+            "source_recording_id": clip.clip_id,
+        },
+    )
+    event = EventInterval(
+        0.0,
+        duration,
+        clip.label,
+        "enrollment_execution",
+        metadata={
+            "donor_dataset": SYNTHESIS_CONFIG["donor_dataset"],
+            "donor_clip_id": clip.clip_id,
+            "donor_subject_id": clip.subject_id,
+            "donor_exercise_id": clip.exercise_id,
+            "donor_repetition_index": clip.repetition_index,
+            "boundary_source": "clean_source_repetition_extent",
+        },
+    )
+    return RawRecording(
+        dataset=DATASET,
+        recording_id=recording_id,
+        subject_id=f"donor:{clip.subject_id}",
+        session_id=recording_id,
+        streams=(stream,),
+        events=(event,),
+        metadata={
+            "task1_reference_only": True,
+            "source_recording_id": clip.clip_id,
+            "synthesis_config_sha256": config_digest(),
+        },
+    )
+
+
 # ------------------------------------------------------------------- adapter API
 
 
@@ -538,15 +629,28 @@ def iter_recordings(
 ) -> Iterator[RawRecording]:
     config = SYNTHESIS_CONFIG
     donors = load_donor_bank(
-        CachedRecordingDataset(_canonical_root(config["donor_dataset"], root)), config
+        CachedRecordingDataset(
+            _canonical_root(config["donor_dataset"], root), mmap=False
+        ),
+        config,
     )
     sessions = load_background_index(
-        CachedRecordingDataset(_canonical_root(config["background_dataset"], root)),
+        CachedRecordingDataset(
+            _canonical_root(config["background_dataset"], root), mmap=False
+        ),
         config,
     )
     spans = np.array([s.timestamps_sec[-1] - s.timestamps_sec[0] for s in sessions])
     session_weights = spans / spans.sum()
     rng = np.random.default_rng(int(config["seed"]))
+    # Clean source repetitions are part of the derived cache so every persisted
+    # Task-1 unit resolves through one dataset/cache contract.
+    for index, clip in enumerate(donors):
+        if limit is not None and index >= limit:
+            return
+        yield donor_recording(index, clip)
+    if limit is not None:
+        return
     budget = float(config["target_hours"]) * 3600.0
     produced_sec = 0.0
     produced = 0

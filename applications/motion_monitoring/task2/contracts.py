@@ -1,4 +1,14 @@
-"""Data contracts for set-conditioned Task-2 change quantification."""
+"""Data contracts for Task-2 change quantification (personal-normative ruler).
+
+An episode is one personal reference set plus one query. The query's role says
+what the ruler must do with it: an ``accepted_query`` is another execution of the
+same person and task (pull together); a ``modified_query`` is a same-person
+execution carrying a declared physical modification of known severity (push
+apart); an ``other_subject_query`` is another person's execution of the same
+task on the same configuration (push apart); an ``unlabeled_query`` is scored
+but never supervises. Every member of an episode shares one dataset, task and
+sensor-compatibility key (docs/tasks/TASK2_CHANGE_QUANTIFICATION.md section 3).
+"""
 
 from __future__ import annotations
 
@@ -16,24 +26,16 @@ from applications.motion_monitoring.data.compatibility import (
 from applications.motion_monitoring.sequence import MotionSequence
 
 
-EpisodeKind = Literal["accepted_query", "changed_query", "unlabeled_query"]
-
-
-@dataclass(frozen=True)
-class ChangeTargetSpec:
-    """One interpretable signed change target and its development-set scale."""
-
-    name: str
-    scale: float
-    unit: str = "unitless"
-
-    def __post_init__(self) -> None:
-        if not self.name:
-            raise ValueError("target name must be non-empty")
-        if not torch.isfinite(torch.tensor(self.scale)) or self.scale <= 0:
-            raise ValueError("target scale must be finite and positive")
-        if not self.unit:
-            raise ValueError("target unit must be non-empty")
+EpisodeKind = Literal[
+    "accepted_query", "modified_query", "other_subject_query", "unlabeled_query"
+]
+ROLE_INDEX: dict[str, int] = {
+    "accepted_query": 0,
+    "modified_query": 1,
+    "other_subject_query": 2,
+    "unlabeled_query": 3,
+}
+NEGATIVE_ROLES = frozenset({"modified_query", "other_subject_query"})
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,9 @@ class BoundedExecution:
     execution_id: str
     task_id: str
     sensor_config: SensorCompatibilityKey | None = None
+    physical_features: Tensor | None = None
+    physical_feature_mask: Tensor | None = None
+    physical_feature_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         embeddings = torch.as_tensor(self.embeddings)
@@ -89,6 +94,23 @@ class BoundedExecution:
             raise ValueError("execution provenance fields must be non-empty")
         if not embeddings.is_floating_point() or not intervals.is_floating_point():
             raise ValueError("embeddings and intervals must use floating-point tensors")
+        physical = self.physical_features
+        physical_mask = self.physical_feature_mask
+        if (physical is None) != (physical_mask is None):
+            raise ValueError("physical features and their mask must be supplied together")
+        if physical is not None:
+            physical = torch.as_tensor(physical)
+            physical_mask = torch.as_tensor(physical_mask)
+            if physical.shape[0] != embeddings.shape[0] or physical.shape != physical_mask.shape:
+                raise ValueError("physical features must align with execution patches")
+            if physical_mask.dtype != torch.bool:
+                raise ValueError("physical feature mask must be boolean")
+            if physical.shape[1] != len(self.physical_feature_names):
+                raise ValueError("physical feature names must match their width")
+            if not bool(torch.isfinite(physical[physical_mask]).all()):
+                raise ValueError("valid physical features must be finite")
+            object.__setattr__(self, "physical_features", physical)
+            object.__setattr__(self, "physical_feature_mask", physical_mask)
         object.__setattr__(self, "embeddings", embeddings)
         object.__setattr__(self, "patch_intervals_sec", intervals)
         object.__setattr__(self, "patch_mask", mask)
@@ -117,6 +139,9 @@ def from_motion_sequence(
             channels=sequence.channels,
             gravity_state=sequence.gravity_state,
         ),
+        physical_features=sequence.physical_features,
+        physical_feature_mask=sequence.physical_feature_mask,
+        physical_feature_names=sequence.physical_feature_names,
     )
 
 
@@ -128,14 +153,14 @@ def _same_config(first: BoundedExecution, second: BoundedExecution) -> bool:
 
 @dataclass(frozen=True)
 class ExecutionEpisode:
-    """A personal reference set, one query, and optional same-person context."""
+    """A personal reference set, one query with a declared role, optional context."""
 
     accepted_references: tuple[BoundedExecution, ...]
     query: BoundedExecution
     episode_kind: EpisodeKind
-    change_targets: Tensor
-    target_mask: Tensor
-    target_specs: tuple[ChangeTargetSpec, ...]
+    severity: float = 0.0
+    modification_kind: str | None = None
+    nuisance_kind: str | None = None
     personal_context: tuple[BoundedExecution, ...] = ()
     sample_weight: float = 1.0
 
@@ -144,20 +169,36 @@ class ExecutionEpisode:
         context = tuple(self.personal_context)
         if not references:
             raise ValueError("an episode requires at least one accepted reference")
-        if self.episode_kind not in {
-            "accepted_query",
-            "changed_query",
-            "unlabeled_query",
-        }:
+        if self.episode_kind not in ROLE_INDEX:
             raise ValueError(f"invalid episode kind: {self.episode_kind}")
+        severity = float(self.severity)
+        if not torch.isfinite(torch.tensor(severity)) or severity < 0:
+            raise ValueError("severity must be finite and non-negative")
+        if self.episode_kind == "modified_query":
+            if severity <= 0 or not self.modification_kind:
+                raise ValueError("a modified query declares a positive severity and a kind")
+        elif self.modification_kind is not None:
+            raise ValueError("only modified queries carry a modification kind")
+        elif self.episode_kind == "other_subject_query":
+            severity = 1.0
+        else:
+            if severity != 0:
+                raise ValueError("accepted and unlabeled queries have zero severity")
+        if self.nuisance_kind is not None and self.episode_kind != "accepted_query":
+            raise ValueError("nuisance transforms are declared only on accepted queries")
 
         anchor = references[0]
-        target_members = (*references, self.query)
-        for execution in target_members:
+        for execution in references:
+            if execution.subject_id != anchor.subject_id:
+                raise ValueError("reference executions must be within subject")
+        same_person = self.episode_kind != "other_subject_query"
+        if same_person and self.query.subject_id != anchor.subject_id:
+            raise ValueError("this query kind must be within subject")
+        if not same_person and self.query.subject_id == anchor.subject_id:
+            raise ValueError("an other-subject query must come from another person")
+        for execution in (*references, self.query):
             if execution.dataset != anchor.dataset:
                 raise ValueError("target executions must share one identity namespace")
-            if execution.subject_id != anchor.subject_id:
-                raise ValueError("target executions must be within subject")
             if execution.task_id != anchor.task_id:
                 raise ValueError("target executions must represent the same declared task")
             if execution.embeddings.shape[1] != anchor.embeddings.shape[1]:
@@ -165,7 +206,7 @@ class ExecutionEpisode:
             if not _same_config(anchor, execution):
                 raise ValueError("target executions have incompatible sensor configurations")
 
-        all_members = (*target_members, *context)
+        all_members = (*references, self.query, *context)
         execution_ids = [item.execution_id for item in all_members]
         if len(set(execution_ids)) != len(execution_ids):
             raise ValueError("query, references, and context must be independent executions")
@@ -176,33 +217,23 @@ class ExecutionEpisode:
                 raise ValueError("personal context must share embedding width")
             if not _same_config(anchor, execution):
                 raise ValueError("personal context has an incompatible sensor configuration")
-
-        targets = torch.as_tensor(self.change_targets)
-        mask = torch.as_tensor(self.target_mask)
-        specs = tuple(self.target_specs)
-        if targets.shape != (len(specs),):
-            raise ValueError("change targets must match the target schema")
-        if mask.shape != targets.shape or mask.dtype != torch.bool:
-            raise ValueError("target mask must be boolean and match change targets")
-        if not bool(torch.isfinite(targets[mask]).all()):
-            raise ValueError("valid change targets must be finite")
-        if len({spec.name for spec in specs}) != len(specs):
-            raise ValueError("change target names must be unique")
         if not torch.isfinite(torch.tensor(self.sample_weight)) or self.sample_weight <= 0:
             raise ValueError("sample weight must be finite and positive")
         object.__setattr__(self, "accepted_references", references)
         object.__setattr__(self, "personal_context", context)
-        object.__setattr__(self, "change_targets", targets)
-        object.__setattr__(self, "target_mask", mask)
-        object.__setattr__(self, "target_specs", specs)
+        object.__setattr__(self, "severity", severity)
 
     @property
-    def classification_target(self) -> float:
-        return float(self.episode_kind == "changed_query")
+    def role_index(self) -> int:
+        return ROLE_INDEX[self.episode_kind]
 
     @property
-    def classification_valid(self) -> bool:
-        return self.episode_kind != "unlabeled_query"
+    def is_positive(self) -> bool:
+        return self.episode_kind == "accepted_query"
+
+    @property
+    def is_negative(self) -> bool:
+        return self.episode_kind in NEGATIVE_ROLES
 
     @property
     def reference_set_id(self) -> str:
@@ -213,7 +244,7 @@ class ExecutionEpisode:
 
 @dataclass(frozen=True)
 class EpisodeBatch:
-    """Padded set-conditioned episodes ready for the Task-2 head."""
+    """Padded set-conditioned episodes ready for the Task-2 ruler."""
 
     reference_embeddings: Tensor
     reference_intervals_sec: Tensor
@@ -226,16 +257,24 @@ class EpisodeBatch:
     query_embeddings: Tensor
     query_intervals_sec: Tensor
     query_mask: Tensor
-    classification_targets: Tensor
-    classification_mask: Tensor
-    change_targets: Tensor
-    target_mask: Tensor
-    target_scales: Tensor
+    roles: Tensor
+    severities: Tensor
     sample_weights: Tensor
     task_ids: tuple[str, ...]
     subject_ids: tuple[str, ...]
     reference_set_ids: tuple[str, ...]
-    target_names: tuple[str, ...]
+    modification_kinds: tuple[str | None, ...]
+    nuisance_kinds: tuple[str | None, ...]
+
+    @property
+    def positive_mask(self) -> Tensor:
+        return self.roles == ROLE_INDEX["accepted_query"]
+
+    @property
+    def negative_mask(self) -> Tensor:
+        return (self.roles == ROLE_INDEX["modified_query"]) | (
+            self.roles == ROLE_INDEX["other_subject_query"]
+        )
 
     def to(self, device: torch.device | str) -> "EpisodeBatch":
         values = {
@@ -248,7 +287,8 @@ class EpisodeBatch:
             task_ids=self.task_ids,
             subject_ids=self.subject_ids,
             reference_set_ids=self.reference_set_ids,
-            target_names=self.target_names,
+            modification_kinds=self.modification_kinds,
+            nuisance_kinds=self.nuisance_kinds,
         )
 
 
@@ -341,9 +381,6 @@ def collate_execution_episodes(episodes: Sequence[ExecutionEpisode]) -> EpisodeB
 
     if not episodes:
         raise ValueError("cannot collate an empty episode batch")
-    schema = episodes[0].target_specs
-    if any(item.target_specs != schema for item in episodes[1:]):
-        raise ValueError("all episodes in a batch must use the same target schema")
     first = episodes[0].query
     width = first.embeddings.shape[1]
     device = first.embeddings.device
@@ -397,18 +434,16 @@ def collate_execution_episodes(episodes: Sequence[ExecutionEpisode]) -> EpisodeB
         query_embeddings=query[0],
         query_intervals_sec=query[1],
         query_mask=query[2],
-        classification_targets=torch.tensor(
-            [item.classification_target for item in episodes], dtype=torch.float32
+        roles=torch.tensor([item.role_index for item in episodes], dtype=torch.long, device=device),
+        severities=torch.tensor(
+            [item.severity for item in episodes], dtype=torch.float32, device=device
         ),
-        classification_mask=torch.tensor(
-            [item.classification_valid for item in episodes], dtype=torch.bool
+        sample_weights=torch.tensor(
+            [item.sample_weight for item in episodes], dtype=torch.float32, device=device
         ),
-        change_targets=torch.stack([item.change_targets for item in episodes]).float(),
-        target_mask=torch.stack([item.target_mask for item in episodes]),
-        target_scales=torch.tensor([spec.scale for spec in schema], dtype=torch.float32),
-        sample_weights=torch.tensor([item.sample_weight for item in episodes], dtype=torch.float32),
         task_ids=tuple(item.query.task_id for item in episodes),
         subject_ids=tuple(item.query.subject_id for item in episodes),
         reference_set_ids=tuple(item.reference_set_id for item in episodes),
-        target_names=tuple(spec.name for spec in schema),
+        modification_kinds=tuple(item.modification_kind for item in episodes),
+        nuisance_kinds=tuple(item.nuisance_kind for item in episodes),
     )

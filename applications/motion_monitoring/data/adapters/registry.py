@@ -39,7 +39,7 @@ ADAPTERS: dict[str, AdapterSpec] = {
     "alameda": AdapterSpec(
         "alameda",
         "applications.motion_monitoring.data.adapters.alameda",
-        "task2_evaluation",
+        "longitudinal_extension",
         "stream",
     ),
     "aidlab_har": AdapterSpec(
@@ -60,14 +60,28 @@ ADAPTERS: dict[str, AdapterSpec] = {
     "cops": AdapterSpec(
         "cops",
         "applications.motion_monitoring.data.adapters.cops",
-        "task2_evaluation",
+        "longitudinal_extension",
         "stream",
+    ),
+    # Dominant-wrist consumer-watch ADL timelines: same person, same task, across
+    # days. Primary source of accepted Task-2 positives; training only.
+    "harmes": AdapterSpec(
+        "harmes",
+        "applications.motion_monitoring.data.adapters.harmes",
+        "task2_training",
+    ),
+    # Controlled known-difference Task-2 cell: correct plus two curated incorrect
+    # variants per knee exercise, from real unsupervised patient execution.
+    # Muscle-belly placement, so a cross-placement stress cell, never a headline.
+    "kneepad": AdapterSpec(
+        "kneepad",
+        "applications.motion_monitoring.data.adapters.kneepad",
+        "task2_evaluation",
     ),
     "monipar": AdapterSpec(
         "monipar",
         "applications.motion_monitoring.data.adapters.monipar",
-        "task1_evaluation",
-        "stream",
+        "task2_evaluation",
     ),
     "oca": AdapterSpec(
         "oca",
@@ -79,6 +93,14 @@ ADAPTERS: dict[str, AdapterSpec] = {
         "applications.motion_monitoring.data.adapters.openpack",
         "training_development",
     ),
+    # Mid-level kitchen gestures on five body-worn Xsens units. The only local
+    # source with genuine within-recording recurrence at instance granularity, so
+    # it anchors Task-3 training (TASK3 doc section 10).
+    "opportunity": AdapterSpec(
+        "opportunity",
+        "applications.motion_monitoring.data.adapters.opportunity",
+        "task3_training",
+    ),
     "recofit": AdapterSpec(
         "recofit",
         "applications.motion_monitoring.data.adapters.recofit",
@@ -89,15 +111,35 @@ ADAPTERS: dict[str, AdapterSpec] = {
         "applications.motion_monitoring.data.adapters.wear",
         "evaluation",
     ),
+    # Pre-materialised Task-2 training variants: declared physical modifications
+    # and acquisition nuisances of the source bounded executions, frozen under
+    # VARIANT_CONFIG so the corpus is encoded once. Training only.
+    "task2_modified_v1": AdapterSpec(
+        "task2_modified_v1",
+        "applications.motion_monitoring.data.adapters.task2_modified_v1",
+        "task2_training",
+        "derived",
+        derived_from=("harmes", "crossfit"),
+    ),
+    # Assembled long wrist recordings for Task 3: CrossFit repetitions spliced into
+    # different-exercise CrossFit backgrounds, so training faces unknown boundaries
+    # on a timeline that is mostly non-target (TASK3 doc section 10.3).
+    "synth_long_v1": AdapterSpec(
+        "synth_long_v1",
+        "applications.motion_monitoring.data.adapters.synth_long_v1",
+        "task3_training",
+        "derived",
+        derived_from=("crossfit",),
+    ),
     # Task-1 synthetic wrist-IMU training corpus: CrossFit single-repetition
-    # clips inserted into RecoFit backgrounds (TASK1_REFERENCE_RESOLUTION_SPEC
+    # clips inserted into CrossFit wrist backgrounds (TASK1_REFERENCE_RESOLUTION_SPEC
     # section C). Training only; never a development or test source.
     "synth_wrist_v1": AdapterSpec(
         "synth_wrist_v1",
         "applications.motion_monitoring.data.adapters.synth_wrist_v1",
         "task1_training",
         "derived",
-        derived_from=("crossfit", "recofit"),
+        derived_from=("crossfit",),
     ),
 }
 

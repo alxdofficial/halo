@@ -1,4 +1,13 @@
-"""Set-conditioned change head for Task-2 execution episodes."""
+"""Personal-normative change ruler for Task-2 execution episodes.
+
+The ruler does not classify change. It learns the coordinate system in which a
+person's ordinary repetition scatter is tight and physical change is wide
+(docs/tasks/TASK2_CHANGE_QUANTIFICATION.md section 5). Its output is a
+phase-local residual between a query and the personal reference prototype; the
+scalar distance is the mean cosine residual over movement phase. Scoring against
+the personal envelope and the per-person threshold stay closed-form
+(``personal.py``); nothing here produces a logit, a threshold or a regressed target.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +21,10 @@ from .contracts import EpisodeBatch
 
 
 @dataclass(frozen=True)
-class ChangeHeadOutput:
-    change_logits: Tensor
-    change_scores: Tensor
-    target_predictions: Tensor
+class RulerOutput:
+    distances: Tensor
     phase_residuals: Tensor
+    residual_vectors: Tensor
     reference_phase: Tensor
     query_phase: Tensor
     evidence_attention: Tensor
@@ -88,12 +96,25 @@ def _resample_execution_set(
     return torch.stack(rows)
 
 
-class ChangeMetricHead(nn.Module):
-    """Score a query relative to a personal accepted-reference set.
+def _normalize(values: Tensor) -> Tensor:
+    eps = 1e-6 if values.dtype in {torch.float16, torch.bfloat16} else 1e-8
+    return F.normalize(values, dim=-1, eps=eps)
 
-    Reference executions form the baseline without seeing the query. The query then
-    cross-attends to those references and optional same-person context. Role and
-    physical-phase embeddings tell the head which tokens serve which purpose.
+
+def _prototype(reference_phase: Tensor, execution_mask: Tensor) -> Tensor:
+    weights = execution_mask.to(reference_phase.dtype)[:, :, None, None]
+    total = (reference_phase * weights).sum(dim=1)
+    return total / weights.sum(dim=1).clamp_min(1.0)
+
+
+class ChangeRuler(nn.Module):
+    """Map an aligned (reference set, query) pair into a comparable residual space.
+
+    References are contextualised among themselves and never see the query, so
+    an unusual query cannot redefine normality. The query attends to the
+    reference (and optional same-person context) tokens and receives a
+    zero-initialised refinement in the metric space, so the ruler starts exactly
+    at the transparent cosine floor and only moves where the objective rewards it.
     """
 
     REFERENCE_ROLE = 0
@@ -103,7 +124,6 @@ class ChangeMetricHead(nn.Module):
     def __init__(
         self,
         embedding_dim: int,
-        target_dim: int,
         *,
         phase_bins: int = 8,
         projection_dim: int | None = None,
@@ -111,14 +131,13 @@ class ChangeMetricHead(nn.Module):
         attention_heads: int = 4,
     ) -> None:
         super().__init__()
-        if embedding_dim <= 0 or target_dim <= 0:
-            raise ValueError("embedding and target dimensions must be positive")
+        if embedding_dim <= 0:
+            raise ValueError("embedding dimension must be positive")
         if phase_bins < 2:
             raise ValueError("phase_bins must be at least two")
         if context_dim <= 0 or attention_heads <= 0 or context_dim % attention_heads:
             raise ValueError("context_dim must be positive and divisible by attention_heads")
         self.embedding_dim = embedding_dim
-        self.target_dim = target_dim
         self.phase_bins = phase_bins
         self.projection_dim = projection_dim
         if projection_dim is None:
@@ -154,19 +173,10 @@ class ChangeMetricHead(nn.Module):
             context_dim, attention_heads, dropout=0.0, batch_first=True
         )
         self.query_norm = nn.LayerNorm(context_dim)
-        self.residual_correction = nn.Sequential(
-            nn.Linear(4 * context_dim, context_dim),
-            nn.GELU(),
-            nn.Linear(context_dim, 1),
-        )
-        # Start close to the transparent cosine baseline while keeping gradient
-        # paths into every contextualization component alive from step one.
-        nn.init.normal_(self.residual_correction[-1].weight, std=1e-3)
-        nn.init.zeros_(self.residual_correction[-1].bias)
-
-        self.logit_scale_raw = nn.Parameter(torch.tensor(1.0))
-        self.change_bias = nn.Parameter(torch.tensor(0.0))
-        self.target_readout = nn.Linear(metric_dim + phase_bins + context_dim, target_dim)
+        self.refinement = nn.Linear(context_dim, metric_dim)
+        # Zero-initialised: the ruler begins at the transparent cosine floor.
+        nn.init.zeros_(self.refinement.weight)
+        nn.init.zeros_(self.refinement.bias)
 
     def _project(self, values: Tensor) -> Tensor:
         if self.projection is not None:
@@ -177,14 +187,11 @@ class ChangeMetricHead(nn.Module):
 
     def _role_phase_tokens(self, values: Tensor, role: int) -> Tensor:
         phase = self.phase_embedding.to(dtype=values.dtype)
-        role_ids = torch.full(
-            values.shape[:-1], role, dtype=torch.long, device=values.device
-        )
+        role_ids = torch.full(values.shape[:-1], role, dtype=torch.long, device=values.device)
         return self.context_input(values) + phase + self.role_embedding(role_ids)
 
-    def forward(self, batch: EpisodeBatch) -> ChangeHeadOutput:
-        if batch.query_embeddings.shape[-1] != self.embedding_dim:
-            raise ValueError("batch embedding width does not match the metric head")
+    def align(self, batch: EpisodeBatch) -> tuple[Tensor, Tensor]:
+        """Projected reference set and query resampled onto movement phase."""
 
         references = self._project(batch.reference_embeddings)
         query = self._project(batch.query_embeddings)
@@ -198,36 +205,47 @@ class ChangeMetricHead(nn.Module):
         query_phase = resample_to_phase(
             query, batch.query_intervals_sec, batch.query_mask, bins=self.phase_bins
         )
+        return reference_phase, query_phase
+
+    def _reference_memory(
+        self, reference_phase: Tensor, execution_mask: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """Contextualise an accepted-reference set without exposing the query."""
+
         batch_size, reference_count, _, _ = reference_phase.shape
-        reference_tokens = self._role_phase_tokens(
+        tokens = self._role_phase_tokens(
             reference_phase, self.REFERENCE_ROLE
         ).reshape(batch_size, reference_count * self.phase_bins, -1)
-        reference_token_mask = ~batch.reference_execution_mask.unsqueeze(-1).expand(
+        token_mask = ~execution_mask.unsqueeze(-1).expand(
             -1, -1, self.phase_bins
         ).reshape(batch_size, -1)
-        reference_tokens = self.reference_encoder(
-            reference_tokens, src_key_padding_mask=reference_token_mask
+        return (
+            self.reference_encoder(tokens, src_key_padding_mask=token_mask),
+            token_mask,
         )
 
-        memory = reference_tokens
-        memory_mask = reference_token_mask
-        if batch.context_embeddings.shape[1] > 0:
-            context_phase = _resample_execution_set(
-                self._project(batch.context_embeddings),
-                batch.context_intervals_sec,
-                batch.context_patch_mask,
-                batch.context_execution_mask,
-                bins=self.phase_bins,
-            )
-            context_count = context_phase.shape[1]
+    def _refine_query(
+        self,
+        query_phase: Tensor,
+        reference_phase: Tensor,
+        reference_mask: Tensor,
+        *,
+        context_phase: Tensor | None = None,
+        context_mask: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        memory, memory_mask = self._reference_memory(reference_phase, reference_mask)
+        if context_phase is not None:
+            if context_mask is None:
+                raise ValueError("context mask is required with context phase")
+            batch_size, context_count, _, _ = context_phase.shape
             context_tokens = self._role_phase_tokens(
                 context_phase, self.CONTEXT_ROLE
             ).reshape(batch_size, context_count * self.phase_bins, -1)
-            context_mask = ~batch.context_execution_mask.unsqueeze(-1).expand(
+            context_token_mask = ~context_mask.unsqueeze(-1).expand(
                 -1, -1, self.phase_bins
             ).reshape(batch_size, -1)
             memory = torch.cat((memory, context_tokens), dim=1)
-            memory_mask = torch.cat((memory_mask, context_mask), dim=1)
+            memory_mask = torch.cat((memory_mask, context_token_mask), dim=1)
 
         query_tokens = self._role_phase_tokens(query_phase, self.QUERY_ROLE)
         attended, attention = self.query_attention(
@@ -238,43 +256,97 @@ class ChangeMetricHead(nn.Module):
             need_weights=True,
             average_attn_weights=True,
         )
-        contextual_query = self.query_norm(query_tokens + attended)
+        contextual = self.query_norm(query_tokens + attended)
+        refined = query_phase + self.refinement(contextual).to(query_phase.dtype)
+        return refined, attention
 
-        reference_weights = batch.reference_execution_mask.to(reference_phase.dtype)
-        reference_weights = reference_weights[:, :, None, None]
-        reference_prototype = (reference_phase * reference_weights).sum(dim=1)
-        reference_prototype = reference_prototype / reference_weights.sum(dim=1).clamp_min(1.0)
-        eps = 1e-6 if query_phase.dtype in {torch.float16, torch.bfloat16} else 1e-8
-        query_normalized = F.normalize(query_phase, dim=-1, eps=eps)
-        reference_normalized = F.normalize(reference_prototype, dim=-1, eps=eps)
-        cosine_residual = 1.0 - (query_normalized * reference_normalized).sum(dim=-1)
-
-        reference_context = attended
-        correction_input = torch.cat(
-            (
-                contextual_query,
-                reference_context,
-                contextual_query - reference_context,
-                (contextual_query - reference_context).abs(),
-            ),
-            dim=-1,
+    def forward(self, batch: EpisodeBatch) -> RulerOutput:
+        if batch.query_embeddings.shape[-1] != self.embedding_dim:
+            raise ValueError("batch embedding width does not match the ruler")
+        reference_phase, query_phase = self.align(batch)
+        context_phase = None
+        context_mask = None
+        if batch.context_embeddings.shape[1] > 0:
+            context_phase = _resample_execution_set(
+                self._project(batch.context_embeddings),
+                batch.context_intervals_sec,
+                batch.context_patch_mask,
+                batch.context_execution_mask,
+                bins=self.phase_bins,
+            )
+            context_mask = batch.context_execution_mask
+        refined_query, attention = self._refine_query(
+            query_phase,
+            reference_phase,
+            batch.reference_execution_mask,
+            context_phase=context_phase,
+            context_mask=context_mask,
         )
-        correction = 0.25 * torch.tanh(self.residual_correction(correction_input).squeeze(-1))
-        phase_residuals = cosine_residual + correction
-        change_scores = phase_residuals.mean(dim=-1)
-        change_logits = F.softplus(self.logit_scale_raw) * change_scores + self.change_bias
 
-        signed_delta = (query_normalized - reference_normalized).mean(dim=1)
-        readout_features = torch.cat(
-            (signed_delta, phase_residuals, contextual_query.mean(dim=1)), dim=-1
-        )
-        target_predictions = self.target_readout(readout_features)
-        return ChangeHeadOutput(
-            change_logits=change_logits,
-            change_scores=change_scores,
-            target_predictions=target_predictions,
+        prototype = _prototype(reference_phase, batch.reference_execution_mask)
+        residual_vectors = _normalize(refined_query) - _normalize(prototype)
+        phase_residuals = 1.0 - (_normalize(refined_query) * _normalize(prototype)).sum(dim=-1)
+        return RulerOutput(
+            distances=phase_residuals.mean(dim=-1),
             phase_residuals=phase_residuals,
+            residual_vectors=residual_vectors,
             reference_phase=reference_phase,
-            query_phase=query_phase,
+            # Scoring must consume the contextualised metric-space query.  Returning
+            # the pre-refinement tensor here silently bypassed the attention and
+            # refinement path in personal_change_report().
+            query_phase=refined_query,
             evidence_attention=attention,
         )
+
+    @torch.no_grad()
+    def reference_residuals(self, batch: EpisodeBatch) -> tuple[Tensor, Tensor]:
+        """Leave-one-out phase residuals of every reference in the ruler's space.
+
+        These feed the personal envelope at deployment: each accepted reference is
+        compared with the prototype of the others, in the same projected space
+        the query distance uses, so the person's ordinary scatter is measured with
+        the same ruler. Returns ``[batch, reference, bins]`` residuals and the
+        reference execution mask.
+        """
+
+        reference_phase, _ = self.align(batch)
+        mask = batch.reference_execution_mask
+        batch_size, count, bins, _ = reference_phase.shape
+        residuals = reference_phase.new_zeros(batch_size, count, bins)
+        held_out_rows: list[Tensor] = []
+        remaining_rows: list[Tensor] = []
+        remaining_masks: list[Tensor] = []
+        destinations: list[tuple[int, int]] = []
+        max_remaining = max(int(row.sum()) - 1 for row in mask)
+        if max_remaining < 1:
+            return residuals, mask
+        for row in range(batch_size):
+            valid = torch.nonzero(mask[row], as_tuple=False).flatten()
+            for index in valid.tolist():
+                others = [item for item in valid.tolist() if item != index]
+                if not others:
+                    continue
+                remaining = reference_phase.new_zeros(
+                    max_remaining, bins, reference_phase.shape[-1]
+                )
+                remaining[: len(others)] = reference_phase[row, others]
+                remaining_mask = torch.zeros(
+                    max_remaining, dtype=torch.bool, device=reference_phase.device
+                )
+                remaining_mask[: len(others)] = True
+                held_out_rows.append(reference_phase[row, index])
+                remaining_rows.append(remaining)
+                remaining_masks.append(remaining_mask)
+                destinations.append((row, index))
+        refined, _ = self._refine_query(
+            torch.stack(held_out_rows),
+            torch.stack(remaining_rows),
+            torch.stack(remaining_masks),
+        )
+        weights = torch.stack(remaining_masks).to(reference_phase.dtype)[..., None, None]
+        prototype = (torch.stack(remaining_rows) * weights).sum(dim=1)
+        prototype = prototype / weights.sum(dim=1).clamp_min(1.0)
+        values = 1.0 - (_normalize(refined) * _normalize(prototype)).sum(dim=-1)
+        for destination, value in zip(destinations, values):
+            residuals[destination] = value
+        return residuals, mask

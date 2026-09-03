@@ -1,155 +1,93 @@
 # Application implementation plan
 
-> **Plan of record, 2026-08-31.** Each stage establishes a simple complete-timeline floor before a
-> learned component is added.
+> **Plan of record, 2026-09-02.** The three tasks are mechanically implemented. This document only
+> records the remaining execution order; task definitions belong in their task documents and data
+> membership belongs in the signed manifests.
 
-**Current progress.** Seven application sources have immutable payload checksums, verified native-time
-adapters, and lossless map-style caches. Two Task-2 longitudinal state sources are additionally exposed
-through stream-only adapters: MoniPar reuses its existing canonical sessions, ALAMEDA reads selected
-campaigns from its 4.8 GB archive, and COPS reads nested hourly files without expanding roughly
-297 GiB of CSV. The runtime `MotionSequence` contract exports native-clock intervals, validity,
-normalized embeddings, physical summaries, and provenance. Author-released HARNet, UniMTS, and
-NormWear checkpoints now produce that same contract; optional ImageBind is also wired. All four
-encoders pass one-step, real-data Task-1/2/3 head and gradient smokes, and all four encode real samples
-from each Task-2 source. These are mechanical checks, not trained models or results. The seven-source
-`COHORT_V1` manifest contains 864 nonduplicated training/development recordings and 277 sealed-test
-recordings. Complete representation caches, task-specific fit manifests, calibrated operating
-points, long training, and complete evaluations remain open.
+## Current state
 
-The paired frozen-representation utility gate is now the required next experiment. Its direct arms
-are constrained cosine DTW for Task 1, phase-aligned cosine with personal robust statistics for Task
-2, and raw candidate cosine affinity for Task 3. Its learned arms use the existing task-specific
-heads on exactly the same tensors. A three-encoder GPU smoke on 2026-08-31 verified both paths and
-finite head gradients. It is not a quality result: it uses one OpenPack diagnostic fixture per task,
-five fitting steps, and a synthetic known change for Task 2. The full gate still requires immutable
-task manifests and subject-disjoint development evaluation as specified in
-[`EVALUATION_PROTOCOL.md`](EVALUATION_PROTOCOL.md).
+- Native-time adapters and provenance-bound raw caches exist for the active sources.
+- HALO and the author-released HARNet, UniMTS, and NormWear encoders export the shared timestamped
+  `MotionSequence` contract. ImageBind remains optional.
+- Task 1 V2, Task 2 V1, and Task 3 V1 have separate signed cohort/task manifests.
+- Task 1 and Task 2 require independently bounded representation caches where an enrolled or
+  compared execution must not see surrounding-recording context.
+- The all-task physical-encoder smoke and the released-baseline smoke exercise the current heads,
+  losses, masks, and gradient paths. Smoke scores are not application results.
 
-Reproduce the cross-task mechanical check with:
+## Shared gate
+
+For each selected encoder:
+
+1. Build complete representation caches with raw-cache and checkpoint provenance.
+2. Freeze the cross-encoder common-unit intersection before fitting a task head.
+3. Run the non-learned control and the identically configured learned head.
+4. Select global operating points without test data where the task needs one.
+5. Evaluate every signed test unit and report each dataset separately with subject-level
+   uncertainty.
+6. Record trainable parameter count, fitting time, inference time, and exclusions.
+
+Do not fine-tune an encoder until its frozen direct-versus-learned comparison is complete. An
+end-to-end HALO arm is a later system measurement, not a replacement for that matched comparison.
+
+## Task 1
+
+1. Build full query-timeline and independently bounded reference caches for `COHORT_TASK1_V2`.
+2. Run `build_common_task1_units.py` across all encoders at one temporal stride.
+3. Fit the small matcher on `TASK1_TRAIN_V2` using only its synthetic training-subject hold-out for
+   the operating threshold.
+4. Evaluate all paired same-subject and cross-subject units in `TASK1_TEST_V2` on C-MHAD and
+   OpenPack.
+5. Report event precision, recall, F1, false alarms per hour, count error, and boundary error for
+   direct constrained DTW and the learned projection.
+
+The exact data and reference rules are in
+[`TASK1_REFERENCE_RESOLUTION_SPEC.md`](../tasks/TASK1_REFERENCE_RESOLUTION_SPEC.md).
+
+## Task 2
+
+1. Rebuild `task2_modified_v1` and `TASK2_{TRAIN,TEST}_V1` whenever their provenance changes.
+2. Build independently bounded representations for HARMES, CrossFit, generated variants, MoniPar,
+   and KneE-PAD.
+3. Run `build_common_task2_units.py` across encoders at one temporal stride.
+4. Fit `ChangeRuler` only on the declared train pool. Clinical labels and evaluation queries never
+   enter fitting.
+5. Evaluate the frozen cosine floor, learned ruler, and raw physical-summary control on the same
+   common units.
+6. Report MoniPar and KneE-PAD separately. Unsupported reliability strata remain visible.
+
+The exact training, personal-limit, and metric rules are in
+[`TASK2_CHANGE_QUANTIFICATION.md`](../tasks/TASK2_CHANGE_QUANTIFICATION.md).
+
+## Task 3
+
+1. Build complete-timeline caches for `COHORT_TASK3_V2`.
+2. Fit the affinity head on `TASK3_TRAIN_V2` (Opportunity gestures plus the assembled
+   `synth_long_v1` wrist timelines), sampling event-anchored batches so every batch contains
+   independent executions of one identity.
+3. Fix both readout thresholds a priori on held-out training identities under a 5% false-edge
+   budget. There is no development split.
+4. Evaluate all `TASK3_TEST_V2` timelines on OpenPack and OCA. C-MHAD and WEAR are excluded:
+   with a median of one occurrence per identity they cannot measure recurrence.
+5. Report occurrence precision/recall, false occurrences per hour, count error, motif coverage,
+   cluster purity together with fragmentation, boundary quality, and runtime.
+
+The exact candidate and recurrence rules are in
+[`TASK3_RECURRENT_MOTION_DISCOVERY.md`](../tasks/TASK3_RECURRENT_MOTION_DISCOVERY.md).
+
+## Mechanical checks
 
 ```bash
 /home/alex/code/HALO/legacy_code/.venv/bin/python \
   -m applications.motion_monitoring.smoke --steps 3 --device cpu
 ```
 
-The same command accepts `--encoder halo --checkpoint <phase-a.pt>` and optional
-`--train-encoder` for a one-step GPU gradient-path check. Do not treat its deliberately tiny,
-development-source metrics as application performance.
-
-Reproduce the paired released-encoder utility smoke with:
-
 ```bash
 /home/alex/code/HALO/legacy_code/.venv/bin/python \
   -m applications.motion_monitoring.baseline_smoke \
   --baselines harnet unimts normwear --tasks task1 task2 task3 \
-  --steps 5 --device cuda --output /tmp/frozen_utility_gate.json
+  --steps 3 --device cuda
 ```
 
-## Stage 0: protocol and annotation audit
-
-1. Maintain one authoritative temporal annotation inventory.
-2. Reconstruct XRF V2 and HARMES complete timelines without Phase-A excerpt assumptions.
-3. **Implemented:** define, validate, and serialize `MotionSequence` without losing physical time.
-4. **Implemented for seven canonical sources:** freeze application train/development/test roles and
-   upstream-cache provenance.
-5. **Recording cohort implemented; task episodes open:** freeze deterministic manifests containing
-   subjects, recordings, references, target intervals, target-absent time, annotation scope, and
-   split fingerprints.
-6. Select thresholds and checkpoints on development subjects before sealed evaluation.
-
-**Exit condition:** no reference/query leakage, every negative interval is supported by its annotation
-contract, and every result regenerates from one manifest fingerprint.
-
-## Stage 1: common representation export
-
-1. **Implemented and smoke-tested:** export timestamped frozen HALO patch embeddings without pooling
-   away movement phase.
-2. **Implemented and smoke-tested:** faithful temporal adapters for the primary author-released
-   HARNet, UniMTS, and NormWear encoders, plus optional ImageBind.
-3. Export raw IMU and parameter-free physical measurements beside every latent sequence.
-4. Measure temporal resolution, throughput, memory, and device coverage.
-
-**Exit condition:** every selected encoder produces the same cached `MotionSequence` schema in
-physical time. HALO and the released baseline adapters pass short real-source probes; full cohort
-caches and throughput records remain open.
-
-## Stage 2: Task-1 full-timeline floors
-
-1. **Implemented:** open-begin/open-end cosine subsequence DTW with bounded local warp slope.
-2. **Implemented:** trace every feasible endpoint into a physical-time candidate interval.
-3. **Implemented:** score thresholding and temporal non-maximum suppression for multiple detections.
-4. **Partially implemented:** physical-feature, HALO, and released-encoder timelines use the same
-   matcher; the raw-signal DTW control and complete official evaluation runner remain open.
-5. Fit thresholds on target-present and target-absent development recordings.
-6. **Implemented mechanically:** natural cache episodes plus deterministic independent-view,
-   retiming, distractor, target-absent, validity, and join-guard test episodes. Pair preflight records
-   data-quality exclusions before loading, and guards break alignment paths rather than only masking
-   endpoint losses.
-7. Produce event timelines, alignment paths, false-alarm curves, count error, and boundary error.
-
-**Exit condition:** event AP and recall at a declared false-alarms-per-hour operating point are
-available for every representation on natural continuous recordings.
-
-## Stage 3: Task-2 measurement
-
-1. **Implemented mechanically:** phase-normalized latent residual curves for bounded executions.
-2. **Partially implemented:** duration and IMU magnitude/dynamic/jerk summaries are exported;
-   cadence, frequency, smoothness, and stability reporting remain open.
-3. **Personal joint-variation fit implemented:** estimate robust personal center, measurement-floor
-   scaling, and shrinkage-regularized covariance; remounting noise and minimum detectable change
-   calibration remain open.
-4. Fit a robust longitudinal state over per-execution deviations.
-5. **Mechanically implemented:** masked, unit-scaled known-change classification/regression and
-   accepted-variation controls; real longitudinal association remains open.
-6. Build phase and longitudinal plots with uncertainty and nearest historical examples.
-
-**Exit condition:** known changes are separated from ordinary measurement noise without using quality
-or clinical language absent external validation.
-
-## Stage 4: Task-3 dense recurrence discovery
-
-1. **Implemented mechanically:** encode complete recording crops at a fine physical-time stride.
-2. **Implemented:** pool adjacent embeddings over declared physical durations, with candidate output
-   invariant to heterogeneous batch padding.
-3. **Implemented:** assign candidate/event overlap targets from exact-boundary training sources; ignore ambiguous
-   partial overlaps and incompletely annotated negatives.
-4. Implement pooled cosine, constrained DTW, and variable-length matrix-profile controls.
-5. **Implemented mechanically:** train a balanced same-motion metric on scoped arbitrary identities.
-6. **Implemented:** consolidate overlapping multiscale candidates with temporal NMS.
-7. Calibrate recurrence thresholds on held-out subjects and identities.
-8. **Partially implemented:** mutual-neighbor recurrence graphs, unassigned candidates, and motif
-   diagnostics exist; human-review artifacts remain open.
-9. Report oracle source-interval matching and complete-timeline discovery separately.
-
-**Exit condition:** repeated-event coverage, false motif rate, count error, fragmentation, boundary
-quality, and review burden are measured on hidden-label continuous recordings.
-
-## Stage 5: optional encoder adaptation
-
-Only if a frozen comparison identifies a representation limitation:
-
-1. fine-tune the encoder through the unchanged task loss;
-2. keep independent positive executions and same-context hard negatives;
-3. hold out subjects, sessions, identities, and datasets as separate generalization tests; and
-4. compare frozen and fine-tuned encoders at matched operating points and compute cost.
-
-Do not restore candidate-label voting, an evidence transformer, or a complex curriculum unless a
-measured failure specifically requires it.
-
-## Optional motion-proposal speed arm
-
-The existing physical-evidence/hysteresis/PELT implementation may screen long still intervals. It is
-not on the critical path and cannot replace complete-timeline evaluation. Retain it only if it yields
-a useful runtime reduction at negligible downstream recall loss.
-
-## Applied validation
-
-Collect a focused phone/watch study only if public data cannot close the evidence gap. It should
-include independently remounted sessions, confirmed executions, controlled changes, long
-target-absent periods, synchronized video, and clinician or ergonomist review.
-
-## Repository cleanup rule
-
-`main` keeps only the active application design. Historical zero-shot and evidence-engine work remains
-recoverable from `archive/pre-application-main-20260830` at commit `32267b6`; it is not duplicated in
-active documentation.
+These commands test plumbing only. Complete results must bind the task manifest, common-unit file,
+representation provenance, head checkpoint, and operating-point provenance.

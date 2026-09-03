@@ -41,7 +41,7 @@ SOURCE_CONTRACTS: dict[str, dict[str, Any]] = {
         "background_contract": "NULL arrays exist but are not an exhaustive natural timeline",
         "known_execution_change": False,
         "video_reference": "not required by the selected release",
-        "recommended_use": "controlled Task 1/3 repetition training",
+        "recommended_use": "controlled repetition training and Task 2 synthetic modifications",
     },
     "aidlab_har": {
         "study_role": "train_development_control",
@@ -117,8 +117,8 @@ SOURCE_CONTRACTS: dict[str, dict[str, Any]] = {
         "adapter_gap": "application timeline adapter not yet implemented",
     },
     "harmes": {
-        "study_role": "train_development",
-        "current_data_form": "Phase-A action excerpts; raw recording and event log retained locally",
+        "study_role": "task2_training",
+        "current_data_form": "72 raw dominant-wrist timelines with converted event-log executions",
         "continuous_timeline": True,
         "exact_instance_intervals": True,
         "instance_granularity": ["activity_instance"],
@@ -126,22 +126,20 @@ SOURCE_CONTRACTS: dict[str, dict[str, Any]] = {
         "background_contract": "inter-event time exists in source but is omitted by Phase-A converter",
         "known_execution_change": False,
         "video_reference": "event log; multimodal source exists but selected payload is wrist IMU",
-        "recommended_use": "reconstruct wrist-ADL timelines for Task 1/3 training",
-        "adapter_gap": "application timeline adapter not yet implemented",
+        "recommended_use": "Task 2 accepted-repeat training and synthetic modification source",
     },
     "monipar": {
         "study_role": "sealed_task2_evaluation",
         "current_data_form": "continuous weekly protocol timeline",
         "continuous_timeline": True,
-        "exact_instance_intervals": False,
-        "instance_granularity": ["protocol_state_run"],
-        "repeated_instances_in_timeline": False,
+        "exact_instance_intervals": True,
+        "instance_granularity": ["weekly_single_run_protocol_execution"],
+        "repeated_instances_in_timeline": True,
         "background_contract": "protocol transitions, not free-living exhaustive background",
         "known_execution_change": True,
-        "video_reference": "neurologist-reviewed clinical protocol; severity adapter remains open",
+        "video_reference": "neurologist-reviewed clinical protocol; bradykinesia and tremor metadata converted",
         "recommended_use": (
-            "Task 2 longitudinal association after severity alignment and active-state "
-            "aggregation audits"
+            "sealed Task 2 longitudinal reliability and clinician-association evaluation"
         ),
     },
     "phytmo": {
@@ -288,7 +286,7 @@ def build_inventory() -> dict[str, Any]:
         },
         "primary_natural_event_sources": ["c_mhad", "openpack", "oca", "xrf_v2"],
         "primary_isolated_instance_source": ["crossfit"],
-        "primary_task2_change_sources": ["phytmo", "kneepad"],
+        "primary_task2_change_sources": ["harmes", "crossfit"],
         "datasets": datasets,
     }
 

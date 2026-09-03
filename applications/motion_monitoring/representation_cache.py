@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from hashlib import sha1, sha256
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,7 @@ import torch
 from torch import nn
 
 from applications.motion_monitoring.data.cache import CachedRecordingDataset
+from applications.motion_monitoring.data.contracts import EventInterval, RawRecording, SensorStream
 from applications.motion_monitoring.data.manifests import (
     CohortEntry,
     CohortManifest,
@@ -24,6 +25,21 @@ from applications.motion_monitoring.sequence import MotionEncoder, MotionSequenc
 
 
 REPRESENTATION_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True, order=True)
+class BoundedSegment:
+    dataset: str
+    cache_index: int
+    recording_id: str
+    stream_id: str
+    event_index: int
+    start_sec: float
+    end_sec: float
+
+
+def bounded_representation_id(recording_id: str, event_index: int) -> str:
+    return f"{recording_id}::bounded_event_{event_index}"
 
 
 def file_sha256(path: Path) -> str:
@@ -211,27 +227,32 @@ class CachedMotionSequenceDataset(Sequence[MotionSequence]):
 
 
 class MotionSequenceUnion:
-    """Read-through union of representation caches with disjoint dataset sets.
+    """Read-through union of representation caches with disjoint sequence keys.
 
-    Lets a natural-data cache and a synthetic-corpus cache (encoded separately,
-    possibly under different cohorts) serve one task manifest.
+    A dataset may appear in more than one member so a complete-timeline cache and
+    an independently bounded-event cache can serve one task. Exact
+    ``(dataset, recording, stream)`` identities must remain unique.
     """
 
     def __init__(self, members: Sequence[CachedMotionSequenceDataset]) -> None:
         if not members:
             raise ValueError("representation union needs at least one cache")
         self.members = tuple(members)
-        self.member_by_dataset: dict[str, CachedMotionSequenceDataset] = {}
+        self.members_by_dataset: dict[str, list[CachedMotionSequenceDataset]] = {}
         for member in self.members:
             for dataset in member.datasets:
-                if dataset in self.member_by_dataset:
-                    raise ValueError(
-                        f"dataset {dataset!r} is served by more than one representation cache"
-                    )
-                self.member_by_dataset[dataset] = member
-        strides = {float(member.metadata.get("stride_seconds", 1.0)) for member in self.members}
-        if len(strides) != 1:
-            raise ValueError(f"representation caches disagree on stride: {sorted(strides)}")
+                self.members_by_dataset.setdefault(dataset, []).append(member)
+        for dataset, dataset_members in self.members_by_dataset.items():
+            keys = [
+                key
+                for member in dataset_members
+                for key in member.index_by_key
+                if key[0] == dataset
+            ]
+            if len(keys) != len(set(keys)):
+                raise ValueError(
+                    f"dataset {dataset!r} has duplicate sequence identities across caches"
+                )
         encoders = {
             json.dumps(member.metadata.get("encoder_provenance"), sort_keys=True)
             for member in self.members
@@ -239,19 +260,43 @@ class MotionSequenceUnion:
         if len(encoders) != 1:
             raise ValueError("representation caches were produced by different encoders")
         self.metadata = dict(self.members[0].metadata)
-        self.metadata["datasets"] = sorted(self.member_by_dataset)
+        self.metadata["datasets"] = sorted(self.members_by_dataset)
         self.metadata["member_roots"] = [str(member.root) for member in self.members]
+        self.metadata["stride_seconds_by_dataset"] = {}
+        for dataset, dataset_members in sorted(self.members_by_dataset.items()):
+            strides = {
+                float(member.metadata.get("stride_seconds", 1.0))
+                for member in dataset_members
+            }
+            if len(strides) != 1:
+                raise ValueError(
+                    f"representation caches disagree on stride for {dataset!r}"
+                )
+            self.metadata["stride_seconds_by_dataset"][dataset] = strides.pop()
 
     @property
     def datasets(self) -> tuple[str, ...]:
-        return tuple(sorted(self.member_by_dataset))
+        return tuple(sorted(self.members_by_dataset))
 
     def get(self, dataset: str, recording_id: str, stream_id: str) -> MotionSequence:
         try:
-            member = self.member_by_dataset[dataset]
+            members = self.members_by_dataset[dataset]
         except KeyError as error:
             raise KeyError(f"no representation cache serves dataset {dataset!r}") from error
-        return member.get(dataset, recording_id, stream_id)
+        for member in members:
+            if (dataset, recording_id, stream_id) in member.index_by_key:
+                return member.get(dataset, recording_id, stream_id)
+        raise KeyError(f"representation not found: {(dataset, recording_id, stream_id)!r}")
+
+    def stride_seconds(self, dataset: str) -> float:
+        try:
+            members = self.members_by_dataset[dataset]
+        except KeyError as error:
+            raise KeyError(f"no representation cache serves dataset {dataset!r}") from error
+        strides = {float(member.metadata.get("stride_seconds", 1.0)) for member in members}
+        if len(strides) != 1:
+            raise ValueError(f"representation caches disagree on stride for {dataset!r}")
+        return strides.pop()
 
 
 def open_representations(
@@ -274,6 +319,30 @@ def open_representations(
     if len(members) == 1:
         return members[0]
     return MotionSequenceUnion(members)
+
+
+def require_complete_representations(
+    representations: CachedMotionSequenceDataset | MotionSequenceUnion,
+) -> None:
+    """Reject pilot caches from a train/evaluation common-unit intersection.
+
+    ``--limit`` is useful for a mechanical cache-build smoke, but it does not
+    identify a defensible population of task units.  Keep that distinction at
+    the cache boundary so a later common-unit file cannot silently turn a
+    truncated cache into a reportable comparison.
+    """
+
+    members = (
+        representations.members
+        if isinstance(representations, MotionSequenceUnion)
+        else (representations,)
+    )
+    limited = [str(member.root) for member in members if member.metadata.get("selection_limit")]
+    if limited:
+        raise ValueError(
+            "official common-unit construction rejects --limit pilot representation caches: "
+            + ", ".join(limited)
+        )
 
 
 def _selected_entries(
@@ -413,6 +482,208 @@ def build_representation_cache(
             "recording_count": len(entries),
             "sequence_count": len(rows),
             "selection_limit": limit,
+        }
+        (staging / "cache.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        staging.rename(output)
+    except Exception:
+        if not resume:
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _bounded_raw_recording(
+    recording: RawRecording, segment: BoundedSegment
+) -> RawRecording:
+    matches = [stream for stream in recording.streams if stream.stream_id == segment.stream_id]
+    if len(matches) != 1:
+        raise ValueError(f"bounded segment has no unique stream {segment.stream_id!r}")
+    stream = matches[0]
+    timestamps = np.asarray(stream.timestamps_sec)
+    left = int(np.searchsorted(timestamps, segment.start_sec, side="left"))
+    right = int(np.searchsorted(timestamps, segment.end_sec, side="left"))
+    if right <= left:
+        raise ValueError("bounded segment contains no sensor samples")
+    selected_timestamps = timestamps[left:right].astype(np.float64, copy=True)
+    selected_timestamps -= selected_timestamps[0]
+    duration = float(segment.end_sec - segment.start_sec)
+    return RawRecording(
+        dataset=recording.dataset,
+        recording_id=bounded_representation_id(recording.recording_id, segment.event_index),
+        subject_id=recording.subject_id,
+        session_id=recording.session_id,
+        streams=(
+            SensorStream(
+                stream_id=stream.stream_id,
+                placement=stream.placement,
+                device=stream.device,
+                timestamps_sec=selected_timestamps,
+                values=np.asarray(stream.values[left:right]).copy(),
+                channels=stream.channels,
+                valid=np.asarray(stream.valid[left:right]).copy(),
+                gravity_state=stream.gravity_state,
+                nominal_rate_hz=stream.nominal_rate_hz,
+                metadata={**dict(stream.metadata), "bounded_source_interval_sec": [segment.start_sec, segment.end_sec]},
+            ),
+        ),
+        events=(
+            EventInterval(
+                start_sec=0.0,
+                end_sec=duration,
+                label="bounded_execution",
+                annotation_kind="bounded_representation",
+            ),
+        ),
+        split=recording.split,
+        metadata={
+            **dict(recording.metadata),
+            "source_recording_id": recording.recording_id,
+            "source_event_index": segment.event_index,
+            "source_interval_sec": [segment.start_sec, segment.end_sec],
+        },
+    )
+
+
+@torch.no_grad()
+def build_bounded_representation_cache(
+    output: Path,
+    manifest: CohortManifest,
+    recording_caches: Mapping[str, CachedRecordingDataset],
+    encoder: MotionEncoder,
+    segments: Sequence[BoundedSegment],
+    *,
+    encoder_provenance: Mapping[str, Any],
+    patch_seconds: float | None = None,
+    stride_seconds: float = 1.0,
+    force: bool = False,
+    resume: bool = False,
+) -> None:
+    """Encode independently bounded events without surrounding-recording context."""
+
+    if (patch_seconds is not None and patch_seconds <= 0) or stride_seconds <= 0:
+        raise ValueError("patch and stride durations must be positive")
+    if isinstance(encoder, nn.Module) and any(
+        parameter.requires_grad for parameter in encoder.parameters()
+    ):
+        raise ValueError("representation cache encoder must be frozen")
+    validate_manifest_caches(manifest, recording_caches)
+    unique = tuple(sorted(set(segments)))
+    if not unique:
+        raise ValueError("bounded representation selection is empty")
+    bounds_by_identity: dict[tuple[str, str, str, int], tuple[float, float]] = {}
+    for segment in unique:
+        identity = (
+            segment.dataset,
+            segment.recording_id,
+            segment.stream_id,
+            segment.event_index,
+        )
+        bounds = (segment.start_sec, segment.end_sec)
+        previous = bounds_by_identity.setdefault(identity, bounds)
+        if previous != bounds:
+            raise ValueError(
+                "one bounded representation identity was requested with conflicting "
+                f"intervals: {identity!r}: {previous!r} versus {bounds!r}"
+            )
+    cohort_lookup = {
+        (entry.dataset, entry.cache_index, entry.recording_id): entry
+        for entry in manifest.entries
+    }
+    output = Path(output)
+    staging = output.with_name(f".{output.name}.staging")
+    if output.exists():
+        if not force:
+            raise FileExistsError(f"representation cache already exists: {output}")
+        shutil.rmtree(output)
+    if staging.exists() and not resume:
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True, exist_ok=resume)
+    rows: list[dict[str, Any]] = []
+    try:
+        for segment in unique:
+            entry_key = (segment.dataset, segment.cache_index, segment.recording_id)
+            try:
+                entry = cohort_lookup[entry_key]
+            except KeyError as error:
+                raise ValueError(f"bounded segment lies outside the cohort: {entry_key!r}") from error
+            recording = recording_caches[segment.dataset][segment.cache_index]
+            if recording.recording_id != segment.recording_id:
+                raise ValueError("bounded segment no longer matches its canonical cache")
+            derived_id = bounded_representation_id(segment.recording_id, segment.event_index)
+            directory = _storage_name(segment.dataset, derived_id, segment.stream_id)
+            destination = staging / directory
+            if resume and destination.exists():
+                try:
+                    cached = read_motion_sequence(destination, mmap=False)
+                    if (cached.dataset, cached.recording_id, cached.stream_id) != (
+                        segment.dataset,
+                        derived_id,
+                        segment.stream_id,
+                    ):
+                        raise ValueError("resumed bounded sequence identity is stale")
+                except Exception:
+                    shutil.rmtree(destination, ignore_errors=True)
+                else:
+                    rows.append(
+                        {
+                            "dataset": segment.dataset,
+                            "recording_id": derived_id,
+                            "stream_id": segment.stream_id,
+                            "split": entry.split,
+                            "directory": directory,
+                        }
+                    )
+                    continue
+            bounded = _bounded_raw_recording(recording, segment)
+            encode_kwargs: dict[str, Any] = {
+                "stream_id": segment.stream_id,
+                "stride_seconds": stride_seconds,
+            }
+            if patch_seconds is not None:
+                encode_kwargs["patch_seconds"] = patch_seconds
+            sequence = encoder.encode_recording(bounded, **encode_kwargs)
+            # Matching and manifest annotations use the original recording clock.
+            sequence = replace(
+                sequence,
+                recording_id=derived_id,
+                intervals_sec=sequence.intervals_sec + float(segment.start_sec),
+            )
+            write_motion_sequence(sequence, destination)
+            rows.append(
+                {
+                    "dataset": segment.dataset,
+                    "recording_id": derived_id,
+                    "stream_id": segment.stream_id,
+                    "split": entry.split,
+                    "directory": directory,
+                }
+            )
+        (staging / "manifest.jsonl").write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        datasets = sorted({segment.dataset for segment in unique})
+        metadata = {
+            "schema_version": REPRESENTATION_SCHEMA_VERSION,
+            "cohort_name": manifest.name,
+            "cohort_fingerprint": manifest.fingerprint,
+            "cache_fingerprints": {
+                dataset: manifest.cache_fingerprints[dataset] for dataset in datasets
+            },
+            "encoder_provenance": _jsonable(encoder_provenance),
+            "patch_seconds": (
+                patch_seconds
+                if patch_seconds is not None
+                else float(getattr(encoder, "window_seconds", 1.0))
+            ),
+            "stride_seconds": stride_seconds,
+            "datasets": datasets,
+            "splits": sorted({row["split"] for row in rows}),
+            "recording_count": len(unique),
+            "sequence_count": len(rows),
+            "selection_limit": None,
+            "bounded_events": True,
         }
         (staging / "cache.json").write_text(
             json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"

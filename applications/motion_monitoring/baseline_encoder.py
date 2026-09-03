@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from hashlib import sha256
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -23,6 +25,14 @@ from eval.data import EvalStream
 
 PRIMARY_APPLICATION_BASELINES = ("harnet", "unimts", "normwear")
 OPTIONAL_APPLICATION_BASELINES = ("imagebind",)
+
+
+def _artifact_digest(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class BaselineMotionEncoder(nn.Module):
@@ -69,7 +79,7 @@ class BaselineMotionEncoder(nn.Module):
 
     def _setup(self) -> dict[str, Any]:
         if self._state is None:
-            self._state = self.adapter.setup(self.device)
+            self._state = self.adapter.setup_features(self.device)
         return self._state
 
     def _eval_stream(
@@ -163,6 +173,19 @@ class BaselineMotionEncoder(nn.Module):
 
     def provenance(self) -> dict[str, object]:
         state = self._setup()
+        artifacts = self.adapter.feature_artifacts(state)
+        artifact_provenance = {}
+        for name, raw_path in artifacts.items():
+            path = Path(raw_path)
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"{self.name} feature artifact {name!r} is missing: {path}"
+                )
+            artifact_provenance[name] = {
+                "path": str(path.resolve()),
+                "sha256": _artifact_digest(path),
+                "bytes": path.stat().st_size,
+            }
         return {
             "kind": "released_frozen_baseline",
             "name": self.name,
@@ -173,9 +196,6 @@ class BaselineMotionEncoder(nn.Module):
                 "rate_hz": self.adapter.contract.rate_hz,
                 "window_sec": self.adapter.contract.window_sec,
             },
-            "evaluation_config": self.adapter.evaluation_config(state),
-            "artifacts": {
-                name: str(path)
-                for name, path in self.adapter.evaluation_artifacts(state).items()
-            },
+            "feature_config": self.adapter.feature_config(state),
+            "artifacts": artifact_provenance,
         }

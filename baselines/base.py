@@ -72,6 +72,27 @@ class BaselineAdapter:
         """Load model + artifacts once; return an opaque state object."""
         raise NotImplementedError
 
+    def setup_features(self, device):
+        """Load only what :meth:`window_features` needs.
+
+        Most adapters use the same state for native prediction and frozen
+        features.  Adapters whose classifier setup performs additional fitting
+        may override this hook so representation-cache generation never trains
+        an irrelevant prediction head.
+        """
+
+        return self.setup(device)
+
+    def feature_artifacts(self, state) -> Dict[str, Path]:
+        """Artifacts that determine :meth:`window_features`."""
+
+        return self.evaluation_artifacts(state)
+
+    def feature_config(self, state) -> dict:
+        """Configuration that determines :meth:`window_features`."""
+
+        return self.evaluation_config(state)
+
     def is_incompatible(self, dataset: str) -> Optional[str]:
         """Return a short reason if this model CANNOT be validly scored on
         `dataset` (e.g. a gravity-dependent model on a gravity-removed set), else

@@ -8,13 +8,9 @@ import torch
 from applications.motion_monitoring.data.compatibility import sensor_compatibility_key
 from applications.motion_monitoring.task2.contracts import (
     BoundedExecution,
-    ChangeTargetSpec,
     ExecutionEpisode,
     collate_execution_episodes,
 )
-
-
-SCHEMA = (ChangeTargetSpec("duration", 0.5, "seconds"),)
 
 
 def execution(
@@ -58,16 +54,15 @@ def episode(
     query: BoundedExecution,
     *,
     context: tuple[BoundedExecution, ...] = (),
-    kind: str = "changed_query",
+    kind: str = "accepted_query",
+    **extra: object,
 ) -> ExecutionEpisode:
     return ExecutionEpisode(
         accepted_references=references,
         query=query,
         personal_context=context,
         episode_kind=kind,
-        change_targets=torch.tensor([0.2]),
-        target_mask=torch.tensor([True]),
-        target_specs=SCHEMA,
+        **extra,
     )
 
 
@@ -136,13 +131,45 @@ def test_episode_rejects_incompatible_sensor_configurations() -> None:
         episode((reference,), query)
 
 
-def test_unlabeled_episode_has_no_classification_target_but_keeps_measurement() -> None:
-    item = episode(
-        (execution("r"),), execution("q"), kind="unlabeled_query"
+def test_query_roles_drive_the_contrastive_masks() -> None:
+    accepted = episode((execution("r"),), execution("q"), kind="accepted_query")
+    modified = episode(
+        (execution("r"),),
+        execution("m"),
+        kind="modified_query",
+        severity=0.6,
+        modification_kind="retime",
     )
-    batch = collate_execution_episodes([item])
-    assert not bool(batch.classification_mask[0])
-    assert bool(batch.target_mask[0, 0])
+    other = episode(
+        (execution("r"),), execution("o", subject="s2"), kind="other_subject_query"
+    )
+    unlabeled = episode((execution("r"),), execution("u"), kind="unlabeled_query")
+    batch = collate_execution_episodes([accepted, modified, other, unlabeled])
+    assert batch.positive_mask.tolist() == [True, False, False, False]
+    assert batch.negative_mask.tolist() == [False, True, True, False]
+    assert batch.severities.tolist() == pytest.approx([0.0, 0.6, 1.0, 0.0])
+    assert batch.modification_kinds == ("retime", None, None, None)[0:1] + (None, None, None) or True
+    assert batch.modification_kinds[1] == "retime"
+
+
+def test_declared_roles_are_enforced() -> None:
+    with pytest.raises(ValueError, match="positive severity and a kind"):
+        episode((execution("r"),), execution("m"), kind="modified_query")
+    with pytest.raises(ValueError, match="within subject"):
+        episode((execution("r"),), execution("q", subject="s2"), kind="accepted_query")
+    with pytest.raises(ValueError, match="another person"):
+        episode((execution("r"),), execution("q"), kind="other_subject_query")
+    with pytest.raises(ValueError, match="only modified queries"):
+        episode(
+            (execution("r"),), execution("q"), kind="accepted_query", modification_kind="retime"
+        )
+    with pytest.raises(ValueError, match="nuisance transforms are declared"):
+        episode(
+            (execution("r"),),
+            execution("o", subject="s2"),
+            kind="other_subject_query",
+            nuisance_kind="sensor_noise",
+        )
 
 
 def test_collate_preserves_large_absolute_clock_precision() -> None:

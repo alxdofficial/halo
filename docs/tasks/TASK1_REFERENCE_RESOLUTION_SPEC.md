@@ -1,8 +1,8 @@
 # Task 1 spec: reference resolution and semantics
 
-> **Design spec, 2026-09-01; §§A/1–4 implemented 2026-09-01; §C split redesign +
-> synthetic training corpus decided 2026-09-02 and is the current implementation queue
-> (§E items 6–12).** Owner for implementation: the Task-1 pipeline. This document resolves
+> **Design spec, current protocol implemented 2026-09-02.** Sections A–E retain the reasoning
+> that led to the design. Section F is authoritative where it differs, including the two-role
+> train/evaluation protocol, paired reference relations, and threshold fitting. This document resolves
 > the sub-patch-reference problem and the long-reference problem measured on the
 > 2026-09-01 data probe, and the set-level-label problem measured 2026-09-02; link it from
 > `TASK1_ARBITRARY_DETECTION.md` §6 when convenient.
@@ -213,36 +213,33 @@ projection over frozen embeddings — it learns a metric, not physics — but th
 | source | placement | channels | natural long recording | per-execution labels | new role |
 |---|---|---|---|---|---|
 | C-MHAD | right wrist | acc+gyro | yes (8 h, 12 subj) | exact | **test** |
-| OpenPack | right wrist | acc+gyro | yes — most natural (54 h, 16 subj) | per operation | **dev + test, subject-disjoint** (moves out of train) |
-| OCA | upper arm / chest | acc+gyro | yes (6 h, 5 subj) | yes | **test** |
-| AIDLAB-HAR | chest | acc only | short sessions | per rep | **dev** (chest family) |
-| CrossFit | wrist | acc+gyro | no (sets only) | exact rep clips: 5,455 across 10 exercises, 57 subj | **donor bank** (train only) |
-| RecoFit | right forearm | acc+gyro | 79 h sessions, 94 subj, 100 % annotated (2,147 `Non-Exercise` segments = 29 h, median 34 s) | set-level only | **background + distractor bank** (train only) |
+| OpenPack | right wrist | acc+gyro | yes — most natural (54 h, 16 subj) | per operation | **test** (all 16 subjects) |
+| OCA | upper arm / chest | acc+gyro | yes (6 h, 5 subj) | yes | excluded from the primary Task-1 set |
+| AIDLAB-HAR | chest | acc only | short sessions | per rep | excluded from the primary Task-1 set |
+| CrossFit | wrist | acc+gyro | separate idle traces | exact rep clips: 5,455 across 10 exercises, 57 subj | **donor + wrist-background bank** (train only) |
+| RecoFit | right forearm | acc+gyro | 79 h sessions, 94 subj | set-level only | excluded from synthesis: placement mismatch |
 | WEAR | both wrists | **acc only** | yes (19 h) | bout-level only | acc-only background only; never mixed into the 6-channel family; no longer a target |
 
-- The wrist-IMU family (C-MHAD, OpenPack, CrossFit, RecoFit) is the primary arm. OCA and
-  AIDLAB stay as evaluation/dev in their own families; a training corpus for those
-  families is out of scope until the wrist arm is measured.
-- OpenPack dev/test split: 4 of 16 subjects to development, 12 to test, chosen by the
-  existing seeded leakage-group assignment; the split is recorded in `COHORT_V1`'s
-  successor and the fingerprint changes. Calibration (threshold, NMS) is done on natural
-  dev only — a threshold chosen on synthetic queries does not transfer.
-- Nothing synthetic ever enters development or test.
+- The wrist-IMU family (C-MHAD, OpenPack, CrossFit) is the primary arm. OCA and
+  AIDLAB are excluded because their sensor families do not have a matched training
+  analogue in the current protocol.
+- Nothing synthetic enters evaluation. Threshold fitting uses a held-out subset of
+  synthetic background subjects only; natural test recordings are never used for tuning.
 
 ### C.2 Synthetic query construction (wrist family)
 
 One training unit = (reference, query, per-execution targets, present flag), built as:
 
-1. **Background:** a contiguous RecoFit segment of 60–120 s (Non-Exercise, or an
-   exercise set of a *different* label, or a mix across a session), or a CrossFit set of a
-   different exercise. Background labels are known, so every background region is either
-   neutral or a labelled distractor.
-2. **Reference:** one CrossFit rep clip of exercise X from subject A (or a RecoFit
-   exemplar prefix), passed through §A's snapping/floor unchanged.
-3. **Inserted positives:** 0–4 rep clips of exercise X that are **different executions,
+1. **Background:** a contiguous 20–120 s slice from a real CrossFit wrist `Null` trace.
+   Derived duplicate traces are excluded. This keeps placement, device family, channels,
+   units, gravity convention, and native rate identical to the donor bank.
+2. **Reference:** one clean, unmodified CrossFit repetition exposed as an
+   enrollment-only record. It is never cut back out of a synthetic query.
+3. **Inserted positives:** 1–4 rep clips of exercise X that are **different executions,
    mostly from subjects other than A**, each augmented independently (§C.3), inserted at
-   distinct low-motion points. Their inserted extents are the targets — exact by
-   construction. `target_present = False` units insert none.
+   distinct low-motion points. Their inserted extents are the targets, exact by
+   construction. Target-absent units pair the query with a clean reference label absent
+   from that query; they do not use a visibly different zero-insertion query recipe.
 4. **Inserted negatives:** rep clips of exercises ≠ X inserted by the *same procedure*
    in the same or other units, so that "was spliced" is uninformative. Every unit contains
    at least one inserted segment, positive or not.
@@ -253,28 +250,28 @@ One training unit = (reference, query, per-execution targets, present flag), bui
    sample rate (resample donor to the background rate); acc-only backgrounds may only
    receive acc-only donors.
 7. Synthesis is raw-level, deterministic under a recorded seed, materialized as a finite
-   corpus (target ≈ 40 h of queries) and **encoded once per encoder** into a
+   corpus (8 h of queries plus 5,427 clean reference records) and **encoded once per encoder** into a
    representation cache tagged `condition: "synthetic"` — so baselines with 6–10 s
    receptive fields see the seams the way they would in deployment. Embedding-level
    cut-and-paste is not used.
 
 ### C.3 Augmentation (applied to donors; session-level transforms to the whole query)
 
-Time-warp ±15 %, amplitude scale 0.8–1.2, small axis rotation (≤ 15°) applied
-consistently to every inserted segment of a unit plus the background (never only the
-inserted segment — no watermarking), additive sensor noise at background noise level.
+Time-warp ±15 %, amplitude scale 0.8–1.2 on donor dynamics, donor noise, and donor-gravity
+alignment to the local background frame. A small axis rotation (≤15°) is then applied to
+the complete query, so it cannot identify inserted intervals. The crossfade guard around
+every seam remains alignment-valid but is excluded from endpoint supervision.
 
 ### C.4 Controls (must pass before any trained number is reported)
 
 1. **Splice-leak control:** train the head on the synthetic corpus with a *random*
-   reference (wrong exercise). Its event F1 on synthetic dev must be at chance; if it is
+   reference (wrong exercise). Its event F1 on held-out synthetic subjects must be at chance; if it is
    not, the seams are a feature and the recipe is rejected.
-2. **Natural-dev gate:** train on synthetic, calibrate and measure on natural dev
-   (OpenPack-dev + AIDLAB). The learned head must beat the untrained direct floor there
-   before anything runs on test. This is the only success criterion.
+2. **Reference floor:** the untrained direct matcher is a mandatory evaluation row. The learned
+   head must be reported beside it; no natural development data is used for selection.
 3. **Reference-identity control:** an arm where inserted positives are the reference's
-   own clip (augmented) must score *higher* on synthetic dev and *not* on natural dev —
-   confirming the cross-execution rule matters.
+   own clip (augmented) must score *higher* on held-out synthetic subjects than the
+   cross-clip rule. This is a synthetic leakage diagnostic, not a natural-data claim.
 4. Per-unit provenance: donor recording ids, background recording id, insertion
    intervals, augmentation parameters, seed — all persisted.
 
@@ -330,36 +327,38 @@ items 6–9 are BUILT (see per-item notes), 10–12 are in flight. Nothing is co
    strata, per-dataset rejection recording in `task1/full_evaluation.py`.
 5. **DONE (prior work)** — Task-0 calibration parity.
 6. **DONE** — Cohort/split rebuild (§C.1): `manifests/COHORT_TASK1_V2.json`
-   (`cohort_task1_v2`, fingerprint `1561aa29…`) with declared roles
-   (`train_only` / `development_only` / `split_evaluation` / `evaluation`); OpenPack dev 4 /
-   test 12 subjects; `TASK1_{TRAIN,DEVELOPMENT,TEST}_V2.json` from
-   `task1/build_manifests_v2.py` (train 4569 units, dev 850, test 4017). `COHORT_V1` and the
+   (`cohort_task1_v2`, fingerprint `04d87d19…`) with declared roles
+   (`train_only` / `evaluation`); `TASK1_{TRAIN,TEST}_V2.json` from
+   `task1/build_manifests_v2.py` (train 2,070 units; test rebuilt as paired relation trials).
+   `COHORT_V1` and the
    Task-3 manifests are untouched.
-7. **DONE** — `data/adapters/synth_wrist_v1.py::load_donor_bank` (5427 CrossFit rep clips,
-   50 subjects, 10 exercises, 1–8 s, fully valid) and `load_background_index` (RecoFit
-   sessions with set/junk intervals; low-motion placement scored at synthesis time).
+7. **DONE** — `data/adapters/synth_wrist_v1.py::load_donor_bank` (5,427 CrossFit rep clips,
+   50 subjects, 10 exercises, 1–8 s, fully valid) and `load_background_index` (real CrossFit
+   wrist `Null` parents; duplicate repetition-derived traces excluded).
 8. **DONE** — `synth_wrist_v1` is a `derived` canonical cache (registry policy `derived`,
-   provenance = generator sha + source-cache provenance): 1603 recordings, 40.0 h,
-   94 background subjects, 2246 primary + 1086 distractor inserts, every insert with the
-   §C.4.4 provenance. Encoded once for HALO PB-04 into
-   `artifacts/representations/app_v2_halo_pb04_synth` (stride 1.0); representation caches
-   now bind per-dataset raw-cache fingerprints and union across cohorts
-   (`representation_cache.open_representations`).
+   provenance = generator sha + CrossFit source-cache provenance): 5,427 clean
+   enrollment-only records plus 437 synthetic query timelines, 8.0 query hours, and no
+   zero-insertion queries. Every insertion carries §C.4.4 provenance. It is encoded for
+   HALO PB-04 at 0.5 s stride in
+   `artifacts/representations/app_v2_halo_pb04_synth_stride05`; representation caches
+   bind per-dataset raw-cache fingerprints and unions permit per-dataset strides while
+   requiring one encoder provenance (`representation_cache.open_representations`).
    Manifest-level reference rule: `reference_identity: donor` (never the target's donor clip;
    different donor subject where possible — verified 0/0 violations).
-   Known deviation: 567/1603 recordings ended with zero primary inserts (config weight 20 %)
-   because placement can fail when RecoFit sets dominate a window; the metadata records
-   what was actually inserted.
+   Requested insert counts are exact: a synthesis attempt is discarded if any planned
+   primary or distractor cannot be placed.
 9. **DONE (built; results pending)** — `task1/controls_v2.py` runs the splice-leak control
    (wrong-exercise references; chance = untrained matcher under the same wrong references)
    and the reference-identity control (same-donor-clip references paired against the
    cross-clip rule on identical units) on a background-subject hold-out inside the
-   synthetic corpus; the natural-dev gate is in `train_full.py` (`natural_dev_gate`).
-10. Per-stride cache selection in evaluation/training (one cache dir per stride tier);
-    baseline fine-stride caches for the new test set.
-11. Retrain the head on the synthetic corpus; report natural-dev gate, then test —
-    together with the dev-only checkpoint A/B (item 12).
-12. **Checkpoint A/B (dev only)** — long_4h vs PB-04 on development sources using
+   synthetic corpus. The control does not substitute same-subject natural enrollment for a
+   same-clip identity test.
+10. **DONE in code** — mixed-stride cache unions, manifest validation, frozen common-unit
+    intersections, and encoder-provenance binding in train/evaluation. Baseline fine-stride
+    caches and the final cross-encoder intersection remain run artifacts to build.
+11. Retrain the head on the synthetic corpus; fix the operating point on held-out synthetic
+    background subjects; then evaluate both the learned head and direct floor on test.
+12. **Historical checkpoint A/B note** — long_4h vs PB-04 on development sources using
     `app_v1_halo_long4h_dev`; the 2026-09-01 C-MHAD event-AUC probe (PB-04 0.508 = chance
     vs UniMTS 0.688) is diagnostic only, never selection.
 13. Open/optional: §D.3 k=3 fusion; §B occupancy readout; §5 HALO adaptive-scale arm.
@@ -401,3 +400,136 @@ same scaling; the 60 s training crop bounds it, but budget before launching long
 - `applications/motion_monitoring/task1/train_full.py` (per-sample jitter; per-stratum
   calibration)
 - `applications/motion_monitoring/task1/matcher.py` (vectorization prerequisite)
+
+## F. Current minimal train/evaluation protocol (implemented 2026-09-02)
+
+Task 1 has exactly two data roles, **train** and **evaluation**. Every non-learned constant is
+fixed before test evaluation; there is no development split. The current corpus is the reconciled
+CrossFit-background 8 h generator described in section C.
+
+### F.1 Audit of candidate sources (measured 2026-09-02)
+
+| source | family | natural timeline | per-execution labels | subjects | current role | finding |
+|---|---|---|---|---|---|---|
+| C-MHAD TV gestures | right-wrist research IMU, 6-axis, 50 Hz | yes | exact, video-inspected; median 2.1 s | 12 | wrist test | paired same-subject cross-run and cross-subject enrollment where both references exist. |
+| C-MHAD transitions | middle-waist research IMU, 6-axis, 50 Hz | yes | exact, video-inspected | 12 | cross-placement stress test | reported separately; it is not a smartwatch-wrist result. |
+| OpenPack | wrist research IMU, 6-axis, 30 Hz | yes, 105 recordings | exact fine actions; median 1.5 s | 16 | test | paired same-subject cross-session and cross-subject enrollment where both references exist. |
+| OCA | chest vest, 4 IMUs, 20–27 Hz | yes, 13 recordings | sample-label runs; median 3.8 s | 5 | test | different family with no training analogue; 4 target-absent units (cyclic assembly, §D.2); 6 labels. Low-utility cell. |
+| AIDLAB-HAR | chest, acc-only | short sessions | series + rep fiducials (0.4 s) | 180 codes, identities unverified | dev | exists only as a development control; no evaluation value once dev is removed. |
+| CrossFit | wrist watch, 6-axis, 100 Hz | no (sets) | exact rep clips, 5,455 | 57 | donor bank | unchanged. |
+| RecoFit | right forearm armband | yes, 79 h | set-level | 94 | background bank (spec) | forearm, not wrist: background family mismatch with wrist donors if used; the in-flight generator uses CrossFit backgrounds instead. |
+| HARMES | wrist watch, 6-axis, 50 Hz | yes, 57 parsable recordings, 51.6 h | event log, **median event 63 s** (p10 22 s), inter-event gap median 14 s (10.4 h total) | 20 | none | bout-level ADLs: a ≤20 s reference against a 63 s target is the §A.2 degeneracy again (IoU < 0.5 by construction). **Not a Task-1 target source.** Task 2 only. |
+| WEAR, MoniPar, MM-Fit | — | — | bout / state / set | — | retired | unchanged. |
+
+### F.2 Minimal set
+
+| role | sources |
+|---|---|
+| train | synthetic wrist corpus (`synth_wrist_v1`: CrossFit donors; background per the reconciled generator) |
+| evaluation | C-MHAD right-wrist gestures and waist transitions (all 12 subjects), OpenPack right wrist (all 16 subjects) |
+
+Dropped: AIDLAB-HAR (dev-only, unverified identities), OCA (5 subjects, foreign family, no absent
+condition). Both stay adapted and may be reported as an appendix transfer cell if wanted; they are
+not part of the build. OpenPack and the C-MHAD gesture stream are wrist six-axis research IMUs,
+the same placement family as the synthetic corpus except for device family. C-MHAD transitions
+are an explicitly separate waist-placement transfer condition.
+
+### F.3 What replaces the development split
+
+| former dev use | replacement |
+|---|---|
+| threshold chosen by F1 search on natural dev (`train_full.calibrate`), with reference-position buckets | **one global threshold fixed a priori**: the score at which the trained matcher produces a declared budget of false alarms per hour on the synthetic corpus's held-out background subjects (training data). Budget declared before evaluation; no per-bucket thresholds. Supporting measurement (2026-09-01): transferred-threshold F1 0.106 vs oracle 0.110 on C-MHAD — threshold choice is not the bottleneck. |
+| natural-dev gate (learned head must beat the untrained floor before test) | the **untrained direct floor is a mandatory row** in every evaluation table; if the head loses, the table shows it. |
+| checkpoint A/B on dev (§E item 12) | encoder checkpoint fixed a priori and named in the manifest protocol block; no selection. |
+| §C.4 splice-leak and reference-identity controls | unchanged — they run on a background-subject hold-out **inside the synthetic corpus**, which is training data. |
+| calibration strata (§B.4) | reported as evaluation strata, never used to set thresholds. |
+
+Metrics: event average precision (threshold-free) becomes the primary number; event F1, precision,
+recall and FA/h at the a-priori threshold are reported alongside; F1 at the oracle threshold is
+reported only as a labelled upper bound. Subject cluster-bootstrap CI95 unchanged.
+
+### F.3b Sensor-compatibility audit (2026-09-02)
+
+Every Task-1 trial pairs a reference and a query that share one
+`SensorCompatibilityKey`; the manifest builder groups references by that key and
+`validate_task_manifest` re-checks it on load. Verified on the built manifests:
+**0 of 2,024 train units and 0 of 8,272 test units pair mismatched sensors**, and
+C-MHAD's wrist and waist streams never cross (1,200 wrist and 1,670 waist units,
+each internally matched).
+
+The train-to-evaluation gap is a declared transfer, not an in-trial defect:
+
+| split | device family | placement | channels |
+|---|---|---|---|
+| train (`synth_wrist_v1`) | watch | `wrist` | 6 |
+| test (C-MHAD wrist, OpenPack) | research IMU | `right_wrist` | 6 |
+| test (C-MHAD transitions) | research IMU | `middle_waist` | 6 |
+
+So Task 1 reports consumer-watch training transferred to research-IMU wrist
+evaluation, with the waist condition as a further cross-placement stress test.
+
+### F.3c Synthesis augmentation audit (2026-09-02)
+
+The augmentation set is deliberately small: whole-execution retiming, log-uniform
+scaling of the donor's dynamic component, additive sensor noise, and a
+whole-query axis rotation of at most 15 degrees. Gravity alignment at the seam and
+the 0.2-0.4 s crossfade are *correctness* requirements, not augmentations: without
+them the splice is a step discontinuity and "was spliced" becomes the answer.
+
+The ranges were widened after measuring the gap between donors and evaluation
+targets, because the original linear +/-20 % amplitude band was not sufficient:
+
+| quantity | CrossFit donors | C-MHAD targets | OpenPack targets |
+|---|---|---|---|
+| dynamic acceleration, median | 1.73 g | 0.35 g | 0.36 g |
+| target-to-background energy contrast | 2.53x | 2.34x | 0.92x |
+
+Training targets were roughly five times more energetic than any realistic
+fine-motion target, so the old band covered 17 % of C-MHAD and 11 % of OpenPack
+targets and let "loud region" stand in for "target" — a shortcut that does not
+exist in OpenPack, where targets are no louder than their surroundings. Amplitude
+is now log-uniform over 0.2 to 1.25 and retiming spans 0.6 to 1.6, chosen from the
+declared deployment envelope ("wrist movements from fine hand gestures to
+full-effort exercise") rather than fitted to the test statistics. After rebuilding
+(`SYNTHESIS_CONFIG` version 3):
+
+| quantity | synthetic targets, before | after | evaluation range |
+|---|---|---|---|
+| dynamic acceleration p10/50/90 (g) | -- / 0.91 / -- | 0.10 / 0.27 / 1.01 | 0.21-0.80 |
+| duration p10/50/90 (s) | 2.98 / 3.47 / 3.99 | 1.73 / 2.90 / 4.51 | 0.79-6.22 |
+| energy contrast | 2.53x | 1.22x | 0.92-2.34x |
+
+No new augmentation kind was added. The residual gap is at the short end of
+duration: training targets stop near 1.7 s while some evaluation targets run to
+0.8 s.
+
+### F.4 Utility recovered at no data cost
+
+1. **Paired same-subject cross-run enrollment column.** C-MHAD (median 9 runs per subject-action)
+   and OpenPack (5 sessions per subject) support it. Report `same_subject` and `cross_subject`
+   separately over the same query-label trials: the former is the deployment story ("record your
+   own reference"), the latter the generalisation story.
+2. k = 1 and k = 3 enrollment columns per §D.3 (already planned).
+3. C-MHAD wrist gestures (novel-motion condition) and waist transitions (generic-motion condition)
+   reported separately per §7.2 of the design doc, on their own streams.
+
+### F.5 Implemented manifest and code changes
+
+- `COHORT_TASK1_V2` roles → `synth_wrist_v1: train_only`, `c_mhad: evaluation`,
+  `openpack: evaluation`; `development_only` and `split_evaluation` roles removed; fingerprint
+  changes.
+- `TASK1_DEVELOPMENT_V2.json` deleted; `TASK1_TEST_V2.json` rebuilt with OpenPack 16 subjects and a
+  `reference_relation` field (`same_subject` / `cross_subject`).
+- `task1/evaluate_v2.py`: `calibrate` on development removed; threshold read from the training
+  protocol block (FA/h budget on synthetic hold-out).
+- `task1/train_full.py`: the direct matcher is the mandatory floor row; the fixed operating point
+  uses two held-out synthetic background subjects.
+- §E item 12 (dev checkpoint A/B) retired; the checkpoint is declared.
+
+### F.6 Cross-task decision required
+
+Task 3 currently trains on 13 OpenPack subjects and evaluates on C-MHAD, OCA and WEAR. With
+OpenPack sealed for Task 1, either Task 3 also seals it (train on CrossFit, RecoFit, AIDLAB;
+evaluate on C-MHAD and OpenPack; WEAR and OCA dropped) so Tasks 1 and 3 share one sealed set, or the
+asymmetry is kept and explained. This is the Task-3 owner's call; the shared set is the minimal
+option and makes OpenPack a genuine unseen occupational domain for every task.

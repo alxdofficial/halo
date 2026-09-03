@@ -307,6 +307,152 @@ precision among reviewed clusters, and cumulative exposure covered.
 9. Run a cross-domain experiment from controlled exercise training to OCA or held-out OpenPack
    occupational actions.
 
+## 10. Data plan (implemented 2026-09-03)
+
+**Status.** Built and exercised on the real caches with a stub encoder; not yet
+run with a trained encoder. `COHORT_TASK3_V2` plus `TASK3_{TRAIN,TEST}_V2` are
+frozen. The V1 cohort and manifests remain untouched for reference.
+
+| piece | state |
+|---|---|
+| event-anchored pair sampler (`task3/sampling.py`) | built, 7 tests |
+| a-priori operating point on held-out training identities | built, replaces development calibration |
+| Opportunity gesture adapter + cache | built, 24 runs, 4 subjects |
+| `synth_long_v1` assembled corpus + cache | built, 529 recordings, 470 MB |
+| `COHORT_TASK3_V2`, `TASK3_TRAIN_V2` (649 timelines), `TASK3_TEST_V2` (156) | frozen |
+| candidate grid re-derived to (1.5, 2.5, 4, 6, 10, 16) s | built |
+| shuffled-identity leak control | built |
+
+Measured after the change: the training event index holds 20,495 executions over
+94 identities, **all 94 of which recur**, with a median of 134 instances each. A
+batch now yields the sampler's full 4,096 positive and 4,096 negative pairs where
+the previous crop-and-hope sampler produced none on these sources. Held-out
+identities are disjoint from fitted ones, 24 against 70.
+
+Both readouts get their own threshold. The untrained cosine floor and the learned
+metric are scored on the same held-out pairs and each takes the largest affinity
+whose false-edge rate stays inside the 5% budget, so the floor never borrows the
+trained arm's operating point. `run_full_evaluation.py` reads both from
+`task3_training.json` and refuses to run if either is missing.
+
+The V1 Task-3 manifests are retired, not deleted. `COHORT_V1.json` stays because
+other builders still default to it.
+
+### 10.0 Original audit (2026-09-03)
+
+Nothing in this section is implemented. It records an audit of the current sources
+against what the task actually asks for, and the set that follows from it.
+
+### 10.1 What the measurements showed
+
+A recurrence-discovery evaluation needs a recording in which motions actually
+recur. Measured per test recording:
+
+| source | role | length | identities per recording | occurrences per identity | identities recurring 3+ | labelled fraction |
+|---|---|---|---|---|---|---|
+| C-MHAD | test | 119 s | 5 | **1** | **15 %** | 0.15, non-exhaustive |
+| WEAR | test | 2,786 s | 18 | **1** | **22 %** | 0.62 |
+| OCA | test | 1,313 s | 6 | 26 | 95 % | 1.00, exhaustive |
+| OpenPack | *train* | 1,824 s | 23 | 20 | 97 % | 0.63, non-exhaustive |
+
+Two of the three evaluation sources contain essentially no recurrence, and
+C-MHAD leaves 85 % of its timeline unlabelled and non-exhaustive, so a discovered
+motif there cannot be scored either way. The source that best matches the
+deployment scenario, OpenPack, is currently a *training* source and is also Task
+1's sealed test.
+
+The frozen candidate grid (2, 4, 8, 16, 32 s) does not fit the sources it is
+applied to. Best achievable temporal IoU with a perfectly centred candidate:
+
+| source | AIDLAB | CrossFit set | OpenPack | RecoFit set | C-MHAD | OCA | WEAR |
+|---|---|---|---|---|---|---|---|
+| reachable at IoU >= 0.5 | **21 %** | 100 % | 66 % | 73 % | 95 % | 69 % | 57 % |
+
+AIDLAB annotates 0.4 s fiducial markers, which cannot reach a 2 s minimum
+candidate; it contributes 180 of 864 timelines and can produce almost no positive
+pair. Training is otherwise dominated by set-level annotations (CrossFit 33 s,
+RecoFit 47 s) while two of three test sources are instance-level near 2 s.
+
+### 10.2 The proposed set
+
+| role | source | unit | placement | status |
+|---|---|---|---|---|
+| train | Opportunity `ML_Both_Arms` gesture track | one gesture, 1.7-5.7 s | both lower and upper arms, back; Xsens 30 Hz | **needs an application adapter**; raw release is on disk, the Phase-A converter ingested only the 4-label locomotion track |
+| train | `synth_long_v1` assembled recordings | inserted CrossFit repetition, ~2.5 s | wrist, consumer watch 100 Hz | **needs a derived adapter** |
+| test | OpenPack `fine_action` | ~1.5 s | right wrist, ATR TSND151 30 Hz | cached; **moves out of training** |
+| test | OCA `sample_label_run` | ~2 s | left chest, BNO055 20-27 Hz | cached |
+
+Dropped: AIDLAB (unreachable annotations), C-MHAD and WEAR (no recurrence),
+RecoFit and CrossFit `exercise_sequence` (set-level, wrong granularity).
+
+Opportunity supplies 17 gesture identities per run with a median of 3 occurrences
+each, 61 % recurring three or more times, and 99 % reachable on the candidate
+grid, across 4 subjects and 24 runs including 4 scripted Drill runs. It is inside
+HALO's pretraining corpus, which is harmless training-side but forecloses any
+unseen-source claim for it. CrossFit, OpenPack and OCA are all absent from that
+corpus, so both test sources are genuinely unseen.
+
+Moving OpenPack to evaluation also resolves the standing cross-task conflict: all
+16 of its subjects are currently Task-3 training and Task-1 sealed test.
+
+### 10.3 Why training needs assembled recordings, and evaluation must not have them
+
+CrossFit repetition clips are ~3 s. A clip cannot host four of the five candidate
+scales, contains one execution so no positive pair can form inside it, and has no
+background at all, while deployment searches a complete timeline that is mostly
+non-target. Assembling several executions of one exercise, interleaved with
+different-label exercises and background, fixes all three.
+
+The decisive reason is boundary realism. At deployment nothing supplies event
+boundaries; the pyramid must find them. Training on pre-trimmed clips hands the
+boundary over for free, so the model never learns to tolerate a candidate that
+starts early, ends late, or straddles two executions, and the boundary IoU and
+start/end error metrics in section 6.2 would be measured on a condition training
+never faced. In an assembled recording the inserted extents are known exactly
+while the grid still has to locate them.
+
+Three conditions apply. Assembled positives are never the only positives:
+Opportunity supplies natural boundaries, background and execution variability
+alongside them. A leak control is mandatory, matching Task 1's: train with
+identity labels shuffled, and if inserted regions still separate from background,
+the model is reading seams and the recipe is rejected. Background is drawn from
+CrossFit sets of a *different* label rather than `Null` recordings only, because
+`Null` covers just 7 subjects while different-label sets reach all 50 at matched
+placement and double as labelled distractors. Section 5's prohibition still
+holds: session-level transforms apply to background and inserts together, never
+to the inserted events alone.
+
+Evaluation is never synthesised. Planting the motifs would test recovery of what
+was inserted, which is a different and easier question, and would void the
+discovery claim.
+
+### 10.4 Blocking code changes, in order
+
+1. **Pair sampler.** Section 2.3 specifies sampling independent executions of one
+   identity, but the implementation crops a random 120 s window per recording and
+   forms pairs from whatever landed in it. Measured expected occurrences of a
+   given identity inside one crop: Opportunity 0.34, CrossFit 1.0, OpenPack 1.22,
+   OCA 2.77. Under the `different_instance` rule the two training sources
+   therefore yield almost no positives. Sample event pairs first and crop around
+   them. This is the prerequisite for everything else; the data is already
+   adequate once it is fixed.
+2. Re-derive the candidate grid from the retained training durations instead of
+   the current default.
+3. Give Task 3 its own cohort with `exclude_duplicate_views=False`, since CrossFit
+   repetition arrays are flagged as duplicate views of their parent set.
+4. Remove the development split, per the two-role rule already applied to Tasks 1
+   and 2, and fix the recurrence threshold a priori.
+
+### 10.5 Known limitations to carry into the writeup
+
+- OpenPack labels 0.63 of its timeline and is non-exhaustive, so a motif found in
+  the remainder cannot be scored as a false positive without human or video
+  review. Section 7 already requires that review; it is not optional here.
+- Both test sources are occupational. There is no consumer-watch, free-living
+  recurrence cell, and no synthesis can supply one.
+- Opportunity has 4 subjects. Whether its gesture track can carry training has not
+  been measured and should be before the set is committed.
+
 ## 9. Research basis
 
 - Yeh et al., *Matrix Profile I: All Pairs Similarity Joins for Time Series*, ICDM 2016,

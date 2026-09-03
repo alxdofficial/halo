@@ -28,7 +28,8 @@ nuisance-control hypothesis, not a headline contribution.
 The likely gap is therefore broader than frontend design. It includes a mismatch between generic HAR
 pretraining and the information each application needs. A representation trained to collapse all
 examples of one activity can erase exactly the within-activity differences needed by Task 2. A pooled
-window classifier can also discard boundaries and phase structure needed by Tasks 0, 1, and 3.
+window classifier can also discard boundaries and phase structure needed by Tasks 1 and 3 and by
+the optional motion-proposal baseline.
 
 Four levels of evidence must not be conflated:
 

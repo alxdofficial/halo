@@ -114,32 +114,73 @@
         "repetition"
       ],
       "known_execution_change": false,
-      "recommended_use": "controlled Task 1/3 repetition training",
+      "recommended_use": "controlled repetition training and Task 2 synthetic modifications",
       "repeated_instances_in_timeline": true,
       "study_role": "train_development",
       "video_reference": "not required by the selected release"
     },
     "harmes": {
-      "adapter_gap": "application timeline adapter not yet implemented",
       "application_cache": {
-        "cache_status": "not_applicable"
+        "background_event_count": 0,
+        "background_hours": 0.0,
+        "cache_status": "measured",
+        "event_count": 2398,
+        "event_duration_seconds": {
+          "max": 209.73363709449768,
+          "median": 63.39143943786621,
+          "min": 9.053539276123047
+        },
+        "event_kinds": {
+          "bounded_execution": 2398
+        },
+        "events_per_recording": {
+          "max": 47.0,
+          "median": 47.0,
+          "min": 0.0
+        },
+        "recordings": 72,
+        "recordings_with_multiple_events": 52,
+        "recordings_with_repeated_label_instances": 51,
+        "source_scoped_labels": 15,
+        "subjects": 20
       },
       "background_contract": "inter-event time exists in source but is omitted by Phase-A converter",
       "continuous_timeline": true,
-      "current_data_form": "Phase-A action excerpts; raw recording and event log retained locally",
+      "current_data_form": "72 raw dominant-wrist timelines with converted event-log executions",
       "exact_instance_intervals": true,
       "instance_granularity": [
         "activity_instance"
       ],
       "known_execution_change": false,
-      "recommended_use": "reconstruct wrist-ADL timelines for Task 1/3 training",
+      "recommended_use": "Task 2 accepted-repeat training and synthetic modification source",
       "repeated_instances_in_timeline": true,
-      "study_role": "train_development",
+      "study_role": "task2_training",
       "video_reference": "event log; multimodal source exists but selected payload is wrist IMU"
     },
     "kneepad": {
       "application_cache": {
-        "cache_status": "not_applicable"
+        "background_event_count": 0,
+        "background_hours": 0.0,
+        "cache_status": "measured",
+        "event_count": 2084,
+        "event_duration_seconds": {
+          "max": 31.1985,
+          "median": 3.7935,
+          "min": 1.4985
+        },
+        "event_kinds": {
+          "bounded_execution": 2084
+        },
+        "events_per_recording": {
+          "max": 1.0,
+          "median": 1.0,
+          "min": 1.0
+        },
+        "recordings": 2084,
+        "recordings_with_multiple_events": 0,
+        "recordings_with_repeated_label_instances": 0,
+        "source_scoped_labels": 3,
+        "subjects": 31
       },
       "background_contract": "no continuous background",
       "continuous_timeline": false,
@@ -175,20 +216,42 @@
     },
     "monipar": {
       "application_cache": {
-        "cache_status": "not_applicable"
+        "background_event_count": 0,
+        "background_hours": 0.0,
+        "cache_status": "measured",
+        "event_count": 7775,
+        "event_duration_seconds": {
+          "max": 65.19999999999999,
+          "median": 7.28000000000003,
+          "min": 0.01999999999998181
+        },
+        "event_kinds": {
+          "bounded_execution": 1292,
+          "protocol_state": 6483
+        },
+        "events_per_recording": {
+          "max": 67.0,
+          "median": 42.0,
+          "min": 37.0
+        },
+        "recordings": 174,
+        "recordings_with_multiple_events": 174,
+        "recordings_with_repeated_label_instances": 174,
+        "source_scoped_labels": 9,
+        "subjects": 28
       },
       "background_contract": "protocol transitions, not free-living exhaustive background",
       "continuous_timeline": true,
       "current_data_form": "continuous weekly protocol timeline",
-      "exact_instance_intervals": false,
+      "exact_instance_intervals": true,
       "instance_granularity": [
-        "protocol_state_run"
+        "weekly_single_run_protocol_execution"
       ],
       "known_execution_change": true,
-      "recommended_use": "Task 2 longitudinal association after severity alignment and active-state aggregation audits",
-      "repeated_instances_in_timeline": false,
+      "recommended_use": "sealed Task 2 longitudinal reliability and clinician-association evaluation",
+      "repeated_instances_in_timeline": true,
       "study_role": "sealed_task2_evaluation",
-      "video_reference": "neurologist-reviewed clinical protocol; severity adapter remains open"
+      "video_reference": "neurologist-reviewed clinical protocol; bradykinesia and tremor metadata converted"
     },
     "oca": {
       "application_cache": {
@@ -418,8 +481,8 @@
     "xrf_v2"
   ],
   "primary_task2_change_sources": [
-    "phytmo",
-    "kneepad"
+    "harmes",
+    "crossfit"
   ],
   "schema_updated_on": "2026-08-30",
   "schema_version": 1

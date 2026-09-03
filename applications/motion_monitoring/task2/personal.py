@@ -15,6 +15,9 @@ import torch
 from torch import Tensor
 
 
+MIN_OPERATING_POINT_REFERENCES = 4
+
+
 @dataclass(frozen=True)
 class PersonalDeviation:
     """One or more feature vectors scored against a personal baseline."""
@@ -61,7 +64,7 @@ class PersonalVariationModel:
     def reference_limited(self) -> bool:
         """Whether too few accepted executions were available for joint covariance."""
 
-        return self.sample_count < 3
+        return self.sample_count < MIN_OPERATING_POINT_REFERENCES
 
     def score(self, features: Tensor) -> PersonalDeviation:
         """Return robust standardized and joint deviations from the accepted baseline."""
@@ -151,3 +154,94 @@ def fit_personal_variation(
         sample_count=len(values),
         feature_names=tuple(feature_names),
     )
+
+
+@dataclass(frozen=True)
+class PersonalOperatingPoint:
+    """Per-person, per-task limit fixed from accepted references only.
+
+    ``personal_limit95`` is the deployed threshold on the joint deviation: the mean plus
+    1.96 standard deviations of the leave-one-execution-out deviations of the
+    accepted references. It is not a measurement-science MDC because it is a
+    reference-only operating limit rather than ``1.96 * sqrt(2) * SEM``. With
+    fewer than four references, each leave-one-out fold has too little data for
+    even a regularized joint scatter estimate, so no limit is reported.
+    """
+
+    personal_limit95: float
+    loo_deviations: Tensor
+    loo_mean: float
+    loo_sd: float
+    sample_count: int
+    z: float
+
+    @property
+    def reference_limited(self) -> bool:
+        return self.sample_count < MIN_OPERATING_POINT_REFERENCES
+
+
+def personal_operating_point(
+    reference_features: Tensor,
+    *,
+    measurement_floor: Tensor | float = 1e-3,
+    z: float = 1.96,
+    feature_names: Sequence[str] = (),
+) -> PersonalOperatingPoint:
+    """Leave-one-execution-out 95% operating limit from accepted references."""
+
+    values = torch.as_tensor(reference_features).double()
+    if values.ndim != 2 or values.shape[0] < 1:
+        raise ValueError("reference features must be [reference, feature] with at least one row")
+    if z <= 0:
+        raise ValueError("z must be positive")
+    count = int(values.shape[0])
+    if count < MIN_OPERATING_POINT_REFERENCES:
+        return PersonalOperatingPoint(
+            personal_limit95=float("nan"),
+            loo_deviations=values.new_zeros(0),
+            loo_mean=float("nan"),
+            loo_sd=float("nan"),
+            sample_count=count,
+            z=float(z),
+        )
+    deviations = []
+    for index in range(count):
+        others = torch.cat((values[:index], values[index + 1 :]))
+        model = fit_personal_variation(
+            others, measurement_floor=measurement_floor, feature_names=tuple(feature_names)
+        )
+        deviations.append(model.score(values[index]).joint_deviation)
+    loo = torch.stack(deviations)
+    mean = float(loo.mean())
+    sd = float(loo.std(unbiased=True)) if count > 1 else 0.0
+    sd = max(sd, 1e-6)
+    return PersonalOperatingPoint(
+        personal_limit95=mean + float(z) * sd,
+        loo_deviations=loo,
+        loo_mean=mean,
+        loo_sd=sd,
+        sample_count=count,
+        z=float(z),
+    )
+
+
+def score_query(
+    reference_features: Tensor,
+    query_features: Tensor,
+    *,
+    measurement_floor: Tensor | float = 1e-3,
+    z: float = 1.96,
+) -> dict[str, float | bool]:
+    """Deviation of one query from the person's accepted envelope, with its threshold."""
+
+    references = torch.as_tensor(reference_features).double()
+    model = fit_personal_variation(references, measurement_floor=measurement_floor)
+    deviation = float(model.score(torch.as_tensor(query_features).double()).joint_deviation)
+    point = personal_operating_point(references, measurement_floor=measurement_floor, z=z)
+    exceeds = (not point.reference_limited) and deviation > point.personal_limit95
+    return {
+        "joint_deviation": deviation,
+        "personal_limit95": point.personal_limit95,
+        "exceeds_personal_limit": bool(exceeds),
+        "reference_limited": bool(point.reference_limited),
+    }

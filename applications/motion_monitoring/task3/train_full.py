@@ -1,9 +1,9 @@
-"""Fit and calibrate the Task-3 recurrence metric on signed manifests."""
+"""Fit the Task-3 recurrence metric and fix its operating point a priori."""
 
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -29,8 +29,13 @@ from applications.motion_monitoring.task3.data import (
     collate_motion_sequences,
     event_batch_from_recordings,
 )
-from applications.motion_monitoring.task3.losses import scoped_pair_indices
-from applications.motion_monitoring.task3.metrics import binary_auroc
+from applications.motion_monitoring.task3.losses import scoped_pair_indices, scoped_pair_loss
+from applications.motion_monitoring.task3.sampling import (
+    build_event_index,
+    crop_around,
+    sample_batch_instances,
+    split_identities,
+)
 from applications.motion_monitoring.task3.model import RecurrentMotionMetric
 from applications.motion_monitoring.task3.training import (
     initialize_affinity_threshold,
@@ -64,6 +69,7 @@ def _batch_for_units(
     device,
     durations_sec,
     candidate_stride_sec,
+    crops: Sequence[tuple[float, float] | None] | None = None,
 ):
     recordings = []
     sequences = []
@@ -72,10 +78,13 @@ def _batch_for_units(
     annotation_kinds = {unit.annotation_kind for unit in units}
     if len(annotation_kinds) != 1:
         raise ValueError("one Task-3 batch must use one annotation kind")
-    for unit in units:
+    for position, unit in enumerate(units):
         recording = recording_caches[unit.dataset][unit.cache_index]
         sequence = representations.get(unit.dataset, unit.recording_id, unit.stream_id)
-        if crop_seconds is not None and sequence.duration_sec > crop_seconds:
+        window = None if crops is None else crops[position]
+        if window is not None:
+            sequence = _crop_sequence(sequence, window[0], window[1])
+        elif crop_seconds is not None and sequence.duration_sec > crop_seconds:
             low = float(sequence.intervals_sec[0, 0])
             high = float(sequence.intervals_sec[-1, 1]) - crop_seconds
             start = rng.uniform(low, high)
@@ -103,100 +112,51 @@ def _batch_for_units(
     return candidates, targets
 
 
-def _balanced_threshold(scores: np.ndarray, targets: np.ndarray) -> dict[str, float]:
-    if not targets.any() or not (~targets).any():
-        raise ValueError("threshold calibration requires both pair classes")
-    unique = np.unique(scores)
-    candidates = np.unique(np.quantile(unique, np.linspace(0.0, 1.0, min(512, len(unique)))))
-    candidates = np.concatenate(
-        (candidates, [np.nextafter(candidates[-1], np.inf)])
-    )
-    best = None
-    for threshold in candidates:
-        predicted = scores >= threshold
-        sensitivity = float(predicted[targets].mean())
-        specificity = float((~predicted[~targets]).mean())
-        balanced = 0.5 * (sensitivity + specificity)
-        key = (balanced, specificity, float(threshold))
-        if best is None or key > best[0]:
-            best = (key, float(threshold), sensitivity, specificity)
-    assert best is not None
-    return {
-        "threshold": best[1],
-        "balanced_accuracy": best[0][0],
-        "sensitivity": best[2],
-        "specificity": best[3],
-        "auroc": binary_auroc(torch.from_numpy(scores), torch.from_numpy(targets)),
-        "positive_pairs": int(targets.sum()),
-        "negative_pairs": int((~targets).sum()),
-    }
+OPERATING_POINT_PROTOCOL = {
+    "schema_version": 1,
+    "false_edge_rate": 0.05,
+    "holdout_identity_fraction": 0.25,
+    "holdout_unit": "training identity",
+    "rule": (
+        "largest affinity threshold whose false-edge rate over held-out training "
+        "identities does not exceed the budget"
+    ),
+}
 
 
-@torch.no_grad()
-def calibrate(
-    manifest,
-    recording_caches,
-    representations,
-    model,
-    *,
-    batch_size,
-    durations_sec,
-    candidate_stride_sec,
-    seed,
-    device,
-):
-    rng = random.Random(seed)
-    grouped: dict[tuple[str, str], list[Task3EvaluationUnit]] = defaultdict(list)
-    for row in manifest.units:
-        unit = Task3EvaluationUnit(**row)
-        grouped[(unit.dataset, unit.annotation_kind)].append(unit)
-    direct_positive = []
-    direct_negative = []
-    learned_positive = []
-    learned_negative = []
-    rejected = 0
-    for units in grouped.values():
-        for start in range(0, len(units), batch_size):
-            subset = units[start : start + batch_size]
-            try:
-                candidates, targets = _batch_for_units(
-                    subset,
-                    recording_caches,
-                    representations,
-                    crop_seconds=None,
-                    rng=rng,
-                    device=device,
-                    durations_sec=durations_sec,
-                    candidate_stride_sec=candidate_stride_sec,
-                )
-                positive, negative = scoped_pair_indices(candidates, targets)
-                if not len(positive) or not len(negative):
-                    rejected += len(subset)
-                    continue
-            except ValueError:
-                rejected += len(subset)
-                continue
-            flat = candidates.embeddings.reshape(-1, candidates.embeddings.shape[-1])
-            raw = F.normalize(flat, dim=-1, eps=1e-8)
-            learned = model.embed(flat)
-            for indices, direct_rows, learned_rows in (
-                (positive, direct_positive, learned_positive),
-                (negative, direct_negative, learned_negative),
-            ):
-                direct_rows.extend(
-                    (raw[indices[:, 0]] * raw[indices[:, 1]]).sum(-1).cpu().tolist()
-                )
-                learned_rows.extend(
-                    (learned[indices[:, 0]] * learned[indices[:, 1]]).sum(-1).cpu().tolist()
-                )
-    def fit(positive, negative):
-        scores = np.asarray([*positive, *negative], dtype=np.float32)
-        labels = np.asarray([True] * len(positive) + [False] * len(negative))
-        return _balanced_threshold(scores, labels)
+def fix_operating_point(
+    scores: np.ndarray, targets: np.ndarray, *, false_edge_rate: float
+) -> dict[str, Any]:
+    """Threshold from a declared false-edge budget on held-out training identities."""
+
+    if not 0 < false_edge_rate < 1:
+        raise ValueError("false-edge rate must lie in (0, 1)")
+    if scores.shape != targets.shape or not len(scores):
+        raise ValueError("scores and targets must be aligned and non-empty")
+    negative = np.sort(scores[targets == 0])
+    if not len(negative):
+        raise ValueError("the hold-out produced no negative pairs")
+    allowed = int(np.floor(false_edge_rate * len(negative)))
+    # Scores are same-motion affinities, so an edge exists when score >= threshold.
+    # To admit at most ``allowed`` negatives the threshold must sit just above the
+    # (allowed+1)-th largest negative; ties are resolved upwards so the budget is
+    # never exceeded.
+    if allowed >= len(negative):
+        threshold = float(np.nextafter(negative[0], -np.inf))
+    else:
+        threshold = float(np.nextafter(negative[len(negative) - allowed - 1], np.inf))
+        while int((negative >= threshold).sum()) > allowed:
+            threshold = float(np.nextafter(threshold, np.inf))
+    accepted_negative = int((scores[targets == 0] >= threshold).sum())
+    accepted_positive = int((scores[targets == 1] >= threshold).sum())
+    positives = int((targets == 1).sum())
     return {
-        "direct": fit(direct_positive, direct_negative),
-        "learned": fit(learned_positive, learned_negative),
-        "rejected_units": rejected,
+        "threshold": threshold,
+        "false_edge_rate_budget": float(false_edge_rate),
+        "holdout_false_edge_rate": accepted_negative / len(negative),
+        "holdout_recall": accepted_positive / positives if positives else float("nan"),
+        "holdout_pairs": int(len(scores)),
+        "holdout_positive_pairs": positives,
     }
 
 
@@ -206,7 +166,6 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     rng = random.Random(args.seed)
     cohort = read_cohort_manifest(args.cohort)
     train_manifest = read_task_manifest(args.train_manifest)
-    development_manifest = read_task_manifest(args.development_manifest)
     representations = CachedMotionSequenceDataset(
         args.representations, manifest_fingerprint=cohort.fingerprint
     )
@@ -219,21 +178,53 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
-    grouped: dict[tuple[str, str], list[Task3EvaluationUnit]] = defaultdict(list)
-    for row in train_manifest.units:
-        unit = Task3EvaluationUnit(**row)
-        grouped[(unit.dataset, unit.annotation_kind)].append(unit)
-    eligible_groups = [units for units in grouped.values() if len(units) >= args.batch_size]
-    if not eligible_groups:
-        raise ValueError("no Task-3 source has enough units for one batch")
+    units = [Task3EvaluationUnit(**row) for row in train_manifest.units]
+    # Section 2.3: positives are independent executions of one identity. Index the
+    # events first and crop around them; a random crop per recording almost never
+    # contains two executions of the same identity (measured 0.34 for Opportunity,
+    # 1.0 for CrossFit clips) and the loss then sees no positive pairs at all.
+    full_index = build_event_index(units, recording_caches)
+    index_summary = full_index.summary()
+    # Two data roles only: the operating point is fixed on held-out TRAINING
+    # identities, never on a development split.
+    index, holdout_index = split_identities(
+        full_index,
+        holdout_fraction=float(OPERATING_POINT_PROTOCOL["holdout_identity_fraction"]),
+        seed=args.seed,
+    )
+    if not index.recurring_identities(minimum=2):
+        raise ValueError(
+            "the Task-3 train manifest contains no identity with two independent executions"
+        )
     telemetry = []
     skipped = 0
     initialized = False
     step = 0
     while step < args.steps:
-        units = rng.choice(eligible_groups)
-        subset = rng.sample(units, args.batch_size)
         try:
+            drawn = sample_batch_instances(
+                index,
+                batch_size=args.batch_size,
+                positives=args.positives_per_batch,
+                rng=rng,
+            )
+            subset = []
+            crops = []
+            for instance, _role in drawn:
+                unit = units[instance.unit_index]
+                sequence = representations.get(unit.dataset, unit.recording_id, unit.stream_id)
+                subset.append(unit)
+                crops.append(
+                    crop_around(
+                        instance,
+                        crop_seconds=args.crop_seconds,
+                        timeline_start=float(sequence.intervals_sec[0, 0]),
+                        timeline_end=float(sequence.intervals_sec[-1, 1]),
+                        rng=rng,
+                    )
+                )
+            if len({unit.annotation_kind for unit in subset}) != 1:
+                raise ValueError("one Task-3 batch must use one annotation kind")
             candidates, targets = _batch_for_units(
                 subset,
                 recording_caches,
@@ -243,6 +234,7 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
                 device=args.device,
                 durations_sec=args.durations,
                 candidate_stride_sec=args.candidate_stride,
+                crops=crops,
             )
             positive, negative = scoped_pair_indices(candidates, targets)
             if not len(positive) or not len(negative):
@@ -275,32 +267,118 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
     }
     torch.save(checkpoint, args.output / "task3_head.pt")
 
-    development_caches = {
-        dataset: open_cache(dataset)
-        for dataset in sorted({str(row["dataset"]) for row in development_manifest.units})
+    # Operating point on held-out TRAINING identities, never on natural test data.
+    holdout_scores: list[float] = []
+    holdout_targets: list[int] = []
+    direct_scores: list[float] = []
+    direct_targets: list[int] = []
+    holdout_rng = random.Random(args.seed + 1)
+    model.eval()
+    with torch.no_grad():
+        for _ in range(args.operating_point_batches):
+            try:
+                drawn = sample_batch_instances(
+                    holdout_index,
+                    batch_size=args.batch_size,
+                    positives=args.positives_per_batch,
+                    rng=holdout_rng,
+                )
+                subset, crops = [], []
+                for instance, _role in drawn:
+                    unit = units[instance.unit_index]
+                    sequence = representations.get(
+                        unit.dataset, unit.recording_id, unit.stream_id
+                    )
+                    subset.append(unit)
+                    crops.append(
+                        crop_around(
+                            instance,
+                            crop_seconds=args.crop_seconds,
+                            timeline_start=float(sequence.intervals_sec[0, 0]),
+                            timeline_end=float(sequence.intervals_sec[-1, 1]),
+                            rng=holdout_rng,
+                        )
+                    )
+                if len({unit.annotation_kind for unit in subset}) != 1:
+                    continue
+                candidates, targets = _batch_for_units(
+                    subset,
+                    recording_caches,
+                    representations,
+                    crop_seconds=args.crop_seconds,
+                    rng=holdout_rng,
+                    device=args.device,
+                    durations_sec=args.durations,
+                    candidate_stride_sec=args.candidate_stride,
+                    crops=crops,
+                )
+                output = scoped_pair_loss(model, candidates, targets)
+                holdout_scores.extend(
+                    output.positive_logits.detach().cpu().reshape(-1).tolist()
+                )
+                holdout_targets.extend([1] * output.positive_logits.numel())
+                holdout_scores.extend(
+                    output.negative_logits.detach().cpu().reshape(-1).tolist()
+                )
+                holdout_targets.extend([0] * output.negative_logits.numel())
+                # The untrained floor readout scores the same held-out pairs with
+                # plain cosine, so it gets its own threshold under the same budget
+                # rather than borrowing the learned metric's.
+                positive, negative = scoped_pair_indices(candidates, targets)
+                flat = candidates.embeddings.reshape(
+                    -1, candidates.embeddings.shape[-1]
+                )
+                unit_norm = F.normalize(flat, dim=-1, eps=1e-8)
+                for indices, label in ((positive, 1), (negative, 0)):
+                    cosine = (
+                        unit_norm[indices[:, 0]] * unit_norm[indices[:, 1]]
+                    ).sum(-1)
+                    direct_scores.extend(cosine.detach().cpu().tolist())
+                    direct_targets.extend([label] * len(indices))
+            except ValueError:
+                continue
+    budget = float(OPERATING_POINT_PROTOCOL["false_edge_rate"])
+    unsupported = {"unsupported": "held-out identities produced no scorable pairs"}
+    operating_point = {
+        "learned_metric_recurrence": (
+            fix_operating_point(
+                np.asarray(holdout_scores),
+                np.asarray(holdout_targets),
+                false_edge_rate=budget,
+            )
+            if holdout_scores
+            else dict(unsupported)
+        ),
+        "direct_cosine_recurrence": (
+            fix_operating_point(
+                np.asarray(direct_scores),
+                np.asarray(direct_targets),
+                false_edge_rate=budget,
+            )
+            if direct_scores
+            else dict(unsupported)
+        ),
     }
-    calibration = calibrate(
-        development_manifest,
-        development_caches,
-        representations,
-        model,
-        batch_size=args.batch_size,
-        durations_sec=args.durations,
-        candidate_stride_sec=args.candidate_stride,
-        seed=args.seed,
-        device=args.device,
-    )
+    checkpoint["operating_point"] = operating_point
+    checkpoint["operating_point_protocol"] = dict(OPERATING_POINT_PROTOCOL)
+    torch.save(checkpoint, args.output / "task3_head.pt")
     report = {
         "task": "task3",
-        "status": "trained_and_development_calibrated",
+        "status": "trained_and_operating_point_fixed",
         "cohort_fingerprint": cohort.fingerprint,
+        "train_manifest_fingerprint": train_manifest.fingerprint,
         "representation_provenance": representations.metadata["encoder_provenance"],
         "train_units": len(train_manifest.units),
+        "event_index": index_summary,
+        "fit_identities": len(index.identities),
+        "holdout_identities": len(holdout_index.identities),
         "steps": args.steps,
         "batch_size": args.batch_size,
+        "positives_per_batch": args.positives_per_batch,
         "skipped_batches": skipped,
         "telemetry": telemetry,
-        "calibration": calibration,
+        "operating_point_protocol": dict(OPERATING_POINT_PROTOCOL),
+        "operating_point": operating_point,
     }
     (args.output / "task3_training.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -311,22 +389,33 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cohort", type=Path, default=root / "manifests/COHORT_V1.json")
+    parser.add_argument("--cohort", type=Path, default=root / "manifests/COHORT_TASK3_V2.json")
     parser.add_argument(
-        "--train-manifest", type=Path, default=root / "manifests/TASK3_TRAIN_V1.json"
-    )
-    parser.add_argument(
-        "--development-manifest",
-        type=Path,
-        default=root / "manifests/TASK3_DEVELOPMENT_V1.json",
+        "--train-manifest", type=Path, default=root / "manifests/TASK3_TRAIN_V2.json"
     )
     parser.add_argument("--representations", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--steps", type=int, default=1000)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument(
+        "--positives-per-batch",
+        type=int,
+        default=2,
+        help="independent executions of one identity guaranteed in every batch",
+    )
+    parser.add_argument("--operating-point-batches", type=int, default=64)
     parser.add_argument("--crop-seconds", type=float, default=120.0)
-    parser.add_argument("--durations", type=float, nargs="+", default=(2, 4, 8, 16, 32))
+    # Derived from the retained training executions (Opportunity gestures and
+    # assembled CrossFit repetitions): p5/p50/p95 = 1.5 / 2.83 / 4.98 s. The first
+    # four scales cover that distribution densely; 10 and 16 extend upward so
+    # longer evaluation events are not structurally unreachable. Measured reach at
+    # IoU >= 0.5: training 99.7 %, OpenPack 79.8 %, OCA 98.7 %. The previous
+    # default started at 2 s and reached only 71.7 % of OpenPack, whose median
+    # fine action is 1.6 s.
+    parser.add_argument(
+        "--durations", type=float, nargs="+", default=(1.5, 2.5, 4, 6, 10, 16)
+    )
     parser.add_argument("--candidate-stride", type=float, default=1.0)
     parser.add_argument("--projection-dim", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)

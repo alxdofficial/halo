@@ -15,6 +15,7 @@ from applications.motion_monitoring.evaluation_manifests import (
 )
 from applications.motion_monitoring.representation_cache import (
     CachedMotionSequenceDataset,
+    bounded_representation_id,
 )
 from applications.motion_monitoring.task1.episodes import (
     crop_sequence,
@@ -46,7 +47,9 @@ def unit_matches(
     reference_recording = recordings[unit.reference_cache_index]
     query_recording = recordings[unit.query_cache_index]
     reference_sequence = representations.get(
-        unit.dataset, unit.reference_recording_id, unit.reference_stream_id
+        unit.dataset,
+        bounded_representation_id(unit.reference_recording_id, unit.reference_event_index),
+        unit.reference_stream_id,
     )
     query_sequence = from_motion_sequence(
         representations.get(
@@ -65,6 +68,7 @@ def unit_matches(
         reference_event_index=unit.reference_event_index,
         target_intervals_sec=unit.target_intervals_sec,
         reference_interval_sec=getattr(unit, "reference_interval_sec", None),
+        guard_intervals_sec=unit.guard_intervals_sec,
     )
     reference = episode.reference.embeddings[episode.reference.valid]
     query = episode.query.embeddings
@@ -144,7 +148,7 @@ def _reference_bucket(positions: int) -> str:
     for name, low, high in REFERENCE_POSITION_STRATA:
         if low <= positions <= high:
             return name
-    return REFERENCE_POSITION_STRATA[0][0]
+    raise ValueError(f"reference has no declared resolution stratum: {positions} positions")
 
 
 def _duration_stratified_recall(
@@ -183,7 +187,7 @@ def _unit_metrics(
     recordings: CachedRecordingDataset,
     representations: CachedMotionSequenceDataset,
     *,
-    score_threshold: float,
+    score_threshold: float | Mapping[str, float],
     model: DifferentiableSubsequenceMatcher | None,
     nms_iou: float,
     match_iou: float,
@@ -193,26 +197,47 @@ def _unit_metrics(
         unit,
         recordings,
         representations,
-        score_threshold=score_threshold,
+        score_threshold=(float("inf") if isinstance(score_threshold, Mapping) else score_threshold),
         model=model,
         nms_iou=nms_iou,
     )
+    resolved_threshold = (
+        float(
+            score_threshold.get(
+                _reference_bucket(
+                    int(
+                        episode.metadata.get(
+                            "reference_positions", len(episode.reference.embeddings)
+                        )
+                    )
+                ),
+                score_threshold.get("global", float("nan")),
+            )
+        )
+        if isinstance(score_threshold, Mapping)
+        else float(score_threshold)
+    )
+    if not np.isfinite(resolved_threshold):
+        raise ValueError("Task-1 threshold mapping lacks a finite stratum fallback")
+    accepted_matches = [
+        match for match in matches if match.score <= resolved_threshold
+    ]
     if coalesce_gap_sec is not None:
-        matches = coalesce_matches(matches, coalesce_gap_sec)
+        accepted_matches = coalesce_matches(accepted_matches, coalesce_gap_sec)
     metrics = event_detection_metrics(
-        matches,
+        accepted_matches,
         episode.targets_sec,
         query_duration_sec=episode.query.intervals_sec[-1, 1].item()
         - episode.query.intervals_sec[0, 0].item(),
         iou_threshold=match_iou,
-        score_threshold=score_threshold,
+        score_threshold=float("inf"),
     )
     metrics["query_subject_id"] = unit.query_subject_id
     metrics["reference_positions"] = int(
         episode.metadata.get("reference_positions", len(episode.reference.embeddings))
     )
     metrics["duration_strata"] = _duration_stratified_recall(
-        [match for match in matches], episode.targets_sec, iou_threshold=match_iou
+        accepted_matches, episode.targets_sec, iou_threshold=match_iou
     )
     return metrics
 
@@ -314,7 +339,7 @@ def evaluate_task1_test(
     recording_caches: Mapping[str, CachedRecordingDataset],
     representations: CachedMotionSequenceDataset,
     *,
-    score_threshold: float,
+    score_threshold: float | Mapping[str, float],
     model: DifferentiableSubsequenceMatcher | None = None,
     nms_iou: float = 0.3,
     match_iou: float = 0.5,
@@ -322,8 +347,10 @@ def evaluate_task1_test(
 ) -> tuple[Task1DatasetResult, ...]:
     """Evaluate every frozen unit and aggregate independently per test dataset.
 
-    The threshold is mandatory and global because it must be selected once on
-    development sources. This function never tunes against test annotations.
+    The threshold is mandatory and must be selected once on development
+    sources. It may be a global scalar or a frozen mapping by declared
+    reference-resolution stratum. This function never tunes against test
+    annotations.
     ``coalesce_gap_by_dataset`` enables bout coalescing (spec section D.4) for
     datasets whose targets are long periodic bouts detected by excerpt
     references; it is part of the declared protocol, never tuned on test.
@@ -331,7 +358,10 @@ def evaluate_task1_test(
 
     if manifest.task != "task1" or not manifest.units:
         raise ValueError("a non-empty Task-1 manifest is required")
-    if not np.isfinite(score_threshold):
+    if isinstance(score_threshold, Mapping):
+        if not score_threshold or any(not np.isfinite(float(value)) for value in score_threshold.values()):
+            raise ValueError("Task-1 thresholds must be finite development values")
+    elif not np.isfinite(score_threshold):
         raise ValueError("Task-1 threshold must be a finite development value")
 
     metrics_by_dataset: dict[str, list[dict[str, float]]] = defaultdict(list)
@@ -344,7 +374,7 @@ def evaluate_task1_test(
                 unit,
                 recording_caches[unit.dataset],
                 representations,
-                score_threshold=float(score_threshold),
+                score_threshold=score_threshold,
                 model=model,
                 nms_iou=nms_iou,
                 match_iou=match_iou,

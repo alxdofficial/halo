@@ -26,12 +26,12 @@ Regenerate measured application-cache counts with:
 | **OCA** | continuous sample-labeled assembly sessions | yes, at assembly-phase level | yes | occupational transfer and recurrence evaluation |
 | **XRF V2** | Phase-A excerpts; raw video-aligned scenes remain local | yes in source | yes | reconstruct for Task-1/3 training, including `pouring_water` |
 | **CrossFit** | parent exercise arrays and author-provided repetition excerpts | yes | limited workout sequence | controlled repetition training |
-| **HARMES** | Phase-A excerpts; raw wrist recording and event logs remain local | yes in source | yes | reconstruct wrist-ADL Task-1/3 training timelines |
+| **HARMES** | 72 dominant-wrist timelines with source event logs | yes | yes | Task-2 accepted-repeat training; 2,398 bounded ADLs |
 | **WEAR** | continuous outdoor activity and NULL intervals | activity bouts only | yes | long-duration false-alarm and coarse-bout evaluation |
 | **RecoFit** | continuous exercise visits with set intervals and counts | no | yes | background, set matching, and count supervision |
 | **AIDLAB-HAR** | series intervals and short repetition-marker windows | no | yes, within short recordings | boundary and temporal-anchor control |
 | **MM-Fit** | Phase-A set excerpts; full workouts recoverable | no, sets plus counts | yes in source | weak supervision and video/pose development |
-| **MoniPar** | continuous weekly exercise protocol | exercise blocks only | yes | Task-1 cross-week query-by-example only; excluded from Task 2 |
+| **MoniPar** | 174 weekly watch protocols | seven single-run protocol items per visit | yes | sealed Task-2 longitudinal evaluation; 1,207 primary bounded executions |
 | **PHYTMO** | bounded correct/incorrect therapy series | series only | no | Task-2 known-change development |
 | **KneE-PAD** | short correct and incorrect exercise trials | trial extent only | no | Task-2 known-variant evaluation candidate |
 | **SPAR** | shoulder-exercise bouts containing repetitions | bout only | no | Task-2 repeatability, not localization |

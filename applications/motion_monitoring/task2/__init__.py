@@ -1,8 +1,9 @@
-"""Task 2: bounded-execution change quantification."""
+"""Task 2: bounded-execution change quantification (personal-normative ruler)."""
 
 from .contracts import (
+    NEGATIVE_ROLES,
+    ROLE_INDEX,
     BoundedExecution,
-    ChangeTargetSpec,
     EpisodeBatch,
     ExecutionEpisode,
     ExecutionEpisodeDataset,
@@ -10,47 +11,100 @@ from .contracts import (
     from_motion_sequence,
 )
 from .controls import DirectChangeOutput, direct_change_scores
-from .losses import ChangeLoss, ChangeLossConfig, change_quantification_loss
+from .losses import RulerLoss, RulerLossConfig, ruler_loss
+from .episodes import (
+    ACCELERATION_ONLY,
+    SIX_AXIS,
+    ExecutionRecord,
+    EpisodePlan,
+    Task2BatchBuilder,
+    relation_between,
+    relation_summary,
+    validate_batch,
+)
 from .metrics import (
+    AgreementResult,
     RegressionMetrics,
+    ReliabilityResult,
     balanced_accuracy,
     binary_operating_metrics,
     binary_auroc,
+    bland_altman,
     masked_regression_metrics,
+    nuisance_false_alarm_rate,
+    paired_within_series_auroc,
+    reliability,
+    standardised_response_mean,
+    subject_bootstrap,
 )
-from .model import ChangeHeadOutput, ChangeMetricHead, resample_to_phase
+from .modifications import (
+    MODIFICATION_SPECS,
+    NUISANCE_SPECS,
+    apply_modification,
+    apply_nuisance,
+)
+from .model import ChangeRuler, RulerOutput, resample_to_phase
 from .personal import (
     PersonalDeviation,
+    PersonalOperatingPoint,
     PersonalVariationModel,
     fit_personal_variation,
+    personal_operating_point,
+    score_query,
 )
-from .training import StepTelemetry, initialize_change_threshold, train_step
+from .scoring import ChangeReport, personal_change_report
+from .training import StepTelemetry, train_step
 
 __all__ = [
+    "relation_summary",
+    "ACCELERATION_ONLY",
+    "SIX_AXIS",
+    "ChangeReport",
+    "personal_change_report",
+    "validate_batch",
+    "subject_bootstrap",
+    "standardised_response_mean",
+    "reliability",
+    "relation_between",
+    "paired_within_series_auroc",
+    "nuisance_false_alarm_rate",
+    "bland_altman",
+    "apply_nuisance",
+    "apply_modification",
+    "Task2BatchBuilder",
+    "ReliabilityResult",
+    "NUISANCE_SPECS",
+    "MODIFICATION_SPECS",
+    "ExecutionRecord",
+    "EpisodePlan",
+    "AgreementResult",
+    "NEGATIVE_ROLES",
+    "ROLE_INDEX",
     "BoundedExecution",
+    "ChangeRuler",
     "DirectChangeOutput",
-    "ChangeHeadOutput",
-    "ChangeLoss",
-    "ChangeLossConfig",
-    "ChangeMetricHead",
-    "ChangeTargetSpec",
     "EpisodeBatch",
     "ExecutionEpisode",
     "ExecutionEpisodeDataset",
     "PersonalDeviation",
+    "PersonalOperatingPoint",
     "PersonalVariationModel",
     "RegressionMetrics",
+    "RulerLoss",
+    "RulerLossConfig",
+    "RulerOutput",
     "StepTelemetry",
     "balanced_accuracy",
     "binary_operating_metrics",
     "binary_auroc",
-    "change_quantification_loss",
     "collate_execution_episodes",
     "direct_change_scores",
     "from_motion_sequence",
     "fit_personal_variation",
-    "initialize_change_threshold",
     "masked_regression_metrics",
+    "personal_operating_point",
     "resample_to_phase",
+    "ruler_loss",
+    "score_query",
     "train_step",
 ]

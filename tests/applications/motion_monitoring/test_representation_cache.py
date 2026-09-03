@@ -11,8 +11,12 @@ from applications.motion_monitoring.data.cache import CachedRecordingDataset, wr
 from applications.motion_monitoring.data.contracts import EventInterval, RawRecording, SensorStream
 from applications.motion_monitoring.data.manifests import build_cohort_manifest
 from applications.motion_monitoring.representation_cache import (
+    BoundedSegment,
     CachedMotionSequenceDataset,
+    bounded_representation_id,
+    build_bounded_representation_cache,
     build_representation_cache,
+    require_complete_representations,
 )
 from applications.motion_monitoring.sequence import PhysicalProjectionEncoder
 
@@ -147,6 +151,22 @@ def test_representation_cache_rejects_trainable_encoder_and_existing_output(tmp_
         )
 
 
+def test_limited_representation_cache_cannot_be_used_for_official_common_units(tmp_path):
+    caches, manifest = _cohort(tmp_path)
+    encoder = PhysicalProjectionEncoder(embedding_dim=8).requires_grad_(False)
+    output = tmp_path / "pilot"
+    build_representation_cache(
+        output,
+        manifest,
+        caches,
+        encoder,
+        encoder_provenance={"kind": "test"},
+        limit=1,
+    )
+    with pytest.raises(ValueError, match="rejects --limit pilot"):
+        require_complete_representations(CachedMotionSequenceDataset(output))
+
+
 def test_representation_cache_resumes_valid_staging_sequences(tmp_path):
     caches, manifest = _cohort(tmp_path)
     encoder = PhysicalProjectionEncoder(embedding_dim=8).requires_grad_(False)
@@ -240,6 +260,7 @@ def test_cache_accepts_other_cohort_on_matching_raw_fingerprints_and_unions(tmp_
         synthetic, second, new_caches, encoder,
         encoder_provenance={"kind": "test", "weights": "w"},
         datasets={"synthetic_source"},
+        stride_seconds=0.5,
     )
     union = open_representations([natural, synthetic], cohort=second)
     assert isinstance(union, MotionSequenceUnion)
@@ -247,6 +268,10 @@ def test_cache_accepts_other_cohort_on_matching_raw_fingerprints_and_unions(tmp_
     assert union.get("synthetic_source", "synthetic_source-1", "wrist").embeddings.shape[1] == 8
     assert union.get("test_source", "test_source-1", "wrist").embeddings.shape[1] == 8
     assert json.loads(json.dumps(union.metadata))["datasets"] == ["synthetic_source", "test_source"]
+    assert union.metadata["stride_seconds_by_dataset"] == {
+        "synthetic_source": 0.5,
+        "test_source": 1.0,
+    }
 
     # A cache serving no dataset of the cohort is refused outright.
     lonely = _cache(tmp_path, "lonely", (_recording("lonely", "x", 1),))
@@ -260,8 +285,8 @@ def test_cache_accepts_other_cohort_on_matching_raw_fingerprints_and_unions(tmp_
     with pytest.raises(ValueError, match="shares no canonical cache"):
         open_representations([natural], cohort=lonely_cohort)
 
-    # Two caches serving the same dataset cannot be unioned.
-    with pytest.raises(ValueError, match="more than one representation cache"):
+    # Overlapping caches are allowed only when their sequence keys are disjoint.
+    with pytest.raises(ValueError, match="duplicate sequence identities"):
         open_representations([natural, natural], cohort=second)
 
     # Different encoders cannot be unioned either.
@@ -273,3 +298,47 @@ def test_cache_accepts_other_cohort_on_matching_raw_fingerprints_and_unions(tmp_
     )
     with pytest.raises(ValueError, match="different encoders"):
         open_representations([natural, other], cohort=second)
+
+
+def test_bounded_representation_sees_only_the_event_and_unions_with_timeline(tmp_path):
+    from applications.motion_monitoring.representation_cache import open_representations
+
+    caches, manifest = _cohort(tmp_path)
+    encoder = PhysicalProjectionEncoder(embedding_dim=8).requires_grad_(False)
+    provenance = {"kind": "test", "weights": "bounded"}
+    timeline = tmp_path / "timeline"
+    bounded = tmp_path / "bounded"
+    build_representation_cache(
+        timeline,
+        manifest,
+        caches,
+        encoder,
+        encoder_provenance=provenance,
+        datasets={"train_source"},
+        stride_seconds=0.25,
+    )
+    segment = BoundedSegment(
+        dataset="train_source",
+        cache_index=0,
+        recording_id="train_source-1",
+        stream_id="wrist",
+        event_index=0,
+        start_sec=0.2,
+        end_sec=1.2,
+    )
+    build_bounded_representation_cache(
+        bounded,
+        manifest,
+        caches,
+        encoder,
+        [segment],
+        encoder_provenance=provenance,
+        stride_seconds=0.25,
+    )
+    union = open_representations([timeline, bounded], cohort=manifest)
+    derived = union.get(
+        "train_source", bounded_representation_id("train_source-1", 0), "wrist"
+    )
+    assert float(derived.intervals_sec[0, 0]) >= 0.2 - 1e-6
+    assert float(derived.intervals_sec[-1, 1]) <= 1.2 + 1e-6
+    assert union.get("train_source", "train_source-1", "wrist").recording_id == "train_source-1"

@@ -1,4 +1,12 @@
-"""Masked, unit-controlled objectives for Task-2 metric learning."""
+"""Contrastive ruler objective for Task 2 (design doc section 5).
+
+Within each reference set of a batch, every accepted query must sit closer to
+the personal prototype than every negative query by a margin. The margin scales
+with the declared severity of a physical modification, so a barely modified
+execution is not asked to sit as far away as a clearly changed one, and it is
+the full margin for another person's execution. A small pull term keeps
+accepted queries tight. There is no classifier, no regression and no threshold.
+"""
 
 from __future__ import annotations
 
@@ -8,131 +16,81 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .contracts import EpisodeBatch
-from .model import ChangeHeadOutput
+from .contracts import ROLE_INDEX, EpisodeBatch
+from .model import RulerOutput
 
 
 @dataclass(frozen=True)
-class ChangeLossConfig:
-    classification_weight: float = 1.0
-    ranking_weight: float = 0.5
-    regression_weight: float = 1.0
-    ranking_margin: float = 0.2
-    huber_delta: float = 1.0
+class RulerLossConfig:
+    margin: float = 0.2
+    pull_weight: float = 0.1
+    minimum_severity_multiplier: float = 0.25
 
     def __post_init__(self) -> None:
-        if min(self.classification_weight, self.ranking_weight, self.regression_weight) < 0:
-            raise ValueError("loss weights must be non-negative")
-        if self.classification_weight + self.ranking_weight + self.regression_weight <= 0:
-            raise ValueError("at least one loss component must be enabled")
-        if self.ranking_margin <= 0:
-            raise ValueError("ranking margin must be positive")
-        if self.huber_delta <= 0:
-            raise ValueError("Huber delta must be positive")
+        if self.margin <= 0:
+            raise ValueError("margin must be positive")
+        if self.pull_weight < 0:
+            raise ValueError("pull weight must be non-negative")
+        if not 0 < self.minimum_severity_multiplier <= 1:
+            raise ValueError("minimum severity multiplier must be in (0, 1]")
 
 
 @dataclass(frozen=True)
-class ChangeLoss:
+class RulerLoss:
     total: Tensor
-    classification: Tensor
     ranking: Tensor
-    regression: Tensor
-    classification_count: int
+    pull: Tensor
     ranking_count: int
-    regression_count: int
+    positive_count: int
+    negative_count: int
 
 
-def _weighted_masked_mean(
-    values: Tensor, mask: Tensor, sample_weights: Tensor
-) -> Tensor:
-    weights = mask.to(values.dtype) * sample_weights
-    denominator = weights.sum()
-    if float(denominator.detach()) == 0.0:
-        return values.sum() * 0.0
-    return (values * weights).sum() / denominator
-
-
-def change_quantification_loss(
-    output: ChangeHeadOutput,
-    batch: EpisodeBatch,
-    config: ChangeLossConfig = ChangeLossConfig(),
-) -> ChangeLoss:
-    """Combine change discrimination and scaled interpretable-target regression."""
-
-    classification_per_pair = F.binary_cross_entropy_with_logits(
-        output.change_logits,
-        batch.classification_targets,
-        reduction="none",
-    )
-    classification = _weighted_masked_mean(
-        classification_per_pair,
-        batch.classification_mask,
-        batch.sample_weights,
-    )
-
-    ranking_terms: list[Tensor] = []
-    ranking_weights: list[Tensor] = []
+def ruler_loss(
+    output: RulerOutput, batch: EpisodeBatch, config: RulerLossConfig = RulerLossConfig()
+) -> RulerLoss:
+    distances = output.distances
+    roles = batch.roles
+    modified = ROLE_INDEX["modified_query"]
+    other = ROLE_INDEX["other_subject_query"]
+    accepted = ROLE_INDEX["accepted_query"]
+    terms: list[Tensor] = []
+    weights: list[Tensor] = []
     for reference_set_id in dict.fromkeys(batch.reference_set_ids):
-        indices = [
-            index
-            for index, value in enumerate(batch.reference_set_ids)
-            if value == reference_set_id and bool(batch.classification_mask[index])
-        ]
-        accepted = [index for index in indices if batch.classification_targets[index] < 0.5]
-        changed = [index for index in indices if batch.classification_targets[index] >= 0.5]
-        for accepted_index in accepted:
-            for changed_index in changed:
-                ranking_terms.append(
-                    F.relu(
-                        config.ranking_margin
-                        - output.change_scores[changed_index]
-                        + output.change_scores[accepted_index]
+        indices = [i for i, value in enumerate(batch.reference_set_ids) if value == reference_set_id]
+        positives = [i for i in indices if int(roles[i]) == accepted]
+        negatives = [i for i in indices if int(roles[i]) in (modified, other)]
+        for positive in positives:
+            for negative in negatives:
+                if int(roles[negative]) == modified:
+                    multiplier = batch.severities[negative].clamp(
+                        min=config.minimum_severity_multiplier, max=1.0
                     )
+                else:
+                    multiplier = distances.new_tensor(1.0)
+                terms.append(
+                    F.relu(distances[positive] - distances[negative] + config.margin * multiplier)
                 )
-                ranking_weights.append(
-                    torch.sqrt(
-                        batch.sample_weights[accepted_index]
-                        * batch.sample_weights[changed_index]
-                    )
+                weights.append(
+                    torch.sqrt(batch.sample_weights[positive] * batch.sample_weights[negative])
                 )
-    if ranking_terms:
-        stacked_terms = torch.stack(ranking_terms)
-        stacked_weights = torch.stack(ranking_weights)
-        ranking = (stacked_terms * stacked_weights).sum() / stacked_weights.sum()
+    if terms:
+        stacked = torch.stack(terms)
+        weight = torch.stack(weights).to(stacked.dtype)
+        ranking = (stacked * weight).sum() / weight.sum()
     else:
-        ranking = output.change_scores.sum() * 0.0
-
-    scaled_error = (
-        output.target_predictions - batch.change_targets
-    ) / batch.target_scales.unsqueeze(0)
-    regression_per_target = F.huber_loss(
-        scaled_error,
-        torch.zeros_like(scaled_error),
-        delta=config.huber_delta,
-        reduction="none",
-    )
-    valid_per_pair = batch.target_mask.sum(dim=1).clamp_min(1)
-    regression_per_pair = (
-        regression_per_target * batch.target_mask.to(regression_per_target.dtype)
-    ).sum(dim=1) / valid_per_pair
-    pair_has_target = batch.target_mask.any(dim=1)
-    regression = _weighted_masked_mean(
-        regression_per_pair,
-        pair_has_target,
-        batch.sample_weights,
-    )
-
-    total = (
-        config.classification_weight * classification
-        + config.ranking_weight * ranking
-        + config.regression_weight * regression
-    )
-    return ChangeLoss(
+        ranking = distances.sum() * 0.0
+    positive_mask = batch.positive_mask
+    if bool(positive_mask.any()):
+        weight = batch.sample_weights[positive_mask].to(distances.dtype)
+        pull = (distances[positive_mask] * weight).sum() / weight.sum()
+    else:
+        pull = distances.sum() * 0.0
+    total = ranking + config.pull_weight * pull
+    return RulerLoss(
         total=total,
-        classification=classification,
         ranking=ranking,
-        regression=regression,
-        classification_count=int(batch.classification_mask.sum().item()),
-        ranking_count=len(ranking_terms),
-        regression_count=int(batch.target_mask.sum().item()),
+        pull=pull,
+        ranking_count=len(terms),
+        positive_count=int(positive_mask.sum()),
+        negative_count=int(batch.negative_mask.sum()),
     )

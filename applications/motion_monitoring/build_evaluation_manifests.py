@@ -1,20 +1,20 @@
-"""Build immutable per-task test manifests from COHORT_V1."""
+"""Build the immutable Task-3 manifests from COHORT_V1.
+
+Task 1 builds its own cohort and manifests with
+``applications.motion_monitoring.task1.build_manifests_v2``; Task 2 with
+``applications.motion_monitoring.task2.build_manifests_v1``.
+"""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
-from applications.motion_monitoring.data.examples import open_cache
 from applications.motion_monitoring.data.manifests import read_cohort_manifest
 from applications.motion_monitoring.evaluation_manifests import (
-    build_task1_development_manifest,
-    build_task1_train_manifest,
-    build_task1_test_manifest,
     build_task3_development_manifest,
     build_task3_train_manifest,
     build_task3_test_manifest,
-    unsupported_task2_manifest,
     write_task_manifest,
 )
 
@@ -34,13 +34,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260831)
     args = parser.parse_args()
     cohort = read_cohort_manifest(args.cohort)
-    datasets = sorted({entry.dataset for entry in cohort.entries})
-    caches = {dataset: open_cache(dataset) for dataset in datasets}
     manifests = (
-        build_task1_train_manifest(cohort, caches, seed=args.seed),
-        build_task1_development_manifest(cohort, caches, seed=args.seed),
-        build_task1_test_manifest(cohort, caches, seed=args.seed),
-        unsupported_task2_manifest(cohort, seed=args.seed),
         build_task3_train_manifest(cohort, seed=args.seed),
         build_task3_development_manifest(cohort, seed=args.seed),
         build_task3_test_manifest(cohort, seed=args.seed),

@@ -110,30 +110,24 @@ The complete cohort, baseline, alignment, metric, and visualization protocol is 
 
 Evaluate three properties separately.
 
-### Reliability
+The implemented V1 evaluation reports MoniPar and KneE-PAD separately. Each comparison uses four
+accepted references from the same person, task, stream, and sensor compatibility key. Its operating
+limit is fitted only from those four references; Task 2 has no global development threshold.
 
-- within-session and cross-session test-retest error;
-- intraclass correlation where enough repeated sessions exist;
-- sensitivity to device remounting and ordinary repetition variation; and
-- the minimum change distinguishable from that noise floor.
+- **Reliability:** ICC(2,1), SEM, and true MDC95 are reported only for action/stream strata with
+  named repeat occasions shared across at least two subjects. Unsupported strata remain visible.
+- **Known differences:** report within-person/action/stream AUROC between accepted and changed
+  deviations and the accepted-repeat false-alarm rate at the personal reference-only limit.
+- **MoniPar:** report the released one-point clinician-score change and a predeclared stricter
+  two-point subgroup. Never infer a label for an unscored visit.
+- **KneE-PAD:** compare remaining correct trials with released incorrect variants; describe this as
+  a within-visit research-placement stress test, not longitudinal evidence.
+- **Controls:** every learned-ruler result must include the frozen-embedding cosine floor and the
+  raw physical-summary ruler under the same personal-reference protocol.
 
-### Known execution differences
-
-- sensitivity to known changes, specificity on accepted executions, balanced accuracy, and effect
-  size at a development-fixed threshold;
-- the accepted-execution false-alarm rate, reported directly rather than inferred from specificity;
-- ordinal association with clinician severity or quality scores;
-- sensitivity to controlled changes in speed, range, and amplitude; and
-- phase localization agreement when a deviation interval is annotated.
-
-### Longitudinal association
-
-- within-subject association between movement change and clinical measurements;
-- mixed-effects or repeated-measures analysis rather than treating sessions as independent people;
-- confidence intervals over subjects; and
-- explicit separation of cross-sectional subject differences from within-person change.
-
-Latent distance is never labeled "quality" solely because it separates activity classes.
+The V1 implementation uses normalized-phase linear interpolation, not DTW, and does not claim
+persistent trend detection or clinical prognosis. Latent distance is never labeled "quality"
+solely because it separates activity classes.
 
 ## 5. Task 3: recurrent motion discovery
 
@@ -182,18 +176,20 @@ currently blocked by short converted artifacts; C-MHAD, WEAR, and OCA have verif
 adapters and are frozen as test-only members of `COHORT_V1`. Dataset readiness must be copied into each
 result artifact so a later source or converter change cannot silently alter the cohort.
 
-The core public evaluation matrix is intentionally small:
+The public evaluation matrix is intentionally small and task-specific:
 
 | dataset | primary role | complementary role |
 |---|---|---|
-| **C-MHAD** | sealed Task-1 demonstrated-action detection | Task-3 event recurrence and wrist-versus-waist control |
-| **WEAR** | long continuous Task-1 false-alarm validation | coarse Task-3 activity-bout control |
-| **OCA** | occupational Task-3 recurrent-motion discovery | occupational Task-1 transfer |
+| **C-MHAD** | sealed Task-1 detection, with paired same-/cross-subject enrollment | Task-3 event recurrence and wrist-versus-waist control |
+| **OpenPack** | sealed Task-1 occupational detection | Task-3 train/development identity source |
+| **WEAR** | none in Task-1 V2 | coarse Task-3 activity-bout control |
+| **OCA** | none in Task-1 V2 | occupational Task-3 recurrent-motion discovery |
+| **MoniPar** | none | Task-2 clinician-scored between-week change |
+| **KneE-PAD** | none | Task-2 correct-versus-incorrect stress cell |
 
-This is one shared three-dataset test study, not three unrelated benchmark collections. Their
-recording membership is fixed in `COHORT_V1`; signed train, development, and test task manifests
-freeze the exact evaluation units. MoniPar is excluded because its available conversion does not
-provide sufficiently reliable event boundaries for these tasks.
+The tasks do not share one cohort because their units and leakage constraints differ. Task 1 uses
+`COHORT_TASK1_V2`, Task 2 uses `COHORT_TASK2_V1`, and Task 3 uses `COHORT_V1`. Signed task manifests
+freeze the exact units. MoniPar and KneE-PAD belong only to Task 2.
 
 OpenPack is the priority Task-3 metric-training and held-out-identity source. Its import and
 provenance checks are complete; it enters a result only after the exact identity manifest is frozen,
@@ -222,8 +218,9 @@ The exact temporal annotation contract of every source is recorded in
 - Store generated tables and figures under a versioned application result directory and summarize
   only the promoted protocol in `docs/results/RESULTS.md`.
 
-One operating threshold is selected per encoder/readout on the four development sources and then
-held fixed for C-MHAD, WEAR, and OCA. Selecting a threshold from each test dataset is prohibited.
-Complete evaluation means every unit in the signed manifest, not a bounded smoke fixture. Task 3
-uses exact blockwise top-k cosine search to retain complete long recordings without allocating a
-dense candidate-by-candidate matrix.
+Task 1 and Task 3 operating points are selected from their declared non-test data and then frozen.
+Task 2 derives a new personal limit from each deployment reference set by design; no test query is
+used in that fit. Selecting a global threshold from a test dataset is prohibited. Complete
+evaluation means every unit in the signed manifest, not a bounded smoke fixture. Task 3 uses exact
+blockwise top-k cosine search to retain complete long recordings without allocating a dense
+candidate-by-candidate matrix.

@@ -1,4 +1,9 @@
-"""Transparent non-learned controls for Task-2 change quantification."""
+"""Transparent non-learned controls for Task-2 change quantification.
+
+``direct_change_scores`` is the untrained floor: frozen embeddings, cosine
+residual to the personal prototype, personal envelope. It is a mandatory row in
+every Task-2 table (design doc section 7).
+"""
 
 from __future__ import annotations
 

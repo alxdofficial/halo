@@ -1,68 +1,66 @@
 # Frozen application manifests
 
-`COHORT_V1.json` is the authoritative recording-level cohort for the seven application sources with
-canonical raw-timeline caches. It binds exact cache membership and provenance, excludes CrossFit's
-derived repetition copies, and keeps each canonical subject or conservative identity-linkage group
-inside one split. The deterministic development selection favors source annotation coverage and
-keeps labels seen in only one leakage group in training.
+These files freeze data membership and evaluation units. They are protocol artifacts, not mutable
+training outputs. A manifest fingerprint changes when source-cache provenance, cohort membership,
+or unit construction changes.
 
-Rebuild it only as an explicit protocol revision:
+## Active protocols
 
-```bash
-/home/alex/code/HALO/legacy_code/.venv/bin/python \
-  -m applications.motion_monitoring.data.build_manifest
-```
+| task | cohort | train | development | test |
+|---|---|---|---|---|
+| Task 1 | `COHORT_TASK1_V2.json` | `TASK1_TRAIN_V2.json` | none; synthetic training subjects provide the threshold hold-out | `TASK1_TEST_V2.json` |
+| Task 2 | `COHORT_TASK2_V1.json` | `TASK2_TRAIN_V1.json` | none; the operating limit is fitted from each person's references | `TASK2_TEST_V1.json` |
+| Task 3 | `COHORT_TASK3_V2.json` | `TASK3_TRAIN_V2.json` | none; the threshold comes from held-out training identities under a false-edge budget | `TASK3_TEST_V2.json` |
 
-The file's embedded fingerprint changes if a source cache, adapter output, split seed, role, or
-recording assignment changes. Generated representation caches must record that fingerprint.
+Files from Task 1 V1 were removed. Do not recreate or consume them.
 
-HARMES and MoniPar are not yet members because they still use the older representation-corpus
-storage rather than the application `RawRecording` cache contract. Their integration requires a
-separate reviewed adapter revision; they must not be appended as unvalidated index lists.
+## Task 1
 
-`TASK{1,3}_{TRAIN,DEVELOPMENT,TEST}_V1.json` freezes the exact units used to fit task heads,
-select one global operating threshold per encoder/readout, and report the three sealed test
-datasets separately. Task 1 contains enrollment/query pairs; Task 3 contains complete
-recording-stream timelines. The test totals are 2,612 Task-1 trials and 340 Task-3 timelines.
-
-## Task-1 V2 (2026-09-02, `docs/tasks/TASK1_REFERENCE_RESOLUTION_SPEC.md` section C)
-
-`COHORT_TASK1_V2.json` (`cohort_task1_v2`) is Task 1's own cohort with declared per-dataset roles;
-`COHORT_V1.json` stays the Task-3 cohort and is untouched. Roles:
-
-| dataset          | role                | split                                   |
-|------------------|---------------------|-----------------------------------------|
-| `synth_wrist_v1` | `train_only`        | train (synthetic; never calibrates)     |
-| `aidlab_har`     | `development_only`  | development                             |
-| `openpack`       | `split_evaluation`  | development 4 subjects / test 12        |
-| `c_mhad`, `oca`  | `evaluation`        | test                                    |
-
-`TASK1_{TRAIN,DEVELOPMENT,TEST}_V2.json` are built from it by
-`python -m applications.motion_monitoring.task1.build_manifests_v2`. Synthetic references are
-chosen by donor identity (`reference_identity: donor`): never the same donor clip as a target,
-and a different donor subject wherever one exists. RecoFit, CrossFit and WEAR are no longer
-Task-1 targets (they are the synthesis background and donor sources instead).
-
-`synth_wrist_v1` is a `derived` canonical cache: deterministic raw-level synthesis from the
-CrossFit and RecoFit caches (`data/adapters/synth_wrist_v1.py`, ≈40 h). Its provenance is the
-generator's sha plus the two source caches' provenance, so `build_cache --force synth_wrist_v1`
-reproduces it bit-for-bit. Representation caches record per-dataset raw-cache fingerprints and
-may be opened under any cohort whose raw caches match (`open_representations`), so a natural
-cache built under `COHORT_V1` and a synthetic cache built under `COHORT_TASK1_V2` serve one
-manifest together.
-
-Runners: `task1/train_full.py` (multi-cache `--representations`, natural-dev gate),
-`task1/evaluate_v2.py` (dev calibration → test), `task1/controls_v2.py` (section C.4 controls).
-
-`TASK2_TEST_V1.json` is intentionally empty. None of the current sealed datasets provides
-same-person, same-task bounded executions with accepted-versus-changed truth. The manifest records
-that blocker so synthetic or clinical-state proxies cannot silently be reported as the real test.
-
-Validate source identities and representation-cache coverage before a run:
+Task 1 V2 uses `synth_wrist_v1` for training and C-MHAD plus OpenPack for sealed evaluation.
+Reference/query comparisons are configuration-matched and contain paired same-subject and
+cross-subject enrollment conditions. Rebuild with:
 
 ```bash
 /home/alex/code/HALO/legacy_code/.venv/bin/python \
-  -m applications.motion_monitoring.evaluation_readiness \
-  --representation harnet=/path/to/harnet_cache \
-  --representation unimts=/path/to/unimts_cache
+  -m applications.motion_monitoring.task1.build_manifests_v2
 ```
+
+The query timeline must be represented in full. Every enrolled reference must also be encoded as
+an independently bounded input so it cannot use context outside its declared interval. Official
+cross-encoder runs first freeze the shared eligible units with `build_common_task1_units.py`.
+
+## Task 2
+
+Task 2 trains from HARMES, CrossFit, and the generated `task2_modified_v1` variants. Its sealed
+evaluation contains clinician-scored MoniPar comparisons and correct-versus-incorrect KneE-PAD
+comparisons. Rebuild with:
+
+```bash
+/home/alex/code/HALO/legacy_code/.venv/bin/python \
+  -m applications.motion_monitoring.task2.build_manifests_v1
+```
+
+All Task 2 executions are encoded independently at their source boundaries. Official
+cross-encoder runs freeze the common train-execution and test-unit intersection with
+`build_common_task2_units.py`. The train/evaluate runners require that file and verify its hashes.
+See `docs/tasks/TASK2_CHANGE_QUANTIFICATION.md` for the complete protocol and commands.
+
+## Task 3
+
+`COHORT_TASK3_V2.json` and the Task 3 V2 manifests are the active recurrence-discovery protocol.
+The V1 Task-3 manifests (`TASK3_TRAIN_V1`, `TASK3_DEVELOPMENT_V1`, `TASK3_TEST_V1`) are RETIRED and
+must not be consumed: their evaluation sources, C-MHAD and WEAR, carry a median of one occurrence
+per identity and so cannot measure recurrence at all, and their development split has been replaced
+by an a-priori operating point. `COHORT_V1.json` itself stays, because other builders still default
+to it.
+They use complete recording-stream timelines and retain a distinct development split for model
+selection.
+
+## Representation rules
+
+- Representation caches carry the cohort fingerprint, raw-cache fingerprints, encoder provenance,
+  patch duration, and temporal stride.
+- A cache with stale provenance must be rebuilt, not relabelled.
+- Official cross-encoder Task 1 and Task 2 comparisons require equal stride and a frozen common-unit
+  intersection.
+- Missing official units are errors. Pilot `--limit` caches are not valid result inputs.

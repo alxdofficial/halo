@@ -168,10 +168,33 @@ def test_derived_provenance_binds_generator_and_source_caches():
     from applications.motion_monitoring.data.cache import cache_provenance
 
     sources = Path(synth.__file__).resolve().parents[1] / "sources"
-    if not all((sources / name / "processed" / "canonical_v1" / "cache.json").is_file() for name in ("crossfit", "recofit")):
-        pytest.skip("crossfit/recofit canonical caches are not built here")
+    if not (sources / "crossfit" / "processed" / "canonical_v1" / "cache.json").is_file():
+        pytest.skip("crossfit canonical cache is not built here")
     provenance = cache_provenance("synth_wrist_v1")
-    assert set(provenance["source_caches"]) == {"crossfit", "recofit"}
+    assert set(provenance["source_caches"]) == {"crossfit"}
     assert "payload_tree_sha256" not in provenance
     assert provenance["adapter_module"].endswith("synth_wrist_v1")
     assert len(provenance["adapter_sha256"]) == 64
+
+
+def test_clean_donor_record_is_enrollment_only_and_configuration_matched(bank):
+    clip = bank[0][0]
+    recording = synth.donor_recording(0, clip)
+    event = recording.events[0]
+    stream = recording.streams[0]
+    assert recording.metadata["task1_reference_only"] is True
+    assert event.annotation_kind == "enrollment_execution"
+    assert event.metadata["donor_clip_id"] == clip.clip_id
+    assert stream.placement == "wrist"
+    assert stream.device == "off-the-shelf smartwatch"
+    assert stream.channels == (
+        "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z"
+    )
+
+
+def test_every_synthetic_query_has_primary_and_distractor_insertions(bank):
+    for seed in range(20):
+        recording = _synthesize(bank, seed, index=seed)
+        assert recording is not None
+        assert recording.metadata["inserted_primary_count"] >= 1
+        assert recording.metadata["inserted_distractor_count"] >= 1

@@ -51,6 +51,10 @@ class CohortManifest:
     # test). ``split_evaluation`` is the only role allowed to hold both
     # development and test recordings, and only across disjoint leakage groups.
     roles: Mapping[str, str] = field(default_factory=dict)
+    # Whether source-declared duplicate signal views were dropped when this cohort
+    # was formed. It changes which recordings are members, so it is part of the
+    # fingerprint and is persisted; only Task 2 sets it False.
+    exclude_duplicate_views: bool = True
 
     def entries_for(
         self, *, dataset: str | None = None, split: SplitName | None = None
@@ -151,6 +155,7 @@ def build_cohort_manifest(
     development_only_datasets: Sequence[str] = (),
     split_evaluation_datasets: Sequence[str] = (),
     evaluation_development_fraction: float | None = None,
+    exclude_duplicate_views: bool = True,
 ) -> CohortManifest:
     """Create one deterministic train/development/test recording manifest.
 
@@ -161,6 +166,13 @@ def build_cohort_manifest(
     ``split_evaluation`` datasets are partitioned development/test by leakage
     group using ``evaluation_development_fraction`` so a natural source can
     calibrate on a few subjects and test on the rest without any subject overlap.
+
+    ``exclude_duplicate_views`` drops recordings a source declares to be another
+    view of the same physical signal, such as CrossFit's per-repetition arrays
+    carved out of their parent set. That is required wherever a parent and its
+    excerpt could land on opposite sides of a split, which is every Task-1 and
+    Task-3 cohort. Task 2's unit *is* the repetition and it splits by subject, so
+    it turns the rule off; leaving it on would silently empty the source.
     """
 
     if not name.strip():
@@ -209,8 +221,11 @@ def build_cohort_manifest(
         cache = caches[dataset]
         fingerprints[dataset] = cache_fingerprint(cache)
         group_cells: dict[str, set[tuple[str, str]]] = {}
+        eligible = (
+            _eligible_recording if exclude_duplicate_views else (lambda recording: True)
+        )
         for recording in cache:
-            if not _eligible_recording(recording):
+            if not eligible(recording):
                 continue
             group = subject_leakage_group(recording)
             group_cells.setdefault(group, set()).update(
@@ -236,7 +251,7 @@ def build_cohort_manifest(
             development = set()
         assignments: dict[RecordingKey, str] = {}
         for cache_index, recording in enumerate(cache):
-            if not _eligible_recording(recording):
+            if not eligible(recording):
                 continue
             group = subject_leakage_group(recording)
             split: SplitName
@@ -267,11 +282,7 @@ def build_cohort_manifest(
                 )
             )
         validate_subject_disjoint_assignments(
-            (
-                recording
-                for recording in cache
-                if _eligible_recording(recording)
-            ),
+            (recording for recording in cache if eligible(recording)),
             assignments,
         )
 
@@ -284,6 +295,8 @@ def build_cohort_manifest(
         "cache_fingerprints": dict(sorted(fingerprints.items())),
         "entries": [asdict(entry) for entry in entries],
     }
+    if not exclude_duplicate_views:
+        unsigned["exclude_duplicate_views"] = False
     if extended:
         unsigned["roles"] = dict(sorted(roles.items()))
     fingerprint = sha256(_canonical_json(unsigned)).hexdigest()
@@ -296,6 +309,7 @@ def build_cohort_manifest(
         entries=tuple(entries),
         fingerprint=fingerprint,
         roles=dict(sorted(roles.items())) if extended else {},
+        exclude_duplicate_views=bool(exclude_duplicate_views),
     )
 
 
@@ -303,6 +317,10 @@ def write_cohort_manifest(manifest: CohortManifest, path: Path) -> None:
     payload = asdict(manifest)
     if not payload.get("roles"):
         payload.pop("roles", None)
+    # Absent means the default, so cohorts written before this flag existed keep
+    # their original fingerprints.
+    if payload.get("exclude_duplicate_views", True):
+        payload.pop("exclude_duplicate_views", None)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

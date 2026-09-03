@@ -115,6 +115,7 @@ class DetectionEpisode:
     reference: EmbeddingSequence
     query: EmbeddingSequence
     targets_sec: torch.Tensor
+    alignment_valid: torch.Tensor | None = None
     loss_valid: torch.Tensor | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -130,15 +131,24 @@ class DetectionEpisode:
             )
         if self.reference.feature_dim != self.query.feature_dim:
             raise ValueError("reference and query embedding dimensions must match")
-        loss_valid = (
+        alignment_valid = (
             self.query.valid
+            if self.alignment_valid is None
+            else torch.as_tensor(self.alignment_valid, dtype=torch.bool)
+        )
+        loss_valid = (
+            alignment_valid
             if self.loss_valid is None
             else torch.as_tensor(self.loss_valid, dtype=torch.bool)
         )
+        if alignment_valid.shape != self.query.valid.shape:
+            raise ValueError("alignment_valid must match the query sequence length")
         if loss_valid.shape != self.query.valid.shape:
             raise ValueError("loss_valid must match the query sequence length")
-        if torch.any(loss_valid & ~self.query.valid):
-            raise ValueError("loss_valid cannot enable an invalid query patch")
+        if torch.any(alignment_valid & ~self.query.valid):
+            raise ValueError("alignment_valid cannot enable an invalid query patch")
+        if torch.any(loss_valid & ~alignment_valid):
+            raise ValueError("loss_valid cannot enable an alignment-invalid query patch")
         query_start = self.query.intervals_sec[0, 0]
         query_end = self.query.intervals_sec[-1, 1]
         if len(targets) and (
@@ -146,7 +156,7 @@ class DetectionEpisode:
             or torch.any(targets[:, 1] > query_end)
         ):
             raise ValueError("targets must lie within the query timeline")
-        unavailable = ~loss_valid
+        unavailable = ~alignment_valid
         for start, end in targets:
             overlaps_unavailable = (
                 unavailable
@@ -155,9 +165,10 @@ class DetectionEpisode:
             )
             if torch.any(overlaps_unavailable):
                 raise ValueError(
-                    "a target cannot cross an invalid or guarded query patch"
+                    "a target cannot cross an invalid query patch"
                 )
         object.__setattr__(self, "targets_sec", targets)
+        object.__setattr__(self, "alignment_valid", alignment_valid)
         object.__setattr__(self, "loss_valid", loss_valid)
 
 
@@ -169,6 +180,7 @@ class DetectionBatch:
     query: torch.Tensor
     reference_valid: torch.Tensor
     query_valid: torch.Tensor
+    alignment_valid: torch.Tensor
     loss_valid: torch.Tensor
     query_intervals_sec: torch.Tensor
     endpoint_targets: torch.Tensor
@@ -184,6 +196,7 @@ class DetectionBatch:
                 "query",
                 "reference_valid",
                 "query_valid",
+                "alignment_valid",
                 "loss_valid",
                 "query_intervals_sec",
                 "endpoint_targets",
@@ -243,6 +256,11 @@ def collate_detection_episodes(
     query_valid = pad_sequence(
         [item.query.valid for item in episodes], batch_first=True, padding_value=False
     )
+    alignment_valid = pad_sequence(
+        [item.alignment_valid for item in episodes],
+        batch_first=True,
+        padding_value=False,
+    )
     loss_valid = pad_sequence(
         [item.loss_valid for item in episodes], batch_first=True, padding_value=False
     )
@@ -272,6 +290,7 @@ def collate_detection_episodes(
         query=query,
         reference_valid=reference_valid,
         query_valid=query_valid,
+        alignment_valid=alignment_valid,
         loss_valid=loss_valid,
         query_intervals_sec=query_intervals,
         endpoint_targets=endpoint_targets,
@@ -344,7 +363,7 @@ def _snap_reference_selection(
     widths = (intervals[:, 1] - intervals[:, 0]).abs()
     step = float(widths.median())
     if context_bound_sec is None:
-        context_bound_sec = max(0.5, 1.5 * step)
+        context_bound_sec = 0.5
 
     valid = sequence.valid
     inside = valid & (centers >= start_sec) & (centers < end_sec)
@@ -366,34 +385,40 @@ def _snap_reference_selection(
         raise ValueError("the reference event crosses an invalid embedding gap")
 
     left, right = int(selected[0]), int(selected[-1]) + 1
-    added_context_sec = 0.0
+    def context(left_index: int, right_index: int) -> tuple[float, float, float]:
+        left_context = max(0.0, float(start_sec - intervals[left_index, 0]))
+        right_context = max(0.0, float(intervals[right_index - 1, 1] - end_sec))
+        return left_context, right_context, left_context + right_context
+
     while right - left < minimum_positions:
         options: list[tuple[float, str]] = []
         if left > 0 and bool(valid[left - 1]) and int(selected[0]) - (left - 1) <= 1:
-            extra = max(0.0, float(start_sec - intervals[left - 1, 0]))
-            if added_context_sec + extra <= context_bound_sec + 1e-9:
-                options.append((extra, "left"))
+            _, _, prospective = context(left - 1, right)
+            if prospective <= context_bound_sec + 1e-9:
+                options.append((prospective, "left"))
         if right < len(valid) and bool(valid[right]):
-            extra = max(0.0, float(intervals[right, 1] - end_sec))
-            if added_context_sec + extra <= context_bound_sec + 1e-9:
-                options.append((extra, "right"))
+            _, _, prospective = context(left, right + 1)
+            if prospective <= context_bound_sec + 1e-9:
+                options.append((prospective, "right"))
         if not options:
             raise ValueError(
                 "the reference event cannot reach the minimum position floor "
                 "within its contiguous valid run and context bound"
             )
         if rng is not None and len(options) > 1:
-            extra, side = options[rng.randrange(len(options))]
+            _, side = options[rng.randrange(len(options))]
         else:
-            extra, side = min(options)
+            _, side = min(options)
         if side == "left":
             left -= 1
         else:
             right += 1
-        added_context_sec += extra
+    left_context, right_context, added_context_sec = context(left, right)
     provenance = {
         "reference_positions": right - left,
         "reference_added_context_sec": round(added_context_sec, 6),
+        "reference_left_context_sec": round(left_context, 6),
+        "reference_right_context_sec": round(right_context, 6),
         "reference_seeded_by_overlap": seeded_by_overlap,
         "reference_grid_step_sec": round(step, 6),
     }
@@ -536,11 +561,15 @@ def episode_from_recordings(
         raise ValueError("target intervals must be finite with positive duration")
     query_start = float(query_sequence.intervals_sec[0, 0])
     query_end = float(query_sequence.intervals_sec[-1, 1])
-    targets = [
-        (max(start, query_start), min(end, query_end))
-        for start, end in targets
-        if min(end, query_end) > max(start, query_start)
-    ]
+    selected_targets = []
+    for start, end in targets:
+        if end <= query_start or start >= query_end:
+            continue
+        if start < query_start - 1e-6 or end > query_end + 1e-6:
+            raise ValueError("a target is incomplete at the query crop boundary")
+        selected_targets.append((start, end))
+    targets = selected_targets
+    alignment_valid = query_sequence.valid.clone()
     loss_valid = query_sequence.valid.clone()
     for start, end in guard_intervals_sec:
         if not np.isfinite((start, end)).all() or end <= start:
@@ -565,6 +594,7 @@ def episode_from_recordings(
             dtype=query_sequence.intervals_sec.dtype,
             device=query_sequence.intervals_sec.device,
         ).reshape(-1, 2),
+        alignment_valid=alignment_valid,
         loss_valid=loss_valid,
         metadata={
             "dataset": query_recording.dataset,

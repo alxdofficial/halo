@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 import baselines
@@ -59,6 +60,47 @@ def test_baseline_encoder_uses_native_window_and_preserves_partial_length(
     assert sorted(encoder._state["lengths"]) == [5, 15, 20]
     assert torch.allclose(sequence.embeddings.norm(dim=-1), torch.ones(3), atol=1e-5)
     assert not any(parameter.requires_grad for parameter in encoder.parameters())
+
+
+def test_application_encoder_uses_feature_only_setup(monkeypatch, tmp_path) -> None:
+    artifact = tmp_path / "encoder.pt"
+    artifact.write_bytes(b"released encoder")
+
+    class FeatureOnlyAdapter(_LengthAwareAdapter):
+        name = "test_feature_only"
+
+        def setup(self, device):
+            raise AssertionError("native prediction setup must not run")
+
+        def setup_features(self, device):
+            return {"lengths": [], "feature_only": True}
+
+        def feature_artifacts(self, state):
+            return {"checkpoint": artifact}
+
+    adapter = FeatureOnlyAdapter()
+    monkeypatch.setitem(baselines.REGISTRY, adapter.name, adapter)
+    encoder = BaselineMotionEncoder(adapter.name)
+    sequence = encoder.encode_recording(_recording())
+    provenance = encoder.provenance()
+
+    assert sequence.embeddings.shape[1] == 6
+    assert encoder._state["feature_only"]
+    assert provenance["artifacts"]["checkpoint"]["bytes"] == len(b"released encoder")
+    assert len(provenance["artifacts"]["checkpoint"]["sha256"]) == 64
+
+
+def test_application_encoder_rejects_missing_feature_artifact(monkeypatch, tmp_path) -> None:
+    class MissingArtifactAdapter(_LengthAwareAdapter):
+        name = "test_missing_feature_artifact"
+
+        def feature_artifacts(self, state):
+            return {"checkpoint": tmp_path / "missing.pt"}
+
+    adapter = MissingArtifactAdapter()
+    monkeypatch.setitem(baselines.REGISTRY, adapter.name, adapter)
+    with pytest.raises(FileNotFoundError, match="feature artifact"):
+        BaselineMotionEncoder(adapter.name).provenance()
 
 
 def test_unimts_preserves_one_source_sample_for_wrap_padding() -> None:

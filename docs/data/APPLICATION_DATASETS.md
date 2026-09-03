@@ -1,6 +1,6 @@
 # Dataset roles for movement monitoring
 
-> **Verified inventory, 2026-08-31.** Dataset role is checkpoint-dependent. A source consumed by a
+> **Verified inventory, 2026-09-02.** Dataset role is checkpoint-dependent. A source consumed by a
 > HALO checkpoint during representation training may be used for development but not to claim
 > unseen-dataset generalization for that checkpoint.
 
@@ -21,27 +21,23 @@ the desired experiment while the released files omit timestamps, physical units,
 
 ## 2. Core evaluation matrix
 
-Use four public datasets as the default final study. They are selected by application role rather
-than by whichever source gives the highest score, and each source is reported separately.
+The active protocols use a small task-specific set. Sources are selected by annotation contract,
+not by whichever one gives the highest score, and each source is reported separately.
 
 | dataset | task coverage | reason for inclusion | current gate |
 |---|---|---|---|
-| **C-MHAD** | Tasks 0 and 1 | synchronized video, real continuous background, event intervals, and wrist/waist six-axis views | native-clock adapter verified; freeze the evaluation manifest before use |
-| **WEAR** | Tasks 0, 1, and 3 | independent outdoor cohort, natural continuous activity/NULL, arm-watch acceleration, and egocentric video | fixed-rate adapter verified; unresolved repeat-session linkage and one missing left-arm stream are explicit |
-| **MoniPar** | excluded | repeated watch protocols across weeks | available conversion lacks sufficiently reliable event boundaries for the frozen complete-timeline evaluation |
-| **OCA** | Tasks 0, 1, and 3 | repeated industrial assembly in long recordings with NULL and publisher partitions | native-rate four-stream adapter and clock-gap split verified; publisher train/validation are not subject-disjoint |
+| **C-MHAD** | Task 1 evaluation; Task 3 evaluation | synchronized video, continuous background, event intervals, and wrist/waist six-axis views | native-clock adapter and frozen manifests verified |
+| **OpenPack** | Task 1 evaluation; Task 3 train/development | occupational wrist IMU with bounded operations and complete timelines | adapter and frozen manifests verified; its role differs by task |
+| **WEAR** | Task 3 evaluation | independent outdoor cohort with natural continuous activity/NULL | fixed-rate adapter verified; one missing left-arm stream remains explicit |
+| **OCA** | Task 3 evaluation | repeated industrial assembly in long recordings with NULL | native-rate four-stream adapter and clock-gap split verified |
+| **MoniPar** | Task 2 evaluation | repeated watch protocols and clinician scores across weeks | reviewed bounded-event adapter and sealed Task-2 comparisons verified |
+| **KneE-PAD** | Task 2 evaluation | correct and released incorrect rehabilitation executions | reviewed adapter; reported as a research-placement, within-visit stress cell |
 
-The core matrix is sufficient for the main application paper because it covers continuous event
-localization, query-by-example detection, longitudinal change, and occupational recurrence while
-reusing datasets across tasks. Add a fifth dataset only to answer a prespecified missing condition,
-not to increase table size. KneE-PAD is the leading conditional Task-2 addition after its short-trial
-and checkpoint-provenance checks are resolved.
-
-The frozen four-source training/development set is OpenPack, CrossFit, AIDLAB-HAR, and RecoFit.
-The frozen three-source evaluation set is C-MHAD, WEAR, and OCA. HARMES and MoniPar are not members
-of `COHORT_V1`; neither may be appended without a reviewed adapter and protocol revision. An arm trained on OpenPack
-may use its official held-out subjects for a within-source result, but it cannot call that result
-unseen-dataset transfer. OCA remains the cross-dataset occupational source.
+Each task owns its own cohort because the unit and leakage constraints differ. Task 1 trains on the
+`synth_wrist_v1` corpus and evaluates C-MHAD plus OpenPack. Task 2 trains on HARMES, CrossFit, and
+their pre-materialised variants, then evaluates MoniPar plus KneE-PAD. Task 3 trains/develops on
+OpenPack, CrossFit, AIDLAB-HAR, and RecoFit, then evaluates C-MHAD, WEAR, and OCA. An arm trained on
+OpenPack cannot call an OpenPack result unseen-dataset transfer.
 
 Reporting contract:
 
@@ -55,14 +51,14 @@ Reporting contract:
 
 | dataset | measured local structure | primary use | readiness and limitation |
 |---|---|---|---|
-| **MoniPar** | 174 complete weekly protocols, 28 subjects, nine labels; session duration 405-445 s | cross-week Task 1 | **Signal adapter verified.** Released 50 Hz gravity-present watch acceleration is exposed in g with weekly subject/session identity and sample-label state runs. It is excluded from Task 2 because the 6,483 runs are not independent repetition annotations. |
+| **MoniPar** | 174 complete weekly protocols, 28 subjects, nine labels; session duration 405-445 s | Task 2 evaluation | **Signal and event adapter verified.** Released 50 Hz gravity-present watch acceleration is exposed in g with weekly subject/session identity. The seven single-run protocol items yield 1,207 primary bounded executions; multi-run `postural_transition` and `resting` are excluded from the primary protocol. Per-visit bradykinesia and rest-tremor metadata are converted in the canonical cache. |
 | **SPAR** | 280 exercise bouts, 20 subjects, seven labels; median 42 s | Task-1 alignment and Task-2 within-bout repeatability | **Conditional.** Apple Watch acceleration and gyroscope are appropriate, but about 20 repetitions share one bout and are not independent sessions. |
 | **Upper Limb Use** | 1,042 converted sessions, 15 subjects, 15 ADLs | bilateral wrist Task-2 exploration | **Blocked.** 598 sessions contain under 50 rows and many contain only two samples. Reconstruct and validate the source timeline before use. |
-| **KneE-PAD** | 2,084 trials, 31 subjects, nine variant labels; median 3.79 s | known-difference Task 2 | **Conditional.** Correct and two incorrect variants are useful, but most trials are shorter than six seconds, placements are research-grade, and checkpoint exclusion must be confirmed. |
+| **KneE-PAD** | 2,084 trials, 31 subjects, nine released variant labels; median 3.79 s | known-difference Task 2 | **Ready.** Correct trials and released incorrect variants form 13,768 sealed comparisons. The 148.15 Hz muscle-belly research IMUs make this a cross-placement stress cell, not consumer-watch evidence. |
 
-MoniPar remains useful for Task 1 because it supplies repeated real watch sessions. It is not a Task-2
-source: the release does not identify independent executions, and the cohort would not constitute
-complete clinical validation.
+MoniPar is used only for Task 2. After requiring four stable clinician-scored reference visits and
+a later scored query, 20 comparisons remain (13 accepted and 7 changed). This is a deliberately
+small clinician-rated feasibility cell, not complete clinical validation.
 
 ### 3.1 Additional longitudinal sources audited for Task 2
 
@@ -73,8 +69,8 @@ complete clinical validation.
 | **REHAB-120** | open CC BY 4.0 data; 120 baseline and 109 discharge assessments plus rehabilitation exercises | blocked: the release does not expose defensible baseline/discharge identity linkage, exercise arrays are derived orientation/flex signals, and one released NPY is corrupt. In the assessment IMU files, 2,454/5,994 acceleration arrays are all-zero placeholders and 262 reach about +/-16 although the paper declares m/s2 from a +/-2 g accelerometer; units and saturation handling require author clarification. |
 | **WATCH-PD** | 82 early untreated Parkinson's participants and 50 controls with repeated standardized visits over 12 months | best gated external validation candidate; access requires a steering-committee proposal. |
 
-ALAMEDA, COPS, and MoniPar are explicitly `stream` adapters. The canonical cache command rejects
-them so it cannot accidentally duplicate their sources or expand the longitudinal archives. The tracked
+ALAMEDA and COPS are explicitly `stream` adapters. MoniPar is a materialized canonical cache because
+its 174 short weekly visits are the reviewed Task-2 evaluation unit. The tracked
 Task-2 audit is `applications/motion_monitoring/data/inspection/task2_audit.json`; it verifies sampled
 rates, units, finite masks, placements, clock monotonicity, annotation semantics, and corpus coverage.
 
@@ -87,10 +83,10 @@ measurements support a longitudinal claim.
 | dataset | useful source structure | application requirement |
 |---|---|---|
 | **PHYTMO** | 30 subjects, correct/incorrect therapy series, optical reference | development for Task 2; series contain repeated movements but are not one execution per file |
-| **MM-Fit** | 21 full workouts, phones, two watches, earbud, RGB-D and pose | reconstruct full workouts for Tasks 0, 1, and 3; current sessions are per-set excerpts |
+| **MM-Fit** | 21 full workouts, phones, two watches, earbud, RGB-D and pose | possible future complete-timeline source for Tasks 1 and 3; current sessions are per-set excerpts |
 | **Opportunity** | repeated household recordings with interaction and NULL tracks in the source | reconstruct complete runs and fine annotation tracks; current converter retains only four locomotion labels |
 | **REALDISP** | ideal, self, and induced placement conditions | Task-2 remounting/nuisance development |
-| **HARMES** | repeated wrist ADLs with source event times | reconstruct inter-event gaps; current converter stores action segments only |
+| **HARMES** | 72 raw dominant-wrist ADL timelines with event logs | Task-2 accepted-repeat training; the reviewed application adapter keeps inter-event gaps and 2,398 bounded executions |
 | **XRF V2** | synchronized wrist, pocket, glasses, and ear views | useful multi-device development; reconstruct physical scenes rather than treating six views as six events |
 | **Capture24** | 151 free-living wrist days and more than 2,500 converted hours | reconstruct source days for background and scale tests; coarse-label segments are not natural event boundaries |
 
@@ -297,20 +293,22 @@ an optional runtime baseline documented in
 ### Task 1: arbitrary task detection
 
 - Use independent reference and query executions, not two windows from one bout.
-- Use CrossFit and eligible OpenPack identities for controlled same-motion matching development.
-- Use C-MHAD as the primary sealed arbitrary-action source.
-- Use WEAR and OCA as complementary duration and occupational conditions.
+- Train on `synth_wrist_v1`, whose references and inserted targets come from independent CrossFit
+  wrist executions with configuration-matched real backgrounds.
+- Evaluate C-MHAD and OpenPack under paired same-subject and cross-subject enrollment.
 
 Owner: [`TASK1_ARBITRARY_DETECTION.md`](../tasks/TASK1_ARBITRARY_DETECTION.md).
 
 ### Task 2: change quantification
 
-- Use PHYTMO, REALDISP, and MM-Fit for development only.
-- Do not use MoniPar: its protocol states and event boundaries do not support the accepted-versus-changed execution contract.
+- Use HARMES and CrossFit accepted executions plus deterministic raw-level variants to train the
+  change ruler.
+- Use MoniPar clinician-scored single-run protocol items as the small between-week evaluation cell.
+- Use KneE-PAD correct and released incorrect trials as a separate within-visit stress cell.
 - Use a quality-controlled ALAMEDA subset for exploratory long-term personal state trends only after its
   identity/linkage manifest is verified, and COPS only as a short-term fluctuation stress test.
-- Pursue WATCH-PD for gated standardized-task validation; do not substitute cross-subject ordering.
-- Use eligible KneE-PAD variants for known differences.
+- Treat MJFF Levodopa Response as a gated future extension. DUO-GAIT is not part of V1 because the
+  accessible archive remained incomplete.
 - Do not use Upper Limb Use until the short-session defect is resolved.
 - Treat GAITEX as a separate biomechanical/orientation oracle.
 

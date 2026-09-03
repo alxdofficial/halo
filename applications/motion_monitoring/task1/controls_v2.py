@@ -12,11 +12,14 @@ reported number).
   recipe is rejected. Chance is the untrained matcher under the same
   wrong references; the correct-reference arm trained on the same units
   gives the scale.
-* ``reference_identity``: the reference is an inserted copy of the *same
-  donor clip* as one of the query's positives (augmented differently), paired
-  against the cross-clip rule on exactly the same units. The same-clip arm
-  should score higher on synthetic dev and *not* on natural dev — the
-  cross-execution rule matters, and it is what natural dev measures.
+* ``reference_identity``: the reference is the clean source *same donor clip*
+  as one of the query's positives, paired against the cross-clip rule on
+  exactly the same synthetic units. The same-clip arm should score higher on
+  synthetic held-out subjects. This diagnoses source-clip identity leakage;
+  it does not make a claim about natural same-subject enrollment.
+
+Thresholds here are oracle F1 searches on synthetic dev — diagnostics, never
+the deployed operating point.
 """
 
 from __future__ import annotations
@@ -38,24 +41,18 @@ from applications.motion_monitoring.data.manifests import read_cohort_manifest
 from applications.motion_monitoring.evaluation_manifests import (
     Task1EvaluationUnit,
     read_task_manifest,
+    validate_task_manifest,
 )
 from applications.motion_monitoring.representation_cache import open_representations
-from applications.motion_monitoring.task1.train_full import calibrate, fit_head
+from applications.motion_monitoring.task1.train_full import (
+    calibrate,
+    fit_head,
+    split_by_subject,
+)
 
 
 def _digest(*parts: object) -> str:
     return sha256(":".join(str(part) for part in parts).encode("utf-8")).hexdigest()
-
-
-def split_by_subject(
-    units: list[Task1EvaluationUnit], *, seed: int, heldout_fraction: float
-) -> tuple[list[Task1EvaluationUnit], list[Task1EvaluationUnit]]:
-    subjects = sorted({unit.query_subject_id for unit in units})
-    ranked = sorted(subjects, key=lambda subject: _digest(seed, "heldout", subject))
-    heldout = set(ranked[: max(1, round(len(ranked) * heldout_fraction))])
-    train = [unit for unit in units if unit.query_subject_id not in heldout]
-    dev = [unit for unit in units if unit.query_subject_id in heldout]
-    return train, dev
 
 
 def wrong_references(
@@ -94,29 +91,34 @@ def wrong_references(
     return swapped
 
 
-def insert_index(cache) -> dict[str, list[tuple[int, str, str, int, tuple[float, float]]]]:
-    """Map donor clip id -> every inserted copy in the corpus."""
+def clean_reference_index(
+    cache,
+) -> dict[str, list[tuple[int, str, str, int, tuple[float, float], str]]]:
+    """Map donor clip id to clean enrollment-only source records."""
 
-    inserts: dict[str, list[tuple[int, str, str, int, tuple[float, float]]]] = defaultdict(list)
+    references: dict[
+        str, list[tuple[int, str, str, int, tuple[float, float], str]]
+    ] = defaultdict(list)
     for cache_index, recording in enumerate(cache):
         for event_index, event in enumerate(recording.events):
             clip = event.metadata.get("donor_clip_id")
-            if event.annotation_kind != "inserted_execution" or clip is None:
+            if event.annotation_kind != "enrollment_execution" or clip is None:
                 continue
-            inserts[str(clip)].append(
+            references[str(clip)].append(
                 (
                     cache_index,
                     recording.recording_id,
                     recording.subject_id,
                     event_index,
                     (float(event.start_sec), float(event.end_sec)),
+                    recording.streams[0].stream_id,
                 )
             )
-    return inserts
+    return references
 
 
 def same_clip_references(
-    units: list[Task1EvaluationUnit], cache, inserts, *, seed: int
+    units: list[Task1EvaluationUnit], cache, references, *, seed: int
 ) -> tuple[list[Task1EvaluationUnit], list[Task1EvaluationUnit]]:
     """Pair each present unit with a reference inserted from the same donor clip.
 
@@ -142,12 +144,12 @@ def same_clip_references(
         candidates = [
             item
             for clip in sorted(target_clips)
-            for item in inserts.get(clip, ())
+            for item in references.get(clip, ())
             if item[1] != unit.query_recording_id
         ]
         if not candidates:
             continue
-        cache_index, recording_id, subject_id, event_index, interval = min(
+        cache_index, recording_id, subject_id, event_index, interval, stream_id = min(
             candidates,
             key=lambda item: _digest(seed, "same_clip", unit.query_recording_id, unit.label, item[1], item[3]),
         )
@@ -157,7 +159,7 @@ def same_clip_references(
                 reference_cache_index=cache_index,
                 reference_recording_id=recording_id,
                 reference_subject_id=subject_id,
-                reference_stream_id=unit.query_stream_id,
+                reference_stream_id=stream_id,
                 reference_event_index=event_index,
                 reference_interval_sec=interval,
                 reference_rule="source_event+same_donor_clip",
@@ -194,9 +196,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cohort", type=Path, default=root / "manifests/COHORT_TASK1_V2.json")
     parser.add_argument("--train-manifest", type=Path, default=root / "manifests/TASK1_TRAIN_V2.json")
-    parser.add_argument(
-        "--development-manifest", type=Path, default=root / "manifests/TASK1_DEVELOPMENT_V2.json"
-    )
     parser.add_argument("--representations", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--control", choices=("splice_leak", "reference_identity", "all"), default="all")
@@ -215,15 +214,14 @@ def main() -> None:
     cohort = read_cohort_manifest(args.cohort)
     representations = open_representations(args.representations, cohort=cohort)
     train_manifest = read_task_manifest(args.train_manifest)
-    development = read_task_manifest(args.development_manifest)
     units = [Task1EvaluationUnit(**row) for row in train_manifest.units]
     datasets = sorted({unit.dataset for unit in units})
     if datasets != ["synth_wrist_v1"]:
         raise ValueError(f"controls expect a synthetic-only train manifest, got {datasets}")
-    caches = {
-        dataset: open_cache(dataset)
-        for dataset in sorted({*datasets, *(str(row["dataset"]) for row in development.units)})
-    }
+    caches = {dataset: open_cache(dataset) for dataset in datasets}
+    validate_task_manifest(train_manifest, cohort, caches)
+    if train_manifest.task != "task1" or train_manifest.protocol.get("split") != "train":
+        raise ValueError("--train-manifest must be a Task-1 train manifest")
     synth_train, synth_dev = split_by_subject(
         units, seed=args.seed, heldout_fraction=args.heldout_fraction
     )
@@ -246,7 +244,6 @@ def main() -> None:
     report: dict[str, Any] = {
         "cohort_fingerprint": cohort.fingerprint,
         "train_manifest_fingerprint": train_manifest.fingerprint,
-        "development_manifest_fingerprint": development.fingerprint,
         "representation_provenance": representations.metadata["encoder_provenance"],
         "synthetic_split": {
             "heldout_fraction": args.heldout_fraction,
@@ -298,12 +295,12 @@ def main() -> None:
         torch.save(wrong_model.state_dict(), args.output / "splice_leak_wrong_head.pt")
 
     if args.control in ("reference_identity", "all"):
-        inserts = insert_index(caches["synth_wrist_v1"])
+        references = clean_reference_index(caches["synth_wrist_v1"])
         same_train, cross_train = same_clip_references(
-            synth_train, caches["synth_wrist_v1"], inserts, seed=args.seed
+            synth_train, caches["synth_wrist_v1"], references, seed=args.seed
         )
         same_dev, cross_dev = same_clip_references(
-            synth_dev, caches["synth_wrist_v1"], inserts, seed=args.seed + 1
+            synth_dev, caches["synth_wrist_v1"], references, seed=args.seed + 1
         )
         print(
             f"reference-identity: paired units train={len(same_train)} dev={len(same_dev)} "
@@ -313,29 +310,24 @@ def main() -> None:
         same_model, same_fit = fit(same_train)
         print("reference-identity: training cross-clip head")
         cross_model, cross_fit = fit(cross_train)
-        natural = _UnitManifest([Task1EvaluationUnit(**row) for row in development.units])
         rows = {
             "same_clip_direct_synth_dev": score(same_dev, None),
             "cross_clip_direct_synth_dev": score(cross_dev, None),
             "same_clip_head_synth_dev": score(same_dev, same_model),
             "cross_clip_head_synth_dev": score(cross_dev, cross_model),
-            "same_clip_head_natural_dev": _summ(calibrate(natural, caches, representations, same_model)),
-            "cross_clip_head_natural_dev": _summ(calibrate(natural, caches, representations, cross_model)),
-            "direct_natural_dev": _summ(calibrate(natural, caches, representations, None)),
         }
         synth_gap = rows["same_clip_head_synth_dev"]["event_f1"] - rows["cross_clip_head_synth_dev"]["event_f1"]
-        natural_gap = rows["same_clip_head_natural_dev"]["event_f1"] - rows["cross_clip_head_natural_dev"]["event_f1"]
         report["reference_identity"] = {
             **rows,
             "paired_units": {"train": len(same_train), "dev": len(same_dev)},
             "fits": {"same_clip": same_fit, "cross_clip": cross_fit},
             "synthetic_dev_gap_event_f1": synth_gap,
-            "natural_dev_gap_event_f1": natural_gap,
-            "passed": bool(synth_gap > 0 and natural_gap <= 0),
+            "natural_check": "not applicable: same-subject enrollment is not a same-clip control",
+            "passed": bool(synth_gap > 0),
         }
         for name, row in rows.items():
             print(f"  {name:32s} F1={row['event_f1']:.3f} FA/h={row['false_alarms_per_hour']:.1f}")
-        print(f"  synth gap={synth_gap:+.3f}  natural gap={natural_gap:+.3f}  passed={report['reference_identity']['passed']}")
+        print(f"  synth gap={synth_gap:+.3f}  passed={report['reference_identity']['passed']}")
 
     (args.output / "controls_v2.json").write_text(
         json.dumps(report, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"

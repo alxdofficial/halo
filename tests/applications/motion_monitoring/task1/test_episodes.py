@@ -118,6 +118,21 @@ def test_episode_from_recordings_uses_independent_event_and_excludes_guards():
         )
 
 
+def test_episode_rejects_a_target_cut_by_the_query_crop():
+    reference_recording = _recording("reference", EventInterval(1.0, 3.0, "pour"))
+    query_recording = _recording("query", EventInterval(3.0, 6.0, "pour"))
+
+    with pytest.raises(ValueError, match="incomplete at the query crop boundary"):
+        episode_from_recordings(
+            reference_recording,
+            query_recording,
+            _sequence(),
+            _sequence(length=4),
+            label="pour",
+            reference_event_index=0,
+        )
+
+
 def test_cached_event_pair_dataset_loads_real_cache_contract(tmp_path):
     reference = _recording("reference", EventInterval(1.0, 4.0, "pour"))
     query = _recording("query", EventInterval(4.0, 7.0, "pour"))
@@ -260,7 +275,7 @@ def test_reference_cannot_bridge_an_invalid_embedding_gap():
         )
 
 
-def test_synchronized_views_and_targets_crossing_guards_are_rejected():
+def test_synchronized_views_are_rejected_and_guards_only_mask_supervision():
     event = EventInterval(1.0, 4.0, "pour")
     reference = _recording("reference", event)
     synchronized = RawRecording(
@@ -282,16 +297,17 @@ def test_synchronized_views_and_targets_crossing_guards_are_rejected():
         )
 
     query = _recording("query", EventInterval(4.0, 7.0, "pour"))
-    with pytest.raises(ValueError, match="invalid or guarded"):
-        episode_from_recordings(
-            reference,
-            query,
-            _sequence(),
-            _sequence(),
-            label="pour",
-            reference_event_index=0,
-            guard_intervals_sec=((5.0, 6.0),),
-        )
+    episode = episode_from_recordings(
+        reference,
+        query,
+        _sequence(),
+        _sequence(),
+        label="pour",
+        reference_event_index=0,
+        guard_intervals_sec=((5.0, 6.0),),
+    )
+    assert episode.alignment_valid.all()
+    assert episode.loss_valid.tolist() == [True, True, True, True, True, False, True, True]
 
 
 def test_cropped_views_of_one_source_recording_are_not_independent():

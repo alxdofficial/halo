@@ -233,9 +233,7 @@ class DifferentiableSubsequenceMatcher(nn.Module):
             chunks: list[torch.Tensor] = []
             valid_chunks: list[torch.Tensor] = []
             cursor = 0
-            alignment_valid = (
-                batch.query_valid[batch_index] & batch.loss_valid[batch_index]
-            )
+            alignment_valid = batch.query_valid[batch_index] & batch.alignment_valid[batch_index]
             for start, end in _valid_runs(alignment_valid):
                 if start > cursor:
                     chunks.append(query.new_full((start - cursor,), -1e4))

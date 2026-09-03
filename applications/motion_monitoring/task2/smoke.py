@@ -1,308 +1,304 @@
-"""Short synthetic Task-2 trainer for mechanical and gradient verification."""
+"""Short synthetic smoke for the Task-2 personal-normative ruler.
+
+Builds compatibility-clean batches from synthetic per-subject trajectories, runs
+a handful of optimizer steps, and reports whether the ruler separates accepted
+repeats from declared modifications better than the untrained cosine floor. It
+exercises the code path end to end; it is not evidence about real data.
+"""
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, dataclass, replace
 import json
-from dataclasses import asdict, dataclass
-from typing import Sequence
+from pathlib import Path
+import random
+from typing import Any
 
+import numpy as np
 import torch
-from torch.utils.data import DataLoader
 
-from .contracts import (
-    BoundedExecution,
-    ChangeTargetSpec,
-    ExecutionEpisode,
-    ExecutionEpisodeDataset,
-    collate_execution_episodes,
-)
-from .losses import ChangeLossConfig, change_quantification_loss
-from .metrics import balanced_accuracy, binary_auroc, masked_regression_metrics
-from .model import ChangeMetricHead
-from .training import StepTelemetry, initialize_change_threshold, train_step
+from applications.motion_monitoring.data.compatibility import sensor_compatibility_key
+from .contracts import BoundedExecution, collate_execution_episodes
+from .episodes import ExecutionRecord, Task2BatchBuilder, relation_summary
+from .losses import RulerLossConfig
+from .metrics import paired_within_series_auroc
+from .modifications import MODIFICATIONS, NUISANCES, apply_modification, apply_nuisance
+from .model import ChangeRuler
+from .scoring import personal_change_report
+from .training import train_step
 
 
-SYNTHETIC_TARGETS = (
-    ChangeTargetSpec("duration_log_ratio", 0.25, "log-ratio"),
-    ChangeTargetSpec("acc_intensity_log_ratio", 0.30, "log-ratio"),
-    ChangeTargetSpec("gyro_intensity_log_ratio", 0.30, "log-ratio"),
-    ChangeTargetSpec("pause_fraction_delta", 0.20, "fraction"),
-)
+_CHANNELS = ("acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z")
+_RATE_HZ = 50.0
+
+
+def _key(channels=_CHANNELS):
+    return sensor_compatibility_key(
+        device="smartwatch",
+        placement="wrist",
+        channels=tuple(channels),
+        gravity_state="present",
+    )
+
+
+_KEY = _key()
 
 
 @dataclass(frozen=True)
 class SmokeResult:
     steps: int
-    initial_loss: float
-    final_loss: float
-    auroc: float
-    balanced_accuracy: float
-    regression_mae: dict[str, float]
-    max_grad_norm: float
-    min_active_parameter_grad_norm: float
+    episodes: int
+    first_loss: float
+    last_loss: float
+    first_separation: float | None
+    last_separation: float | None
+    floor_auroc: float
+    ruler_auroc: float
     nonfinite_gradients: int
-    updated_parameter_count: int
+    reference_attention_fraction: float
+    relation_mix: dict[str, Any]
 
 
-def _trajectory(length: int, width: int, phase_shift: float = 0.0) -> torch.Tensor:
-    phase = torch.linspace(0.0, 1.0, length)
-    columns = []
-    for index in range(width):
-        frequency = 1 + index % 4
-        columns.append(torch.sin(2 * torch.pi * frequency * (phase + phase_shift)))
-    return torch.stack(columns, dim=-1)
+def _signal(length: int, channels: int, rng: np.random.Generator, *, offset: np.ndarray) -> np.ndarray:
+    time = np.linspace(0.0, 1.0, length)
+    columns = [np.sin(2 * np.pi * (1 + index % 4) * time) for index in range(channels)]
+    values = np.stack(columns, axis=-1) + offset
+    return values + 0.02 * rng.normal(size=values.shape)
 
 
-def _execution(
-    values: torch.Tensor,
+def _embed(
+    values: np.ndarray,
     *,
-    subject: int,
+    dataset: str,
+    subject: str,
+    session: str,
     execution: str,
-    duration: float,
-    task: str = "repeated_reach",
+    task: str,
+    channels=_CHANNELS,
 ) -> BoundedExecution:
-    count = len(values)
-    edges = torch.linspace(0.0, duration, count + 1)
-    intervals = torch.stack((edges[:-1], edges[1:]), dim=-1)
+    """Stand in for a frozen encoder: one patch per 0.5 s of physical time.
+
+    Released encoders pad a reduced channel set into the canonical six-channel
+    layout and carry a validity mask, so the embedding width does not change when
+    the gyroscope is dropped; only the declared configuration does. The stand-in
+    reproduces that, otherwise a channel view would silently resize the ruler.
+    """
+
+    array = np.asarray(values, dtype=np.float32)
+    if tuple(channels) != _CHANNELS:
+        padded = np.zeros((array.shape[0], len(_CHANNELS)), dtype=np.float32)
+        for column, name in enumerate(channels):
+            padded[:, _CHANNELS.index(name)] = array[:, column]
+        array = padded
+    per_patch = max(2, int(0.5 * _RATE_HZ))
+    count = max(2, array.shape[0] // per_patch)
+    patches = np.stack(
+        [array[index * per_patch : (index + 1) * per_patch].mean(axis=0) for index in range(count)]
+    )
+    edges = np.arange(count + 1, dtype=np.float64) * (per_patch / _RATE_HZ)
     return BoundedExecution(
-        embeddings=values.float(),
-        patch_intervals_sec=intervals.float(),
+        embeddings=torch.from_numpy(patches).float(),
+        patch_intervals_sec=torch.from_numpy(np.stack((edges[:-1], edges[1:]), axis=-1)).float(),
         patch_mask=torch.ones(count, dtype=torch.bool),
-        dataset="synthetic_task2",
-        subject_id=f"subject_{subject}",
-        session_id=f"session_{execution}",
-        execution_id=f"subject_{subject}_{execution}",
+        dataset=dataset,
+        subject_id=subject,
+        session_id=session,
+        execution_id=execution,
         task_id=task,
+        sensor_config=_key(channels),
     )
 
 
-def make_synthetic_episodes(
-    *,
-    subjects: int = 16,
-    embedding_dim: int = 12,
-    seed: int = 7,
-) -> list[ExecutionEpisode]:
-    """Create personal reference sets with accepted and known-change queries."""
+def make_records(
+    *, subjects: int = 6, executions: int = 6, channels: int = 6, seed: int = 11
+) -> tuple[list[ExecutionRecord], dict[str, np.ndarray]]:
+    """Synthetic executions plus the raw signals the batch builder transforms."""
 
-    if subjects < 2 or embedding_dim < 4:
-        raise ValueError(
-            "synthetic smoke requires at least two subjects and four features"
-        )
-    generator = torch.Generator().manual_seed(seed)
-    episodes: list[ExecutionEpisode] = []
-    for subject in range(subjects):
-        length = 10 + subject % 5
-        subject_offset = 0.05 * torch.randn(embedding_dim, generator=generator)
-        references = []
-        for reference_index in range(3):
-            reference_values = _trajectory(
-                length + reference_index % 2,
-                embedding_dim,
-                0.002 * reference_index,
-            ) + subject_offset
-            reference_values += 0.015 * torch.randn(
-                reference_values.shape, generator=generator
-            )
-            references.append(
-                _execution(
-                    reference_values,
-                    subject=subject,
-                    execution=f"reference_{reference_index}",
-                    duration=4.0 + 0.05 * reference_index + 0.1 * (subject % 3),
+    rng = np.random.default_rng(seed)
+    records: list[ExecutionRecord] = []
+    raw: dict[str, np.ndarray] = {}
+    for subject_index in range(subjects):
+        subject = f"subject_{subject_index:02d}"
+        offset = 0.05 * rng.normal(size=channels)
+        for execution_index in range(executions):
+            day = f"day_{execution_index % 3}"
+            session = f"{subject}_{day}"
+            execution_id = f"{subject}_exec_{execution_index}"
+            values = _signal(120 + 10 * (execution_index % 3), channels, rng, offset=offset)
+            raw[execution_id] = values
+            records.append(
+                ExecutionRecord(
+                    execution=_embed(
+                        values,
+                        dataset="synthetic_task2",
+                        subject=subject,
+                        session=session,
+                        execution=execution_id,
+                        task="repeated_reach",
+                    ),
+                    key=_KEY,
+                    day=day,
                 )
             )
-        references = tuple(references)
-        context_values = _trajectory(length, embedding_dim, 0.2) + subject_offset
-        context = (
-            _execution(
-                context_values,
-                subject=subject,
-                execution="context_other_task",
-                duration=3.7,
-                task="other_task",
-            ),
-        )
+    return records, raw
 
-        accepted_values = _trajectory(length + (subject % 2), embedding_dim, 0.005)
-        accepted_values += subject_offset
-        accepted_values += 0.025 * torch.randn(
-            accepted_values.shape, generator=generator
+
+def make_pool(*, subjects: int = 6, seed: int = 11, modified_per_execution: int = 2):
+    """Clean records plus pre-materialised variants, mirroring the derived corpus.
+
+    Real runs read variants from ``task2_modified_v1``; the smoke makes the same
+    shapes in memory so the batch builder is exercised on the selection path it
+    actually uses.
+    """
+
+    records, raw = make_records(subjects=subjects, seed=seed)
+    pool = list(records)
+    kinds = sorted(MODIFICATIONS)
+    nuisance_kinds = sorted(NUISANCES)
+    rng = np.random.default_rng(seed)
+    for record in records:
+        values = raw[record.root_id]
+        for index in range(modified_per_execution):
+            kind = kinds[int(rng.integers(len(kinds)))]
+            severity = float(0.3 + 0.7 * rng.random())
+            modified = apply_modification(
+                values,
+                kind=kind,
+                severity=severity,
+                seed=int(rng.integers(2**31)),
+                sampling_rate_hz=_RATE_HZ,
+                channels=_CHANNELS,
+            )
+            pool.append(
+                replace(
+                    record,
+                    execution=_variant_execution(record, modified, f"modified_{index}"),
+                    variant="modified",
+                    modification_kind=kind,
+                    severity=severity,
+                    origin_execution_id=record.root_id,
+                )
+            )
+        nuisance_kind = nuisance_kinds[int(rng.integers(len(nuisance_kinds)))]
+        nuisanced = apply_nuisance(
+            values,
+            kind=nuisance_kind,
+            seed=int(rng.integers(2**31)),
+            sampling_rate_hz=_RATE_HZ,
+            channels=_CHANNELS,
         )
-        accepted = _execution(
-            accepted_values,
-            subject=subject,
-            execution="accepted",
-            duration=4.05 + 0.1 * (subject % 3),
-        )
-        episodes.append(
-            ExecutionEpisode(
-                accepted_references=references,
-                query=accepted,
-                episode_kind="accepted_query",
-                change_targets=torch.tensor([0.01, 0.01, -0.01, 0.0]),
-                target_mask=torch.ones(4, dtype=torch.bool),
-                target_specs=SYNTHETIC_TARGETS,
-                personal_context=context,
+        pool.append(
+            replace(
+                record,
+                execution=_variant_execution(record, nuisanced, "nuisance"),
+                variant="nuisance",
+                nuisance_kind=nuisance_kind,
+                origin_execution_id=record.root_id,
             )
         )
-
-        changed_values = _trajectory(length + 2, embedding_dim, 0.03) + subject_offset
-        phase_start = len(changed_values) // 3
-        phase_end = 2 * len(changed_values) // 3
-        changed_values[phase_start:phase_end, :4] *= 0.35
-        changed_values[phase_start:phase_end, 4:8] += 0.55
-        changed_values += 0.02 * torch.randn(changed_values.shape, generator=generator)
-        changed = _execution(
-            changed_values,
-            subject=subject,
-            execution="changed",
-            duration=5.0 + 0.1 * (subject % 3),
-        )
-        episodes.append(
-            ExecutionEpisode(
-                accepted_references=references,
-                query=changed,
-                episode_kind="changed_query",
-                change_targets=torch.tensor([0.22, -0.28, 0.24, 0.18]),
-                target_mask=torch.tensor([True, True, subject % 4 != 0, True]),
-                target_specs=SYNTHETIC_TARGETS,
-                personal_context=context,
-            )
-        )
-    return episodes
+    return pool
 
 
-@torch.no_grad()
-def _evaluate(
-    model: ChangeMetricHead, episodes: Sequence[ExecutionEpisode]
-) -> dict[str, object]:
-    batch = collate_execution_episodes(episodes)
-    model.eval()
-    output = model(batch)
-    loss = change_quantification_loss(output, batch)
-    regression = masked_regression_metrics(
-        output.target_predictions,
-        batch.change_targets,
-        batch.target_mask,
-        batch.target_names,
+def _variant_execution(record: ExecutionRecord, values: np.ndarray, suffix: str) -> BoundedExecution:
+    return _embed(
+        values,
+        dataset=record.execution.dataset,
+        subject=record.execution.subject_id,
+        session=record.execution.session_id,
+        execution=f"{record.execution.execution_id}:{suffix}",
+        task=record.execution.task_id,
     )
-    return {
-        "loss": float(loss.total),
-        "auroc": binary_auroc(
-            output.change_scores,
-            batch.classification_targets,
-            batch.classification_mask,
-        ),
-        "balanced_accuracy": balanced_accuracy(
-            output.change_logits,
-            batch.classification_targets,
-            batch.classification_mask,
-        ),
-        "regression_mae": regression.mae,
-    }
+
+
+def build_demo_batch(*, subjects: int = 4, seed: int = 11, groups: int = 2):
+    """One compatibility-clean batch of synthetic episodes, for tests and demos."""
+
+    builder = Task2BatchBuilder(
+        make_pool(subjects=subjects, seed=seed),
+        reference_count=4,
+        positives_per_episode=2,
+        seed=seed,
+    )
+    episodes, _ = builder.build_batch(groups=groups, seed=seed)
+    return episodes, collate_execution_episodes(episodes)
 
 
 def run_synthetic_smoke(
     *,
-    steps: int = 40,
-    batch_size: int = 8,
-    embedding_dim: int = 12,
+    steps: int = 12,
+    subjects: int = 6,
+    seed: int = 11,
     device: str = "cpu",
-    seed: int = 7,
 ) -> SmokeResult:
-    if steps <= 0 or batch_size <= 1:
-        raise ValueError("steps must be positive and batch size must exceed one")
+    if steps <= 0:
+        raise ValueError("steps must be positive")
     torch.manual_seed(seed)
-    episodes = make_synthetic_episodes(embedding_dim=embedding_dim, seed=seed)
-    train_episodes = [
-        item for item in episodes if int(item.query.subject_id.split("_")[-1]) < 12
-    ]
-    validation_episodes = [
-        item for item in episodes if int(item.query.subject_id.split("_")[-1]) >= 12
-    ]
-    loader = DataLoader(
-        ExecutionEpisodeDataset(train_episodes),
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_execution_episodes,
-        generator=torch.Generator().manual_seed(seed),
-    )
-    model = ChangeMetricHead(
-        embedding_dim=embedding_dim,
-        target_dim=len(SYNTHETIC_TARGETS),
-        phase_bins=8,
-    ).to(device)
-    initialize_change_threshold(
-        model, collate_execution_episodes(train_episodes).to(device)
-    )
-    initial_loss = float(_evaluate(model.cpu(), train_episodes)["loss"])
-    model.to(device)
-    initial_parameters = {
-        name: value.detach().clone() for name, value in model.named_parameters()
-    }
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-4)
-    loss_config = ChangeLossConfig(classification_weight=1.0, regression_weight=1.0)
-    telemetry: list[StepTelemetry] = []
-    iterator = iter(loader)
-    for _ in range(steps):
-        try:
-            batch = next(iterator)
-        except StopIteration:
-            iterator = iter(loader)
-            batch = next(iterator)
-        telemetry.append(
-            train_step(
-                model,
-                batch.to(device),
-                optimizer,
-                loss_config=loss_config,
-                grad_clip=5.0,
-            )
-        )
-    evaluation = _evaluate(model.cpu(), validation_episodes)
-    final_loss = float(_evaluate(model, train_episodes)["loss"])
-    active_gradients = [
-        value
-        for step_telemetry in telemetry
-        for value in step_telemetry.parameter_grad_norms.values()
-        if value > 0
-    ]
-    updated = sum(
-        not torch.equal(initial_parameters[name].cpu(), value.detach().cpu())
-        for name, value in model.named_parameters()
-    )
+    pool = make_pool(subjects=subjects, seed=seed)
+    builder = Task2BatchBuilder(pool, reference_count=4, positives_per_episode=2, seed=seed)
+    model = ChangeRuler(pool[0].execution.embeddings.shape[1], phase_bins=8).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3)
+    telemetry = []
+    plans = []
+    episodes_seen = 0
+    for step in range(steps):
+        episodes, batch_plans = builder.build_batch(groups=2, seed=seed + step)
+        batch = collate_execution_episodes(episodes).to(device)
+        episodes_seen += len(episodes)
+        plans.extend(batch_plans)
+        telemetry.append(train_step(model, batch, optimizer, loss_config=RulerLossConfig()))
+
+    episodes, _ = builder.build_batch(groups=3, seed=seed + 999)
+    batch = collate_execution_episodes(episodes).to(device)
+    model.eval()
+    # Both arms travel the same deployment path: phase residual, personal
+    # envelope, per-person reference limit. Only the residual space differs.
+    ruler_distances = personal_change_report(batch, model).joint_deviation
+    floor = personal_change_report(batch, None).joint_deviation
+
+    def by_subject(values: torch.Tensor):
+        accepted: dict[str, list[float]] = {}
+        changed: dict[str, list[float]] = {}
+        for index, episode in enumerate(episodes):
+            subject = episode.accepted_references[0].subject_id
+            target = accepted if episode.is_positive else changed if episode.is_negative else None
+            if target is not None:
+                target.setdefault(subject, []).append(float(values[index]))
+        return accepted, changed
+
+    floor_auroc = paired_within_series_auroc(*by_subject(floor))["mean_auroc"]
+    ruler_auroc = paired_within_series_auroc(*by_subject(ruler_distances))["mean_auroc"]
     return SmokeResult(
         steps=steps,
-        initial_loss=initial_loss,
-        final_loss=final_loss,
-        auroc=float(evaluation["auroc"]),
-        balanced_accuracy=float(evaluation["balanced_accuracy"]),
-        regression_mae=dict(evaluation["regression_mae"]),
-        max_grad_norm=max(item.total_grad_norm_preclip for item in telemetry),
-        min_active_parameter_grad_norm=min(active_gradients),
+        episodes=episodes_seen,
+        first_loss=telemetry[0].total_loss,
+        last_loss=telemetry[-1].total_loss,
+        first_separation=telemetry[0].separation,
+        last_separation=telemetry[-1].separation,
+        floor_auroc=floor_auroc,
+        ruler_auroc=ruler_auroc,
         nonfinite_gradients=sum(item.nonfinite_gradients for item in telemetry),
-        updated_parameter_count=updated,
+        reference_attention_fraction=telemetry[-1].reference_attention_fraction,
+        relation_mix=relation_summary(plans),
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--steps", type=int, default=40)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--steps", type=int, default=12)
+    parser.add_argument("--subjects", type=int, default=6)
+    parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    print(
-        json.dumps(
-            asdict(
-                run_synthetic_smoke(
-                    steps=args.steps, batch_size=args.batch_size, device=args.device
-                )
-            ),
-            indent=2,
-            sort_keys=True,
-        )
+    result = run_synthetic_smoke(
+        steps=args.steps, subjects=args.subjects, seed=args.seed, device=args.device
     )
+    payload: dict[str, Any] = asdict(result)
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":

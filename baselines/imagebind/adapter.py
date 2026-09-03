@@ -123,6 +123,11 @@ class ImageBindAdapter(CosineAdapter):
     def evaluation_artifacts(self, state):
         return {"released_checkpoint": IMAGEBIND_CKPT, "text_vocabulary": BPE_PATH}
 
+    def feature_artifacts(self, state):
+        # Application tasks consume only the IMU tower; text tokenization is not
+        # part of the cached signal representation.
+        return {"released_checkpoint": IMAGEBIND_CKPT}
+
     def evaluation_config(self, state):
         return {
             "input_rate_hz": TARGET_HZ,
@@ -130,14 +135,20 @@ class ImageBindAdapter(CosineAdapter):
             "input_channels": list(_IMU_CHANNELS),
         }
 
-    def setup(self, device):
-        """Load frozen imagebind_huge (1024-d joint space) from the cached checkpoint."""
+    def feature_config(self, state):
+        return {
+            "input_rate_hz": TARGET_HZ,
+            "input_samples": PAD_LEN,
+            "input_channels": list(_IMU_CHANNELS),
+            "feature_layer": "imu_tower",
+        }
+
+    def _setup_imu(self, device):
         import torch
 
         _ensure_imagebind_importable()
-        from imagebind.models import imagebind_model  # noqa: E402 (repo-local, via sys.modules stub)
+        from imagebind.models import imagebind_model  # noqa: E402
         from imagebind.models.imagebind_model import ModalityType  # noqa: E402
-        from imagebind.models.multimodal_preprocessors import SimpleTokenizer  # noqa: E402
 
         if not IMAGEBIND_CKPT.exists():
             raise FileNotFoundError(
@@ -151,10 +162,22 @@ class ImageBindAdapter(CosineAdapter):
         assert not missing and not unexpected, (
             f"ImageBind load mismatch: missing={missing} unexpected={unexpected}")
         model.eval().to(device)
-        for p in model.parameters():
-            p.requires_grad_(False)
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        return {"model": model, "ModalityType": ModalityType}
+
+    def setup_features(self, device):
+        """Load the IMU tower without the text tokenizer unused by task caches."""
+
+        return self._setup_imu(device)
+
+    def setup(self, device):
+        """Load frozen imagebind_huge (1024-d joint space) from the cached checkpoint."""
+        state = self._setup_imu(device)
+        from imagebind.models.multimodal_preprocessors import SimpleTokenizer  # noqa: E402
+
         tokenizer = SimpleTokenizer(bpe_path=str(BPE_PATH))
-        return {"model": model, "ModalityType": ModalityType, "tokenizer": tokenizer}
+        return {**state, "tokenizer": tokenizer}
 
     def window_embeddings(self, stream, state, device, batch=64) -> np.ndarray:
         """(N,1024) L2-normalized IMU embeddings.

@@ -1,14 +1,16 @@
-"""Build the Task-1 V2 cohort and split manifests (spec section C).
+"""Build the Task-1 V2 cohort and split manifests (spec sections C and F).
 
-Roles (TASK1_REFERENCE_RESOLUTION_SPEC.md section C.1):
+Roles (TASK1_REFERENCE_RESOLUTION_SPEC.md section F.2, two data roles only):
 
-* train           = ``synth_wrist_v1`` only (synthetic; never tunes anything)
-* development     = AIDLAB + four OpenPack subjects
-* test            = C-MHAD, OCA, the remaining twelve OpenPack subjects
+* train      = ``synth_wrist_v1`` only (synthetic; the operating point is fixed
+               on its held-out background subjects, never on natural data)
+* evaluation = C-MHAD and OpenPack, every subject; reported under both the
+               ``cross_subject`` and ``same_subject`` reference relations
 
-COHORT_V1 and the Task-3 manifests are untouched; Task 1 gets its own cohort
-so its roles can diverge from the shared cohort without invalidating the
-per-dataset representation caches (see ``representation_cache``).
+There is no development split. COHORT_V1 and the Task-3 manifests are untouched;
+Task 1 gets its own cohort so its roles can diverge from the shared cohort
+without invalidating the per-dataset representation caches (see
+``representation_cache``).
 """
 
 from __future__ import annotations
@@ -22,7 +24,6 @@ from applications.motion_monitoring.data.manifests import (
     write_cohort_manifest,
 )
 from applications.motion_monitoring.evaluation_manifests import (
-    build_task1_development_manifest,
     build_task1_test_manifest,
     build_task1_train_manifest,
     write_task_manifest,
@@ -31,11 +32,7 @@ from applications.motion_monitoring.evaluation_manifests import (
 
 COHORT_NAME = "cohort_task1_v2"
 TRAIN_ONLY = ("synth_wrist_v1",)
-DEVELOPMENT_ONLY = ("aidlab_har",)
-SPLIT_EVALUATION = ("openpack",)
-EVALUATION = ("c_mhad", "oca")
-# 4 of OpenPack's 16 subjects calibrate; 12 test.
-EVALUATION_DEVELOPMENT_FRACTION = 0.25
+EVALUATION = ("c_mhad", "openpack")
 
 
 def main() -> None:
@@ -48,17 +45,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260831)
     args = parser.parse_args()
 
-    datasets = sorted(TRAIN_ONLY + DEVELOPMENT_ONLY + SPLIT_EVALUATION + EVALUATION)
+    datasets = sorted(TRAIN_ONLY + EVALUATION)
     caches = {dataset: open_cache(dataset) for dataset in datasets}
     cohort = build_cohort_manifest(
         caches,
         name=COHORT_NAME,
         seed=args.seed,
         train_only_datasets=TRAIN_ONLY,
-        development_only_datasets=DEVELOPMENT_ONLY,
-        split_evaluation_datasets=SPLIT_EVALUATION,
         evaluation_datasets=EVALUATION,
-        evaluation_development_fraction=EVALUATION_DEVELOPMENT_FRACTION,
     )
     cohort_path = args.output_dir / "COHORT_TASK1_V2.json"
     write_cohort_manifest(cohort, cohort_path)
@@ -74,9 +68,6 @@ def main() -> None:
 
     manifests = (
         build_task1_train_manifest(cohort, caches, seed=args.seed, name="task1_train_v2"),
-        build_task1_development_manifest(
-            cohort, caches, seed=args.seed, name="task1_development_v2"
-        ),
         build_task1_test_manifest(cohort, caches, seed=args.seed, name="task1_test_v2"),
     )
     for manifest in manifests:
@@ -84,9 +75,13 @@ def main() -> None:
         path = args.output_dir / f"TASK1_{split}_V2.json"
         write_task_manifest(manifest, path)
         present = sum(1 for unit in manifest.units if unit["target_present"])
+        relations = {}
+        for unit in manifest.units:
+            relations[unit["reference_relation"]] = relations.get(unit["reference_relation"], 0) + 1
         print(
-            f"{manifest.name}: {len(manifest.units)} units ({present} present), "
-            f"{len(manifest.exclusions)} exclusions, {manifest.fingerprint} -> {path}"
+            f"{manifest.name}: {len(manifest.units)} units ({present} present; "
+            + ", ".join(f"{k}={v}" for k, v in sorted(relations.items()))
+            + f"), {len(manifest.exclusions)} exclusions, {manifest.fingerprint} -> {path}"
         )
 
 

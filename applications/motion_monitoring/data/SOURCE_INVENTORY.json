@@ -194,9 +194,9 @@
     }
   },
   "reuse_existing_without_copy": {
-    "monipar": "Task-1 cross-week evaluation only; excluded from Task 2 because source states are not independent executions.",
+    "monipar": "Sealed Task-2 evaluation: seven single-run weekly protocol items are converted as bounded executions; task-specific adapter carries clinical metadata.",
     "mmfit": "Reconstruct full workouts for development; set intervals and counts are weaker than exact repetition boundaries.",
-    "harmes": "Fifth training/development source; reconstruct event gaps for wrist-ADL development.",
+    "harmes": "Task-2 training source: raw dominant-wrist timelines and start/end logs are converted into bounded ADL executions.",
     "opportunity": "Reconstruct full runs and fine gesture annotations for development only.",
     "capture24": "Use only as natural background and scale stress data, not as event-boundary truth.",
     "phytmo": "Task-2 controlled correct/incorrect development only because HALO pretraining consumed it.",

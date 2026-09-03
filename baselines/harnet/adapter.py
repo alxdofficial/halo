@@ -271,6 +271,25 @@ class HarnetAdapter(ConSEAdapter):
     def evaluation_artifacts(self, state):
         return {"conse_head": _HEAD_CACHE}
 
+    def setup_features(self, device):
+        """Load the released trunk without fitting the unused ConSE head."""
+
+        model = _load_harnet(1, device)
+        model.train(False)
+        return {"model": model}
+
+    def feature_artifacts(self, state):
+        return {"released_checkpoint": _hub_dir() / "model_check_point/mtl_5_best.mdl"}
+
+    def feature_config(self, state):
+        return {
+            "released_model": HARNET_NAME,
+            "released_source": f"{SSL_HUB_REPO}:{SSL_HUB_TAG}",
+            "input_rate_hz": TARGET_HZ,
+            "input_samples": TARGET_LEN,
+            "feature_layer": "feature_extractor",
+        }
+
     def evaluation_config(self, state):
         return {
             "released_model": HARNET_NAME,

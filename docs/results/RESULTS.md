@@ -1,4 +1,8 @@
-# Complete application evaluation
+# Legacy V1 application evaluation
+
+These tables are the frozen V1 pilot and do not describe the current Task-1 V2 protocol or its
+rebuilt synthetic corpus. Do not combine these numbers with V2 results. Current V2 results belong
+in a separately versioned report after its controls and common-unit evaluation are complete.
 
 Status: complete deterministic evaluation, but provisional for publication. Subject-level
 confidence intervals and raw-signal or physical-feature controls are not yet included.

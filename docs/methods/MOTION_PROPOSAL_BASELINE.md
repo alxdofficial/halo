@@ -182,7 +182,7 @@ the quantities being detected.
 | **WEAR** | continuous 50 Hz four-watch acceleration, explicit `null`, THUMOS-style intervals, synchronized egocentric video | primary learned-development or sealed evaluation source | use one arm watch for the consumer-wearable result; acceleration is gravity-present in g; row order supplies time because the raw CSV has no timestamp column |
 | **OCA** | twelve continuous CSV sessions, four six-axis IMUs, and six actions plus NULL | occupational evaluation and Task-3 development | split timestamp gaps; preserve per-session native rates near 20 or 27 Hz; convert m/s2 to g and BNO055 degree/s to rad/s; report research upper-arm/chest placement |
 | **MM-Fit** | synchronized phones, watches, earbud, RGB-D, pose, workout sets and repetition information | development only for current expanded HALO checkpoint | reconstruct complete workouts from source files; converted set sessions are not continuous recordings |
-| **MoniPar** | 174 complete weekly exercise protocols, 28 subjects, 50 Hz watch acceleration | Task-1 cross-week development | exercise blocks are source intervals, not individual repetition boundaries; excluded from Task 2 |
+| **MoniPar** | 174 complete weekly exercise protocols, 28 subjects, 50 Hz watch acceleration | sealed Task-2 longitudinal evaluation | seven single-run protocol items are now converted as one bounded execution per weekly visit; it remains outside Task-0/1 proposal evaluation |
 
 File-level checks on 2026-08-29 covered all selectively downloaded C-MHAD and WEAR files and the
 complete OCA release. OCA contains both approximately 20 Hz and 27 Hz sessions, and `P0-R0.csv`

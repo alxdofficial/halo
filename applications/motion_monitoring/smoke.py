@@ -38,17 +38,15 @@ from applications.motion_monitoring.task1.matcher import best_full_timeline_matc
 from applications.motion_monitoring.task1.training import event_detection_metrics
 from applications.motion_monitoring.task2 import (
     BoundedExecution,
-    ChangeMetricHead,
+    ChangeRuler,
     ExecutionEpisode,
     binary_auroc,
     binary_operating_metrics,
     collate_execution_episodes,
-    direct_change_scores,
     from_motion_sequence as task2_execution,
-    initialize_change_threshold,
+    personal_change_report,
     train_step as task2_train_step,
 )
-from applications.motion_monitoring.task2.smoke import SYNTHETIC_TARGETS
 from applications.motion_monitoring.task3 import (
     RecurrentMotionMetric,
     assign_event_targets,
@@ -262,13 +260,13 @@ def _task2_smoke(
     train_encoder: bool,
 ) -> dict[str, object]:
     # A mechanical smoke needs a real encoder input but does not define a Task-2
-    # cohort.  Use independently recorded same-label OpenPack actions here;
-    # controlled PHYTMO/KneE-PAD manifests own reportable known-change fitting.
+    # cohort. Use independently recorded same-label OpenPack actions here. The
+    # manifest-bound HARMES/CrossFit protocol owns reportable fitting.
     examples = _independent_examples(
-        "openpack", "operation", label="Assemble Box", count=4, same_subject=True
+        "openpack", "operation", label="Assemble Box", count=5, same_subject=True
     )
-    reference_examples = examples[:3]
-    comparison_example = examples[3]
+    reference_examples = examples[:4]
+    comparison_example = examples[4]
     reference_recordings = tuple(crop_event(item) for item in reference_examples)
     comparison_recording = crop_event(comparison_example)
 
@@ -296,9 +294,6 @@ def _task2_smoke(
             accepted_references=references,
             query=comparison,
             episode_kind="accepted_query",
-            change_targets=torch.zeros(len(SYNTHETIC_TARGETS)),
-            target_mask=torch.ones(len(SYNTHETIC_TARGETS), dtype=torch.bool),
-            target_specs=SYNTHETIC_TARGETS,
         )
         changed_embeddings = comparison.embeddings.clone()
         phase = torch.linspace(
@@ -323,33 +318,26 @@ def _task2_smoke(
         changed_episode = ExecutionEpisode(
             accepted_references=references,
             query=changed,
-            episode_kind="changed_query",
-            change_targets=torch.tensor([0.2, -0.2, 0.2, 0.1]),
-            target_mask=torch.ones(len(SYNTHETIC_TARGETS), dtype=torch.bool),
-            target_specs=SYNTHETIC_TARGETS,
+            episode_kind="modified_query",
+            severity=1.0,
+            modification_kind="latent_smoke_only",
         )
         return collate_execution_episodes([accepted, changed_episode]).to(
             next(encoder.parameters()).device
         )
 
     first_batch = build_batch()
-    direct = direct_change_scores(first_batch)
+    direct = personal_change_report(first_batch, None)
+    targets = torch.tensor([False, True], device=direct.joint_deviation.device)
     direct_auroc = binary_auroc(
-        direct.personal_change_scores,
-        first_batch.classification_targets,
-        first_batch.classification_mask,
-    )
-    direct_threshold, direct_operating = _midpoint_operating_metrics(
-        direct.personal_change_scores[first_batch.classification_targets.bool()],
-        direct.personal_change_scores[~first_batch.classification_targets.bool()],
+        direct.joint_deviation,
+        targets,
     )
     frozen_batch = None if train_encoder else first_batch
-    model = ChangeMetricHead(
+    model = ChangeRuler(
         embedding_dim=first_batch.reference_embeddings.shape[-1],
-        target_dim=len(SYNTHETIC_TARGETS),
         phase_bins=8,
     ).to(first_batch.reference_embeddings.device)
-    initialize_change_threshold(model, first_batch)
     parameters = list(model.parameters())
     if train_encoder:
         parameters += [p for p in encoder.parameters() if p.requires_grad]
@@ -366,19 +354,8 @@ def _task2_smoke(
             }
         )
     model.eval()
-    with torch.no_grad():
-        learned_output = model(first_batch)
-        learned_auroc = binary_auroc(
-            learned_output.change_scores,
-            first_batch.classification_targets,
-            first_batch.classification_mask,
-        )
-        learned_operating = binary_operating_metrics(
-            learned_output.change_logits,
-            first_batch.classification_targets,
-            first_batch.classification_mask,
-            threshold=0.0,
-        )
+    learned = personal_change_report(first_batch, model)
+    learned_auroc = binary_auroc(learned.joint_deviation, targets)
     return {
         "dataset": "openpack",
         "task": comparison_example.event.label,
@@ -386,19 +363,27 @@ def _task2_smoke(
         "frozen_direct": {
             "method": "phase_cosine_personal_robust_statistics",
             "auroc": direct_auroc,
-            "diagnostic_threshold": direct_threshold,
-            **direct_operating,
-            "accepted_score": float(direct.personal_change_scores[0]),
-            "changed_score": float(direct.personal_change_scores[1]),
+            "accepted_score": float(direct.joint_deviation[0]),
+            "changed_score": float(direct.joint_deviation[1]),
+            "accepted_above_personal_limit": bool(
+                direct.exceeds_personal_limit[0]
+            ),
+            "changed_above_personal_limit": bool(
+                direct.exceeds_personal_limit[1]
+            ),
             "reference_limited_fraction": float(direct.reference_limited.float().mean()),
         },
         "frozen_learned": {
-            "method": "set_conditioned_change_head",
+            "method": "set_conditioned_change_ruler",
             "auroc": learned_auroc,
-            "diagnostic_threshold": 0.0,
-            **learned_operating,
-            "accepted_score": float(learned_output.change_scores[0]),
-            "changed_score": float(learned_output.change_scores[1]),
+            "accepted_score": float(learned.joint_deviation[0]),
+            "changed_score": float(learned.joint_deviation[1]),
+            "accepted_above_personal_limit": bool(
+                learned.exceeds_personal_limit[0]
+            ),
+            "changed_above_personal_limit": bool(
+                learned.exceeds_personal_limit[1]
+            ),
             "first": rows[0],
             "last": rows[-1],
         },

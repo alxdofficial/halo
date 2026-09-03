@@ -54,7 +54,7 @@ def test_alignment_masks_impossible_endpoints_padding_and_internal_gaps():
     assert torch.isfinite(output.endpoint_logits).all()
 
 
-def test_loss_guards_break_alignment_paths_instead_of_only_masking_endpoints():
+def test_supervision_guards_do_not_break_alignment_paths():
     reference = _sequence(torch.eye(4))
     query = _sequence(torch.randn(6, 4))
     episode = DetectionEpisode(
@@ -64,11 +64,11 @@ def test_loss_guards_break_alignment_paths_instead_of_only_masking_endpoints():
         loss_valid=torch.tensor([True, True, False, True, True, True]),
     )
 
-    output = DifferentiableSubsequenceMatcher(4)(
-        collate_detection_episodes([episode])
-    )
+    batch = collate_detection_episodes([episode])
+    output = DifferentiableSubsequenceMatcher(4)(batch)
 
-    assert output.endpoint_valid[0].tolist() == [False, True, False, False, True, True]
+    assert output.endpoint_valid[0].tolist() == [False, True, True, True, True, True]
+    assert batch.loss_valid[0].tolist() == [True, True, False, True, True, True]
 
 
 def test_all_trainable_matcher_parameters_receive_finite_nonzero_gradients():
