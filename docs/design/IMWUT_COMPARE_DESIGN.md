@@ -226,10 +226,23 @@ baselines under identical inputs.
 
 ## 9. Open items before any build
 
-- Constants in Section 3 are set by judgement; vary them in training if curious.
-- Headline configuration is Arm A (acquisition text OFF, explicit compatibility filter). Decided.
-- Baseline weight audit (Section 5).
-- Target deadline **Feb 1 2027** (Nov 1 2026 only if the k-curve is in hand by early October).
-  Venue read and the recalibration it produced: `docs/research/IMWUT_VENUE_READ.md`.
+All three are now **DECIDED** (2026-09-03) and recorded in `docs/design/IMWUT_HANDOFF.md` §1:
+
+1. **k=0 mechanism** — comparator over a candidate-excluded, config-compatible corpus draw (not
+   ConSE), so one mechanism spans the whole k-curve.
+2. **Arm A never sees acquisition text** — text is OFF at pretraining *and* fine-tuning; Arm A and
+   Arm B get separate Phase-A runs (~26 min each).
+3. **Arm B2 compatibility distance is binary, not a ladder** — distance 1 means same device family
+   plus *equivalent* placement (left↔right wrist, pocket variants). Wrist↔ankle and watch↔phone are
+   out of scope; we do not claim a graded degradation curve.
+
+Remaining: constants in Section 3 are set by judgement and may be varied in training; baseline
+weight audit (Section 5). Target deadline is **Nov 1 2026** (user decision), with the Oct 1 k-curve
+gate in `docs/design/IMWUT_BUILD_PLAN.md`. Venue read: `docs/research/IMWUT_VENUE_READ.md`.
+
+**A blocking prerequisite surfaced during the sweep**: `StreamSpec.placement` values are free-text
+prose ("the left wrist" vs "left wrist" vs "dominant wrist"), and the existing compatibility key
+normalizes only whitespace and case — so the compatible pool fragments. Placement classes must be
+built before anything else. See the handoff, §2 and W1.
 
 No implementation, branch beyond this document, or training run is authorised by this document.
