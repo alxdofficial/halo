@@ -1,0 +1,208 @@
+# Recognize by comparison — agreed design and paper shape for the IMWUT submission
+
+**Status: design of record for the `imwut/compare` line. Agreed 2026-09-03. THINKING STAGE —
+nothing in this document is implemented, trained, or evaluated yet.**
+
+This supersedes the clinical / motion-monitoring pivot as the paper target. The
+classification-era code (Phase-A tokenizer, evidence/compact engine, baseline adapters, the
+`adaptation_v1` evaluation manifest) stays the substrate; the application tasks remain on `main`
+untouched.
+
+---
+
+## 0. Why this direction
+
+Supervisor decision, 2026-09-03: clinical venues want a concrete solution to one condition with
+data gathered for it; a generic technique that happens to apply to several conditions will not
+land there. HALO started as an ML paper and should stay one. The right venue for a well-evaluated
+incremental improvement on the HALO line is IMWUT, where the recent comparable work lives
+(CrossHAR, GOAT, oneHAR, IMUZero, LanHAR, MASTER, Customizable-FM, Wonderwall).
+
+What we learned across v1 and v2 (see `docs/results/` and the memory ledger) points at one
+increment:
+
+- The encoder was never the bottleneck: frozen HALO features linearly separate activities at
+  84 macro-F1 while zero-shot through a text bridge sits near 40.
+- Comparison against labelled exemplars is the right primitive: the *untrained* retrieve-and-vote
+  mechanism already edged harnet (47.5 vs 47.3), and prototype/ridge over frozen features beat
+  every trained head we built.
+- Plain cosine retrieval over a heterogeneous bank fails for a specific reason: it ranks by
+  acquisition configuration (x7 lift) rather than by activity. Learned retrieval was worth
+  exactly nothing. The stage should go.
+- The one learned component that helped (the attention mixer, +0.12) helped only because the
+  language channel was in the loop: a scrambled-vocabulary control inverted the gain.
+- Training with the ground-truth label absent from the support set pushed zero-shot below chance
+  under closed-vocabulary cross-entropy, while helping k >= 1. Zero-shot is additionally capped by
+  the weak relation between signal similarity and label-name similarity (r ~ 0.11).
+- End-to-end training from random initialisation collapsed the encoder's effective rank within
+  300 steps. Warm-starting from self-supervised pretraining is not optional.
+
+The literature has moved the same way: sensor heterogeneity (user, device, placement) is named as
+the dominant barrier in every 2025-26 survey, ZARA (ACL 2026) gets training-free transfer by
+reasoning over *retrieved reference statistics* with an LLM, and HARBench (PerCom 2026) now scores
+position-robustness and few-shot as separate axes. We take ZARA's structure — features plus
+labelled reference recordings — and replace the LLM with a small learned comparator.
+
+---
+
+## 1. Thesis
+
+**Recognise by comparison, not classification.** Given a query window and a handful of labelled
+recordings that were acquired under a compatible sensor configuration, a small comparator decides
+which examples the query resembles and reads the label off them in language space. The model is
+not asked to learn a universal representation of all IMU data; it is asked to embed motion into
+features good enough that attention over a compatible support set can make the call.
+
+The contribution we market is the **training curriculum**: how support sets are sampled during
+pretraining-plus-fine-tuning so that the comparator learns to compare rather than to memorise a
+vocabulary. Nothing in the architecture is claimed as novel.
+
+---
+
+## 2. Model (kept deliberately simple)
+
+| Component | Decision | Rationale |
+|---|---|---|
+| Front end | **Fixed physical filterbank, single resolution, not learnable** | The learnable arm stayed pinned at its init; simplicity wins. Multiresolution's +0.034 is a documented option we deliberately do not take. |
+| Feature extraction | **Existing Phase-A tokenizer + temporal trunk, unchanged** | No evidence that complicating it buys anything. |
+| Conditioning | **Keep the existing pathways** for sampling rate, patch duration, and acquisition configuration (channel text) | They exist and are tested. Whether the acquisition-text pathway helps once support is config-compatible is an *ablation*, not a design choice (Section 6). |
+| Comparator | **Attention over the query and every support example** (no retrieval stage, no top-k) | Removes the config-ranking defect and the non-differentiable selection; K is small enough to attend over fully. |
+| Readout | score(candidate c) = sum over support examples e of  attn(query, e) x cos(text(label_e), text(c)) | The vote we already run. Duplicate or synonymous labels need no homogenisation — they simply contribute through their text similarity. |
+| Label / text tower | Frozen sentence encoder (MiniLM), text ensembling kept | Every learned text adapter we tried was net-negative. |
+| Size | Compact engine budget, ~1M trainable parameters | Efficiency is part of the story. |
+
+Support examples are **encoded per query, with gradients**, at train time. Nothing is cached.
+
+---
+
+## 3. Support-set contract (the method)
+
+A support set is the list of labelled recordings the comparator sees alongside the query. The
+same sampler runs at train and test; only the pool differs.
+
+1. **Compatibility is a filter, not a learned quantity.** Support examples must share the query's
+   acquisition configuration family: device family, placement, channel set, gravity state.
+   Sampling rate is *not* part of the key (the filterbank is rate-invariant by construction). We
+   do not offer a smartwatch example to a pocket-phone query. This is a plain deployment
+   consideration; we claim no novelty for it. The compatibility key already exists in the
+   application code (`SensorCompatibilityKey`) and is reused as-is.
+2. **Never the query, never the query's subject.** Support is subject-disjoint from the query.
+3. **Random label subset.** Draw a subset of labels present in the pool, then K recordings across
+   that subset. Labels are used verbatim; no canonicalisation, no deduplication.
+4. **Ground truth present with fixed probability.** With probability p the query's label is
+   among the support labels (few-shot episode); otherwise it is excluded (zero-shot episode). The
+   two regimes are trained jointly, not in separate arms.
+5. **Zero-shot episodes use a soft target**, the text-similarity distribution over candidates,
+   not a hard one-hot. This is the guard against the k = 0 collapse we measured.
+6. **Support may span datasets** as long as every example passes the compatibility filter. The
+   encoder is trained on all configurations; the filter only constrains what is compared.
+
+A-priori constants (there is no development split; these are fixed before any run):
+
+| constant | value | note |
+|---|---|---|
+| K (support size) | 32 | proposed; confirm |
+| p (GT present) | 0.5 | proposed; confirm |
+| label-subset size | uniform in [2, min(8, labels available)] | proposed; confirm |
+| fine-tune schedule | 35k-50k steps | the plateau we saw at 6k was a schedule artifact |
+| checkpoint | final step of the fixed budget | no selection on held-out data |
+| seeds | >= 3 | validation-draw variance dominates single runs |
+
+---
+
+## 4. Training
+
+Two stages, both already in the repo:
+
+1. **Self-supervised pretraining of the encoder** with the current Phase-A recipe (JEPA +
+   augmentation-VICReg, fixed 1:1, calibrate-once-at-2k) restricted to single resolution. No new
+   objective is introduced.
+2. **End-to-end fine-tuning** of encoder + comparator on episodes drawn by the Section 3 sampler.
+   Warm-start from stage 1 is mandatory (from-scratch collapsed). Loss = cross-entropy over
+   candidates for few-shot episodes, soft-target cross-entropy for zero-shot episodes.
+
+"End-to-end" in the paper means *end-to-end fine-tuned from self-supervised initialisation*.
+
+---
+
+## 5. Evaluation
+
+- **Protocol**: the frozen `adaptation_v1` manifest — 7 held-out datasets, subject-disjoint,
+  same fingerprint as every baseline row in `docs/results/RESULTS.md`.
+- **Headline**: enrollment k-curve, k in {1, 2, 4, 8, 16}, macro-F1 with subject-bootstrap CIs,
+  mean over >= 3 seeds. Zero-shot (k = 0) is reported as a **disclosed secondary** row using the
+  same mechanism with an empty ground-truth slot; we state its cap rather than chase it.
+- **Support at test time** comes from the held-out dataset's own enrollment pool, which is
+  config-compatible by construction and subject-disjoint by the manifest.
+- **Mandatory control rows**: the *untrained floor* (same mechanism at initialisation) and the
+  *step-0 control* (paired against each trained run), following the methodology rule that every
+  learned component is guilty until a control clears it.
+- **Baselines = released checkpoints only.** Training regimen and data are part of each method;
+  we do not match them. Keep harnet, UniMTS, ImageBind, NormWear. Drop CrossHAR and LiMU-BERT
+  (we pretrained those ourselves). Audit for released weights before writing: Wonderwall
+  (IMWUT'26), IMUZero (IMWUT'25), LanHAR (IMWUT'24), GOAT (IMWUT'24), MOMENT. Every baseline gets
+  its own native few-shot rule (1-NN / prototype / linear head, whichever is best for it).
+
+---
+
+## 6. Ablations (each answers one reviewer question)
+
+| Ablation | Question it answers |
+|---|---|
+| Fixed single-res filterbank vs multiresolution vs learnable vs raw conv | Is the simple front end leaving accuracy on the table? |
+| Attention comparator vs cosine 1-NN vs prototype over the same encoder | Is the learned comparison worth having? (the untrained floor lives here) |
+| Config-compatible support vs unfiltered support | Does the compatibility filter matter, and how much? |
+| Acquisition text ON vs OFF | Once support is compatible, does the encoder still need to be told the config? |
+| Text vote vs one-hot vote | Is the language channel load-bearing? (plus the scrambled-vocabulary control) |
+| p in {0, 0.5, 1} | Does joint ZS/FS training cost few-shot accuracy? |
+| Warm-start vs from-scratch | Is pretraining necessary? |
+| Step-0 control | Did fine-tuning help at all, paired? |
+
+---
+
+## 7. Paper shape
+
+**Working title.** Recognize by Comparison: In-Context Activity Recognition Across Heterogeneous
+IMU Setups.
+
+**Claims.**
+1. A ~1M-parameter comparator over a fixed physical filterbank, given K compatible labelled
+   recordings at test time, matches or beats 68M-1.2B released foundation models on enrollment
+   k >= 1 across seven held-out datasets, and leads where device and placement shift.
+2. The gain comes from the training curriculum — episodic support sampling with joint zero- and
+   few-shot regimes and soft zero-shot targets — not from architecture.
+3. No label homogenisation is needed; verbatim labels vote through language similarity.
+4. The whole system runs on device (parameter, latency and memory table).
+
+**Sections.** Introduction (heterogeneity is a comparison problem) -> Related work (HAR foundation
+models, language-aligned HAR, training-free/LLM reasoning, few-shot HAR) -> Method (front end,
+comparator, support contract, curriculum) -> Evaluation protocol (manifest, leakage discipline,
+baseline contract) -> Results (k-curve table, per-dataset, heterogeneity axes) -> Ablations ->
+Cost -> Limitations (zero-shot cap stated plainly; compatibility filter assumes known placement)
+-> Conclusion.
+
+**Heterogeneity-axis experiment** (kept from the earlier thesis, now with a mechanism that can use
+it): placement shift, rate shift, orientation perturbation, gravity present vs removed — ours vs
+baselines under identical inputs.
+
+---
+
+## 8. Reuse map
+
+| Reused as-is | New |
+|---|---|
+| Phase-A tokenizer + pretraining recipe | Episode sampler with no retrieval and the compatibility filter |
+| Evidence mixer (becomes the comparator) | Joint ZS/FS loss with soft zero-shot targets |
+| `adaptation_v1` manifest, eval harness, adapters | Baseline weight audit for the 2025-26 comparators |
+| Results/methodology tooling (paired gain, step-0 predictor) | Cost table |
+
+---
+
+## 9. Open items before any build
+
+- Confirm the a-priori constants in Section 3.
+- Decide whether the headline configuration keeps acquisition text ON (current default) with OFF
+  as the ablation, or the reverse. Whichever is chosen is fixed before the first run.
+- Baseline weight audit (Section 5).
+
+No implementation, branch beyond this document, or training run is authorised by this document.
