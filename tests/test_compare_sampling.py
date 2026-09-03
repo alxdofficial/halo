@@ -259,3 +259,32 @@ def test_execution_derivation_matches_the_evaluation_loader():
     event_ids = ("ds:sessionA:0", "ds:sessionA:1", "ds:sessionB:0")
     derived = _execution_ids("does_not_exist", event_ids)
     assert list(derived) == ["ds:sessionA", "ds:sessionA", "ds:sessionB"]
+
+
+# ---------------------------------------------------------------- loss regression
+def test_zero_shot_kl_is_finite_with_ragged_candidate_counts():
+    """Regression: padded candidate slots gave target 0 against log-prob -inf, i.e. NaN.
+
+    Found by the first real-data smoke, where episodes legitimately carry different candidate
+    counts. The masked slots must contribute nothing rather than an indeterminate product.
+    """
+    import torch
+
+    from training.compare.sampling import Episode
+    from training.compare.train import episode_loss
+
+    episodes = [
+        Episode(query=0, support=(), support_candidate=(), candidates=("a", "b", "c"),
+                gt_slot=None, mode="compatible", requested_support=0, shrunk=False),
+        Episode(query=1, support=(), support_candidate=(), candidates=("a", "b"),
+                gt_slot=0, mode="compatible", requested_support=0, shrunk=False),
+    ]
+    mask = torch.tensor([[True, True, True], [True, True, False]])
+    text = {
+        "candidate_mask": mask,
+        "candidate_text": torch.nn.functional.normalize(torch.randn(2, 3, 8), dim=-1),
+        "query_label_text": torch.nn.functional.normalize(torch.randn(2, 8), dim=-1),
+    }
+    out = episode_loss(torch.randn(2, 3), episodes, text)
+    assert torch.isfinite(out["loss"]), out
+    assert torch.isfinite(out["kl"]) and torch.isfinite(out["ce"])

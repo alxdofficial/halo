@@ -121,7 +121,6 @@ class SupportComparator(nn.Module):
 
         B, C, _ = candidate_text.shape
         Q = query_feature.shape[1]
-        K = support_feature.shape[1]
         device = query_feature.device
 
         query_slot = torch.full((B, Q), UNBOUND_SLOT, dtype=torch.long, device=device)
@@ -223,7 +222,6 @@ def comparator_logits(
 
     B, C, _ = candidate_text.shape
     K = support_feature.shape[1]
-    device = query_feature.device
 
     # Pool the query's rows into one direction, then score it against every support recording.
     valid_query = query_mask.unsqueeze(-1).to(query_feature.dtype)

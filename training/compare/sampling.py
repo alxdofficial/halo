@@ -43,7 +43,6 @@ import numpy as np
 from data.scripts.labels.canonical_labels import canonicalize
 from data.scripts.curate.compatibility import (
     AcquisitionKey,
-    are_compatible,
     is_near_miss,
     stream_key,
 )
