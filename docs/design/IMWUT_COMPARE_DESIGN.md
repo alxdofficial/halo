@@ -1,6 +1,6 @@
 # Recognize by comparison — agreed design and paper shape for the IMWUT submission
 
-**Status: design of record for the `imwut/compare` line. Agreed 2026-09-03. THINKING STAGE —
+**Status: design of record for the `imwut/compare` line. Agreed 2026-09-03, revised the same day (two arms). THINKING STAGE —
 nothing in this document is implemented, trained, or evaluated yet.**
 
 This supersedes the clinical / motion-monitoring pivot as the paper target. The
@@ -65,7 +65,7 @@ vocabulary. Nothing in the architecture is claimed as novel.
 |---|---|---|
 | Front end | **Fixed physical filterbank, single resolution, not learnable** | The learnable arm stayed pinned at its init; simplicity wins. Multiresolution's +0.034 is a documented option we deliberately do not take. |
 | Feature extraction | **Existing Phase-A tokenizer + temporal trunk, unchanged** | No evidence that complicating it buys anything. |
-| Conditioning | **Keep the existing pathways** for sampling rate, patch duration, and acquisition configuration (channel text) | They exist and are tested. Whether the acquisition-text pathway helps once support is config-compatible is an *ablation*, not a design choice (Section 6). |
+| Conditioning | **Rate and patch-duration pathways kept. Acquisition-configuration text is OFF in the core design.** Compatibility is handled at support construction instead (Section 3). | The encoder is trained on every configuration anyway; once support is compatible by construction there is nothing left for the text to tell it. The text pathway is kept in the code for the Section 6 experiment. |
 | Comparator | **Attention over the query and every support example** (no retrieval stage, no top-k) | Removes the config-ranking defect and the non-differentiable selection; K is small enough to attend over fully. |
 | Readout | score(candidate c) = sum over support examples e of  attn(query, e) x cos(text(label_e), text(c)) | The vote we already run. Duplicate or synonymous labels need no homogenisation — they simply contribute through their text similarity. |
 | Label / text tower | Frozen sentence encoder (MiniLM), text ensembling kept | Every learned text adapter we tried was net-negative. |
@@ -97,16 +97,20 @@ same sampler runs at train and test; only the pool differs.
 6. **Support may span datasets** as long as every example passes the compatibility filter. The
    encoder is trained on all configurations; the filter only constrains what is compared.
 
-A-priori constants (there is no development split; these are fixed before any run):
+Constants (there is no development split; set by judgement before the first run, and free to be
+varied *in training* as an experiment — varying them costs nothing and is informative):
 
 | constant | value | note |
 |---|---|---|
-| K (support size) | 32 | proposed; confirm |
-| p (GT present) | 0.5 | proposed; confirm |
-| label-subset size | uniform in [2, min(8, labels available)] | proposed; confirm |
+| K (support size, train) | 32 | drawn per episode; at evaluation K is the swept k of the k-curve |
+| p (GT present, train) | 0.5 | joint ZS/FS; a sweep over p in {0.25, 0.5, 0.75} is a cheap experiment |
+| label-subset size | uniform in [2, min(8, labels available)] | |
 | fine-tune schedule | 35k-50k steps | the plateau we saw at 6k was a schedule artifact |
 | checkpoint | final step of the fixed budget | no selection on held-out data |
 | seeds | >= 3 | validation-draw variance dominates single runs |
+
+At inference the support size is not a constant at all: the evaluation sweeps k, which is the
+k-curve.
 
 ---
 
@@ -142,23 +146,42 @@ Two stages, both already in the repo:
   (we pretrained those ourselves). Audit for released weights before writing: Wonderwall
   (IMWUT'26), IMUZero (IMWUT'25), LanHAR (IMWUT'24), GOAT (IMWUT'24), MOMENT. Every baseline gets
   its own native few-shot rule (1-NN / prototype / linear head, whichever is best for it).
+- **Closed-set models do open-set through ConSE** (Norouzi et al. 2014), exactly as before: a
+  temperature-calibrated convex combination of label-text embeddings fit on training data only.
+  It is the defensible, practical bridge and it is what lets every released checkpoint enter the
+  same k-curve sweep.
 
 ---
 
-## 6. Ablations (each answers one reviewer question)
+## 6. Two arms, then ablations
+
+**Arm A — explicit compatibility control (the core design).** No acquisition text reaches the
+encoder. Support is filtered to the query's configuration family at construction time. This is the
+headline configuration and every claim in Section 7 is made about it.
+
+**Arm B — learned compatibility (an experiment, not a core design).** Acquisition text is ON and
+support construction allows *anything* — compatible and incompatible examples mixed. The question
+is whether the comparator learns on its own to gauge which examples are compatible, which to
+trust and which to discount. Two sub-questions fall out of it:
+
+- B1. With mixed support, does Arm B recover Arm A's accuracy (learned filter ~ explicit filter)?
+- B2. When *no* perfectly compatible example exists — the support holds only near misses, e.g. a
+  different placement on the same device family — can the model still draw something useful from
+  them, and how does accuracy degrade with compatibility distance?
+
+Arm B is reported as a result about the model, not as a claim the paper rests on.
+
+**Ablations on Arm A** (each answers one reviewer question):
 
 | Ablation | Question it answers |
 |---|---|
 | Fixed single-res filterbank vs multiresolution vs learnable vs raw conv | Is the simple front end leaving accuracy on the table? |
 | Attention comparator vs cosine 1-NN vs prototype over the same encoder | Is the learned comparison worth having? (the untrained floor lives here) |
-| Config-compatible support vs unfiltered support | Does the compatibility filter matter, and how much? |
-| Acquisition text ON vs OFF | Once support is compatible, does the encoder still need to be told the config? |
+| Compatible support vs unfiltered support, text OFF | How much does the explicit filter buy on its own? |
 | Text vote vs one-hot vote | Is the language channel load-bearing? (plus the scrambled-vocabulary control) |
-| p in {0, 0.5, 1} | Does joint ZS/FS training cost few-shot accuracy? |
+| p in {0, 0.25, 0.5, 0.75, 1} | Does joint ZS/FS training cost few-shot accuracy? |
 | Warm-start vs from-scratch | Is pretraining necessary? |
 | Step-0 control | Did fine-tuning help at all, paired? |
-
----
 
 ## 7. Paper shape
 
@@ -166,9 +189,10 @@ Two stages, both already in the repo:
 IMU Setups.
 
 **Claims.**
-1. A ~1M-parameter comparator over a fixed physical filterbank, given K compatible labelled
-   recordings at test time, matches or beats 68M-1.2B released foundation models on enrollment
-   k >= 1 across seven held-out datasets, and leads where device and placement shift.
+1. A ~1M-parameter comparator over a fixed physical filterbank, told nothing about the sensor
+   configuration but given K compatible labelled recordings at test time, matches or beats
+   68M-1.2B released foundation models on enrollment k >= 1 across seven held-out datasets, and
+   leads where device and placement shift.
 2. The gain comes from the training curriculum — episodic support sampling with joint zero- and
    few-shot regimes and soft zero-shot targets — not from architecture.
 3. No label homogenisation is needed; verbatim labels vote through language similarity.
@@ -200,9 +224,8 @@ baselines under identical inputs.
 
 ## 9. Open items before any build
 
-- Confirm the a-priori constants in Section 3.
-- Decide whether the headline configuration keeps acquisition text ON (current default) with OFF
-  as the ablation, or the reverse. Whichever is chosen is fixed before the first run.
+- Constants in Section 3 are set by judgement; vary them in training if curious.
+- Headline configuration is Arm A (acquisition text OFF, explicit compatibility filter). Decided.
 - Baseline weight audit (Section 5).
 
 No implementation, branch beyond this document, or training run is authorised by this document.
