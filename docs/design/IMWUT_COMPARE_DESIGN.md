@@ -137,7 +137,9 @@ Two stages, both already in the repo:
   mean over >= 3 seeds. Zero-shot (k = 0) is reported as a **disclosed secondary** row using the
   same mechanism with an empty ground-truth slot; we state its cap rather than chase it.
 - **Support at test time** comes from the held-out dataset's own enrollment pool, which is
-  config-compatible by construction and subject-disjoint by the manifest.
+  config-compatible by construction and subject-disjoint by the manifest. Two enrollment modes are
+  first-class: **cross-subject** (support from other people) and **same-subject** (support from the
+  user's own recordings) — the latter is the deployment story and the ubicomp headline figure.
 - **Mandatory control rows**: the *untrained floor* (same mechanism at initialisation) and the
   *step-0 control* (paired against each trained run), following the methodology rule that every
   learned component is guilty until a control clears it.
@@ -227,5 +229,7 @@ baselines under identical inputs.
 - Constants in Section 3 are set by judgement; vary them in training if curious.
 - Headline configuration is Arm A (acquisition text OFF, explicit compatibility filter). Decided.
 - Baseline weight audit (Section 5).
+- Target deadline **Feb 1 2027** (Nov 1 2026 only if the k-curve is in hand by early October).
+  Venue read and the recalibration it produced: `docs/research/IMWUT_VENUE_READ.md`.
 
 No implementation, branch beyond this document, or training run is authorised by this document.
