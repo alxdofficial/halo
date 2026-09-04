@@ -204,7 +204,8 @@ Arm B is reported as a result about the model, not as a claim the paper rests on
 |---|---|
 | **Episode mean-centering ON vs OFF** | Does removing what the support rows have in common force the model to discriminate? Configuration is close to a common mode within an episode — the support all shares the query's key — and the previous design's retrieval ranked by configuration at a 7.0x lift, so this targets the measured defect directly. **Changes the step-0 function: compare raw scores at matched seeds, never paired gain.** |
 | From-scratch vs Phase-A warm start | Does one-stage training beat two, at a 35k schedule? Never tested head to head. |
-| Fixed single-res filterbank vs multiresolution vs learnable vs raw conv | Is the simple front end leaving accuracy on the table? |
+| **Fixed filterbank vs continuous kernel** (`--frontend`) | The encoder's two real front-end modes; see 6.1 — the existing head-to-head is inside the noise and must be re-run matched. |
+| Fixed single-res filterbank vs multiresolution vs learnable | Is the simple front end leaving accuracy on the table? |
 | Attention comparator vs cosine 1-NN vs prototype over the same encoder | Is the learned comparison worth having? (the untrained floor lives here) |
 | Compatible support vs unfiltered support, text OFF | How much does the explicit filter buy on its own? |
 | Text vote vs one-hot vote | Is the language channel load-bearing? (plus the scrambled-vocabulary control) |
