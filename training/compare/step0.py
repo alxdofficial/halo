@@ -96,11 +96,17 @@ def main() -> None:
 
     gap = assert_identity_at_init(comparator)
     args.out.mkdir(parents=True, exist_ok=True)
+    neutral = bool(checkpoint["config"].get("neutral_acquisition_text", False))
     torch.save({
+        # Written in the trained checkpoint's exact format, so the SAME evaluation adapter scores
+        # the control and the trained arm. A control scored through a different code path is not a
+        # control.
+        "config": dict(checkpoint["config"]),
         "encoder": checkpoint["encoder"],
         "comparator": comparator.state_dict(),
         "comparator_config": dataclasses.asdict(comparator.cfg),
         "attention_spec": dataclasses.asdict(spec),
+        "args": {"neutral_acquisition_text": neutral, "phase_a": str(args.phase_a)},
         "step": 0,
         "identity_gap": gap,
         "phase_a": str(args.phase_a),
@@ -111,6 +117,7 @@ def main() -> None:
         "tolerance": IDENTITY_TOLERANCE,
         "phase_a": str(args.phase_a),
         "d_model": d_model,
+        "neutral_acquisition_text": neutral,
         "note": "the comparator at initialisation is exactly the closed-form support vote",
     }, indent=2) + "\n")
     print(f"[step0] identity gap {gap:.3e} (tolerance {IDENTITY_TOLERANCE:.0e}) -> {args.out}")

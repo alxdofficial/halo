@@ -17,12 +17,22 @@ Each group is averaged within itself and the two are summed with weight 1. They 
 episode count, because the mix is already set by ``p`` and weighting twice would make ``p`` do two
 jobs at once.
 
-WARM START IS NOT OPTIONAL
---------------------------
-From random initialisation the encoder's effective rank collapsed from 24 to about 9 inside 300
-steps on the previous design, and the run never recovered. ``--phase-a`` is required unless
-``--allow-random-init`` is passed explicitly, and ``encoder/effective_rank`` is logged every
-validation so the same failure is visible immediately rather than at the end of a 3-hour run.
+END TO END, FROM SCRATCH, IS THE DEFAULT
+----------------------------------------
+An earlier draft of this file required a Phase-A warm start, citing an encoder whose effective rank
+collapsed 24 -> 9 within 300 steps of random init. That reading was wrong, and the checkpoints say
+so: **every** compact-engine checkpoint on disk — including ``long_4h_20260821``, the one that led
+33 of 40 enrolment columns at selection 0.5424 — carries ``phase_a_checkpoint=None``. They were all
+trained end to end from random init.
+
+What actually happened is that the rank collapse was measured on a 6,000-step schedule, where the
+apparent peak at step 1,750 was head saturation rather than convergence. At 35,000 steps the same
+from-scratch recipe produced the best result this project has. So rank collapse is a *telemetry
+signal worth watching*, not a demonstrated failure mode, and ``encoder/effective_rank`` is logged
+for exactly that reason.
+
+``--phase-a`` remains available for the warm-start arm. Which of the two wins at a 35k schedule has
+never been tested head to head; that comparison is an experiment, not a settled question.
 """
 
 from __future__ import annotations
@@ -57,7 +67,7 @@ from training.tokenizer.pretrain_data import (
     MultiScaleCollate,
     PretrainDataset,
 )
-from training.tokenizer.pretrain_episodic import encode_batch
+from training.tokenizer.pretrain_episodic import _random_encoder, encode_batch
 
 TAU_TEXT = 0.1          # a priori; matches the retrieval temperature used elsewhere in the repo
 TAU_SUPPORT = 0.07      # closed-form weighting temperature
@@ -267,6 +277,7 @@ def run_step(
     comparator: SupportComparator | None,
     text_of,
     device: torch.device,
+    center: bool = False,
 ) -> dict:
     positions = episode_positions(episodes, corpus)
     batch = collate([dataset[position] for position in positions])
@@ -289,6 +300,7 @@ def run_step(
         candidate_slot=text["candidate_slot"],
         temperature=TAU_SUPPORT,
         vote_scale=VOTE_SCALE,
+        center=center,
     )
     loss = episode_loss(output["logits"], episodes, text)
     return {**loss, **output, "pooled": pooled, "text": text}
@@ -297,11 +309,17 @@ def run_step(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase-a", type=Path, default=None,
-                        help="Phase-A checkpoint to warm-start the encoder from (required "
-                             "unless --allow-random-init)")
-    parser.add_argument("--allow-random-init", action="store_true",
-                        help="train the encoder from scratch. Measured to collapse effective "
-                             "rank 24 -> 9 within 300 steps; for the documented ablation only")
+                        help="optional Phase-A checkpoint for the warm-start arm. Omit for the "
+                             "default end-to-end-from-scratch recipe, which is what every compact "
+                             "checkpoint on disk actually used")
+    parser.add_argument("--frontend", choices=("fixed", "learnable", "continuous"),
+                        default="fixed",
+                        help="front end for a from-scratch encoder; the design of record is fixed")
+    parser.add_argument("--center-features", action="store_true",
+                        help="subtract each episode's mean feature before similarity and "
+                             "attention, so only how rows DIFFER can drive the decision. Changes "
+                             "the step-0 function: compare raw scores at matched seeds, never "
+                             "paired gain, against an uncentered arm")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--steps", type=int, default=35_000)
@@ -325,12 +343,6 @@ def main() -> None:
                         help="~50 steps on real data with telemetry; launches nothing long")
     args = parser.parse_args()
 
-    if args.phase_a is None and not args.allow_random_init:
-        parser.error(
-            "--phase-a is required. Warm-starting is not a preference: from random init the "
-            "encoder's effective rank collapsed 24 -> 9 in 300 steps and never recovered. Pass "
-            "--allow-random-init only to reproduce that ablation."
-        )
     if args.smoke:
         args.steps = min(args.steps, 50)
         args.log_every = 10
@@ -353,22 +365,28 @@ def main() -> None:
     collate = EpisodicCollate(MultiScaleCollate(fixed_patch_seconds=PATCH_SECONDS))
 
     if args.phase_a is None:
-        raise SystemExit(
-            "random-init construction is intentionally not wired here: an encoder still needs a "
-            "Phase-A config to be built from. Pass --phase-a."
+        # The design-of-record recipe: one stage, everything but the frozen text tower and the
+        # filterbank's normalisation statistics starts random.
+        encoder, encoder_config = _random_encoder(
+            device, args.frontend, neutral_acquisition_text=args.neutral_acquisition_text,
         )
-    # Local checkpoint written by our own Phase-A trainer; its `config` holds plain Python values
-    # alongside the tensors, which weights_only=True refuses to unpickle.
-    checkpoint = torch.load(args.phase_a, map_location="cpu", weights_only=False)
-    phase_a_neutral = bool(checkpoint.get("config", {}).get("neutral_acquisition_text", False))
-    if phase_a_neutral != args.neutral_acquisition_text:
-        raise SystemExit(
-            "--neutral-acquisition-text must match the Phase-A checkpoint. Arm A's claim is that "
-            "the encoder never saw acquisition text at ANY stage; mixing the two stages would "
-            "quietly void it."
-        )
-    encoder = build_encoder(checkpoint, device, training=True)
-    print(f"[compare] warm-started from {args.phase_a}", flush=True)
+        encoder = encoder.to(device).train()
+        print(f"[compare] end-to-end from scratch (frontend={args.frontend}, "
+              f"d_model={encoder_config['d_model']})", flush=True)
+    else:
+        # Local checkpoint written by our own Phase-A trainer; its `config` holds plain Python
+        # values alongside the tensors, which weights_only=True refuses to unpickle.
+        checkpoint = torch.load(args.phase_a, map_location="cpu", weights_only=False)
+        encoder_config = dict(checkpoint["config"])
+        phase_a_neutral = bool(encoder_config.get("neutral_acquisition_text", False))
+        if phase_a_neutral != args.neutral_acquisition_text:
+            raise SystemExit(
+                "--neutral-acquisition-text must match the Phase-A checkpoint. Arm A's claim is "
+                "that the encoder never saw acquisition text at ANY stage; mixing the two stages "
+                "would quietly void it."
+            )
+        encoder = build_encoder(checkpoint, device, training=True)
+        print(f"[compare] warm-started from {args.phase_a}", flush=True)
 
     spec = AttentionSpec(d_model=encoder.d_model, n_heads=4, ffn_mult=2, dropout=0.1)
     comparator = SupportComparator(spec, ComparatorConfig()).to(device)
@@ -405,6 +423,7 @@ def main() -> None:
         result = run_step(
             episodes=episodes, corpus=corpus, dataset=dataset, collate=collate,
             encoder=encoder, comparator=comparator, text_of=text_of, device=device,
+            center=args.center_features,
         )
         optimizer.zero_grad(set_to_none=True)
         result["loss"].backward()
@@ -439,8 +458,9 @@ def main() -> None:
     # `config` is the Phase-A encoder config carried forward verbatim: `build_encoder` reconstructs
     # the encoder from it, so the evaluation adapter can load this checkpoint the same way it loads
     # any other. Without it the adapter KeyErrors on our own artifact.
-    config = dict(checkpoint["config"])
+    config = dict(encoder_config)
     config["neutral_acquisition_text"] = bool(args.neutral_acquisition_text)
+    config["center_features"] = bool(args.center_features)
     payload = {
         "config": config,
         "encoder": encoder.state_dict(),
@@ -448,7 +468,7 @@ def main() -> None:
         "comparator_config": dataclasses.asdict(comparator.cfg),
         "attention_spec": dataclasses.asdict(spec),
         "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
-        "phase_a": str(args.phase_a),
+        "phase_a": None if args.phase_a is None else str(args.phase_a),
         "step": args.steps,
     }
     torch.save(payload, args.out / "last.pt")

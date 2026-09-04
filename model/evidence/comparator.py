@@ -196,6 +196,33 @@ def support_vote(
     return (masked * vote).sum(dim=1)
 
 
+def center_episode(
+    query_feature: torch.Tensor,      # (B, Q, d)
+    support_feature: torch.Tensor,    # (B, K, d)
+    query_mask: torch.Tensor,         # (B, Q)
+    support_mask: torch.Tensor,       # (B, K)
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Subtract each episode's own mean feature from its query and support rows.
+
+    WHY THIS MIGHT MATTER (it is an arm to measure, not an assumption). Retrieval in the previous
+    design ranked by *acquisition configuration* rather than activity, at a measured 7.0x lift.
+    Configuration is very close to a common mode within an episode: the support rows all share the
+    query's acquisition key by construction, so whatever they have in common is mostly the thing we
+    do NOT want the similarity to key on. Removing the episode mean leaves only how the rows differ
+    from each other, which is the quantity a discriminator should be using.
+
+    The same trick is standard elsewhere for the same reason — hubness correction in retrieval,
+    all-but-the-top in word embeddings, prototype centering in few-shot learning.
+
+    METHODOLOGY WARNING: centering changes the step-0 function, so a centered run may NOT be
+    compared to an uncentered one by paired gain. Compare raw scores at matched seeds instead.
+    """
+    rows = torch.cat([query_feature, support_feature], dim=1)
+    mask = torch.cat([query_mask, support_mask], dim=1).unsqueeze(-1).to(rows.dtype)
+    mean = (rows * mask).sum(dim=1, keepdim=True) / mask.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    return query_feature - mean, support_feature - mean
+
+
 def comparator_logits(
     comparator: SupportComparator | None,
     *,
@@ -211,6 +238,7 @@ def comparator_logits(
     candidate_slot: torch.Tensor | None = None,
     temperature: float = 0.07,
     vote_scale: float = 10.0,
+    center: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Score every candidate for every episode in the batch.
 
@@ -218,10 +246,19 @@ def comparator_logits(
     support recording supplies the weights, and nothing is learned anywhere. With a comparator
     whose ``residual_head`` is still zero the two paths agree exactly, which is what makes the
     step-0 control a control rather than an approximation.
+
+    ``center=True`` removes the episode's mean feature first (see :func:`center_episode`). It is
+    applied to BOTH the closed-form similarity and the comparator's signal input, so the two stay
+    the same function of the same features.
     """
 
     B, C, _ = candidate_text.shape
     K = support_feature.shape[1]
+
+    if center:
+        query_feature, support_feature = center_episode(
+            query_feature, support_feature, query_mask, support_mask,
+        )
 
     # Pool the query's rows into one direction, then score it against every support recording.
     valid_query = query_mask.unsqueeze(-1).to(query_feature.dtype)

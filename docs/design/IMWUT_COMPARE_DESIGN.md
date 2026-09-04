@@ -116,16 +116,22 @@ k-curve.
 
 ## 4. Training
 
-Two stages, both already in the repo:
+**One stage: end to end from random initialisation** (revised 2026-09-04). Encoder and comparator
+are trained together on episodes drawn by the Section 3 sampler. Loss = cross-entropy over
+candidates for few-shot episodes, soft-target KL for zero-shot episodes.
 
-1. **Self-supervised pretraining of the encoder** with the current Phase-A recipe (JEPA +
-   augmentation-VICReg, fixed 1:1, calibrate-once-at-2k) restricted to single resolution. No new
-   objective is introduced.
-2. **End-to-end fine-tuning** of encoder + comparator on episodes drawn by the Section 3 sampler.
-   Warm-start from stage 1 is mandatory (from-scratch collapsed). Loss = cross-entropy over
-   candidates for few-shot episodes, soft-target cross-entropy for zero-shot episodes.
+This corrects an earlier draft that made a Phase-A warm start mandatory on the grounds that
+from-scratch training collapsed the encoder's effective rank. The checkpoints contradict it: every
+compact-engine checkpoint on disk, including `long_4h_20260821` — the one leading 33 of 40
+enrolment columns at selection 0.5424 — records `phase_a_checkpoint=None`. The rank collapse was
+measured on a 6,000-step schedule where the step-1,750 "peak" was head saturation, not convergence;
+at 35,000 steps the same from-scratch recipe produced the best result the project has.
 
-"End-to-end" in the paper means *end-to-end fine-tuned from self-supervised initialisation*.
+Rank collapse therefore stays as **telemetry worth watching**, not a demonstrated failure mode, and
+`encoder/effective_rank` is logged every validation.
+
+The Phase-A warm start remains available as a second arm (`--phase-a`). Which wins at a 35k
+schedule has never been tested head to head; that is an experiment, not a settled question.
 
 ---
 
@@ -177,12 +183,13 @@ Arm B is reported as a result about the model, not as a claim the paper rests on
 
 | Ablation | Question it answers |
 |---|---|
+| **Episode mean-centering ON vs OFF** | Does removing what the support rows have in common force the model to discriminate? Configuration is close to a common mode within an episode — the support all shares the query's key — and the previous design's retrieval ranked by configuration at a 7.0x lift, so this targets the measured defect directly. **Changes the step-0 function: compare raw scores at matched seeds, never paired gain.** |
+| From-scratch vs Phase-A warm start | Does one-stage training beat two, at a 35k schedule? Never tested head to head. |
 | Fixed single-res filterbank vs multiresolution vs learnable vs raw conv | Is the simple front end leaving accuracy on the table? |
 | Attention comparator vs cosine 1-NN vs prototype over the same encoder | Is the learned comparison worth having? (the untrained floor lives here) |
 | Compatible support vs unfiltered support, text OFF | How much does the explicit filter buy on its own? |
 | Text vote vs one-hot vote | Is the language channel load-bearing? (plus the scrambled-vocabulary control) |
 | p in {0, 0.25, 0.5, 0.75, 1} | Does joint ZS/FS training cost few-shot accuracy? |
-| Warm-start vs from-scratch | Is pretraining necessary? |
 | Step-0 control | Did fine-tuning help at all, paired? |
 
 ## 7. Paper shape

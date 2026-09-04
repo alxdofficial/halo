@@ -245,8 +245,8 @@ class HALOCompareAdapter(BaselineAdapter):
     # ------------------------------------------------------------ zero shot
     def _zero_shot_support(self, stream, state, candidates: Sequence[str]):
         """Config-compatible training recordings whose labels exclude every candidate."""
-        from data.scripts.curate.compatibility import are_compatible, stream_key
         from data.scripts.curate import deployment_policy
+        from data.scripts.curate.compatibility import are_compatible, stream_key
         from training.compare.sampling import build_support_corpus
 
         key = (stream.dataset, stream.stream)
@@ -259,20 +259,24 @@ class HALOCompareAdapter(BaselineAdapter):
                     max_per_stream=4000, seed=ZERO_SHOT_SEED,
                 )
                 state["_corpus"] = corpus
-            pool = [
+            pool = {
                 index for index, other in enumerate(corpus.keys)
                 if are_compatible(query_key, other)
-            ]
-            state["zero_shot_support"][key] = (corpus, set(pool))
+            }
+            state["zero_shot_support"][key] = (corpus, pool)
         corpus, streams = state["zero_shot_support"][key]
         if not streams:
-            return None, "no config-compatible training stream exists for this configuration"
+            return None, (
+                "no training stream shares this acquisition configuration, so the deployed "
+                "mechanism has nothing admissible to compare against at k=0"
+            )
 
-        banned = {str(text).lower() for text in candidates}
+        banned = {str(text).replace("_", " ").lower() for text in candidates}
         rng = np.random.default_rng(ZERO_SHOT_SEED)
         eligible = [
             index for index, recording in enumerate(corpus.recordings)
-            if recording.stream_index in streams and str(recording.label).lower() not in banned
+            if recording.stream_index in streams
+            and str(recording.label).replace("_", " ").lower() not in banned
         ]
         if not eligible:
             return None, "every compatible training recording carries a candidate label"
@@ -280,6 +284,126 @@ class HALOCompareAdapter(BaselineAdapter):
             eligible, size=min(ZERO_SHOT_SUPPORT, len(eligible)), replace=False,
         )
         return [corpus.recordings[int(i)] for i in chosen], None
+
+    def _encode_training_recordings(self, recordings, state):
+        """Encode training-corpus windows into support rows, grouped by their source stream.
+
+        The training grids are not evaluation streams, so they are loaded directly and pushed
+        through the same encoder path. Grouping by stream matters: channel text, gravity state and
+        sampling rate are per-stream, and the encoder is told each group's own.
+        """
+        import torch as T
+        from data.scripts.eda.grid_io import discover_grids
+        from training.tokenizer.eval_transfer import encode_dataset_detailed
+        from training.tokenizer.pretrain_data import (
+            _stream_gravity_state,
+            stream_channel_descriptions,
+            stream_sensor_texts,
+        )
+
+        refs = state.setdefault("_grid_refs", None)
+        if refs is None:
+            refs = {(ref.dataset, ref.stream): ref for ref in discover_grids("native")}
+            state["_grid_refs"] = refs
+
+        grouped: dict[tuple[str, str], list] = {}
+        for recording in recordings:
+            grouped.setdefault((recording.dataset, recording.stream), []).append(recording)
+
+        features, descriptors, labels = [], [], []
+        for (dataset, stream_id), members in grouped.items():
+            ref = refs[(dataset, stream_id)]
+            rows = np.asarray([m.window_index for m in members], dtype=np.int64)
+            windows = np.asarray(ref.load_data()[rows], dtype=np.float32)
+            mask = np.asarray(ref.mask, dtype=bool)
+            gravity_state = _stream_gravity_state(dataset, stream_id)
+            texts = stream_channel_descriptions(
+                dataset, stream_id, neutral=_NEUTRAL_ACQUISITION_TEXT,
+            )
+            detailed = encode_dataset_detailed(
+                state["encoder"], windows, texts, state["device"], float(ref.rate_hz),
+                gravity_state=gravity_state, channel_mask=mask,
+                dataset=dataset, stream=stream_id,
+                neutral_text=_NEUTRAL_ACQUISITION_TEXT, export_sensor_rows=False,
+            )
+            _, sensor_texts, _ = stream_sensor_texts(
+                dataset, stream_id,
+                gravity_removed=(gravity_state == "removed"),
+                has_accel=any(c.startswith("acc") for c, m in zip(ref.channels, mask) if m),
+                has_gyro=any(c.startswith("gyro") for c, m in zip(ref.channels, mask) if m),
+                neutral=_NEUTRAL_ACQUISITION_TEXT,
+            )
+            encoded = state["encoder"].text_encoder.encode_pooled(
+                sensor_texts, device=state["device"],
+            )
+            descriptor = F.normalize(
+                F.normalize(encoded.float(), dim=-1).mean(dim=0, keepdim=True), dim=-1,
+            )
+            pooled = detailed["pooled"].to(state["device"])
+            features.append(pooled)
+            descriptors.append(descriptor.expand(len(pooled), -1))
+            labels.extend(m.label for m in members)
+        return T.cat(features), T.cat(descriptors), labels
+
+    def predict_candidates_from_features(self, features, candidates, state, device):
+        """The k=0 row: the deployed mechanism, supported by candidate-excluded training rows.
+
+        The support set cannot contain the answer — every candidate label is excluded from it — so
+        the only route to a prediction is the query's resemblance to those recordings plus the
+        bridge from their label text to the candidates'. That is the same mechanism as every
+        k >= 1 cell, which is why the k-curve is one curve rather than two glued together.
+        """
+        import torch as T
+
+        owner = state["feature_owner"].get(id(features))
+        if owner is None:
+            raise ValueError(
+                "halo_compare scores k=0 with its own mechanism over recording rows; the features "
+                "passed here were not produced by this adapter's window_features"
+            )
+        from eval import data as eval_data
+
+        stream = eval_data.load_eval_stream(*owner)
+        candidates = list(candidates)
+        support, reason = self._zero_shot_support(stream, state, candidates)
+        if support is None:
+            # An honest unsupported row. Substituting ConSE, or padding with incompatible
+            # recordings, would report a different mechanism under this model's name.
+            raise ValueError(f"zero-shot unsupported for {owner[0]}/{owner[1]}: {reason}")
+
+        query_feature, query_descriptor, _ = self._stream_rows(stream, state)
+        support_feature, support_descriptor, support_labels = self._encode_training_recordings(
+            support, state,
+        )
+        candidate_text = F.normalize(T.from_numpy(
+            state["sbert"]([c.replace("_", " ") for c in candidates])
+        ).float(), dim=-1).to(state["device"])
+        support_label_text = F.normalize(T.from_numpy(
+            state["sbert"]([label.replace("_", " ") for label in support_labels])
+        ).float(), dim=-1).to(state["device"])
+        # Every support row is unbound: none of them carries a candidate's label, by construction.
+        support_bound = T.full(
+            (len(support_labels),), -1, dtype=T.long, device=state["device"],
+        )
+
+        predictions: list[str] = []
+        with T.no_grad():
+            for start in range(0, len(query_feature), QUERY_CHUNK):
+                stop = start + QUERY_CHUNK
+                logits = self._score(
+                    state,
+                    query_feature[start:stop], query_descriptor[start:stop],
+                    support_feature, support_descriptor, support_label_text, support_bound,
+                    candidate_text,
+                )
+                predictions.extend(candidates[int(i)] for i in logits.argmax(1).cpu().tolist())
+        return predictions, {
+            "mechanism": "support_comparator_zero_shot",
+            "predicted_classes": sorted(set(predictions)),
+            "support_rows": int(len(support_labels)),
+            "support_labels": sorted(set(support_labels)),
+            "support_policy": "config_compatible_training_rows_excluding_candidates",
+        }
 
     def evaluation_config(self, state) -> dict:
         return {

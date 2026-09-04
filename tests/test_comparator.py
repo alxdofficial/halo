@@ -212,3 +212,65 @@ def test_batch_episodes_are_independent():
         single = {k: v[:1] for k, v in episode.items()}
         first = comparator_logits(comparator, **single)["logits"]
     assert torch.allclose(both[:1], first, atol=1e-5)
+
+
+# ---------------------------------------------------------------- centering arm
+def test_centering_removes_the_episode_mean():
+    """The point of the arm: after centering, what rows have in common is gone."""
+    from model.evidence.comparator import center_episode
+
+    episode = _episode(K=6)
+    q, s = center_episode(
+        episode["query_feature"], episode["support_feature"],
+        episode["query_mask"], episode["support_mask"],
+    )
+    rows = torch.cat([q, s], dim=1)
+    assert torch.allclose(rows.mean(dim=1), torch.zeros_like(rows.mean(dim=1)), atol=1e-5)
+
+
+def test_centering_respects_the_masks():
+    """Padded rows must not drag the mean; only real rows define the common mode."""
+    from model.evidence.comparator import center_episode
+
+    episode = _episode(K=6)
+    mask = episode["support_mask"].clone()
+    mask[:, 4:] = False
+    episode["support_feature"][:, 4:] = 1e3          # padded garbage
+    q, s = center_episode(
+        episode["query_feature"], episode["support_feature"], episode["query_mask"], mask,
+    )
+    real = torch.cat([q, s[:, :4]], dim=1)
+    assert torch.allclose(real.mean(dim=1), torch.zeros_like(real.mean(dim=1)), atol=1e-3)
+
+
+def test_centering_changes_the_scores():
+    """If it were a no-op there would be nothing to measure."""
+    episode = _episode()
+    with torch.no_grad():
+        plain = comparator_logits(None, **episode)["logits"]
+        centered = comparator_logits(None, center=True, **episode)["logits"]
+    assert not torch.allclose(plain, centered, atol=1e-4)
+
+
+def test_centering_keeps_identity_at_init():
+    """The control must stay exact in the centered arm too, or that arm has no floor."""
+    episode = _episode()
+    with torch.no_grad():
+        trained = comparator_logits(_comparator(), center=True, **episode)["logits"]
+        floor = comparator_logits(None, center=True, **episode)["logits"]
+    assert torch.allclose(trained, floor, atol=1e-6)
+
+
+def test_centering_keeps_support_permutation_invariance():
+    episode = _episode()
+    comparator = _comparator()
+    with torch.no_grad():
+        comparator.residual_head.weight.normal_(std=0.05)
+        before = comparator_logits(comparator, center=True, **episode)["logits"]
+        order = torch.tensor([3, 0, 5, 1, 4, 2])
+        shuffled = dict(episode)
+        for key in ("support_feature", "support_descriptor", "support_label_text",
+                    "support_bound", "support_mask"):
+            shuffled[key] = episode[key][:, order]
+        after = comparator_logits(comparator, center=True, **shuffled)["logits"]
+    assert torch.allclose(before, after, atol=1e-5)
