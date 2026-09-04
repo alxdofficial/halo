@@ -137,8 +137,27 @@ schedule has never been tested head to head; that is an experiment, not a settle
 
 ## 5. Evaluation
 
-- **Protocol**: the frozen `adaptation_v1` manifest — 7 held-out datasets, subject-disjoint,
-  same fingerprint as every baseline row in `docs/results/RESULTS.md`.
+- **Protocol**: the frozen `adaptation_v2` manifest — **10** held-out datasets, subject-disjoint,
+  70 cells (48 usable), fingerprint `0f98ae25…`. `adaptation_v1` (7 datasets) stays intact so the
+  pre-pivot numbers remain comparable; the two carry different protocol names so the assembler
+  cannot mix their rows.
+
+  **motionsense, realworld and shoaib were restored 2026-09-04.** They were never unsuitable — they
+  were the Phase-B *development* split, withheld so repeated development would not consume the
+  datasets meant to support the final claim. That split no longer exists. Restoring them doubles
+  the ordinary-activity enrolment cells (5 -> 10) and lifts ordinary zero-shot cells (4 -> 7)
+  without losing a single clinical cell, and it decorrelates two things that were confounded: with
+  only the seven, 8 of 11 streams were wrist and the hardest labels sat on exactly the streams with
+  the narrowest support pools. All three are phone streams carrying ordinary locomotion.
+
+  **To disclose in the paper:** design decisions in the superseded Phase-B line were made while
+  looking at these three. No model was ever trained on them, so this is researcher exposure rather
+  than data leakage — but the reviewer should hear it from us. `motionsense` additionally has no
+  config-compatible training stream, so like `upper_limb_use` its k=0 row is unsupported while its
+  k>=1 rows are unaffected.
+
+  `hapt` is permanently excluded and now raises if requested: it is the same 30 subjects as
+  `uci_har`, which is in the training corpus.
 - **Headline**: enrollment k-curve, k in {1, 2, 4, 8, 16}, macro-F1 with subject-bootstrap CIs,
   mean over >= 3 seeds. Zero-shot (k = 0) is reported as a **disclosed secondary** row using the
   same mechanism with an empty ground-truth slot; we state its cap rather than chase it.

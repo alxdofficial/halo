@@ -19,6 +19,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 from data.scripts.curate import deployment_policy
+from eval import data as eval_data
 from eval.data import EvalStream, load_eval_stream
 from eval.scoring import align_ground_truth_labels
 from training.evidence.episode_labels import neutral_alias_vocabulary
@@ -30,9 +31,38 @@ PROTOCOL_NAME = "halo_matched_adaptation_v1"
 DEFAULT_SUPPORT = (0, 1, 2, 4, 8, 16)
 DEFAULT_SEEDS = (20260808, 20260809, 20260810, 20260811, 20260812)
 ACTION_REGIMES = {
-    "ordinary": ("inclusivehar", "usc_had", "tnda_har", "ut_complex"),
+    "ordinary": (
+        "inclusivehar", "usc_had", "tnda_har", "ut_complex",
+        # Restored 2026-09-04. These three were never held out for being unsuitable — they were
+        # the Phase-B DEVELOPMENT split, kept aside so repeated development would not consume the
+        # datasets meant to support the final claim. That split no longer exists (two data roles
+        # only), so the reason to withhold them is gone.
+        #
+        # They also correct a real imbalance: without them 8 of 11 evaluation streams are wrist,
+        # and the hardest labels sit on exactly the streams with the narrowest support pools, so
+        # difficulty and support-availability were confounded. All three are phone streams with
+        # ordinary locomotion, which decorrelates the two.
+        #
+        # DISCLOSE IN THE PAPER: design decisions in the superseded Phase-B line were made while
+        # looking at these three. No model was ever trained on them, so this is researcher
+        # exposure rather than data leakage, but a reviewer should hear it from us.
+        "motionsense", "realworld", "shoaib",
+    ),
     "specialized_novel": ("monipar", "spar", "upper_limb_use"),
 }
+
+#: The seven-dataset roster the frozen ``adaptation_v1`` manifest was built from.
+ADAPTATION_V1_DATASETS = (
+    "inclusivehar", "usc_had", "tnda_har", "ut_complex",
+    "monipar", "spar", "upper_limb_use",
+)
+#: The ten-dataset roster for ``adaptation_v2``.
+ADAPTATION_V2_DATASETS = ADAPTATION_V1_DATASETS + ("motionsense", "realworld", "shoaib")
+
+#: hapt is PERMANENTLY excluded: it is the same 30 subjects as uci_har, which is in the training
+#: corpus, so any hapt row would be a direct subject leak. It currently has no eval_labels.json,
+#: which blocks it by accident rather than by design — hence this note.
+NEVER_EVALUATE = ("hapt",)
 
 
 def _json_hash(value: object) -> str:
@@ -312,9 +342,15 @@ def build_manifest(
     alignment: str = "native",
     subject_relations: Sequence[str] = ("same_subject", "cross_subject"),
     configuration_relations: Sequence[str] = ("same_configuration", "cross_configuration"),
+    protocol_name: str = PROTOCOL_NAME,
 ) -> dict:
     """Build the complete matched evaluation manifest from current sealed grids."""
     datasets = tuple(datasets)
+    banned = sorted(set(datasets) & set(NEVER_EVALUATE))
+    if banned:
+        raise ValueError(
+            f"{banned} may never be evaluated: they share subjects with the training corpus"
+        )
     unknown = sorted(set(datasets) - set(sum((list(v) for v in ACTION_REGIMES.values()), [])))
     if unknown:
         raise ValueError(f"datasets have no declared action regime: {unknown}")
@@ -338,12 +374,35 @@ def build_manifest(
     regime_for = {
         dataset: regime for regime, values in ACTION_REGIMES.items() for dataset in values
     }
+    skipped: list[str] = []
+
+    def materialized(specs):
+        """Keep only streams whose grid exists for this alignment.
+
+        A curated StreamSpec describes what the source *could* provide; the grid is what was
+        actually built. shoaib, for instance, declares four placements but only
+        ``phone_right_pocket`` has a native grid. Building the manifest from the spec alone raises
+        halfway through; skipping silently would hide a missing conversion. So skip and report.
+        """
+        kept = []
+        for spec in specs:
+            path = eval_data.DATASETS_DIR / spec.dataset / "grids" / alignment / spec.stream_id
+            if path.is_dir():
+                kept.append(spec)
+            else:
+                skipped.append(f"{spec.dataset}/{spec.stream_id}")
+        return tuple(kept)
+
     for dataset in datasets:
-        primary = deployment_policy.stream_specs(dataset, "primary")
-        deployment = tuple(
+        primary = materialized(deployment_policy.stream_specs(dataset, "primary"))
+        deployment = materialized(tuple(
             spec for spec in deployment_policy.stream_specs(dataset, None)
             if spec.device_profile in {"phone", "watch", "device"}
-        )
+        ))
+        if not primary:
+            raise ValueError(
+                f"{dataset} has no materialized {alignment} grid for any primary stream"
+            )
         for query_spec in primary:
             query = load(dataset, query_spec.stream_id)
             zero_id = f"{dataset}/{query.stream}/zero_shot"
@@ -375,7 +434,7 @@ def build_manifest(
 
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "protocol_name": PROTOCOL_NAME,
+        "protocol_name": protocol_name,
         "alignment": alignment,
         "datasets": list(datasets),
         "action_regimes": {key: list(value) for key, value in ACTION_REGIMES.items()},
@@ -383,6 +442,7 @@ def build_manifest(
         "support_unit": "independent_execution_per_candidate",
         "seeds": [int(value) for value in seeds],
         "candidate_policy": "fixed_dataset_stream_roster_across_curve",
+        "skipped_streams": sorted(set(skipped)),
         "query_policy": "fixed_subject_cohort_across_positive_k_curve",
         "support_policy": "nested_execution_disjoint_prefix",
         "stream_fingerprints": fingerprints,
@@ -541,7 +601,10 @@ def iter_cells(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--datasets", nargs="*", default=list(PHASE_B_TEST_DATASETS))
+    parser.add_argument("--datasets", nargs="*", default=list(ADAPTATION_V2_DATASETS))
+    parser.add_argument("--protocol-name", default="halo_matched_adaptation_v2",
+                        help="stamped into every cell; the assembler refuses to mix protocols, "
+                             "which is what stops v1 and v2 rows landing in one table")
     parser.add_argument("--support", nargs="*", type=int, default=list(DEFAULT_SUPPORT))
     parser.add_argument("--seeds", nargs="*", type=int, default=list(DEFAULT_SEEDS))
     parser.add_argument("--alignment", choices=("native", "non_harmonised", "harmonised"),
@@ -552,6 +615,7 @@ def main() -> None:
         support_counts=args.support,
         seeds=args.seeds,
         alignment=args.alignment,
+        protocol_name=args.protocol_name,
     )
     save_manifest(args.out, manifest)
     statuses = {}

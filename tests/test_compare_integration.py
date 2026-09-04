@@ -278,3 +278,69 @@ def test_six_slot_is_a_no_op_on_already_canonical_input():
     mask = np.ones(6, dtype=bool)
     windows, out_mask = _six_slot(native, list("abcdef"), mask)
     assert np.array_equal(windows, native) and np.array_equal(out_mask, mask)
+
+
+# ---------------------------------------------------------------- adaptation_v2
+def test_adaptation_v2_roster_and_protocol():
+    """The ten-dataset manifest, and the guard that stops v1 and v2 rows sharing a table."""
+    import gzip
+    import json
+    from pathlib import Path
+
+    from eval.enrollment_protocol import ADAPTATION_V1_DATASETS, ADAPTATION_V2_DATASETS
+
+    path = Path("eval/manifests/adaptation_v2.json.gz")
+    assert path.exists(), "adaptation_v2 has not been built"
+    manifest = json.load(gzip.open(path))
+
+    assert manifest["protocol_name"] == "halo_matched_adaptation_v2"
+    assert set(manifest["datasets"]) == set(ADAPTATION_V2_DATASETS)
+    assert set(ADAPTATION_V1_DATASETS) < set(ADAPTATION_V2_DATASETS), "v2 must be a superset"
+
+    v1 = json.load(gzip.open("eval/manifests/adaptation_v1.json.gz"))
+    assert v1["protocol_name"] != manifest["protocol_name"], (
+        "v1 and v2 must carry different protocol names or the assembler will happily mix them"
+    )
+
+
+def test_adaptation_v2_rebalances_the_ordinary_regime():
+    """The reason for adding them: ordinary activities were badly outnumbered."""
+    import gzip
+    import json
+    from collections import Counter
+
+    def ok_cells(path):
+        manifest = json.load(gzip.open(path))
+        return Counter(
+            (c["kind"], c["regime"]) for c in manifest["cells"].values() if c["status"] == "ok"
+        )
+
+    v1, v2 = ok_cells("eval/manifests/adaptation_v1.json.gz"), ok_cells(
+        "eval/manifests/adaptation_v2.json.gz")
+    assert v2[("enrollment", "ordinary")] > v1[("enrollment", "ordinary")]
+    assert v2[("zero_shot", "ordinary")] > v1[("zero_shot", "ordinary")]
+    # Nothing may be lost from the clinical side by rebalancing.
+    assert v2[("enrollment", "specialized_novel")] >= v1[("enrollment", "specialized_novel")]
+    assert v2[("zero_shot", "specialized_novel")] >= v1[("zero_shot", "specialized_novel")]
+
+
+def test_hapt_can_never_enter_an_evaluation_manifest():
+    """hapt is the same 30 subjects as uci_har, which is in training. That is a direct leak."""
+    import pytest as _pytest
+
+    from eval.enrollment_protocol import NEVER_EVALUATE, build_manifest
+
+    assert "hapt" in NEVER_EVALUATE
+    with _pytest.raises(ValueError, match="never be evaluated"):
+        build_manifest(datasets=("hapt",))
+
+
+def test_manifest_records_streams_it_could_not_materialize():
+    """A missing conversion must be visible, not silently dropped."""
+    import gzip
+    import json
+
+    manifest = json.load(gzip.open("eval/manifests/adaptation_v2.json.gz"))
+    assert "skipped_streams" in manifest
+    # shoaib declares four placements; only phone_right_pocket has a native grid.
+    assert any(name.startswith("shoaib/") for name in manifest["skipped_streams"])
