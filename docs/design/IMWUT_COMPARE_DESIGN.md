@@ -211,6 +211,31 @@ Arm B is reported as a result about the model, not as a claim the paper rests on
 | p in {0, 0.25, 0.5, 0.75, 1} | Does joint ZS/FS training cost few-shot accuracy? |
 | Step-0 control | Did fine-tuning help at all, paired? |
 
+### 6.1 On the two front-end modes
+
+The encoder has always had two genuine front ends — the fixed physical filterbank and the
+continuous kernel bank — and both are selectable in the comparison trainer (`--frontend`), verified
+to run from scratch at the compact shape.
+
+A head-to-head already exists on disk, and it settles nothing:
+
+| run | frontend | step | selection |
+|---|---|---:|---:|
+| `e2e_pb04_fixed_filterbank_35k_20260824` | fixed | 10,000 | 0.3642 |
+| `e2e_pb04_continuous_dense_35k_20260824` | continuous | 13,000 | 0.3724 |
+
+Continuous leads by 0.0082, but the two runs stopped at different steps, neither recorded a seed,
+and the measured screening noise on this setup is sd 0.0065 — the standing rule being that nothing
+under about 0.012 is real. So the gap sits inside the noise and was measured off unmatched
+schedules. Only the continuous arm has downstream adaptation results on disk, so even the
+second-stage comparison is one-sided.
+
+The honest statement is that **we do not know which front end is better**, and the paper must
+either say so or run the comparison properly: matched steps, matched seeds, at least three of them,
+compared by raw score rather than paired gain (the front end changes the step-0 function). The
+design of record stays *fixed* because it is the simpler claim and the one the thesis rests on;
+continuous is the challenger, not the default.
+
 ## 7. Paper shape
 
 **Working title.** Recognize by Comparison: In-Context Activity Recognition Across Heterogeneous
