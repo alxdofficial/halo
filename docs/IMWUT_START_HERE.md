@@ -225,4 +225,4 @@ $PY -m pytest tests -q
 | [`design/IMWUT_BUILD_PLAN.md`](design/IMWUT_BUILD_PLAN.md) | the 2026-09-03 sweep and schedule | **historical** — superseded in parts |
 | [`design/IMWUT_HANDOFF.md`](design/IMWUT_HANDOFF.md) | implementation spec written for another agent | **historical** — the work is done |
 | `results/classification/` | pre-pivot measurements | **frozen — never edit** |
-| `tasks/`, `data/APPLICATION_DATASETS.md` | the application line | not this paper |
+| `tasks/`, `docs/data/APPLICATION_DATASETS.md` | the application line | not this paper |

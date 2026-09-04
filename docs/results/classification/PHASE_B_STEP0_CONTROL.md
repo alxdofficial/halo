@@ -10,7 +10,7 @@
 > Its §1 methodology (identity-at-init assertion) remains good practice. Quote no number from it.
 
 > Historical control that motivated the relational decoder now specified by
-> [`../design/PHASE_B_TRAINING_INTENT.md`](../design/PHASE_B_TRAINING_INTENT.md).
+> [`../design/PHASE_B_TRAINING_INTENT.md`](PHASE_B_TRAINING_INTENT.md).
 > Measured 2026-08-09. Development roster only; the sealed test roster was not touched.
 
 ## 1. Why this arm had to exist

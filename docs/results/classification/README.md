@@ -19,4 +19,15 @@ disagreement belongs in the new report, not in an edit to these files.
 | `PHASE_B_E2E_20260818.md` | first end-to-end run; encoder rank collapse from random init |
 | `PHASE_A_RECOVERY_20260818.md` | Phase-A recovery run |
 
+| `PHASE_B_TRAINING_STATUS.md`, `PHASE_B_TRAINING_INTENT.md` | Phase-B training intent and status |
+| `ADAPTATION_TABLE_20260819.md` | the earlier adaptation table |
+| `COMPACT_EVIDENCE_ENGINE.md` | the compact evidence engine — the direct architectural ancestor of `model/evidence/comparator.py` |
+| `RESULTS.md` | the classification-era headline results (NOT `docs/results/RESULTS.md`, which is the application line) |
+
+**A few links in these files do not resolve, on purpose.** They point at *generated* artifacts —
+`eval/adaptation_tables/**/headline_tables.md` and result figures — that were produced by scripts
+and were not carried onto this branch. Everything needed to read the numbers is in the prose here;
+the generated originals are on `archive/pre-application-main-20260830`. Do not fabricate
+replacements.
+
 The original copies remain on branch `archive/pre-application-main-20260830`.
