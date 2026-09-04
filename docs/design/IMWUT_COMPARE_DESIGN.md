@@ -67,6 +67,7 @@ vocabulary. Nothing in the architecture is claimed as novel.
 | Feature extraction | **Existing Phase-A tokenizer + temporal trunk, unchanged** | No evidence that complicating it buys anything. |
 | Conditioning | **Rate and patch-duration pathways kept. Acquisition-configuration text is OFF in the core design.** Compatibility is handled at support construction instead (Section 3). | The encoder is trained on every configuration anyway; once support is compatible by construction there is nothing left for the text to tell it. The text pathway is kept in the code for the Section 6 experiment. |
 | Comparator | **Attention over the query and every support example** (no retrieval stage, no top-k) | Removes the config-ranking defect and the non-differentiable selection; K is small enough to attend over fully. |
+| Feature centering | **ON by default**: each episode's mean feature is subtracted from the query and support rows before similarity and attention | Acquisition configuration is close to a common mode within an episode, since the support all shares the query's key; the previous design's retrieval ranked by configuration at a 7.0x lift. Removing the mean leaves only how rows differ. `--no-center-features` is the ablation. |
 | Readout | score(candidate c) = sum over support examples e of  attn(query, e) x cos(text(label_e), text(c)) | The vote we already run. Duplicate or synonymous labels need no homogenisation — they simply contribute through their text similarity. |
 | Label / text tower | Frozen sentence encoder (MiniLM), text ensembling kept | Every learned text adapter we tried was net-negative. |
 | Size | Compact engine budget, ~1M trainable parameters | Efficiency is part of the story. |
@@ -202,7 +203,7 @@ Arm B is reported as a result about the model, not as a claim the paper rests on
 
 | Ablation | Question it answers |
 |---|---|
-| **Episode mean-centering ON vs OFF** | Does removing what the support rows have in common force the model to discriminate? Configuration is close to a common mode within an episode — the support all shares the query's key — and the previous design's retrieval ranked by configuration at a 7.0x lift, so this targets the measured defect directly. **Changes the step-0 function: compare raw scores at matched seeds, never paired gain.** |
+| **Episode mean-centering OFF** (`--no-center-features`; centering is the DEFAULT as of 2026-09-04) | Does removing what the support rows have in common force the model to discriminate? Configuration is close to a common mode within an episode — the support all shares the query's key — and the previous design's retrieval ranked by configuration at a 7.0x lift, so this targets the measured defect directly. **Changes the step-0 function: compare raw scores at matched seeds, never paired gain.** |
 | From-scratch vs Phase-A warm start | Does one-stage training beat two, at a 35k schedule? Never tested head to head. |
 | **Fixed filterbank vs continuous kernel** (`--frontend`) | The encoder's two real front-end modes; see 6.1 — the existing head-to-head is inside the noise and must be re-run matched. |
 | Fixed single-res filterbank vs multiresolution vs learnable | Is the simple front end leaving accuracy on the table? |

@@ -170,7 +170,12 @@ class HALOCompareAdapter(BaselineAdapter):
                 "encoder is never told the acquisition configuration; evaluating the other way "
                 "round would report a different model than the one that was trained."
             )
+        # Evaluation must centre exactly as training did, or the deployed function is not the one
+        # that was trained. Older checkpoints predate the flag and were trained uncentred.
+        center = bool(blob.get("config", {}).get("center_features",
+                                                 blob.get("args", {}).get("center_features", False)))
         return {
+            "center": center,
             "encoder": encoder, "comparator": comparator, "device": device,
             "sbert": get_sbert_encoder(), "streams": {}, "feature_owner": {},
             "checkpoint_step": int(blob.get("step", 0)),
@@ -264,6 +269,7 @@ class HALOCompareAdapter(BaselineAdapter):
             support_bound=support_bound.unsqueeze(0).expand(n_query, -1),
             support_mask=T.ones((n_query, n_support), dtype=T.bool, device=device),
             candidate_slot=T.arange(n_candidates, device=device).unsqueeze(0).expand(n_query, -1),
+            center=state["center"],
         )
         return out["logits"]
 
@@ -540,6 +546,7 @@ class HALOCompareAdapter(BaselineAdapter):
             "checkpoint_step": state.get("checkpoint_step"),
             "neutral_acquisition_text": _NEUTRAL_ACQUISITION_TEXT,
             "mechanism": "support_comparator",
+            "center_features": state.get("center"),
             "corpus_bank_at_positive_k": False,
             "zero_shot_draws": ZERO_SHOT_DRAWS,
             "zero_shot_labels_per_draw": ZERO_SHOT_LABELS_PER_DRAW,

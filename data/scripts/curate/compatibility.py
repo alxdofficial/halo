@@ -84,16 +84,24 @@ PLACEMENT_SITE: dict[str, str] = {
     "left wrist": "left_wrist",
     "the right wrist": "right_wrist",
     "right wrist": "right_wrist",
+    # Handedness cannot be resolved to a physical side, so these stay side-agnostic. A source that
+    # says only "the wrist" is pooled with one that says "dominant": single-wrist studies place the
+    # device on the preferred wrist by convention, and treating them as different configurations
+    # would strand monipar with no compatible training partner at all.
     "the wrist": "wrist_unspecified",
     "wrist": "wrist_unspecified",
-    # Handedness is recorded, but which physical side that is varies per subject, so it cannot be
-    # resolved to left or right. It is its own site and is wrist-equivalent.
     "dominant wrist": "wrist_unspecified",
     "the dominant wrist": "wrist_unspecified",
-    "the non-dominant wrist": "wrist_unspecified",
-    # upper_limb_use labels by clinical status rather than side, for the same reason.
-    "the wrist of the more-affected arm": "wrist_unspecified",
-    "the wrist of the less-affected arm": "wrist_unspecified",
+    # But an explicitly NON-dominant wrist is not the same observation — the dominant wrist does the
+    # manipulation — so it is its own site rather than pooled with the above. Free to separate:
+    # nhanes is an optional scale source, not part of any named training recipe.
+    "the non-dominant wrist": "non_dominant_wrist",
+    # upper_limb_use labels by clinical status, and affected vs unaffected is the entire contrast
+    # that dataset exists to measure. Pooling them would let an unaffected-arm recording support a
+    # query about the affected arm the moment cross-configuration cells are ever enabled. They are
+    # wrist-EQUIVALENT (so still a near miss) but never identical.
+    "the wrist of the more-affected arm": "affected_wrist",
+    "the wrist of the less-affected arm": "unaffected_wrist",
     # ---- forearm ----------------------------------------------------------
     "the left forearm": "left_forearm",
     "the right forearm": "right_forearm",
@@ -162,7 +170,10 @@ PLACEMENT_SITE: dict[str, str] = {
 #:     unit moves with the torso. Those are different signals, not a placement nuance.
 #:   * anything spanning limbs (wrist with ankle), which the decision puts out of scope entirely.
 EQUIVALENT_SITES: tuple[frozenset[str], ...] = (
-    frozenset({"left_wrist", "right_wrist", "wrist_unspecified"}),
+    frozenset({
+        "left_wrist", "right_wrist", "wrist_unspecified",
+        "non_dominant_wrist", "affected_wrist", "unaffected_wrist",
+    }),
     frozenset({"left_forearm", "right_forearm", "forearm_unspecified"}),
     frozenset({"left_upper_arm", "right_upper_arm"}),
     frozenset({"left_pocket", "right_pocket", "pocket_unspecified", "front_pocket"}),

@@ -44,9 +44,46 @@ def test_prose_variants_of_one_site_collapse():
     """The bug this module exists to fix: six spellings of the wrist were six keys."""
     assert placement_site("the left wrist") == placement_site("left wrist")
     assert placement_site("the right wrist") == placement_site("right wrist")
-    for text in ("the wrist", "wrist", "dominant wrist", "the dominant wrist",
-                 "the non-dominant wrist", "the wrist of the more-affected arm"):
+    # A source that says only "the wrist" is pooled with one that says "dominant": single-wrist
+    # studies use the preferred wrist by convention, and splitting them would strand monipar with
+    # no compatible training partner at all.
+    for text in ("the wrist", "wrist", "dominant wrist", "the dominant wrist"):
         assert placement_site(text) == "wrist_unspecified"
+
+
+def test_semantically_distinct_wrists_do_not_collapse():
+    """Wording is noise; handedness and clinical status are not.
+
+    An explicitly non-dominant wrist is a different observation from the dominant one, and
+    upper_limb_use's affected/unaffected pair IS the contrast that dataset exists to measure.
+    Pooling them would let an unaffected-arm recording support an affected-arm query the moment
+    cross-configuration cells are enabled. They stay wrist-EQUIVALENT (a near miss) but never
+    identical.
+    """
+    sites = {
+        placement_site("the non-dominant wrist"),
+        placement_site("the wrist of the more-affected arm"),
+        placement_site("the wrist of the less-affected arm"),
+        placement_site("the wrist"),
+    }
+    assert len(sites) == 4, f"distinct wrist descriptions collapsed together: {sites}"
+    # ...but all of them remain mutually near-miss-eligible.
+    group = site_group("wrist_unspecified")
+    assert {"non_dominant_wrist", "affected_wrist", "unaffected_wrist"} <= group
+
+
+def test_separating_the_wrists_cost_no_compatible_pool():
+    """The split was made only because it was free; assert that it stayed free."""
+    from data.scripts.curate.compatibility import are_compatible
+
+    train = set(deployment_policy.EXPANDED_PHASE_A_TRAIN_DATASETS)
+    keys = corpus_keys()
+    monipar = stream_key("monipar", "watch_wrist")
+    partners = [
+        1 for (dataset, _stream), other in keys.items()
+        if dataset in train and are_compatible(monipar, other)
+    ]
+    assert partners, "monipar lost its only compatible training stream"
 
 
 def test_laterality_is_preserved_not_collapsed():

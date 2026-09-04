@@ -315,11 +315,12 @@ def main() -> None:
     parser.add_argument("--frontend", choices=("fixed", "learnable", "continuous"),
                         default="fixed",
                         help="front end for a from-scratch encoder; the design of record is fixed")
-    parser.add_argument("--center-features", action="store_true",
-                        help="subtract each episode's mean feature before similarity and "
-                             "attention, so only how rows DIFFER can drive the decision. Changes "
-                             "the step-0 function: compare raw scores at matched seeds, never "
-                             "paired gain, against an uncentered arm")
+    parser.add_argument("--center-features", action=argparse.BooleanOptionalAction, default=True,
+                        help="subtract each episode's mean feature before similarity and attention, "
+                             "so only how rows DIFFER can drive the decision. ON by default; "
+                             "--no-center-features is the ablation. Centering changes the step-0 "
+                             "function, so the two arms are compared by raw score at matched seeds, "
+                             "never by paired gain")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--steps", type=int, default=35_000)

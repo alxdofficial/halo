@@ -44,6 +44,7 @@ def assert_identity_at_init(
     candidates: int = 5,
     support: int = 7,
     seed: int = 0,
+    center: bool = True,
 ) -> float:
     """Check the comparator equals the closed-form vote at init; return the largest gap."""
 
@@ -65,8 +66,8 @@ def assert_identity_at_init(
         "candidate_slot": torch.arange(candidates).unsqueeze(0).expand(batch, candidates),
     }
     with torch.no_grad():
-        learned = comparator_logits(comparator, **episode)["logits"]
-        closed = comparator_logits(None, **episode)["logits"]
+        learned = comparator_logits(comparator, center=center, **episode)["logits"]
+        closed = comparator_logits(None, center=center, **episode)["logits"]
     gap = float((learned - closed).abs().max())
     if gap > IDENTITY_TOLERANCE:
         raise AssertionError(
@@ -84,6 +85,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--n-layers", type=int, default=2)
     parser.add_argument("--n-heads", type=int, default=4)
+    parser.add_argument("--center-features", action=argparse.BooleanOptionalAction, default=True,
+                        help="must match the arm this control is paired against")
     parser.add_argument("--seed", type=int, default=20260901)
     args = parser.parse_args()
 
@@ -94,19 +97,20 @@ def main() -> None:
     spec = AttentionSpec(d_model=d_model, n_heads=args.n_heads, ffn_mult=2, dropout=0.1)
     comparator = SupportComparator(spec, ComparatorConfig(n_layers=args.n_layers))
 
-    gap = assert_identity_at_init(comparator)
+    gap = assert_identity_at_init(comparator, center=args.center_features)
     args.out.mkdir(parents=True, exist_ok=True)
     neutral = bool(checkpoint["config"].get("neutral_acquisition_text", False))
     torch.save({
         # Written in the trained checkpoint's exact format, so the SAME evaluation adapter scores
         # the control and the trained arm. A control scored through a different code path is not a
         # control.
-        "config": dict(checkpoint["config"]),
+        "config": {**checkpoint["config"], "center_features": bool(args.center_features)},
         "encoder": checkpoint["encoder"],
         "comparator": comparator.state_dict(),
         "comparator_config": dataclasses.asdict(comparator.cfg),
         "attention_spec": dataclasses.asdict(spec),
-        "args": {"neutral_acquisition_text": neutral, "phase_a": str(args.phase_a)},
+        "args": {"neutral_acquisition_text": neutral, "phase_a": str(args.phase_a),
+                 "center_features": bool(args.center_features)},
         "step": 0,
         "identity_gap": gap,
         "phase_a": str(args.phase_a),

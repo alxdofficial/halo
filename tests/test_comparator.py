@@ -247,7 +247,7 @@ def test_centering_changes_the_scores():
     """If it were a no-op there would be nothing to measure."""
     episode = _episode()
     with torch.no_grad():
-        plain = comparator_logits(None, **episode)["logits"]
+        plain = comparator_logits(None, center=False, **episode)["logits"]
         centered = comparator_logits(None, center=True, **episode)["logits"]
     assert not torch.allclose(plain, centered, atol=1e-4)
 

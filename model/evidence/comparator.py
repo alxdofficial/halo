@@ -238,7 +238,7 @@ def comparator_logits(
     candidate_slot: torch.Tensor | None = None,
     temperature: float = 0.07,
     vote_scale: float = 10.0,
-    center: bool = False,
+    center: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Score every candidate for every episode in the batch.
 
@@ -247,9 +247,9 @@ def comparator_logits(
     whose ``residual_head`` is still zero the two paths agree exactly, which is what makes the
     step-0 control a control rather than an approximation.
 
-    ``center=True`` removes the episode's mean feature first (see :func:`center_episode`). It is
-    applied to BOTH the closed-form similarity and the comparator's signal input, so the two stay
-    the same function of the same features.
+    ``center`` removes the episode's mean feature first (see :func:`center_episode`) and is ON by
+    default. It is applied to BOTH the closed-form similarity and the comparator's signal input, so
+    the two stay the same function of the same features, and identity-at-init survives it.
     """
 
     B, C, _ = candidate_text.shape
