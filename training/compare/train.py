@@ -360,8 +360,8 @@ def main() -> None:
     # Local checkpoint written by our own Phase-A trainer; its `config` holds plain Python values
     # alongside the tensors, which weights_only=True refuses to unpickle.
     checkpoint = torch.load(args.phase_a, map_location="cpu", weights_only=False)
-    if bool(checkpoint.get("config", {}).get("neutral_acquisition_text", False)) != \
-            args.neutral_acquisition_text:
+    phase_a_neutral = bool(checkpoint.get("config", {}).get("neutral_acquisition_text", False))
+    if phase_a_neutral != args.neutral_acquisition_text:
         raise SystemExit(
             "--neutral-acquisition-text must match the Phase-A checkpoint. Arm A's claim is that "
             "the encoder never saw acquisition text at ANY stage; mixing the two stages would "
@@ -436,12 +436,19 @@ def main() -> None:
                 flush=True,
             )
 
+    # `config` is the Phase-A encoder config carried forward verbatim: `build_encoder` reconstructs
+    # the encoder from it, so the evaluation adapter can load this checkpoint the same way it loads
+    # any other. Without it the adapter KeyErrors on our own artifact.
+    config = dict(checkpoint["config"])
+    config["neutral_acquisition_text"] = bool(args.neutral_acquisition_text)
     payload = {
+        "config": config,
         "encoder": encoder.state_dict(),
         "comparator": comparator.state_dict(),
         "comparator_config": dataclasses.asdict(comparator.cfg),
         "attention_spec": dataclasses.asdict(spec),
         "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+        "phase_a": str(args.phase_a),
         "step": args.steps,
     }
     torch.save(payload, args.out / "last.pt")

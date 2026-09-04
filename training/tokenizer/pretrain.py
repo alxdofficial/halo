@@ -102,6 +102,13 @@ class PretrainConfig:
     # per-sensor IDENTITY text. Default MUST stay 'per_channel' (do-no-harm). asdict(cfg) serializes
     # both into the checkpoint config, so eval/reconstruction picks up the arm automatically.
     text_conditioning: str = "per_channel"
+    # Arm A of the IMWUT comparison line: strip DEVICE / PLACEMENT / GRAVITY from the conditioning
+    # text so the encoder is never told the acquisition configuration at ANY stage. Sensor MODALITY
+    # survives, because the masked-sensor objective needs to know what it is reconstructing.
+    # Compatibility is handled when the support set is built instead, and the claim only holds if
+    # pretraining honours it too — fine-tuning alone would leave the encoder shaped by text it saw
+    # here. Serialized into the checkpoint so evaluation cannot silently mix the two arms.
+    neutral_acquisition_text: bool = False
     # Direct constructors retain the legacy channel path for explicit tests/ablations. The Phase-A
     # CLI sets the design-of-record sensor path below.
     token_granularity: str = "channel"
@@ -1035,6 +1042,9 @@ def main() -> None:
                              "'learnable' = the historical constrained-adaptive filterbank arm "
                              "(see docs/LEGACY.md); 'continuous' = the "
                              "continuous-time temporal-kernel arm.")
+    parser.add_argument("--neutral-acquisition-text", action="store_true", default=None,
+                        help="IMWUT Arm A: strip device/placement/gravity from the conditioning "
+                             "text so the encoder is never told the acquisition configuration")
     parser.add_argument("--text-conditioning", choices=("per_channel", "factored"), default=None,
                         help="config-text conditioning (docs/design/TEXT_CONDITIONING.md §4b). "
                              "'per_channel' = one description per channel; 'factored' (the CLI "
@@ -1186,6 +1196,8 @@ def main() -> None:
         train_datasets=(TRAIN_DATASETS if args.corpus == "expanded"
                         else CORPUS_MATCHED_TRAIN_DATASETS),
     )
+    if args.neutral_acquisition_text is not None:
+        cfg.neutral_acquisition_text = bool(args.neutral_acquisition_text)
     if args.text_conditioning is not None:
         cfg.text_conditioning = args.text_conditioning
     if args.token_granularity is not None:
@@ -1465,15 +1477,18 @@ def main() -> None:
     train_ds = PretrainDataset(
         index, index.train, augment=True, two_view=True,
         augmentation_config=augmentation_cfg, rotation_pairing=cfg.rotation_pairing,
+        neutral_acquisition_text=cfg.neutral_acquisition_text,
     )
     calibration_ds = PretrainDataset(
         index, index.train, augment=True, two_view=False,
         augmentation_config=augmentation_cfg, rotation_pairing=cfg.rotation_pairing,
+        neutral_acquisition_text=cfg.neutral_acquisition_text,
     )
     # Preselecting keeps evaluation cheap. The helper covers every label/stream cell before filling
     # additional slots, preventing a large source from monopolizing a common label's cap.
     val_keys = stratified_eval_subset(index.val, cfg.val_per_label, cfg.data_seed)
-    val_ds = PretrainDataset(index, val_keys, augment=False)
+    val_ds = PretrainDataset(index, val_keys, augment=False,
+                             neutral_acquisition_text=cfg.neutral_acquisition_text)
     train_collate = (MultiResolutionCollate(
         short_choices=cfg.short_patch_choices, long_choices=cfg.long_patch_choices,
         min_resolution_ratio=cfg.min_resolution_ratio, seed=cfg.seed,
