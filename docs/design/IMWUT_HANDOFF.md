@@ -1,5 +1,24 @@
 # IMWUT implementation handoff — weeks 1-3
 
+> ## ⚠️ HISTORICAL DOCUMENT
+>
+> This was written on 2026-09-03 and parts of it were superseded within days. It is kept because it
+> records *how* the work was decomposed and what the sweep found, which is still useful. **It is not
+> the design of record.**
+>
+> Known to be out of date here:
+> - **Warm start is no longer required.** End-to-end from random init is the default; every compact
+>   checkpoint that ever led the table was trained that way. Warm start is a secondary arm.
+> - **Episode mean-centering exists and is ON by default.** It postdates this document entirely.
+> - **Zero-shot is an ensemble** of 8 training-shaped draws, not the single 64-row draw described here.
+> - **The evaluation manifest is `adaptation_v2`** (10 datasets), not `adaptation_v1` (7).
+> - **W1–W8 are all implemented**, with tests. Only the runs (W3, W9) remain, and they need the
+>   user's explicit go.
+>
+> For the current design read [`IMWUT_COMPARE_DESIGN.md`](IMWUT_COMPARE_DESIGN.md); for orientation
+> and standing conventions read [`../IMWUT_START_HERE.md`](../IMWUT_START_HERE.md).
+
+
 **Audience: the agent implementing this. Read this file and the two it points at before writing
 code.** Design of record: `docs/design/IMWUT_COMPARE_DESIGN.md`. Schedule and sweep findings:
 `docs/design/IMWUT_BUILD_PLAN.md`. Venue constraints: `docs/research/IMWUT_VENUE_READ.md`.
@@ -10,9 +29,14 @@ Branch: `imwut/compare`. Target: IMWUT Nov 1 2026.
 
 ## 0. Standing rules — these are not negotiable and are not in the code
 
+> These rules now live in [`../IMWUT_START_HERE.md`](../IMWUT_START_HERE.md) §4, which is their
+> single owner. The list below is the 2026-09-03 original, kept for the record. One item has since
+> changed: rule 2 said never to use the Workflow tool here, and the user lifted that on 2026-09-04.
+
 1. **Never launch a training, control, or evaluation run without the user's explicit go.**
    "Implement" means build + unit tests + a short smoke on real data. Nothing longer.
-2. **Never use the Workflow tool in this repo.** Use direct tools or one scoped subagent.
+2. ~~**Never use the Workflow tool in this repo.**~~ *(lifted 2026-09-04 — workflows are permitted;
+   use judgement and verify findings adversarially.)*
 3. **Python interpreter is `/home/alex/code/HALO/legacy_code/.venv/bin/python`.** There is no venv
    in this repo. Run from the repo root.
 4. **Do not commit unless asked.** Push only when asked.

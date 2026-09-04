@@ -1,5 +1,13 @@
 # HALO documentation
 
+> ## 📍 On branch `imwut/compare`, start with [**IMWUT_START_HERE.md**](IMWUT_START_HERE.md)
+>
+> This branch's active program is the **IMWUT comparison-model line** ("recognise by comparison,
+> not classification"), not the movement-monitoring application described below. The reading order
+> in this file is the `main`-branch application line, which is still maintained but is **not** the
+> current paper target. `IMWUT_START_HERE.md` says which code is live, which is a previous life,
+> and which conventions must not be violated.
+
 `main` contains one active research program: personalized movement monitoring from wearable IMU
 representations.
 

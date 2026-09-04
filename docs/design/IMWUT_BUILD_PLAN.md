@@ -1,5 +1,21 @@
 # IMWUT build plan — from `main` to the Nov 1 2026 submission state
 
+> ## ⚠️ HISTORICAL DOCUMENT
+>
+> This was written on 2026-09-03 and parts of it were superseded within days. It is kept because it
+> records *how* the work was decomposed and what the sweep found, which is still useful. **It is not
+> the design of record.**
+>
+> Known to be out of date here:
+> - **`adaptation_v2` (10 datasets) is the current protocol**, not `adaptation_v1` (7).
+> - **Warm start is no longer the plan**; end-to-end from random init is the default.
+> - The week-by-week schedule was written before the build finished. The build is done; what remains
+>   is the run budget, which has not been cut to fit.
+>
+> For the current design read [`IMWUT_COMPARE_DESIGN.md`](IMWUT_COMPARE_DESIGN.md); for orientation
+> and standing conventions read [`../IMWUT_START_HERE.md`](../IMWUT_START_HERE.md).
+
+
 **Status: plan of record, 2026-09-03. Target deadline Nov 1 2026 (user decision). Nothing here is
 implemented yet.** Design: `docs/design/IMWUT_COMPARE_DESIGN.md`. Venue read:
 `docs/research/IMWUT_VENUE_READ.md`.
