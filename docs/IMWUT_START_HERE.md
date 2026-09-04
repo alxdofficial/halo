@@ -8,14 +8,65 @@ Last updated 2026-09-04.
 
 ---
 
-## 1. What we are building, and why
+## 1. Motivation — the problem, and why this is the response
 
-**Thesis: recognise by comparison, not classification.** Given a query recording and a handful of
-labelled example recordings acquired under a compatible sensor configuration, a small comparator
-decides which examples the query resembles and reads the answer off their labels in language space.
+### The problem the field has
+
+Wearable activity recognition does not fail for lack of model capacity. It fails because **every
+deployment is a different sensing problem**. Change the device, where it sits on the body, which
+axes it reports, whether gravity is present, and the same activity produces a different signal.
+Every 2025-26 survey of the area names this — heterogeneity across users, devices and placements —
+as the dominant barrier to models that work outside the dataset they were fitted on.
+
+The field's standard answer is to build a bigger, more invariant encoder: train on more sources,
+augment away the nuisances, and hope one representation covers everything. We tried that here for
+two years. It produces a representation that separates activities beautifully *within* a
+configuration and transfers poorly *across* one.
+
+### Why comparison, and not a better classifier
+
+The measurement that redirected this project: our frozen features separate activities at **84.3
+macro-F1** under a supervised linear probe, while zero-shot recognition through the label-text
+bridge sits at **39.6** — a 44.7-point gap
+([`RESULTS_V2.md`](results/classification/RESULTS_V2.md)). The encoder was never the bottleneck.
+What was missing was a way to turn "this recording resembles that one" into an answer.
+
+And when we gave the model exemplars to compare against, an **entirely untrained** retrieve-and-vote
+rule reached **44.1** like-for-like — against 47.3 for a 4.2M-parameter model trained on roughly
+700k person-days of wrist data, and against 42.7 for the ConSE bridge.
+
+**Read that carefully, because it is easy to overclaim.** 44.1 does *not* beat harnet. An earlier
+write-up quoted **47.5** for this mechanism and said it did; that figure carried two confounds and
+its like-for-like value is 44.1 — the correction is recorded at the top of
+[`EVIDENCE_ENGINE_FINDINGS.md`](results/classification/EVIDENCE_ENGINE_FINDINGS.md). What survives
+is still the point worth building on: a mechanism with **no trained parameters at all** landed
+within about three points of a model trained on four orders of magnitude more sensor data, and
+above the standard open-vocabulary bridge. The comparison was doing real work before any learning
+happened. That is a reason to invest in the comparison, not a claim to have won.
+
+So the bet is: **stop asking for one representation of all human motion, and start asking a much
+easier question.** Not "what activity is this?" but "which of these few labelled examples does this
+resemble?" — with the examples chosen to be acquisition-compatible with the query, the way any real
+deployment would choose them. That question is well-posed under heterogeneity in a way the first
+one is not, because the query and its examples share a sensing configuration by construction.
+
+### Thesis
+
+**Recognise by comparison, not classification.** Given a query recording and a handful of labelled
+example recordings acquired under a compatible sensor configuration, a small comparator decides
+which examples the query resembles and reads the answer off their labels in language space.
 
 The model is *not* asked to learn a universal representation of all IMU data. It is asked to embed
 motion well enough that attention over a compatible support set can make the call.
+
+### Why it should be publishable
+
+Two capabilities fall out of the design rather than being bolted on. Labels are read through
+language and no parameter is tied to a candidate, so **an unseen activity name is scored by the same
+operation as a seen one** — **49 of the 64 candidate labels** in the `adaptation_v2` roster are
+never seen in training. And a user
+enrolling a few examples on their own device is the *native* mode of the model, not a fine-tuning
+afterthought, which is the deployment story a ubicomp venue actually cares about.
 
 **What we claim as novel: the training curriculum** — how support sets are sampled. Nothing in the
 architecture is claimed as new; the comparator is a matching network with a language readout, and
@@ -28,11 +79,69 @@ major-revision-then-accept path is the norm rather than a failure. The venue rea
 Why this line at all: the supervisor ruled out a clinical pivot on 2026-09-03 (clinical venues want
 one condition with data gathered for it, not a generic method that touches several), and HALO began
 as an ML paper. The evidence that shaped the design is a ledger of measured failures from the
-earlier lines — summarised in §6.
+earlier lines — summarised in §7.
 
 ---
 
-## 2. Which code is live, and which is a previous life
+## 2. Design philosophy — read this before you "fix" anything
+
+The design is the product of a long run of *negative* results (§7). Almost everything clever that
+was tried here made things worse, and the things that worked were subtractions. That history is why
+the code looks the way it does, and it is the single most important thing to understand before
+changing it.
+
+**Five principles, in priority order.**
+
+1. **Simplicity is a claim, not laziness.** A fixed filterbank rather than a learned front end, no
+   retrieval stage, no per-candidate parameters, one shared scalar head. Each of those is a
+   position we defend in the paper, and each was reached by *deleting* something that had been
+   measured and found not to pay. Adding machinery back needs evidence, not intuition.
+2. **The mechanism must be one mechanism.** The same comparison rule runs at every point on the
+   k-curve, k = 0 included. A model that quietly switches to a different rule when the support set
+   is empty has two mechanisms and one misleading graph.
+3. **Deployment realism beats benchmark convenience.** The compatibility filter exists because no
+   real product would compare a pocket-phone query against smartwatch examples. We claim no novelty
+   for it — it is a considered constraint, not a contribution, and it is applied at support
+   construction rather than learned.
+4. **Honesty over impressiveness.** An unmeasurable cell is reported unmeasurable. A gap inside the
+   noise floor is reported as "we do not know". A dataset that cannot answer a question is
+   documented as such rather than coerced into a number.
+5. **Controls before claims.** Every learned component is guilty until its control clears it,
+   because on this codebase the majority of learned components have been net-negative on first
+   measurement. The untrained floor and the paired step-0 control are not paperwork; they are the
+   only reason we can tell learning from luck.
+
+### Choices that look like bugs and are not
+
+If you are sweeping this code for defects, these will all look wrong. They are deliberate. Each one
+has a measurement or an argument behind it; changing any of them is a design decision for the user,
+not a fix.
+
+| Looks like a bug | Why it is there |
+|---|---|
+| **No retrieval stage.** The comparator attends over the whole support set with no top-k. | Retrieval was measured to rank by *acquisition configuration* rather than activity (×7.0 lift), and a learned retrieval stage was worth exactly +0.0000 paired. K is small enough to attend over completely. |
+| **Labels are used verbatim** — no canonicalisation, no synonym merging, no dedup. Two candidates can carry near-identical text. | The readout gives them near-identical votes, which is the correct answer. Deduplicating would impose a closed vocabulary on an open-vocabulary model. |
+| **Some k = 0 cells report "unsupported"** rather than a number. | Those streams have no config-compatible training partner, so the deployed mechanism genuinely does not apply. Substituting ConSE or padding with incompatible rows would report a different mechanism under this model's name. Principle 4. |
+| **Support sets shrink below K instead of being padded.** | Padding with foreign rows would silently violate the compatibility rule; skipping the episode would bias the corpus toward well-populated configurations. Shrinking is logged in telemetry. |
+| **Training starts from random init**, not from the Phase-A checkpoint that exists. | Every compact checkpoint that ever led the table was trained this way. An earlier draft of the docs claimed warm start was mandatory; that claim was wrong and is corrected. |
+| **Encoder effective rank falls early in training.** | Measured before, on a 6k schedule where the apparent peak was head saturation. At 35k the same recipe produced the project's best result. It is logged as a watchdog, not treated as a failure. |
+| **The residual head is zero-initialised**, so the model does nothing at step 0. | That is what makes step 0 *exactly* the closed-form vote, which is what the untrained floor and every paired comparison are defined against. It is asserted to 1e-6. Do not "helpfully" initialise it. |
+| **Absent channels are exact zeros with a mask**, never imputed. | Fabricating a channel would hand the model information no deployment has. Principle 4. |
+| **`adaptation_v1` still exists** alongside v2. | Kept for comparability with pre-pivot numbers. Different protocol names stop the assembler mixing rows. |
+| **Retired baseline adapters (`halo`, `halo_compact`, `halo_evidence`) are still registered.** | They reproduce the frozen classification results. They are retired from the *table*, not from the repo. |
+| **`hapt` raises if requested for evaluation.** | Same 30 subjects as `uci_har`, which is in training. This is a leak guard, not an oversight. |
+
+### Known defect NOT to confuse with the above
+
+`baselines/halo_compact/adapter.py` passes `stream.mask` straight into `encode_dataset_detailed`,
+which requires the canonical 6-slot layout. It fails on accelerometer-only streams — `monipar`'s
+native alignment in particular. This is a *real* bug. It was fixed in `halo_compare` via the
+`_six_slot` helper and deliberately left alone in `halo_compact`, which is being retired. Fix it
+there only if that adapter is needed again.
+
+---
+
+## 3. Which code is live, and which is a previous life
 
 | Line | Status | Where |
 |---|---|---|
@@ -52,7 +161,7 @@ cites. Never edit those files; add new results elsewhere.
 
 ---
 
-## 3. The model, end to end
+## 4. The model, end to end
 
 1. **Draw an episode** (`training/compare/sampling.py`). Pick a query recording; look up its
    acquisition key; build the admissible pool — same key, different subject, different execution.
@@ -83,7 +192,7 @@ one disagree, that one wins** — it is the design of record and this is the ori
 
 ---
 
-## 4. Standing conventions — violate these and the work is worthless
+## 5. Standing conventions — violate these and the work is worthless
 
 These are project rules, not preferences. Several exist because they were violated before and cost
 a result.
@@ -114,7 +223,7 @@ a result.
 
 ---
 
-## 5. Datasets: what trains, what evaluates, and why
+## 6. Datasets: what trains, what evaluates, and why
 
 **Training — 18 datasets, 56 streams, 31 acquisition configs, 166 labels.**
 `deployment_policy.EXPANDED_PHASE_A_TRAIN_DATASETS`.
@@ -123,7 +232,9 @@ a result.
 `0f98ae25…`). `adaptation_v1` (7 datasets) is kept intact for comparability but is **not** the
 current protocol; the two carry different protocol names so the assembler cannot mix their rows.
 
-- 44 of the 55 evaluation labels are **never seen in training** — that is the open-vocabulary story.
+- **49 of the 64 candidate labels** in the `adaptation_v2` roster are **never seen in training** —
+  that is the open-vocabulary story. (An earlier note said 44 of 55; that counted the 7-dataset
+  roster's observed grid labels rather than v2's pre-registered candidate vocabulary.)
 - 4 of the 8 original evaluation acquisition configs are **unseen in training** — that is the
   heterogeneity story.
 - `motionsense`, `realworld` and `shoaib` were restored on 2026-09-04. They were never unsuitable;
@@ -140,7 +251,7 @@ current protocol; the two carry different protocol names so the assembler cannot
 
 ---
 
-## 6. The evidence this design rests on
+## 7. The evidence this design rests on
 
 Every one of these is a measurement from the earlier lines, recorded in
 `docs/results/classification/`. They are why the design looks like it does.
@@ -148,7 +259,7 @@ Every one of these is a measurement from the earlier lines, recorded in
 | Measurement | Consequence |
 |---|---|
 | Frozen features separate activities at 84 macro-F1; zero-shot through text sits near 40 | The encoder was never the bottleneck — the bridge was |
-| Untrained retrieve-and-vote scored 47.5, edging harnet's 47.3 | Comparison against exemplars works *before* any training |
+| Untrained retrieve-and-vote scored **44.1 like-for-like** (harnet 47.3, ConSE 42.7). The widely-quoted 47.5 was confounded — see §1 | Comparison against exemplars does real work *before* any training, but it did **not** beat harnet. Do not repeat the 47.5 claim |
 | Retrieval ranked by **acquisition configuration**, ×7.0 lift, not by activity | Delete the retrieval stage; and centre the episode, since configuration is a common mode |
 | Learned retrieval was worth **+0.0000** paired | The stage is not worth its complexity |
 | The attention mixer gained +0.12, and a scrambled-vocabulary control inverted it | The gain is *semantic*; keep language in the loop |
@@ -158,7 +269,7 @@ Every one of these is a measurement from the earlier lines, recorded in
 
 ---
 
-## 7. Decided and closed
+## 8. Decided and closed
 
 - Arm A (core) sees **no acquisition text at any stage**; Arm B (experiment) has text ON with
   unfiltered support. Separate pretrains per arm; the trainer refuses a mismatched checkpoint.
@@ -176,7 +287,7 @@ Every one of these is a measurement from the earlier lines, recorded in
 - Fixed filterbank is the design of record; the continuous kernel is the challenger, not the
   default.
 
-## 8. Still open
+## 9. Still open
 
 - **No training run has been launched.** Nothing here has evidence of beating its untrained floor.
 - The GPU budget across nine queued ablation arms does not fit the schedule; the cut has not been
@@ -187,7 +298,7 @@ Every one of these is a measurement from the earlier lines, recorded in
 
 ---
 
-## 9. How to run it
+## 10. How to run it
 
 ```bash
 PY=/home/alex/code/HALO/legacy_code/.venv/bin/python   # from the repo root
@@ -214,7 +325,7 @@ $PY -m pytest tests -q
 
 ---
 
-## 10. Document map for this line
+## 11. Document map for this line
 
 | Document | What it owns | Status |
 |---|---|---|

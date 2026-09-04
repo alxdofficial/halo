@@ -23,6 +23,8 @@ disagreement belongs in the new report, not in an edit to these files.
 | `ADAPTATION_TABLE_20260819.md` | the earlier adaptation table |
 | `COMPACT_EVIDENCE_ENGINE.md` | the compact evidence engine — the direct architectural ancestor of `model/evidence/comparator.py` |
 | `RESULTS.md` | the classification-era headline results (NOT `docs/results/RESULTS.md`, which is the application line) |
+| `RESULTS_V2.md` | the ZS-XD table and the **ceiling probe**: frozen features probe at 84.3 macro-F1 while zero-shot sits at 39.6, a 44.7-point gap. This is the measurement the comparison line is a response to. |
+| `EVIDENCE_ENGINE_FINDINGS.md` | the untrained-mechanism results **and their corrections**. Read the correction block at the top first: the widely-quoted **47.5 is confounded and its like-for-like value is 44.1**, which does *not* exceed harnet's 47.3. Several other figures in the body are superseded by that block. |
 
 **A few links in these files do not resolve, on purpose.** They point at *generated* artifacts —
 `eval/adaptation_tables/**/headline_tables.md` and result figures — that were produced by scripts
