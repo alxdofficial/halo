@@ -100,10 +100,10 @@ def test_streams_without_a_compatible_partner_are_reported_unsupported(dataset, 
         deployment_policy.EXPANDED_PHASE_A_TRAIN_DATASETS, max_per_stream=20, seed=0,
     )
     state = {"zero_shot_support": {}, "_corpus": corpus}
-    support, reason = HALOCompareAdapter()._zero_shot_support(
+    draws, reason = HALOCompareAdapter()._zero_shot_draws(
         _Stream(dataset, stream), state, ["walking", "reaching"],
     )
-    assert support is None
+    assert draws is None
     assert "acquisition configuration" in reason
 
 
@@ -117,13 +117,14 @@ def test_zero_shot_support_excludes_every_candidate_label():
     )
     state = {"zero_shot_support": {}, "_corpus": corpus}
     candidates = ["walking", "sitting", "standing"]
-    support, reason = HALOCompareAdapter()._zero_shot_support(
+    draws, reason = HALOCompareAdapter()._zero_shot_draws(
         _Stream("inclusivehar", "phone_waist"), state, candidates,
     )
-    assert support is not None, reason
+    assert draws is not None, reason
     banned = {c.replace("_", " ").lower() for c in candidates}
-    for recording in support:
-        assert recording.label.replace("_", " ").lower() not in banned
+    for rows in draws:
+        for recording in rows:
+            assert recording.label.replace("_", " ").lower() not in banned
 
 
 def test_zero_shot_support_is_configuration_compatible():
@@ -135,12 +136,13 @@ def test_zero_shot_support_is_configuration_compatible():
     )
     state = {"zero_shot_support": {}, "_corpus": corpus}
     query_key = stream_key("inclusivehar", "phone_waist")
-    support, reason = HALOCompareAdapter()._zero_shot_support(
+    draws, reason = HALOCompareAdapter()._zero_shot_draws(
         _Stream("inclusivehar", "phone_waist"), state, ["walking"],
     )
-    assert support is not None, reason
-    for recording in support:
-        assert are_compatible(query_key, stream_key(recording.dataset, recording.stream))
+    assert draws is not None, reason
+    for rows in draws:
+        for recording in rows:
+            assert are_compatible(query_key, stream_key(recording.dataset, recording.stream))
 
 
 def test_zero_shot_support_never_draws_from_an_evaluation_dataset():
@@ -152,12 +154,13 @@ def test_zero_shot_support_never_draws_from_an_evaluation_dataset():
         deployment_policy.EXPANDED_PHASE_A_TRAIN_DATASETS, max_per_stream=200, seed=0,
     )
     state = {"zero_shot_support": {}, "_corpus": corpus}
-    support, _ = HALOCompareAdapter()._zero_shot_support(
+    draws, _ = HALOCompareAdapter()._zero_shot_draws(
         _Stream("inclusivehar", "phone_waist"), state, ["walking"],
     )
     training = set(deployment_policy.EXPANDED_PHASE_A_TRAIN_DATASETS)
-    for recording in support:
-        assert recording.dataset in training
+    for rows in draws:
+        for recording in rows:
+            assert recording.dataset in training
 
 
 def test_evaluation_datasets_are_absent_from_the_training_corpus():
@@ -167,3 +170,111 @@ def test_evaluation_datasets_are_absent_from_the_training_corpus():
         "monipar", "spar", "upper_limb_use",
     }
     assert evaluation.isdisjoint(deployment_policy.EXPANDED_PHASE_A_TRAIN_DATASETS)
+
+
+# ---------------------------------------------------------------- ensemble
+def test_draws_match_the_training_episode_shape():
+    """The k=0 comparison must be the shape the sampler trains on, or it is off-distribution."""
+    from baselines.halo_compare import adapter as A
+    from training.compare.sampling import DEFAULT_LABEL_SUBSET, build_support_corpus
+
+    corpus = build_support_corpus(
+        deployment_policy.EXPANDED_PHASE_A_TRAIN_DATASETS, max_per_stream=200, seed=0,
+    )
+    state = {"zero_shot_support": {}, "_corpus": corpus}
+    draws, reason = A.HALOCompareAdapter()._zero_shot_draws(
+        _Stream("inclusivehar", "phone_waist"), state, ["walking"],
+    )
+    assert draws is not None, reason
+    assert len(draws) == A.ZERO_SHOT_DRAWS
+    low, high = DEFAULT_LABEL_SUBSET
+    for rows in draws:
+        labels = {r.label for r in rows}
+        assert low <= len(labels) <= high, "draw label count is outside the trained range"
+
+
+def test_draws_are_deterministic_and_not_all_identical():
+    """Reproducible under the fixed seed, but genuinely different draws or there is no ensemble."""
+    from baselines.halo_compare.adapter import HALOCompareAdapter
+    from training.compare.sampling import build_support_corpus
+
+    corpus = build_support_corpus(
+        deployment_policy.EXPANDED_PHASE_A_TRAIN_DATASETS, max_per_stream=200, seed=0,
+    )
+    def draw():
+        state = {"zero_shot_support": {}, "_corpus": corpus}
+        got, _ = HALOCompareAdapter()._zero_shot_draws(
+            _Stream("inclusivehar", "phone_waist"), state, ["walking"],
+        )
+        return [sorted({r.label for r in rows}) for rows in got]
+
+    first, second = draw(), draw()
+    assert first == second, "the k=0 row must be reproducible"
+    assert len({tuple(labels) for labels in first}) > 1, "every draw picked the same labels"
+
+
+def test_ensemble_modes_agree_on_a_unanimous_batch():
+    """When every draw says the same thing, no combiner may disagree with it."""
+    import torch
+
+    from baselines.halo_compare.adapter import _ensemble
+
+    logits = torch.zeros(5, 3, 4)
+    logits[..., 2] = 10.0                      # every draw prefers candidate 2
+    for mode in ("probability", "standardized", "logprob"):
+        assert torch.equal(
+            _ensemble(logits, mode).argmax(-1), torch.full((3,), 2),
+        ), mode
+
+
+def test_probability_ensemble_resists_a_single_extreme_draw():
+    """The reason 'probability' is the default: one huge-logit draw must not decide the row."""
+    import torch
+
+    from baselines.halo_compare.adapter import _ensemble
+
+    logits = torch.zeros(4, 1, 3)
+    logits[:3, 0, 0] = 2.0                      # three draws mildly prefer candidate 0
+    logits[3, 0, 1] = 500.0                     # one draw screams for candidate 1
+    assert int(_ensemble(logits, "probability").argmax(-1)) == 0
+    assert int(_ensemble(logits, "logprob").argmax(-1)) == 1   # documented sharper behaviour
+
+
+def test_unknown_ensemble_mode_is_refused():
+    import pytest as _pytest
+    import torch
+
+    from baselines.halo_compare.adapter import _ensemble
+
+    with _pytest.raises(ValueError):
+        _ensemble(torch.zeros(2, 1, 3), "average")
+
+
+def test_accelerometer_only_streams_are_scattered_into_the_canonical_slots():
+    """Regression: a 3-channel source raised inside the encoder's 6-slot contract.
+
+    monipar (evaluation) and capture24 (the only training pool compatible with it) are both
+    accelerometer-only, so this path is on the critical route for a real evaluation dataset. The
+    pre-existing halo_compact adapter passes the native mask straight through and shares the defect.
+    """
+    import numpy as np
+
+    from baselines.halo_compare.adapter import _six_slot
+
+    native = np.arange(2 * 4 * 3, dtype=np.float32).reshape(2, 4, 3)
+    windows, mask = _six_slot(native, ["acc_x", "acc_y", "acc_z"], np.array([True, True, True]))
+    assert windows.shape == (2, 4, 6)
+    assert mask.tolist() == [True, True, True, False, False, False]
+    assert np.array_equal(windows[:, :, :3], native)
+    assert not windows[:, :, 3:].any(), "absent channels must be exact zeros, never fabricated"
+
+
+def test_six_slot_is_a_no_op_on_already_canonical_input():
+    import numpy as np
+
+    from baselines.halo_compare.adapter import _six_slot
+
+    native = np.random.randn(2, 4, 6).astype(np.float32)
+    mask = np.ones(6, dtype=bool)
+    windows, out_mask = _six_slot(native, list("abcdef"), mask)
+    assert np.array_equal(windows, native) and np.array_equal(out_mask, mask)

@@ -18,6 +18,20 @@ At k = 0 there is no support, so the deployed mechanism has nothing to compare a
 every candidate. The model still cannot find the answer among them; it can only note which
 training recordings the query resembles and let their label text bridge to the candidates.
 
+**It is an ensemble of small, training-shaped comparisons, not one large one** (revised 2026-09-04).
+A single 64-row draw spanning many labels is off-distribution: the sampler trains on episodes of
+2-8 candidate labels with K = 32, so a wide flat support set asks the comparator a question it has
+never been asked. Instead the row is scored R times, each draw being a handful of seen labels with
+their example recordings, shaped exactly like a training episode; the per-draw candidate scores are
+then combined. Two things improve at once — the comparison matches the training distribution, and
+averaging over draws removes the support draw as a nuisance variable. That variable is known to
+matter here: on this codebase the *draw* once contributed five times the run-to-run scatter of the
+thing being measured.
+
+Ensembling is also the intervention with the best track record on this project: averaging eight
+label paraphrases was the single largest Phase-B gain (45.3 -> 47.5 macro-F1), and it has no learned
+parameters, which is the category of change that has historically survived its controls here.
+
 Two evaluation streams have no compatible training partner at all (``upper_limb_use``, whose
 wrist sensor is a research IMU rather than a watch, and ``usc_had/phone_hip``, which has near
 misses only). For those the k = 0 row is reported as **unsupported**, with the reason recorded in
@@ -45,14 +59,77 @@ _CKPT = Path(os.environ.get(
 ))
 #: Arm A is the headline configuration: the encoder is never told the acquisition configuration.
 _NEUTRAL_ACQUISITION_TEXT = os.environ.get("HALO_NEUTRAL_ACQUISITION_TEXT", "1") not in {"0", ""}
-#: Windows drawn from the training corpus to support the k = 0 row.
-ZERO_SHOT_SUPPORT = int(os.environ.get("HALO_COMPARE_ZERO_SHOT_SUPPORT", "64"))
+# The k = 0 row is an ENSEMBLE of training-shaped comparisons (see the module docstring). These
+# defaults reproduce the training episode shape exactly — 4 labels x 8 recordings = K 32, inside the
+# sampler's 2-8 label range — so the deployed mechanism is asked the kind of question it was trained
+# on. R = 8 follows the text-ensemble precedent, where averaging 8 paraphrases was worth +2.2 macro-F1
+# and was the single largest Phase-B gain.
+ZERO_SHOT_DRAWS = int(os.environ.get("HALO_COMPARE_ZERO_SHOT_DRAWS", "8"))
+ZERO_SHOT_LABELS_PER_DRAW = int(os.environ.get("HALO_COMPARE_ZERO_SHOT_LABELS", "4"))
+ZERO_SHOT_ROWS_PER_LABEL = int(os.environ.get("HALO_COMPARE_ZERO_SHOT_ROWS_PER_LABEL", "8"))
+#: probability | standardized | logprob — see :func:`_ensemble`.
+ZERO_SHOT_ENSEMBLE = os.environ.get("HALO_COMPARE_ZERO_SHOT_ENSEMBLE", "probability")
 ZERO_SHOT_SEED = 20260901
 QUERY_CHUNK = 1024
 
 
 def _ckpt_sha256() -> str:
     return hashlib.sha256(_CKPT.read_bytes()).hexdigest() if _CKPT.exists() else ""
+
+
+def _six_slot(windows, channels, mask):
+    """Scatter a grid's native channels into the encoder's canonical 6-slot pad+mask layout.
+
+    Accelerometer-only sources store 3 channels — monipar among the evaluation streams, capture24
+    among the training pools — while the encoder's contract is the fixed 6 slots with a validity
+    mask, which is what ``PretrainDataset`` builds for training. Passing a native 3-wide mask
+    straight through raises inside ``encode_dataset_detailed``; the pre-existing ``halo_compact``
+    adapter does exactly that and shares this defect on monipar's native alignment.
+
+    Masked slots are written as exact zeros, never as fabricated channels.
+    """
+    from training.tokenizer.pretrain_data import CHANNELS
+
+    native = np.asarray(windows, dtype=np.float32)
+    native_mask = np.asarray(mask, dtype=bool)
+    if native.shape[-1] == len(CHANNELS) and native_mask.shape[0] == len(CHANNELS):
+        return native, native_mask
+
+    slot = {name: index for index, name in enumerate(CHANNELS)}
+    out = np.zeros((native.shape[0], native.shape[1], len(CHANNELS)), dtype=np.float32)
+    out_mask = np.zeros(len(CHANNELS), dtype=bool)
+    for position, name in enumerate(channels):
+        if name not in slot:
+            continue
+        out[:, :, slot[name]] = native[:, :, position]
+        out_mask[slot[name]] = bool(native_mask[position])
+    out[:, :, ~out_mask] = 0.0
+    return out, out_mask
+
+
+def _ensemble(logits, mode: str):
+    """Combine per-draw candidate scores. ``logits`` is (draws, queries, candidates).
+
+    * ``probability`` — mean of each draw's softmax. Scale-free per draw, so a draw that happens to
+      produce large logits cannot dominate. The default, and the conservative choice.
+    * ``standardized`` — z-score each draw's logits across candidates, then average. The "calibrated"
+      variant: it keeps relative margins rather than flattening them through a softmax, while still
+      removing per-draw scale.
+    * ``logprob`` — mean of log-softmax, i.e. a geometric mean over draws (product of experts).
+      Sharper, but one confident-and-wrong draw can veto the rest.
+    """
+    import torch as T
+
+    if mode == "probability":
+        return T.softmax(logits.float(), dim=-1).mean(dim=0)
+    if mode == "logprob":
+        return T.log_softmax(logits.float(), dim=-1).mean(dim=0)
+    if mode == "standardized":
+        values = logits.float()
+        mean = values.mean(dim=-1, keepdim=True)
+        std = values.std(dim=-1, keepdim=True, unbiased=False).clamp_min(1e-6)
+        return ((values - mean) / std).mean(dim=0)
+    raise ValueError(f"unknown zero-shot ensemble mode {mode!r}")
 
 
 @register
@@ -126,9 +203,12 @@ class HALOCompareAdapter(BaselineAdapter):
         gravity_state = (stream.gravity_state
                          if getattr(stream, "gravity_state", None) is not None
                          else _stream_gravity_state(stream.dataset, stream.stream))
+        from training.tokenizer.pretrain_data import CHANNELS
+
+        windows, mask = _six_slot(stream.windows, stream.channels, stream.mask)
         detailed = encode_dataset_detailed(
-            encoder, stream.windows, texts, device, stream.rate_hz,
-            gravity_state=gravity_state, channel_mask=stream.mask,
+            encoder, windows, texts, device, stream.rate_hz,
+            gravity_state=gravity_state, channel_mask=mask,
             dataset=stream.dataset, stream=stream.stream,
             neutral_text=_NEUTRAL_ACQUISITION_TEXT, export_sensor_rows=False,
         )
@@ -137,8 +217,8 @@ class HALOCompareAdapter(BaselineAdapter):
         _, sensor_texts, _ = stream_sensor_texts(
             stream.dataset, stream.stream,
             gravity_removed=(gravity_state == "removed"),
-            has_accel=any(c.startswith("acc") for c, m in zip(stream.channels, stream.mask) if m),
-            has_gyro=any(c.startswith("gyro") for c, m in zip(stream.channels, stream.mask) if m),
+            has_accel=any(c.startswith("acc") for c, m in zip(CHANNELS, mask) if m),
+            has_gyro=any(c.startswith("gyro") for c, m in zip(CHANNELS, mask) if m),
             neutral=_NEUTRAL_ACQUISITION_TEXT,
         )
         descriptors = encoder.text_encoder.encode_pooled(sensor_texts, device=device)
@@ -243,8 +323,8 @@ class HALOCompareAdapter(BaselineAdapter):
         }
 
     # ------------------------------------------------------------ zero shot
-    def _zero_shot_support(self, stream, state, candidates: Sequence[str]):
-        """Config-compatible training recordings whose labels exclude every candidate."""
+    def _compatible_pool(self, stream, state):
+        """Training recordings sharing this stream's acquisition key, grouped by label."""
         from data.scripts.curate import deployment_policy
         from data.scripts.curate.compatibility import are_compatible, stream_key
         from training.compare.sampling import build_support_corpus
@@ -259,31 +339,57 @@ class HALOCompareAdapter(BaselineAdapter):
                     max_per_stream=4000, seed=ZERO_SHOT_SEED,
                 )
                 state["_corpus"] = corpus
-            pool = {
+            streams = {
                 index for index, other in enumerate(corpus.keys)
                 if are_compatible(query_key, other)
             }
-            state["zero_shot_support"][key] = (corpus, pool)
-        corpus, streams = state["zero_shot_support"][key]
-        if not streams:
+            by_label: dict[str, list] = {}
+            for recording in corpus.recordings:
+                if recording.stream_index in streams:
+                    by_label.setdefault(recording.label, []).append(recording)
+            state["zero_shot_support"][key] = by_label
+        return state["zero_shot_support"][key]
+
+    def _zero_shot_draws(self, stream, state, candidates: Sequence[str]):
+        """R independent, training-shaped support sets of seen labels excluding every candidate.
+
+        Each draw is a handful of labels with their example recordings — the shape the sampler
+        trains on — rather than one wide flat set. Drawing is deterministic under ``ZERO_SHOT_SEED``
+        so the row is reproducible.
+        """
+        by_label = self._compatible_pool(stream, state)
+        if not by_label:
             return None, (
                 "no training stream shares this acquisition configuration, so the deployed "
                 "mechanism has nothing admissible to compare against at k=0"
             )
-
         banned = {str(text).replace("_", " ").lower() for text in candidates}
-        rng = np.random.default_rng(ZERO_SHOT_SEED)
-        eligible = [
-            index for index, recording in enumerate(corpus.recordings)
-            if recording.stream_index in streams
-            and str(recording.label).replace("_", " ").lower() not in banned
-        ]
-        if not eligible:
-            return None, "every compatible training recording carries a candidate label"
-        chosen = rng.choice(
-            eligible, size=min(ZERO_SHOT_SUPPORT, len(eligible)), replace=False,
+        eligible = sorted(
+            label for label in by_label
+            if str(label).replace("_", " ").lower() not in banned
         )
-        return [corpus.recordings[int(i)] for i in chosen], None
+        if len(eligible) < 2:
+            return None, (
+                "fewer than two compatible training labels remain once the candidates are "
+                "excluded, so a comparison would not be a decision"
+            )
+
+        rng = np.random.default_rng(ZERO_SHOT_SEED)
+        draws = []
+        for _ in range(ZERO_SHOT_DRAWS):
+            n_labels = min(ZERO_SHOT_LABELS_PER_DRAW, len(eligible))
+            chosen = rng.choice(eligible, size=n_labels, replace=False)
+            rows = []
+            for label in chosen:
+                pool = by_label[str(label)]
+                take = min(ZERO_SHOT_ROWS_PER_LABEL, len(pool))
+                picked = rng.choice(len(pool), size=take, replace=False)
+                rows.extend(pool[int(i)] for i in picked)
+            if rows:
+                draws.append(rows)
+        if not draws:
+            return None, "no compatible training recording could be drawn"
+        return draws, None
 
     def _encode_training_recordings(self, recordings, state):
         """Encode training-corpus windows into support rows, grouped by their source stream.
@@ -296,6 +402,7 @@ class HALOCompareAdapter(BaselineAdapter):
         from data.scripts.eda.grid_io import discover_grids
         from training.tokenizer.eval_transfer import encode_dataset_detailed
         from training.tokenizer.pretrain_data import (
+            CHANNELS,
             _stream_gravity_state,
             stream_channel_descriptions,
             stream_sensor_texts,
@@ -314,8 +421,7 @@ class HALOCompareAdapter(BaselineAdapter):
         for (dataset, stream_id), members in grouped.items():
             ref = refs[(dataset, stream_id)]
             rows = np.asarray([m.window_index for m in members], dtype=np.int64)
-            windows = np.asarray(ref.load_data()[rows], dtype=np.float32)
-            mask = np.asarray(ref.mask, dtype=bool)
+            windows, mask = _six_slot(ref.load_data()[rows], ref.channels, ref.mask)
             gravity_state = _stream_gravity_state(dataset, stream_id)
             texts = stream_channel_descriptions(
                 dataset, stream_id, neutral=_NEUTRAL_ACQUISITION_TEXT,
@@ -329,8 +435,8 @@ class HALOCompareAdapter(BaselineAdapter):
             _, sensor_texts, _ = stream_sensor_texts(
                 dataset, stream_id,
                 gravity_removed=(gravity_state == "removed"),
-                has_accel=any(c.startswith("acc") for c, m in zip(ref.channels, mask) if m),
-                has_gyro=any(c.startswith("gyro") for c, m in zip(ref.channels, mask) if m),
+                has_accel=any(c.startswith("acc") for c, m in zip(CHANNELS, mask) if m),
+                has_gyro=any(c.startswith("gyro") for c, m in zip(CHANNELS, mask) if m),
                 neutral=_NEUTRAL_ACQUISITION_TEXT,
             )
             encoded = state["encoder"].text_encoder.encode_pooled(
@@ -346,12 +452,13 @@ class HALOCompareAdapter(BaselineAdapter):
         return T.cat(features), T.cat(descriptors), labels
 
     def predict_candidates_from_features(self, features, candidates, state, device):
-        """The k=0 row: the deployed mechanism, supported by candidate-excluded training rows.
+        """The k=0 row: an ensemble of training-shaped comparisons, then one vote.
 
-        The support set cannot contain the answer — every candidate label is excluded from it — so
-        the only route to a prediction is the query's resemblance to those recordings plus the
-        bridge from their label text to the candidates'. That is the same mechanism as every
-        k >= 1 cell, which is why the k-curve is one curve rather than two glued together.
+        Each draw asks the same question the sampler asks at training time — "which of these few
+        seen activities does the query resemble?" — and answers it in candidate space through the
+        label-text bridge. The draws are combined before the argmax, so no single unlucky support
+        set decides the row. No support set can contain the answer: every candidate label is
+        excluded from all of them.
         """
         import torch as T
 
@@ -365,43 +472,64 @@ class HALOCompareAdapter(BaselineAdapter):
 
         stream = eval_data.load_eval_stream(*owner)
         candidates = list(candidates)
-        support, reason = self._zero_shot_support(stream, state, candidates)
-        if support is None:
+        draws, reason = self._zero_shot_draws(stream, state, candidates)
+        if draws is None:
             # An honest unsupported row. Substituting ConSE, or padding with incompatible
             # recordings, would report a different mechanism under this model's name.
             raise ValueError(f"zero-shot unsupported for {owner[0]}/{owner[1]}: {reason}")
 
         query_feature, query_descriptor, _ = self._stream_rows(stream, state)
-        support_feature, support_descriptor, support_labels = self._encode_training_recordings(
-            support, state,
-        )
         candidate_text = F.normalize(T.from_numpy(
             state["sbert"]([c.replace("_", " ") for c in candidates])
         ).float(), dim=-1).to(state["device"])
-        support_label_text = F.normalize(T.from_numpy(
-            state["sbert"]([label.replace("_", " ") for label in support_labels])
-        ).float(), dim=-1).to(state["device"])
-        # Every support row is unbound: none of them carries a candidate's label, by construction.
-        support_bound = T.full(
-            (len(support_labels),), -1, dtype=T.long, device=state["device"],
-        )
 
-        predictions: list[str] = []
+        per_draw: list[T.Tensor] = []
+        draw_labels: list[list[str]] = []
         with T.no_grad():
-            for start in range(0, len(query_feature), QUERY_CHUNK):
-                stop = start + QUERY_CHUNK
-                logits = self._score(
-                    state,
-                    query_feature[start:stop], query_descriptor[start:stop],
-                    support_feature, support_descriptor, support_label_text, support_bound,
-                    candidate_text,
+            for rows in draws:
+                support_feature, support_descriptor, labels = self._encode_training_recordings(
+                    rows, state,
                 )
-                predictions.extend(candidates[int(i)] for i in logits.argmax(1).cpu().tolist())
+                support_label_text = F.normalize(T.from_numpy(
+                    state["sbert"]([label.replace("_", " ") for label in labels])
+                ).float(), dim=-1).to(state["device"])
+                # Every support row is unbound: none carries a candidate's label, by construction.
+                support_bound = T.full(
+                    (len(labels),), -1, dtype=T.long, device=state["device"],
+                )
+                chunks = []
+                for start_row in range(0, len(query_feature), QUERY_CHUNK):
+                    stop = start_row + QUERY_CHUNK
+                    chunks.append(self._score(
+                        state,
+                        query_feature[start_row:stop], query_descriptor[start_row:stop],
+                        support_feature, support_descriptor, support_label_text, support_bound,
+                        candidate_text,
+                    ))
+                per_draw.append(T.cat(chunks, dim=0))
+                draw_labels.append(sorted(set(labels)))
+
+        combined = _ensemble(T.stack(per_draw), ZERO_SHOT_ENSEMBLE)
+        predictions = [candidates[int(i)] for i in combined.argmax(1).cpu().tolist()]
+        # Agreement across draws is the honest read on whether the ensemble is doing work: if every
+        # draw already agreed there was nothing to average, and if none agree the row is noise.
+        votes = T.stack([logits.argmax(1) for logits in per_draw])
+        agreement = float((votes == votes.mode(dim=0).values.unsqueeze(0)).float().mean())
         return predictions, {
-            "mechanism": "support_comparator_zero_shot",
+            "mechanism": "support_comparator_zero_shot_ensemble",
             "predicted_classes": sorted(set(predictions)),
-            "support_rows": int(len(support_labels)),
-            "support_labels": sorted(set(support_labels)),
+            "draws": len(per_draw),
+            "labels_per_draw": ZERO_SHOT_LABELS_PER_DRAW,
+            "rows_per_draw": int(len(draw_labels[0]) and len(draws[0])),
+            "ensemble": ZERO_SHOT_ENSEMBLE,
+            "draw_agreement": agreement,
+            # How much the ensemble actually had to average over. A compatible pool with few
+            # labels left after excluding the candidates makes every draw pick the SAME labels,
+            # and the ensemble degenerates to resampling rows. Measured range across the
+            # evaluation streams: 7 compatible training labels for inclusivehar/phone_waist
+            # against 86 for tnda_har/watch_wrist. Reported per row rather than assumed.
+            "distinct_label_sets": len({tuple(labels) for labels in draw_labels}),
+            "support_labels": sorted({label for labels in draw_labels for label in labels}),
             "support_policy": "config_compatible_training_rows_excluding_candidates",
         }
 
@@ -413,7 +541,11 @@ class HALOCompareAdapter(BaselineAdapter):
             "neutral_acquisition_text": _NEUTRAL_ACQUISITION_TEXT,
             "mechanism": "support_comparator",
             "corpus_bank_at_positive_k": False,
-            "zero_shot_support_windows": ZERO_SHOT_SUPPORT,
+            "zero_shot_draws": ZERO_SHOT_DRAWS,
+            "zero_shot_labels_per_draw": ZERO_SHOT_LABELS_PER_DRAW,
+            "zero_shot_rows_per_label": ZERO_SHOT_ROWS_PER_LABEL,
+            "zero_shot_ensemble": ZERO_SHOT_ENSEMBLE,
+            "zero_shot_seed": ZERO_SHOT_SEED,
             "zero_shot_support_policy": "config_compatible_training_rows_excluding_candidates",
         }
 
